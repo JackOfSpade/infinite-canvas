@@ -8,6 +8,7 @@ import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks
 import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
 import resume_download_bundle from './tests/resume-download-bundle.js';
+import cover_letter_harness from './tests/cover-letter-harness.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -20,6 +21,7 @@ const tests = [
   ...platform_utils,
   ...skill_opportunities,
   ...resume_download_bundle,
+  ...cover_letter_harness,
 ];
 
 async function run() {

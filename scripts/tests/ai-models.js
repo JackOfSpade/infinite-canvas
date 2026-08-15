@@ -1,4 +1,4 @@
-import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, orderGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -6,6 +6,70 @@ import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_O
 import { __setGeminiLadderRetryWaitForTests } from '../../electron/ipc/gemini.js';
 
 export default [
+{
+    name: 'Gemini Vertex routing: global endpoint uses only the supported 2.5 fallback chain',
+    run: () => {
+      assert(VERTEX_LOCATION === 'global', 'Vertex Gemini publisher calls use the global location');
+      assert(JSON.stringify(VERTEX_GEMINI_MODEL_FALLBACKS) === JSON.stringify(['gemini-2.5-flash', 'gemini-2.5-flash-lite']),
+        'Vertex fallback chain contains only supported Flash and Flash-Lite ids');
+      assert(JSON.stringify(getGeminiDefaultThinkingConfig('gemini-2.5-flash')) === JSON.stringify({ thinkingBudget: 1024 })
+        && JSON.stringify(getGeminiDefaultThinkingConfig('gemini-2.5-flash-lite')) === JSON.stringify({ thinkingBudget: 1024 }),
+        'Vertex 2.5 models receive the REST thinkingBudget configuration, never the 3.x thinkingLevel form');
+      const url = vertexGenerateContentUrl('project-123', 'gemini-2.5-flash');
+      assert(url === 'https://aiplatform.googleapis.com/v1/projects/project-123/locations/global/publishers/google/models/gemini-2.5-flash:generateContent',
+        'Vertex request URL targets the global publisher endpoint, never a regional hostname');
+      assert(!url.includes('us-central1') && !VERTEX_GEMINI_MODEL_FALLBACKS.some((id) => /^gemini-3/.test(id)),
+        'Vertex transport cannot emit the regional 3.x ids that returned 404s');
+      assert(JSON.stringify(geminiGroundingTools(false)) === JSON.stringify([{ google_search: {} }]),
+        'AI Studio grounding retains its Generative Language google_search field');
+      assert(JSON.stringify(geminiGroundingTools(true)) === JSON.stringify([{ googleSearch: {} }]),
+        'Vertex grounding uses the v1 publisher API googleSearch field, not the AI Studio spelling');
+      assert(normalizeGeminiApiKey('  api-key  ') === 'api-key' && normalizeGeminiApiKey(' \n\t ') === '',
+        'whitespace-only keys take the no-key Vertex path instead of producing a misleading AI Studio authentication failure');
+      const now = 10_000;
+      const suppressed = new Map([['gemini-2.5-flash', now + 1_000]]);
+      assert(JSON.stringify(orderVertexGeminiModels(suppressed, now)) === JSON.stringify(['gemini-2.5-flash-lite', 'gemini-2.5-flash']),
+        'a cooling Vertex primary moves behind Flash-Lite without leaving the chain empty');
+      return { ok: true };
+    },
+  },
+{
+    name: 'application generation: cover-letter schemas reserve structure for needs and argument, not envelope fields',
+    run: () => {
+      assert(JSON.stringify(APPLICATION_COVER_LETTER_SCHEMA.required) === JSON.stringify(['paragraphs']),
+        'prose schema requires only body paragraphs');
+      assert(Object.keys(APPLICATION_COVER_LETTER_SCHEMA.properties).join(',') === 'paragraphs',
+        'prose schema contains no model-authored letterhead or envelope fields');
+      const need = LETTER_NEEDS_SCHEMA.properties.needs.items;
+      assert(JSON.stringify(need.required) === JSON.stringify(['need', 'quote', 'source', 'decisiveness', 'kind']),
+        'needs schema preserves the ranked, verbatim-grounded requirement contract');
+      assert(need.properties.source.enum.join(',') === 'posting,research',
+        'needs sources are limited to the posting and research');
+      assert(LETTER_NEEDS_SCHEMA.properties.needs.maxItems === 6,
+        'needs schema caps the ranked list at six without preventing the empty-input degrade path');
+      assert(need.properties.decisiveness.minimum === 1 && need.properties.decisiveness.maximum === 100,
+        'needs schema enforces the documented 1–100 decisiveness range');
+      const mapping = LETTER_PLAN_SCHEMA.properties.mappings.items;
+      assert(JSON.stringify(mapping.required) === JSON.stringify(['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference']),
+        'plan mappings carry both résumé evidence and the inferential step');
+      assert(mapping.properties.resumeStatus.enum.join(',') === 'stated,implied,absent',
+        'plan mappings force an explicit résumé-status declaration');
+      assert(LETTER_PLAN_SCHEMA.properties.mappings.maxItems === 2,
+        'plan schema caps the argument at two evidence mappings');
+      assert(LETTER_PLAN_SCHEMA.required.includes('logistics') && LETTER_PLAN_SCHEMA.required.includes('droppedNeeds'),
+        'plan preserves logistics isolation and visible dropped needs');
+      const providerNeeds = toGeminiSchema(LETTER_NEEDS_SCHEMA);
+      const providerPlan = toGeminiSchema(LETTER_PLAN_SCHEMA);
+      assert(providerNeeds.properties.needs.maxItems === 6
+        && providerNeeds.properties.needs.items.properties.decisiveness.minimum === 1
+        && providerNeeds.properties.needs.items.properties.decisiveness.maximum === 100,
+      'Gemini receives the bounded needs contract, not a description-only approximation');
+      assert(providerPlan.properties.mappings.maxItems === 2
+        && providerPlan.properties.mappings.items.properties.needIndex.minimum === 0,
+      'Gemini receives the bounded non-negative argument-mapping contract');
+      return { ok: true };
+    },
+  },
 {
     name: 'application generation: Gemini schema adapter preserves honest empty values without invalid enums',
     run: () => {
@@ -26,11 +90,27 @@ export default [
         'an empty enum must not be sent as an invalid response schema');
       assert(JSON.stringify(source.properties.unit.enum) === JSON.stringify(['USD', '%', '']),
         'the provider adapter must not mutate the cross-provider source schema');
+      const bounded = toGeminiSchema({
+        type: 'object',
+        properties: {
+          candidates: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'string', minLength: 2, maxLength: 8, pattern: '^[A-Z]+$', format: 'email' } },
+          score: { type: 'integer', minimum: 1, maximum: 100 },
+        },
+      });
+      assert(bounded.properties.candidates.minItems === 1 && bounded.properties.candidates.maxItems === 2
+        && bounded.properties.candidates.items.format === 'email',
+      'Gemini response-schema adapter preserves documented array and format constraints');
+      assert(!('minLength' in bounded.properties.candidates.items)
+        && !('maxLength' in bounded.properties.candidates.items)
+        && !('pattern' in bounded.properties.candidates.items),
+      'Gemini response-schema adapter drops unsupported generic JSON-Schema string constraints instead of triggering a provider 400');
+      assert(bounded.properties.score.minimum === 1 && bounded.properties.score.maximum === 100,
+        'Gemini response-schema adapter preserves supported numeric constraints');
       return { preservedValidEnum: true };
     },
   },
 {
-    name: 'application generation: research quota failure degrades to scraped-job-only context',
+    name: 'application generation: research quota fallback distinguishes scraped-description from metadata-only context',
     run: async () => {
       const quotaError = new Error('All Gemini models failed. 8 model(s) exhausted their daily quota.');
       const fallback = await getCompanyResearchContext(
@@ -40,8 +120,17 @@ export default [
       );
       assert(fallback.available === false, 'a research quota failure must be non-fatal and marked unavailable');
       assert(fallback.error.includes('daily quota'), 'the diagnostic should retain the provider failure reason');
-      assert(fallback.text.includes('Do not invent or imply company facts'),
-        'the fallback context must explicitly prevent fabricated company research');
+      assert(fallback.text.includes('no scraped job description was captured')
+        && fallback.text.includes('title/company/location/salary metadata'),
+      'an empty scraped description must be labeled metadata-only, not described as scraped-JD context');
+      const withDescription = await getCompanyResearchContext(
+        { company: 'Acme', title: 'Engineer', snippet: 'Build and maintain production systems.' },
+        null,
+        async () => { throw quotaError; },
+      );
+      assert(withDescription.text.includes('scraped target job description')
+        && !withDescription.text.includes('no scraped job description was captured'),
+      'a real scraped description remains the truthful fallback context when research fails');
       let abortPassedThrough = false;
       try {
         await getCompanyResearchContext({}, null, async () => {
@@ -531,7 +620,8 @@ export default [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
         'resume-parse', 'career-file-extract', 'job-query-generation',
         'job-scoring', 'job-bucketing', 'company-research',
-        'application-resume', 'application-cover-letter', 'application-skill-opportunity',
+        'application-resume', 'application-letter-needs', 'application-letter-plan',
+        'application-cover-letter', 'application-letter-revise', 'application-skill-opportunity',
         'career-achievement-mining', 'default',
       ];
       for (const task of geminiQualityTasks) {
@@ -565,7 +655,10 @@ export default [
       const { OPUS, SONNET, HAIKU } = MODEL_FLOOR;
       const expected = {
         'application-resume':        OPUS,
+        'application-letter-needs':  SONNET, // feeds generation, isn't the artifact
+        'application-letter-plan':   OPUS,
         'application-cover-letter':  OPUS,
+        'application-letter-revise': OPUS,
         'application-skill-opportunity': OPUS,
         'career-achievement-mining': OPUS,
         'career-achievement-refute': SONNET, // generation stepped down 1 (independence — load-bearing)

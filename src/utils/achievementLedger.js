@@ -648,6 +648,13 @@ export function serializeLedgerForPrompt(ledger, opts = {}) {
 
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
+    // A weakened item has already failed an adversarial wording/attribution
+    // check. Its caveat may preserve useful audit context, but asking another
+    // model to faithfully carry that caveat into employer-facing prose proved
+    // unsafe (e.g. sequential jobs became "200% scope expansion" even though
+    // the refuter explicitly disavowed managed scope). Keep it in the durable
+    // ledger and diagnostics, but do not offer it as résumé/letter material.
+    if (Array.isArray(item.flags) && item.flags.includes('refute-weakened')) continue;
     const computed = item.computed && typeof item.computed === 'object' ? item.computed : {};
     const fieldPairs = PROMPT_FIELD_ORDER.map((key) => `${key}=${achievementFieldValue(item, computed, key)}`);
     lines.push(`[${scalarField(item.id)}] ${fieldPairs.join(' ')}`);

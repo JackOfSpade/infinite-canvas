@@ -163,6 +163,22 @@ export const GEMINI_MODEL_FALLBACKS = Object.freeze(
   GEMINI_MODEL_REGISTRY.filter((entry) => !entry.requiresEntitlement).map(({ id }) => id),
 );
 
+// Vertex AI is a separate provider surface from AI Studio. Its global endpoint
+// does not expose the speculative 3.x/alias catalog above; keep its known-good
+// models in a deliberately small, provider-specific chain. Task declarations
+// may still prefer their AI Studio-quality id (for example 3.7 Flash), but the
+// Vertex transport must never send that unsupported id before these fallbacks.
+export const VERTEX_GEMINI_MODEL_FALLBACKS = Object.freeze([
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+]);
+
+// Vertex Gemini 2.5 uses the REST `thinkingBudget` form; the AI Studio 3.x
+// registry above uses its `thinkingLevel` form. Keep this beside the Vertex
+// fallback list so probes and real calls cannot accidentally send the latter
+// to a 2.5 publisher model.
+const VERTEX_THINKING_CONFIG = Object.freeze({ thinkingBudget: 1024 });
+
 /** Every id in the registry, gated or not — for metadata lookups (token windows). */
 export const GEMINI_ALL_MODEL_IDS = Object.freeze(GEMINI_MODEL_REGISTRY.map(({ id }) => id));
 
@@ -180,6 +196,7 @@ export function getGeminiModelInfo(model) {
 export function getGeminiDefaultThinkingConfig(model) {
   const config = getGeminiModelInfo(model)?.thinkingConfig;
   if (config) return { ...config };
+  if (VERTEX_GEMINI_MODEL_FALLBACKS.includes(model)) return { ...VERTEX_THINKING_CONFIG };
   return /^gemma-/i.test(String(model || ''))
     ? { thinkingLevel: 'minimal' }
     : { thinkingLevel: 'high' };
@@ -344,5 +361,18 @@ export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), n
 
   const ready = base.filter((id) => (suppressedUntil.get(id) || 0) <= now);
   const suppressed = base.filter((id) => (suppressedUntil.get(id) || 0) > now);
+  return [...ready, ...suppressed];
+}
+
+/**
+ * Vertex has its own supported catalog, so it cannot share AI Studio's tier
+ * registry or entitlement probes. Suppressed models retain the normal
+ * last-resort behavior: cool them to the tail, but never make a chain empty.
+ */
+export function orderVertexGeminiModels(suppressedUntil = new Map(), now = Date.now()) {
+  const ready = VERTEX_GEMINI_MODEL_FALLBACKS
+    .filter((id) => (suppressedUntil.get(id) || 0) <= now);
+  const suppressed = VERTEX_GEMINI_MODEL_FALLBACKS
+    .filter((id) => (suppressedUntil.get(id) || 0) > now);
   return [...ready, ...suppressed];
 }

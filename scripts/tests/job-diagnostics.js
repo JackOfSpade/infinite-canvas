@@ -1,4 +1,5 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 
 export default [
 {
@@ -123,15 +124,60 @@ export default [
           status: 'completed', stage: 'completed', companyResearch: {
             available: false, error: 'Gemini quota exhausted while searching.',
           },
+          jobContext: {
+            scrapedDescriptionChars: 0, scrapedDescriptionAvailable: false,
+            researchAvailable: false, limitedToMetadata: true,
+          },
+          taskOutcomes: [
+            {
+              task: 'company-research', provider: 'gemini', model: null,
+              status: 'degraded', error: 'Gemini quota exhausted while searching.',
+            },
+            {
+              task: 'application-letter-needs', provider: 'gemini', model: 'gemini-3.5-flash',
+              status: 'completed', fallback: { attempts: 2, reason: 'rate-limit' }, error: null,
+            },
+          ],
+          coverLetter: {
+            needsAvailable: true, needsCount: 2, topNeedArgued: true, mappingCount: 1,
+            planRetried: false, planDegraded: false, revised: false, pageCount: 1,
+            checks: [],
+          },
+          applicationExport: {
+            status: 'saved', destination: '/tmp/Applied Jobs/Example Co/Remote/Senior Example Engineer',
+            savedAt: Date.now(), revealSucceeded: true, bundleError: null, integrityVerified: true,
+            sync: {
+              registered: true, serverListening: true,
+              endpoint: 'http://127.0.0.1:43192/application-sync', error: null,
+            },
+            manifest: [
+              { name: 'Application.html', expected: true, exists: true, readable: true, bytes: 82000, sha256: '0123456789abcdef', matchesSource: true, htmlStructureValid: true, htmlPanelCount: 2, syncConfigValid: true },
+              { name: 'Resume.pdf', expected: true, exists: true, readable: true, bytes: 105000, sha256: '123456789abcdef0', matchesSource: true, pdfHeaderValid: true, pdfParsed: true, pageCount: 1, firstPagePoints: '612x792' },
+              { name: 'Cover Letter.pdf', expected: true, exists: true, readable: true, bytes: 109000, sha256: '23456789abcdef01', matchesSource: true, pdfHeaderValid: true, pdfParsed: true, pageCount: 1, firstPagePoints: '612x792' },
+              { name: 'Original Job Listing.md', expected: true, exists: true, readable: true, bytes: 445, sha256: '3456789abcdef012', matchesSource: true, markdownNonEmpty: true },
+            ],
+          },
         });
         const degradedReport = generateMarkdown({
           description: 'Generate completed without research.',
           nodes: [{ id: 'application-failure-card', type: 'jobcard', data: {} }],
           edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
         }).markdown;
-        assert(degradedReport.includes('Company/role research unavailable — generation used only the scraped job description')
-          && degradedReport.includes('Gemini quota exhausted while searching.'),
-        'Application report must state when a completed document safely degraded to scraped-job-only context');
+        assert(degradedReport.includes('Limited application context:')
+          && degradedReport.includes('no scraped job description was captured')
+          && degradedReport.includes('scraped description 0 char(s) (missing)')
+          && degradedReport.includes('Gemini quota exhausted while searching.')
+          && degradedReport.includes('application-letter-needs → gemini / `gemini-3.5-flash` [completed] (fallback after 2: rate-limit)')
+          && degradedReport.includes('needs evidence source: job metadata only (title/company/location/salary; no scraped description or research)'),
+        'Application report must state when generation had only metadata/career context, not claim an empty scraped description was used');
+        assert(degradedReport.includes('### Application Export (last)')
+          && degradedReport.includes('Outcome: **saved + integrity verified**')
+          && degradedReport.includes('Resume.pdf: readable · 105000 bytes')
+          && degradedReport.includes('source bytes exact · PDF header valid · PDF parse valid (1p, 612x792pt)')
+          && degradedReport.includes('Local edit Sync: workspace registered · service listening')
+          && degradedReport.includes('Opened destination folder: ✅')
+          && degradedReport.includes('Applied-jobs record for this export: not marked'),
+        'FULL report must include the bounded destination readback manifest and reveal result');
 
         const filtered = applyBugReportCode([
           '[JobApplication] Generating application',
@@ -146,6 +192,371 @@ export default [
         recordApplicationTelemetry(prior);
       }
       return { status: 'failed', stage: 'résumé generation' };
+    },
+  },
+{
+    name: 'Application telemetry is scoped to the reporting canvas window',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-foreign-window',
+          nodeId: 'foreign-application-card',
+          windowId: 902,
+          jobTitle: 'Foreign Role',
+          company: 'Foreign Company',
+          status: 'completed',
+        });
+        const foreign = generateMarkdown({
+          description: 'Check this canvas only.',
+          nodes: [{ id: 'local-application-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }, 901).markdown;
+        assert(!foreign.includes('Foreign Role') && !foreign.includes('Foreign Company'),
+          'a FULL report must omit the last application attempt when it belongs to another window');
+
+        recordApplicationTelemetry({
+          attemptId: 'application-local-window',
+          nodeId: 'local-application-card',
+          windowId: 901,
+          jobTitle: 'Local Role',
+          company: 'Local Company',
+          status: 'completed',
+        });
+        const local = generateMarkdown({
+          description: 'Check this canvas only.',
+          nodes: [{ id: 'local-application-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }, 901).markdown;
+        assert(local.includes('### Application Generation (last)')
+          && local.includes('Local Role @ Local Company')
+          && !local.includes('Foreign Role'),
+        'a same-window application attempt must remain in the FULL report');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { foreignWindowOmitted: true, localWindowRetained: true };
+    },
+  },
+{
+    name: 'Application Sync telemetry is integrity-rich and scoped to the saved canvas',
+    run: () => {
+      const prior = getApplicationSyncTelemetry();
+      try {
+        recordApplicationSyncTelemetry({
+          attemptId: 'sync-report-test',
+          workspaceDir: '/tmp/canvas-a/Applied Jobs/Example Co/Toronto/Engineer',
+          document: 'cover', status: 'completed', phase: 'completed', finishedAt: Date.now(),
+          manifest: [
+            { name: 'Application.html', readable: true, bytes: 1200, sha256: 'abc123', matchesSource: true, htmlStructureValid: true, syncConfigValid: true },
+            { name: 'Cover Letter.pdf', readable: true, bytes: 800, sha256: 'def456', matchesSource: true, pdfParsed: true, pageCount: 1, firstPagePoints: '612x792' },
+          ],
+        });
+        const local = buildJobsPipelineSnapshot([], 901, '/tmp/canvas-a/canvas.json');
+        assert(local.includes('### Application Sync (last)')
+          && local.includes('completed + integrity verified')
+          && local.includes('Document: cover letter')
+          && local.includes('PDF parse valid (1p, 612x792pt)')
+          && local.includes('source bytes exact'),
+        'a FULL report must retain the local Sync outcome and exact-byte/structural readback evidence');
+
+        const foreign = buildJobsPipelineSnapshot([], 901, '/tmp/canvas-b/canvas.json');
+        assert(!foreign.includes('### Application Sync (last)') && !foreign.includes('sync-report-test'),
+          'a Sync from another canvas Applied Jobs root must not appear in this report');
+        return { localRetained: true, foreignOmitted: true };
+      } finally {
+        recordApplicationSyncTelemetry(prior);
+      }
+    },
+  },
+{
+    name: 'Résumé length revision permits structural cuts after compact overflow',
+    run: () => {
+      const prompt = buildResumeLengthRevisionPrompt({
+        mainHtml: '<main class="page"><section class="section"><ul><li>Weak one</li><li>Strong two</li></ul></section></main>',
+        pageCount: 2, targetPageCount: 1, compactApplied: true,
+      });
+      assert(prompt.includes('cut at least 12 line(s)')
+        && prompt.includes('explicitly supersedes the initial-draft bullet count')
+        && prompt.includes('reduce every role to 1-2 strongest bullets')
+        && prompt.includes('MUST contain fewer content blocks')
+        && !prompt.includes('Keep the exact same markup structure'),
+      'the fit revision must not forbid the bullet removals/merges it needs to reach the target');
+      return { minimumLinesToCut: 12, structuralCutsAllowed: true };
+    },
+  },
+{
+    name: 'Résumé one-page revision is structurally enforced when the editor ignores the cut',
+    run: () => {
+      const input = `<main class="page"><article class="role"><div class="role-meta"><p class="role-summary">Redundant summary.</p></div><ul class="highlights"><li>Strongest</li><li>Second</li><li>Weak third</li></ul></article><dl class="skills"><dt>Ops</dt><dd>One</dd><dt>Safety</dt><dd>Two</dd></dl></main>`;
+      const output = enforceOnePageRevisionStructure(input, 1);
+      const before = summarizeResumeMarkup(input);
+      const after = summarizeResumeMarkup(output);
+      assert(before.bullets === 3 && after.bullets === 2 && before.roleSummaries === 1 && after.roleSummaries === 0,
+        'one-page post-processing must cap each role at two bullets and remove redundant role summaries');
+      assert(enforceOnePageRevisionStructure(input, 2) === input,
+        'two-page targets must not receive the one-page structural cut');
+      assert(after.hash !== before.hash && after.chars < before.chars && after.skillRows === 2,
+        'revision diagnostics must prove a real structural change without deleting the Skills rows');
+      assert(!/role-meta/.test(output),
+        'a role-meta row emptied by the summary cut must be dropped, not left spending its margin on nothing');
+
+      // The shipped Allied Universal résumé kept a lone city in the second
+      // meta row: .meta-row is `1fr auto`, so the orphan sat in column one and
+      // right-aligned exactly one --col-gap (0.32in) short of the dates above.
+      const withLocation = `<main class="page"><article class="role"><div class="role-header meta-row"><p class="role-title-line"><span class="title">Security Officer</span></p><p class="role-dates"><time datetime="2024-10">Oct 2024</time> – <time>Present</time></p></div><div class="role-meta meta-row"><p class="role-summary">Cut me.</p><p class="role-location">Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article></main>`;
+      const folded = enforceOnePageRevisionStructure(withLocation, 1);
+      assert(!/role-meta/.test(folded) && !/role-location/.test(folded),
+        'a role-meta row left holding only a location must be folded away, not kept as a whole line');
+      assert(/class="role-dates"[^>]*>[\s\S]*?Present[\s\S]*?Memphis, TN[\s\S]*?<\/p>/.test(folded),
+        'the folded location must land in the dates cell, after the date range');
+      assert(summarizeResumeMarkup(folded).bullets === 1,
+        'folding the location must not disturb the bullets');
+
+      // A row still carrying a second cell is doing its job — leave it alone.
+      const twoCell = `<main class="page"><article class="role"><div class="role-header meta-row"><p class="role-dates">Oct 2024</p></div><div class="role-meta meta-row"><p class="role-scope">Kept</p><p class="role-location">Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article></main>`;
+      assert(/role-meta/.test(enforceOnePageRevisionStructure(twoCell, 1)),
+        'a populated two-cell meta row must survive the one-page cut');
+      return { before, after, folded: folded.length };
+    },
+  },
+{
+    name: 'Résumé compact density reaches printed @page margins',
+    run: () => {
+      const css = fs.readFileSync(path.join(process.cwd(), 'resume_design_system', 'resume.css'), 'utf8');
+      assert(css.includes('@page letter-compact') && css.includes('margin: 0.6in 0;')
+        && css.includes('[data-density="compact"] .page { page: letter-compact; }'),
+      'compact density must select a named Letter page with the advertised 0.6in print margins');
+      assert(css.includes('@page a4-compact') && css.includes('page: a4-compact;'),
+        'A4 + compact must select its own compact named page instead of falling back to full A4 margins');
+      // .meta-row is `1fr auto`; a lone cell lands in column one and stops a
+      // full --col-gap short of the content edge unless it spans both tracks.
+      assert(/\.meta-row\s*>\s*:only-child\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/.test(css),
+        'a single-cell meta row must span both columns so it aligns to the content edge');
+      return { letterCompact: true, a4Compact: true, onlyChildSpan: true };
+    },
+  },
+{
+    name: 'Application prompts preserve evidence scope and reject pseudo-growth metrics',
+    run: () => {
+      const source = fs.readFileSync(path.join(process.cwd(), 'electron', 'ipc', 'jobApplication.js'), 'utf8');
+      assert(source.includes('sequential jobs/employers/clients/sectors are chronology, not percentage growth')
+        && source.includes('Never convert a sequence or count of jobs, employers, clients, sectors, or role changes into percentage growth'),
+      'achievement refutation and résumé writing must both reject sequential-role counts presented as scope growth');
+      assert(source.includes('Do not strengthen "coordinated with emergency personnel" into "served as the municipal point of contact"')
+        && source.includes('General evening/weekend availability may be described only at that same level')
+        && source.includes('never imply that they are local, can commute, or will relocate'),
+      'cover-letter generation must preserve evidence specificity, availability granularity, and geography truthfulness');
+      assert(source.includes('does not make CPR/BLS a high-impact gap unless the target posting explicitly requires or strongly prefers CPR/BLS'),
+        'skill-gap analysis must not elevate an adjacent, unstated CPR/BLS credential into a blocking check');
+      return { achievementScope: true, coverEvidenceScope: true, cprGate: true };
+    },
+  },
+{
+    name: 'Application workspace requires confirmation for an on-site city mismatch',
+    run: () => {
+      const doc = buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Derrick</h1></main>',
+        docId: 'location-check',
+        jobContext: {
+          title: 'Security Guard', company: 'Allied Universal',
+          candidateLocation: 'Memphis, TN', location: 'Charlotte, NC, United States',
+        },
+      });
+      assert(doc.includes('data-ic-location-check="work-location"')
+        && doc.includes('Memphis, TN') && doc.includes('Charlotte, NC, United States')
+        && doc.includes('I can work there'),
+      'a cross-city on-site application must show a concrete work-location confirmation card');
+      assert(doc.includes('var locationBlocked = !!locationCard && !locationConfirmed;')
+        && doc.includes('var blocked = locationBlocked || (activeDocument === \'resume\' && reviewBlocked);'),
+      'unresolved location confirmation must gate Sync for both résumé and cover-letter documents');
+      const sameCity = buildResumeDocument({
+        resumeMainHtml: '<main class="page">Same city</main>',
+        jobContext: { candidateLocation: 'Charlotte, NC', location: 'Charlotte, NC, United States' },
+      });
+      assert(!sameCity.includes('data-ic-location-check="work-location"'),
+        'format differences within the same city must not create a false relocation check');
+      return { mismatchBlocked: true, sameCityClear: true };
+    },
+  },
+{
+    name: 'Application bundle replacement removes stale siblings and rolls back a partial promotion',
+    run: async () => {
+      const dir = await fs.promises.mkdtemp('/tmp/infinite-canvas-application-transaction-');
+      const files = {
+        html: path.join(dir, 'Application.html'),
+        resume: path.join(dir, 'Resume.pdf'),
+        cover: path.join(dir, 'Cover Letter.pdf'),
+        listing: path.join(dir, 'Original Job Listing.md'),
+      };
+      try {
+        await Promise.all([
+          fs.promises.writeFile(files.html, 'old html'),
+          fs.promises.writeFile(files.resume, '%PDF-old resume'),
+          fs.promises.writeFile(files.cover, '%PDF-old cover'),
+          fs.promises.writeFile(files.listing, 'old listing'),
+        ]);
+        await replaceApplicationBundleAtomically([
+          { destination: files.html, data: 'new html' },
+          { destination: files.resume, data: null },
+          { destination: files.cover, data: '%PDF-new cover' },
+          { destination: files.listing, data: null },
+        ]);
+        assert(await fs.promises.readFile(files.html, 'utf8') === 'new html'
+          && await fs.promises.readFile(files.cover, 'utf8') === '%PDF-new cover',
+        'a successful transaction promotes every produced artifact');
+        assert(!fs.existsSync(files.resume) && !fs.existsSync(files.listing),
+          'a new generation that lacks an optional artifact removes the stale prior sibling');
+
+        await Promise.all([
+          fs.promises.writeFile(files.html, 'baseline html'),
+          fs.promises.writeFile(files.resume, '%PDF-baseline resume'),
+          fs.promises.writeFile(files.cover, '%PDF-baseline cover'),
+          fs.promises.writeFile(files.listing, 'baseline listing'),
+        ]);
+        const realOps = fs.promises;
+        const failingOps = {
+          access: (...args) => realOps.access(...args),
+          writeFile: (...args) => realOps.writeFile(...args),
+          unlink: (...args) => realOps.unlink(...args),
+          rename: (source, destination) => {
+            if (/\.Cover Letter\.pdf\..*\.tmp$/.test(source) && destination === files.cover) {
+              return Promise.reject(new Error('simulated cover promotion failure'));
+            }
+            return realOps.rename(source, destination);
+          },
+        };
+        let failed = false;
+        try {
+          await replaceApplicationBundleAtomically([
+            { destination: files.html, data: 'v2 html' },
+            { destination: files.resume, data: '%PDF-v2 resume' },
+            { destination: files.cover, data: '%PDF-v2 cover' },
+            { destination: files.listing, data: 'v2 listing' },
+          ], { fileOps: failingOps });
+        } catch (error) {
+          failed = /simulated cover promotion failure/.test(error.message);
+        }
+        assert(failed, 'the injected mid-transaction promotion failure must reach the caller');
+        assert(await fs.promises.readFile(files.html, 'utf8') === 'baseline html'
+          && await fs.promises.readFile(files.resume, 'utf8') === '%PDF-baseline resume'
+          && await fs.promises.readFile(files.cover, 'utf8') === '%PDF-baseline cover'
+          && await fs.promises.readFile(files.listing, 'utf8') === 'baseline listing',
+        'a partial promotion restores the complete previous bundle, never a mixed generation');
+        let verificationFailed = false;
+        try {
+          await replaceApplicationBundleAtomically([
+            { destination: files.html, data: 'unverified html' },
+            { destination: files.resume, data: '%PDF-unverified resume' },
+          ], { verify: async () => { throw new Error('simulated readback failure'); } });
+        } catch (error) {
+          verificationFailed = /simulated readback failure/.test(error.message);
+        }
+        assert(verificationFailed
+          && await fs.promises.readFile(files.html, 'utf8') === 'baseline html'
+          && await fs.promises.readFile(files.resume, 'utf8') === '%PDF-baseline resume',
+        'a failed post-write verification also restores the prior visible artifacts');
+        return { staleRemoved: 2, rollbackRestored: 4, readbackRollback: true };
+      } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+      }
+  },
+},
+{
+    name: 'Application export integrity parses PDFs and matches every promoted byte',
+    run: async () => {
+      const dir = await fs.promises.mkdtemp('/tmp/infinite-canvas-application-integrity-');
+      const htmlPath = path.join(dir, 'Application.html');
+      const pdfPath = path.join(dir, 'Resume.pdf');
+      const listingPath = path.join(dir, 'Original Job Listing.md');
+      const token = 'a'.repeat(64);
+      const html = `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">Resume</main></section><section data-ic-document-panel="cover"><main class="page">Cover</main></section><script id="ic-application-bundle-data" type="application/json">{"sync":{"endpoint":"http://127.0.0.1:43192/application-sync","token":"${token}"}}</script></body></html>`;
+      const listing = '# Example Role\n\n**Company:** Example Co\n';
+      const pdf = await PDFLib.PDFDocument.create();
+      pdf.addPage([612, 792]);
+      const pdfBytes = Buffer.from(await pdf.save());
+      try {
+        await Promise.all([
+          fs.promises.writeFile(htmlPath, html),
+          fs.promises.writeFile(pdfPath, pdfBytes),
+          fs.promises.writeFile(listingPath, listing),
+        ]);
+        const manifest = await inspectApplicationExport([
+          { path: htmlPath, expectedData: html, kind: 'html' },
+          { path: pdfPath, expectedData: pdfBytes, kind: 'pdf' },
+          { path: listingPath, expectedData: listing, kind: 'markdown' },
+        ]);
+        const pdfRow = manifest.find(row => row.name === 'Resume.pdf');
+        assert(manifest.every(row => row.integrityVerified && row.matchesSource)
+          && pdfRow?.pdfParsed && pdfRow.pageCount === 1 && pdfRow.firstPagePoints === '612x792',
+        'readback must prove exact source bytes and parse a non-empty Letter PDF');
+
+        await fs.promises.writeFile(pdfPath, '%PDF-not-a-real-document');
+        let corruptRejected = false;
+        try {
+          await inspectApplicationExport([{ path: pdfPath, expectedData: Buffer.from('%PDF-not-a-real-document'), kind: 'pdf' }]);
+        } catch (error) {
+          corruptRejected = /readback failed/.test(error.message);
+        }
+        assert(corruptRejected, 'a matching %PDF- prefix must not make a structurally corrupt PDF pass readback');
+
+        await fs.promises.writeFile(listingPath, 'different bytes');
+        let mismatchRejected = false;
+        try {
+          await inspectApplicationExport([{ path: listingPath, expectedData: listing, kind: 'markdown' }]);
+        } catch (error) {
+          mismatchRejected = /readback failed/.test(error.message);
+        }
+        assert(mismatchRejected, 'destination bytes that differ from the staged source must fail readback');
+        let missingSourceRejected = false;
+        try {
+          await inspectApplicationExport([{ path: listingPath, kind: 'markdown' }]);
+        } catch (error) {
+          missingSourceRejected = /readback failed/.test(error.message);
+        }
+        assert(missingSourceRejected, 'an integrity claim requires staged source bytes to compare against');
+        return { artifactsVerified: manifest.length, corruptRejected, mismatchRejected, missingSourceRejected };
+      } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
+    name: 'Application Sync persists only the selected panel revision',
+    run: () => {
+      const workspace = (resume, cover, shell) => `<!doctype html><html><body data-shell="${shell}"><section data-ic-document-panel="resume"><main class="page">${resume}</main></section><section data-ic-document-panel="cover"><main class="page">${cover}</main></section></body></html>`;
+      const stored = workspace('saved resume', 'saved cover', 'stored');
+      const incoming = workspace('edited resume', 'edited cover', 'incoming');
+      const resumeMerged = mergeSelectedApplicationPanel(incoming, stored, 'resume');
+      assert(resumeMerged.includes('edited resume') && resumeMerged.includes('saved cover')
+        && !resumeMerged.includes('edited cover') && resumeMerged.includes('data-shell="incoming"'),
+      'résumé Sync must retain the incoming résumé and last-synced cover panel without serializing the shell');
+      const coverMerged = mergeSelectedApplicationPanel(incoming, stored, 'cover');
+      assert(coverMerged.includes('saved resume') && coverMerged.includes('edited cover')
+        && !coverMerged.includes('edited resume'),
+      'cover Sync must retain the incoming cover and last-synced résumé panel');
+      let malformedRejected = false;
+      try {
+        mergeSelectedApplicationPanel('<html><body></body></html>', stored, 'resume');
+      } catch (error) {
+        malformedRejected = /exactly one resume panel/.test(error.message);
+      }
+      assert(malformedRejected, 'Sync must reject a workspace that cannot preserve its inactive panel');
+      let missingSelectedRejected = false;
+      try {
+        mergeSelectedApplicationPanel('<html><body><section data-ic-document-panel="cover"><main class="page">Cover only</main></section></body></html>', stored, 'resume');
+      } catch (error) {
+        missingSelectedRejected = /exactly one resume panel/.test(error.message);
+      }
+      let duplicateRejected = false;
+      try {
+        mergeSelectedApplicationPanel(incoming.replace('</body>', '<section data-ic-document-panel="cover"><main class="page">Duplicate</main></section></body>'), stored, 'resume');
+      } catch (error) {
+        duplicateRejected = /exactly one cover panel \(found 2\)/.test(error.message);
+      }
+      assert(missingSelectedRejected && duplicateRejected,
+        'Sync must reject a missing selected panel and duplicate selected/inactive panels before rendering');
+      return { resumeIsolated: true, coverIsolated: true, malformedRejected, missingSelectedRejected, duplicateRejected };
     },
   },
 {
@@ -169,11 +580,37 @@ export default [
           status: 'completed',
           stage: 'completed',
           companyResearch: { available: true, error: null },
+          coverLetter: {
+            salutation: 'Dear Example Co Hiring Team,', recipient: 'Hiring Team\nExample Co',
+            paragraphs: ['A concise thesis.', 'A grounded mechanism.'], closing: 'Sincerely,',
+            signatureTitle: 'Platform Engineer · candidate', contact: ['Toronto, ON'],
+            needsAvailable: true, needsCount: 3, topNeedArgued: true, mappingCount: 1,
+            droppedNeeds: [{ need: 'Own the data plane', reason: 'No résumé evidence supports it.' }],
+            planRetried: true, planRetryReason: 'first mapping was not grounded', planDegraded: false,
+            checks: [
+              { id: 'evidence-grounding', passed: true, detail: 'one mapping grounded' },
+              { id: 'company-specificity', passed: false, detail: 'no research-sourced specific appears in the letter' },
+            ],
+            revised: true, revisionError: null, pageCount: 1,
+          },
+          coverLetterPlan: {
+            roleThesis: 'Operational judgment is the relevant through-line.',
+            mappings: [{ needIndex: 0, evidence: 'Triaged incomplete reports under time pressure.' }],
+            companyHook: { detail: '', source: '', whyItMattersToCandidate: '' },
+            logistics: '', droppedNeeds: [{ needIndex: 2, reason: 'No résumé evidence supports it.' }],
+          },
+          achievements: { source: 'reused', kept: 8, suppressedWeakened: 1, stats: null, minedBy: null },
           variantAttrs: 'data-print="ink-only" data-mono',
           resumeHtmlSample: '<main class="page" data-print="ink-only" data-mono><section class="section"><h1>Jordan Rivera</h1></section>',
           resumeSkillsDlSample: {
             found: true,
             sample: '<dl class="skills">\n  <dt>Infrastructure</dt>\n  <dd>Kubernetes<span class="sep" data-ic-inferred-separator="join" hidden>·</span><span class="ic-inferred-skill" data-ic-inferred-skill="skill-1" hidden>Terraform</span></dd>\n</dl>',
+            truncated: false,
+          },
+          resumeRoleBlockSample: {
+            found: true,
+            roleCount: 3,
+            sample: '<article class="role"><div class="role-header meta-row"><p class="role-title-line"><span class="title">Security Officer</span></p><p class="role-dates">Oct 2024 – Present<span class="sep" aria-hidden="true">·</span>Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article>',
             truncated: false,
           },
           skillOpportunities: {
@@ -184,10 +621,17 @@ export default [
           render: {
             targetPageCount: 1, attempts: [{ attempt: 1, density: null, pageCount: 2, fontsLoaded: true }],
             initialPageCount: 2, finalPageCount: 2, compactApplied: true, revisionApplied: true,
+            revisionDiagnostics: {
+              input: { chars: 7000, hash: 'aaaaaaaaaaaa', bullets: 9, roleSummaries: 3, skillRows: 4 },
+              editorOutput: { chars: 5600, hash: 'cccccccccccc', bullets: 8, roleSummaries: 0, skillRows: 4 },
+              output: { chars: 5100, hash: 'bbbbbbbbbbbb', bullets: 6, roleSummaries: 0, skillRows: 4 },
+            },
             pdfProduced: true, baselinePdfProduced: true,
             baselinePageCount: 1, baselinePdfError: null, baselineFontsLoaded: true,
             coverLetterPdfProduced: true, coverLetterPdfError: null, coverLetterFontsLoaded: true,
-            resumeRequiresReview: true, error: null, fontsLoaded: true,
+            resumeRequiresReview: true, locationReviewRequired: true,
+            candidateLocation: 'Memphis, TN', jobLocation: 'Charlotte, NC, United States',
+            error: null, fontsLoaded: true,
           },
         });
         const report = generateMarkdown({
@@ -204,6 +648,17 @@ export default [
           'Report must mark the verify-item sample as truncated with an exact count, not emit silently');
         assert(report.includes('Résumé variant: `data-print="ink-only" data-mono`'),
           'Report must render the captured variantAttrs as a structured field');
+        // The head slice dies inside the first role header, so without this
+        // block the Experience structure the fit loop edits is invisible.
+        assert(report.includes('Résumé role block (first of 3 `<article class="role">`')
+          && report.includes('<p class="role-dates">Oct 2024 – Present'),
+          'Report must render a whole role block so the shipped Experience structure is visible');
+        // "6 bullets" alone cannot say whether the editor complied or the
+        // clamp truncated it; the editor snapshot is what separates them.
+        assert(report.includes('structural clamp: APPLIED — editor returned 5600 chars · bullets 8'),
+          'Report must attribute the one-page cut to the editor or to the structural clamp');
+        assert(report.includes('1 refute-weakened item(s) withheld from application prompts'),
+          'Report must say when a cached achievement remains auditable but is intentionally unavailable to résumé/letter generation');
         // The fit-loop measures the worst case (all candidate skills shown);
         // the shipped baseline is a separate, honestly-labeled number that
         // must never be conflated with it (this report's whole reason for
@@ -213,8 +668,18 @@ export default [
           'Fit-loop line must be relabeled as the worst-case measurement, not implied to be the delivered document');
         assert(report.includes('Résumé shipped baseline: 1p · PDF produced'),
           'Report must record the shipped baseline page count separately, obtained free from the baseline PDF render');
+        assert(report.includes('length revision: 7000→5100 chars · bullets 9→6 · role summaries 3→0 · skill rows 4→4 · hash aaaaaaaaaaaa→bbbbbbbbbbbb'),
+          'Report must show whether the length editor actually changed structure, not only that it was called');
+        assert(report.includes('Work-location confirmation required before Sync: candidate `Memphis, TN` → job `Charlotte, NC, United States`'),
+          'Report must expose a candidate/job city mismatch and the required confirmation gate');
         assert(report.includes('<dl class="skills">') && report.includes('Terraform'),
           'Report must include the résumé\'s Skills <dl> block, where skill-opportunity injection actually lands');
+        assert(report.includes('Cover-letter harness: needs available (3) · top need argued · 1 mapping(s) · plan retried once')
+          && report.includes('company-specificity: no research-sourced specific appears in the letter'),
+        'Report must surface the harness lifecycle and factual unmet-check observation');
+        assert(report.includes('Cover-letter argument plan')
+          && report.includes('Operational judgment is the relevant through-line.'),
+        'Report must include the persisted typed argument plan that explains the generated prose');
 
         // A second generation whose résumé genuinely had no Skills section —
         // the report must say so explicitly rather than rendering nothing.

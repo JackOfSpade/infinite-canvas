@@ -72,6 +72,19 @@
   }
 }
 @page letter:first { @bottom-right { content: none; } }
+@page letter-compact {
+  size: Letter;
+  margin: 0.6in 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;
+    margin: 0 0.78in 0.32in 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page letter-compact:first { @bottom-right { content: none; } }
 @page a4 {
   size: A4;
   margin: 18mm 0;
@@ -85,6 +98,19 @@
   }
 }
 @page a4:first { @bottom-right { content: none; } }
+@page a4-compact {
+  size: A4;
+  margin: 15.24mm 0; /* 0.6in, matching compact Letter */
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;
+    margin: 0 16mm 8mm 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page a4-compact:first { @bottom-right { content: none; } }
 @page {
   /* Fallback for engines that don't support named pages — defaults
      to Letter. Vertical margins repeat per page via @page; side
@@ -98,6 +124,15 @@
    already covers the :root case, so no separate :root rule is needed. */
 .page[data-page="a4"],
 [data-page="a4"] .page { page: a4; }
+/* Density changes must reach @page itself: print .page intentionally has no
+   vertical padding, so changing --margin-top/--margin-bot alone only affected
+   the screen preview and left compact PDFs at the full 0.72in margins. */
+.page[data-density="compact"],
+[data-density="compact"] .page { page: letter-compact; }
+.page[data-page="a4"][data-density="compact"],
+[data-page="a4"][data-density="compact"] .page,
+[data-page="a4"] .page[data-density="compact"],
+[data-density="compact"] .page[data-page="a4"] { page: a4-compact; }
 @media print {
   html, body { background: var(--bg); }
   body { padding: 0; }
@@ -239,6 +274,11 @@
   column-gap: var(--col-gap);
   align-items: baseline;
 }
+/* A row left holding one cell — e.g. a .role-meta whose scope summary the
+   one-page revision cut — must still reach the content edge. Without this the
+   lone child lands in the 1fr column and its text-align: right stops one
+   --col-gap short of the margin, visibly out of line with the dates above. */
+.meta-row > :only-child { grid-column: 1 / -1; }
 
 /* =========================================================
    Inline separator (·) used between sibling inline items.

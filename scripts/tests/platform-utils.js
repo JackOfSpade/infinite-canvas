@@ -1568,6 +1568,9 @@ export default [
       assert(w1.confidence === 'medium', 'verdict "weaken" demotes confidence one step (high -> medium)');
       assert(w1.caveats === 'preexisting caveat. market tailwind explains most of this.', 'verdict "weaken" APPENDS suggestedCaveat to any existing caveat, does not overwrite it');
       assert(w1.flags.includes('refute-weakened'), 'verdict "weaken" is flagged for downstream telemetry');
+      const candidatePromptLedger = serializeLedgerForPrompt(out);
+      assert(!candidatePromptLedger.includes('[w1]') && candidatePromptLedger.includes('[s1]'),
+        'refute-weakened items remain auditable in the ledger but are withheld from employer-facing generation prompts');
       const s1 = out.find((i) => i.id === 's1');
       assert(s1.attribution === 'led' && s1.confidence === 'medium', 'verdict "stands" passes the item through unchanged');
       assert(stats.droppedByRefute === 1 && stats.weakened === 1, 'stats tally exactly one drop and one weaken');

@@ -562,6 +562,11 @@ function jsStringLiteral(s) {
 // main process. The company segment is display data from a job board, never a
 // path supplied by the user.
 export function normaliseResumeDownloadBundle(raw = {}) {
+  const auditText = (value, maxLength) => String(value ?? '')
+    .replace(/[\s\S]/g, char => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ? ' ' : char)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
   const safePart = (value, fallback) => {
     const cleaned = String(value ?? '')
     .replace(/[/\\:*?"<>|]+/g, ' ')
@@ -594,6 +599,52 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     && /^[a-f0-9]{64}$/i.test(syncToken)
     ? { endpoint: syncEndpoint, token: syncToken, version: 1 }
     : { endpoint: '', token: '', version: 1 };
+  const rawAudit = raw.coverLetterAudit && typeof raw.coverLetterAudit === 'object'
+    && !Array.isArray(raw.coverLetterAudit) ? raw.coverLetterAudit : null;
+  const boundedIndex = (value) => Number.isInteger(value) && value >= 0 && value <= 999 ? value : null;
+  const coverLetterAudit = rawAudit ? {
+    version: 1,
+    rankedNeeds: (Array.isArray(rawAudit.rankedNeeds) ? rawAudit.rankedNeeds : []).slice(0, 12).map(need => ({
+      need: auditText(need?.need, 320),
+      quote: auditText(need?.quote, 420),
+      source: ['posting', 'research'].includes(String(need?.source || '')) ? String(need.source) : '',
+      decisiveness: Number.isInteger(need?.decisiveness) && need.decisiveness >= 1 && need.decisiveness <= 100
+        ? need.decisiveness : null,
+      kind: auditText(need?.kind, 48),
+    })),
+    finalPlan: {
+      roleThesis: auditText(rawAudit.finalPlan?.roleThesis, 600),
+      mappings: (Array.isArray(rawAudit.finalPlan?.mappings) ? rawAudit.finalPlan.mappings : []).slice(0, 4).map(mapping => ({
+        needIndex: boundedIndex(mapping?.needIndex),
+        need: auditText(mapping?.need, 320),
+        evidence: auditText(mapping?.evidence, 600),
+        evidenceRole: auditText(mapping?.evidenceRole, 160),
+        achievementIds: (Array.isArray(mapping?.achievementIds) ? mapping.achievementIds : []).slice(0, 12)
+          .map(id => auditText(id, 120)).filter(Boolean),
+        resumeStatus: auditText(mapping?.resumeStatus, 32),
+        inference: auditText(mapping?.inference, 600),
+      })),
+      companyHook: {
+        detail: auditText(rawAudit.finalPlan?.companyHook?.detail, 320),
+        source: auditText(rawAudit.finalPlan?.companyHook?.source, 48),
+        whyItMattersToCandidate: auditText(rawAudit.finalPlan?.companyHook?.whyItMattersToCandidate, 500),
+      },
+      logistics: auditText(rawAudit.finalPlan?.logistics, 400),
+      droppedNeeds: (Array.isArray(rawAudit.finalPlan?.droppedNeeds) ? rawAudit.finalPlan.droppedNeeds : []).slice(0, 12).map(item => ({
+        needIndex: boundedIndex(item?.needIndex),
+        reason: auditText(item?.reason, 400),
+      })),
+    },
+    checks: (Array.isArray(rawAudit.checks) ? rawAudit.checks : []).slice(0, 24).map(check => ({
+      id: auditText(check?.id, 80),
+      passed: check?.passed === true,
+      detail: auditText(check?.detail, 320),
+    })),
+    readiness: (Array.isArray(rawAudit.checks) ? rawAudit.checks : []).some(check => check?.passed !== true)
+      ? 'review-required'
+      : 'checks-passed',
+    note: 'Deterministic checks support factual and structural review; they are not a persuasive-quality score.',
+  } : undefined;
   return {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
@@ -601,6 +652,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     resumePdfBase64,
     coverLetterPdfBase64,
     sync,
+    coverLetterAudit,
   };
 }
 
@@ -876,7 +928,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -891,6 +943,11 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   const contextRoles = [...new Set(insights.map(item => item.role).filter(Boolean))];
   const title = String(jobContext?.title || jobContext?.jobTitle || '').trim();
   const company = String(jobContext?.company || '').trim();
+  const candidateLocation = String(jobContext?.candidateLocation || '').trim();
+  const jobLocation = String(jobContext?.location || jobContext?.jobLocation || '').trim();
+  const cityKey = value => String(value || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const locationMismatch = candidateLocation && jobLocation && !/\bremote\b/i.test(jobLocation)
+    && cityKey(candidateLocation) && cityKey(jobLocation) && cityKey(candidateLocation) !== cityKey(jobLocation);
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
@@ -919,12 +976,21 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   </div>`).join('');
   const histControl = histogram.length > 1 ? `<label class="ic-panel-note" for="ic-hist-role">Role category</label><select id="ic-hist-role" class="ic-hist-role">${histogram.map(role => `<option value="${escapeHtml(role.role)}">${escapeHtml(role.role)}</option>`).join('')}</select>` : '';
   const json = JSON.stringify({ insights, histogram });
+  const locationCheck = locationMismatch ? `<article class="ic-insight-card" data-ic-location-check="work-location">
+  <p class="ic-insight-skill">Confirm work location</p>
+  <p class="ic-insight-meta">required before Sync</p>
+  <p class="ic-insight-copy"><span class="ic-insight-label">Current résumé:</span> ${escapeHtml(candidateLocation)}</p>
+  <p class="ic-insight-copy"><span class="ic-insight-label">On-site job:</span> ${escapeHtml(jobLocation)}</p>
+  <p class="ic-insight-prompt"><span class="ic-insight-label">Check:</span> Can you reliably work in this job location (including an actual relocation plan, if needed)?</p>
+  <div class="ic-insight-actions"><button type="button" data-ic-location-action="confirmed" aria-pressed="false">I can work there</button></div>
+</article>` : '';
   return {
     insights,
     markup: `<aside class="ic-workspace-sidebar" aria-label="Résumé tailoring workspace">
   <p class="ic-workspace-kicker">Application workspace</p>
   <h1 class="ic-workspace-title">Application, with receipts.</h1>
   <p class="ic-workspace-context">${escapeHtml(context)}</p>
+  ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
@@ -938,7 +1004,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
     <span id="ic-review-status" class="ic-review-status" role="status"></span>
-    ${verify.length ? verify.map(card).join('') : '<p class="ic-panel-note">No high-impact claims need confirmation.</p>'}
+    ${locationCheck}${verify.length ? verify.map(card).join('') : (locationCheck ? '' : '<p class="ic-panel-note">No high-impact claims need confirmation.</p>')}
   </section>
   <section class="ic-panel" aria-labelledby="ic-learn-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-learn-title">Skills to learn</h2><span class="ic-panel-note">Never added to résumé</span></div>
@@ -1016,6 +1082,9 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   var skillStorageKey = 'ic-skill-review:' + DOC_ID;
   var skillCards = Array.prototype.slice.call(document.querySelectorAll('[data-ic-insight][data-ic-kind="verify"]'));
   var skillDecisions = {};
+  var locationCard = document.querySelector('[data-ic-location-check]');
+  var locationStorageKey = 'ic-location-review:' + DOC_ID;
+  var locationConfirmed = !!(locationCard && locationCard.getAttribute('data-ic-location-decision') === 'confirmed');
   // Each document has its own exported companion. A résumé edit must never
   // invalidate a still-current cover-letter PDF (and vice versa).
   var pdfStale = { resume: false, cover: false };
@@ -1038,14 +1107,17 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     if (!syncBtn || !HAS_APPLICATION_BUNDLE) return;
     var reviewBlocked = skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
     var configured = !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
-    var blocked = activeDocument === 'resume' && reviewBlocked;
+    var locationBlocked = !!locationCard && !locationConfirmed;
+    var blocked = locationBlocked || (activeDocument === 'resume' && reviewBlocked);
     syncBtn.disabled = blocked || !configured;
     syncBtn.setAttribute('aria-disabled', String(blocked || !configured));
     syncBtn.textContent = 'Sync ' + documentLabel(activeDocument);
-    syncBtn.title = blocked ? 'Resolve every high-impact skill check before syncing the résumé.'
-      : (!configured ? 'This copy has not been saved by Infinite Canvas yet.' : 'Render and replace the current ' + documentLabel(activeDocument) + ' PDF in this application folder.');
+    syncBtn.title = locationBlocked ? 'Confirm that you can work in the on-site job location before syncing.'
+      : (blocked ? 'Resolve every high-impact skill check before syncing the résumé.'
+      : (!configured ? 'This copy has not been saved by Infinite Canvas yet.' : 'Render and replace the current ' + documentLabel(activeDocument) + ' PDF in this application folder.'));
     if (pdfBundleNote) {
-      if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
+      if (locationBlocked) { syncMessage = ''; pdfBundleNote.textContent = 'Confirm the on-site work location before syncing.'; }
+      else if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
       else if (!configured) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas before Sync is available.'; }
       // pdfStale is per-document on purpose: a résumé edit must not imply the
       // still-current cover-letter PDF is out of date. Saying which one drifted
@@ -1112,6 +1184,9 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
       });
     }
   } catch (e) {}
+  if (locationCard) {
+    try { if (localStorage.getItem(locationStorageKey) === 'confirmed') locationConfirmed = true; } catch (e) {}
+  }
 
   function inferredNodes(id, attribute) {
     return Array.prototype.slice.call(document.querySelectorAll('[' + attribute + ']')).filter(function (node) {
@@ -1183,14 +1258,14 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     updateSkillReviewStatus();
   }
   function updateSkillReviewStatus() {
-    var total = skillCards.length;
-    var resolved = skillCards.filter(function (card) { return !!skillDecisions[card.getAttribute('data-ic-insight')]; }).length;
+    var total = skillCards.length + (locationCard ? 1 : 0);
+    var resolved = skillCards.filter(function (card) { return !!skillDecisions[card.getAttribute('data-ic-insight')]; }).length + (locationCard && locationConfirmed ? 1 : 0);
     var verified = skillCards.filter(function (card) { return skillDecisions[card.getAttribute('data-ic-insight')] === 'verified'; }).length;
     var progress = document.getElementById('ic-review-progress');
     var status = document.getElementById('ic-review-status');
     if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
     if (status) status.textContent = !total ? '' : (resolved < total
-      ? 'Sync unlocks after every high-impact claim is marked Verified or Not mine.'
+      ? 'Sync unlocks after every required location and high-impact claim check is resolved.'
       : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
     updateSync();
   }
@@ -1201,6 +1276,20 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
       button.addEventListener('click', function () { applySkillDecision(id, button.getAttribute('data-ic-skill-action'), true); });
     });
   });
+  if (locationCard) {
+    if (locationConfirmed) locationCard.setAttribute('data-ic-location-decision', 'confirmed');
+    var locationButton = locationCard.querySelector('[data-ic-location-action="confirmed"]');
+    if (locationButton) {
+      locationButton.setAttribute('aria-pressed', String(locationConfirmed));
+      locationButton.addEventListener('click', function () {
+        locationConfirmed = true;
+        locationCard.setAttribute('data-ic-location-decision', 'confirmed');
+        locationButton.setAttribute('aria-pressed', 'true');
+        try { localStorage.setItem(locationStorageKey, 'confirmed'); } catch (e) {}
+        updateSkillReviewStatus();
+      });
+    }
+  }
   if (resumeMain && resumeMain.innerHTML !== initialResumeMarkup) markPdfStale('resume');
   updateSkillReviewStatus();
   selectDocument('resume');
@@ -1370,12 +1459,14 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
  *   A legacy `pdfBase64` is still accepted as résumé migration data.
  * @param {object} [args.coverLetter] Structured generated cover-letter fields.
  *   The cover is rendered into a second editable panel in this same HTML.
+ * @param {string} [args.coverLetterCheckSummary] Modest factual status line
+ *   shown only when the shipped letter retains deterministic check failures.
  * @param {boolean} [args.showAllVerifySkills] Internal page-fit mode: reveal
  *   every verify candidate to measure the largest user-approved print state.
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: if the model wrapped its answer in a full document or fences,
   // extract just the <main> block.
@@ -1389,7 +1480,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = stripMainVariantAttrs(main);
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
-  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError });
+  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary });
   main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);

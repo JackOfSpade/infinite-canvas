@@ -76,7 +76,10 @@ const TASK_MODELS = {
   // Gemini is a fully valid choice here, served by its own capability-ladder
   // cascade exactly like any other Gemini task.
   'application-resume':        { gemini: 'gemini-3.7-flash' },
+  'application-letter-needs':  { gemini: 'gemini-3.7-flash' },
+  'application-letter-plan':   { gemini: 'gemini-3.7-flash' },
   'application-cover-letter':  { gemini: 'gemini-3.7-flash' },
+  'application-letter-revise': { gemini: 'gemini-3.7-flash' },
   // Evidence-bound analysis of job-significant, adjacent skills. This runs
   // before the employer-facing artefact and feeds the candidate-only review /
   // learning surfaces, so it belongs on the same capable Flash tier.
@@ -163,7 +166,10 @@ const TASK_GROUPS = {
   // here: the output is a document a human sends to a recruiter, where
   // writing nuance + judgment convert to interviews.
   'application-resume':        { group: 'generation' },
+  'application-letter-needs':  { group: 'generation', step: 1 }, // feeds generation, isn't the artifact
+  'application-letter-plan':   { group: 'generation' },
   'application-cover-letter':  { group: 'generation' },
+  'application-letter-revise': { group: 'generation' },
   'application-skill-opportunity': { group: 'generation' },
   'career-achievement-mining': { group: 'generation' },
   'career-achievement-refute': { group: 'generation', step: 1 }, // independence — see doc above, load-bearing
@@ -311,7 +317,10 @@ const TASK_MAX_TOKENS = {
   // truncation produces malformed HTML → a broken PDF, so size well past a
   // 2-page senior résumé. Unused cap is free (billed on actual output).
   'application-resume':        12288,
-  'application-cover-letter':  3072,  // structured letterhead + 3-4 paragraphs
+  'application-letter-needs':  2048,
+  'application-letter-plan':   3072,
+  'application-cover-letter':  3072,  // body paragraphs generated from a vetted plan
+  'application-letter-revise': 3072,
   // Short structured analysis: one role plus only job-significant verify/learn
   // candidates, with evidence and safe follow-up text. Sized for several
   // detailed items without the resume-sized budget.

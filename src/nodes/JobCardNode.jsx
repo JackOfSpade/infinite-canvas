@@ -298,6 +298,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           source: data.source, posted: data.posted, language: data.language,
         },
         careerData,
+        reasoning: data.reasoning,
+        matchScore: data.matchScore,
         achievements: cachedAchievements,
         mineAllowed,
       });
@@ -396,7 +398,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as

@@ -15,12 +15,14 @@ import {
   GEMINI_MODEL_FALLBACKS,
   GEMINI_MODEL_REGISTRY,
   GEMINI_MAX_OUTPUT_TOKENS,
+  VERTEX_GEMINI_MODEL_FALLBACKS,
   classifyGeminiFailure,
   describeGeminiFailure,
   getGeminiDefaultThinkingConfig,
   getGeminiLifecycleWarning,
   isGeminiProviderAvailable,
   orderGeminiModels,
+  orderVertexGeminiModels,
 } from './geminiModels.js';
 import {
   entitledTiersFor,
@@ -55,7 +57,31 @@ const GEMINI_TEMPERATURE = 0.1;
 // below is unrelated: a hard ~20MB API limit on inline image/document bytes.)
 const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
-const LOCATION = 'us-central1';
+// Gemini's Vertex publisher models below are served by the global endpoint.
+// Keeping this separate from the AI Studio catalog is intentional: a service
+// account used to send every speculative 3.x/alias id to us-central1, where
+// each returned a 404 before the real Vertex models were ever attempted.
+export const VERTEX_LOCATION = 'global';
+
+export function vertexGenerateContentUrl(project, model) {
+  return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/${VERTEX_LOCATION}/publishers/google/models/${model}:generateContent`;
+}
+
+/**
+ * Google exposes the same Search capability through two JSON surfaces with
+ * different field names.  AI Studio's Generative Language API uses
+ * `google_search`, whereas Vertex's v1 publisher-model API uses
+ * `googleSearch`.  Keep this provider boundary in one pure helper so a
+ * service-account-only installation cannot silently lose company research.
+ */
+export function geminiGroundingTools(usingVertex = false) {
+  return usingVertex ? [{ googleSearch: {} }] : [{ google_search: {} }];
+}
+
+/** API keys cannot contain meaningful surrounding whitespace. */
+export function normalizeGeminiApiKey(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
 
 /**
  * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
@@ -83,6 +109,13 @@ export function toGeminiSchema(schema) {
   }
   if (schema.nullable) out.nullable = schema.nullable;
   if (schema.required) out.required = schema.required;
+  // Keep only Gemini's documented response-schema constraints. Omitting
+  // min/max-items made the cover-letter two-mapping contract advisory; sending
+  // generic JSON-Schema string constraints (minLength/maxLength/pattern) is
+  // worse, because Gemini rejects them with a request-level 400.
+  for (const key of ['minItems', 'maxItems', 'minimum', 'maximum', 'format']) {
+    if (schema[key] !== undefined) out[key] = schema[key];
+  }
   if (schema.properties) {
     out.properties = {};
     for (const [k, v] of Object.entries(schema.properties)) {
@@ -307,9 +340,9 @@ function scopedKey(scope, model) {
 }
 
 /** Build a model→suppressedUntil view for the given scope (only cooling entries). */
-function suppressionMapForScope(scope, now) {
+function suppressionMapForScope(scope, now, models = GEMINI_MODEL_REGISTRY.map(({ id }) => id)) {
   const m = new Map();
-  for (const { id } of GEMINI_MODEL_REGISTRY) {
+  for (const id of models) {
     const until = modelSuppressedUntil.get(scopedKey(scope, id)) || 0;
     if (until > now) m.set(id, until);
   }
@@ -340,7 +373,7 @@ function rememberGeminiModelFailure(scope, model, classification, message, suppr
 function geminiWarnings(scope = lastActiveScope) {
   const warnings = [];
   const now = Date.now();
-  for (const { id } of GEMINI_MODEL_REGISTRY) {
+  for (const id of [...new Set([...GEMINI_MODEL_REGISTRY.map(({ id }) => id), ...VERTEX_GEMINI_MODEL_FALLBACKS])]) {
     const lifecycle = getGeminiLifecycleWarning(id);
     if (lifecycle) warnings.push({ model: id, type: 'lifecycle', message: lifecycle });
     if (!scope) continue;
@@ -387,11 +420,12 @@ function parseRetryMsFromError(msg) {
  * Exposes internal Gemini diagnostics to the bug reporting IPC layer.
  */
 export function getGeminiTelemetry() {
+  const isVertexScope = lastActiveScope?.startsWith('vx:');
   return {
     lastAttemptedModel,
     lastSuccessfulModel,
     lastAttemptedError,
-    compatibleModels: [...GEMINI_MODEL_FALLBACKS],
+    compatibleModels: [...(isVertexScope ? VERTEX_GEMINI_MODEL_FALLBACKS : GEMINI_MODEL_FALLBACKS)],
     // Why the chain starts where it does. Without this a report showing
     // "started at Flash" is indistinguishable from "Pro was skipped due to a
     // bug" — the entitlement verdict is the difference.
@@ -466,6 +500,7 @@ function geminiProbeBody(model) {
  * `rateLimit` block by design — we don't fabricate one.
  */
 export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quotaStatsMap = null) {
+  apiKey = normalizeGeminiApiKey(apiKey);
   if (!apiKey) {
     return { ok: false, status: null, error: 'No AI Studio API key set (a service-account / Vertex setup is not probed here).' };
   }
@@ -508,7 +543,7 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quota
  * key. Without this, "Check availability" reports "no Gemini key" even though
  * normal Gemini calls work fine through Vertex (Finding 4). NEVER throws.
  */
-export async function probeGeminiVertex(model = 'gemini-3.1-flash-lite', quotaStatsMap = null) {
+export async function probeGeminiVertex(model = VERTEX_GEMINI_MODEL_FALLBACKS[0], quotaStatsMap = null) {
   let token;
   let pid;
   try {
@@ -520,7 +555,7 @@ export async function probeGeminiVertex(model = 'gemini-3.1-flash-lite', quotaSt
   } catch (e) {
     return { ok: false, status: null, model, error: e?.message || String(e) };
   }
-  const url = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${pid}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`;
+  const url = vertexGenerateContentUrl(pid, model);
   let res;
   try {
     res = await fetch(url, {
@@ -723,7 +758,7 @@ let geminiCheckInFlight = null;
  * longer falsely reported as "no Gemini key" (Finding 4). Never throws.
  */
 async function runGeminiAvailabilityCheck(settings) {
-  const apiKey = settings.geminiApiKey || null;
+  const apiKey = normalizeGeminiApiKey(settings.geminiApiKey);
   const hasServiceAccount = !!resolveServiceAccountPath();
 
   if (!apiKey && !hasServiceAccount) {
@@ -745,6 +780,8 @@ async function runGeminiAvailabilityCheck(settings) {
     ? (m) => probeGemini(apiKey, m, null)
     : (m) => probeGeminiVertex(m, null);
 
+  const compatibleModels = apiKey ? GEMINI_MODEL_FALLBACKS : VERTEX_GEMINI_MODEL_FALLBACKS;
+
   // "Check availability" is the user explicitly asking for a FRESH answer, so
   // it re-probes the entitlement-gated tiers too (Pro) rather than reading the
   // week-old cache — this is how a key that just got billing enabled starts
@@ -752,19 +789,19 @@ async function runGeminiAvailabilityCheck(settings) {
   // extra probes are why the gated ids are excluded from GEMINI_MODEL_FALLBACKS:
   // they're worth one request here, on demand, not on every sweep of the
   // routine chain.
-  const gated = gatedTiers()
+  const gated = (apiKey ? gatedTiers() : [])
     .map((tier) => ({ tier, model: probeModelForTier(tier) }))
     .filter((g) => !!g.model);
 
   const [quotaStatsMap, gatedResults, ...probeResults] = await Promise.all([
     fetchGeminiQuotaStats(),
     Promise.all(gated.map((g) => probeOne(g.model).then((r) => ({ ...g, result: r })))),
-    ...GEMINI_MODEL_FALLBACKS.map((m) => probeOne(m)),
+    ...compatibleModels.map((m) => probeOne(m)),
   ]);
 
   const models = probeResults.map((probe, i) => ({
     ...probe,
-    quotaStats: quotaStatsMap?.[GEMINI_MODEL_FALLBACKS[i]] ?? null,
+    quotaStats: quotaStatsMap?.[compatibleModels[i]] ?? null,
   }));
 
   // Fold verdicts into THIS credential+endpoint's scope so the check updates the
@@ -805,6 +842,7 @@ async function runGeminiAvailabilityCheck(settings) {
  * Inner executor for a single Gemini API request.
  */
 async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
+  apiKey = normalizeGeminiApiKey(apiKey);
   // If an API key is provided, route directly to the free AI Studio endpoint
   // Otherwise, default to the Vertex AI service account pipeline
   let endpoint = '';
@@ -816,7 +854,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     // No API key → Vertex AI via service-account.json. getToken() (→ getAuthClient)
     // throws a clear "no credential" error if neither is configured.
     const token = await getToken();
-    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL_FALLBACKS[0]}:generateContent`;
+    endpoint = vertexGenerateContentUrl(projectId, model || VERTEX_GEMINI_MODEL_FALLBACKS[0]);
     headers['Authorization'] = `Bearer ${token}`;
   }
 
@@ -853,7 +891,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   // (grounding is incompatible with a strict responseSchema), so we never set
   // generationConfig.responseSchema here. Carries its own quota/billing.
   if (_grounding) {
-    payload.tools = [{ google_search: {} }];
+    payload.tools = geminiGroundingTools(!apiKey);
   }
 
   const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -952,6 +990,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
  * @returns {Promise<string>} — Raw text response from Gemini
  */
 async function callGemini(parts, apiKey, model, genConfig = {}) {
+  apiKey = normalizeGeminiApiKey(apiKey);
   // Without an API key we use the Vertex/service-account path; verify that
   // credential up front so a missing one fails fast with one clear error
   // instead of throwing the same auth failure against all fallback models.
@@ -983,18 +1022,23 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   // its background probe it would never enter the Pro tier unless the user
   // happened to click Settings → Check availability first.
   const _now = Date.now();
-  const entitledTiers = entitledTiersFor(scope, _now);
-  refreshEntitlementInBackground(
+  const usingVertex = !apiKey;
+  const entitledTiers = usingVertex ? new Set() : entitledTiersFor(scope, _now);
+  if (!usingVertex) {
+    refreshEntitlementInBackground(scope, (m) => probeGemini(apiKey, m), _now);
+  }
+  const scopeSuppression = suppressionMapForScope(
     scope,
-    apiKey ? (m) => probeGemini(apiKey, m) : (m) => probeGeminiVertex(m),
     _now,
+    usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
   );
-  const scopeSuppression = suppressionMapForScope(scope, _now);
-  const modelOrder = orderGeminiModels(model, scopeSuppression, _now, {
-    entitledTiers,
-    responseSchema: !!genConfig.responseSchema,
-    grounding: grounded,
-  });
+  const modelOrder = usingVertex
+    ? orderVertexGeminiModels(scopeSuppression, _now)
+    : orderGeminiModels(model, scopeSuppression, _now, {
+      entitledTiers,
+      responseSchema: !!genConfig.responseSchema,
+      grounding: grounded,
+    });
   const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
   if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
     logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
@@ -1155,13 +1199,19 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     // Recompute fresh — suppressions may have expired during the wait, and a
     // stale `modelOrder` would just re-run the same (still-cooling) ordering.
     const now2 = Date.now();
-    const entitledTiers2 = entitledTiersFor(scope, now2);
-    const scopeSuppression2 = suppressionMapForScope(scope, now2);
-    const modelOrder2 = orderGeminiModels(model, scopeSuppression2, now2, {
-      entitledTiers: entitledTiers2,
-      responseSchema: !!genConfig.responseSchema,
-      grounding: grounded,
-    });
+    const entitledTiers2 = usingVertex ? new Set() : entitledTiersFor(scope, now2);
+    const scopeSuppression2 = suppressionMapForScope(
+      scope,
+      now2,
+      usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
+    );
+    const modelOrder2 = usingVertex
+      ? orderVertexGeminiModels(scopeSuppression2, now2)
+      : orderGeminiModels(model, scopeSuppression2, now2, {
+        entitledTiers: entitledTiers2,
+        responseSchema: !!genConfig.responseSchema,
+        grounding: grounded,
+      });
     const _cooling2 = modelOrder2.filter(m => scopeSuppression2.has(m));
     if (_cooling2.length > 0 && _cooling2.length < modelOrder2.length) {
       logger.info(`[Gemini] Retry pass: deferring ${_cooling2.length} still-suppressed model(s): ${_cooling2.join(', ')}`);
@@ -1238,6 +1288,7 @@ export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, op
  * Used by the preflight (checkPromptFits) to size/split prompts before sending.
  */
 export async function countGeminiInputTokens(text, apiKey, model, { signal = null } = {}) {
+  apiKey = normalizeGeminiApiKey(apiKey);
   if (!apiKey) throw new Error('Gemini countTokens requires an AI Studio API key');
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL_FALLBACKS[0]}:countTokens?key=${apiKey}`;
   const timeoutSignal = AbortSignal.timeout(15000);

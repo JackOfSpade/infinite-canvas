@@ -10,8 +10,11 @@ import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
+import { JSDOM } from 'jsdom';
+import { PDFDocument } from 'pdf-lib';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { extractVariantAttrs, isDualMode } from './resumeHtml.js';
+import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
 
 const { app } = electronPkg;
@@ -23,9 +26,27 @@ export const APPLICATION_SYNC_PATH = '/application-sync';
 const MAX_HTML_BYTES = 64 * 1024 * 1024;
 const STATE_FILE = 'application-sync-workspaces.json';
 const workspaces = new Map();
+const workspaceSyncQueues = new Map();
 let server = null;
 let stateLoaded = false;
 let persistenceQueue = Promise.resolve();
+let lastServerError = null;
+let lastSyncAttempt = null;
+
+export function getApplicationSyncTelemetry() {
+  return lastSyncAttempt;
+}
+
+// Exported for deterministic report fixtures. Production records are owned by
+// syncWorkspace below and never retain the bearer token or document HTML.
+export function recordApplicationSyncTelemetry(data) {
+  lastSyncAttempt = data == null ? null : { ts: Date.now(), ...data };
+}
+
+function updateSyncAttempt(attemptId, changes) {
+  if (!attemptId || lastSyncAttempt?.attemptId !== attemptId) return;
+  recordApplicationSyncTelemetry({ ...lastSyncAttempt, ...changes });
+}
 
 function statePath() {
   return path.join(app.getPath('userData'), STATE_FILE);
@@ -127,6 +148,143 @@ function readJson(request) {
   });
 }
 
+/**
+ * The browser sends its complete two-panel workspace, but Sync only renders
+ * one companion PDF at a time. Persisting the incoming document verbatim
+ * would therefore let an unsynced edit in the OTHER panel leak into
+ * Application.html while that panel's PDF remained on the previous revision.
+ *
+ * Keep the incoming document byte-for-byte except for the inactive panel's
+ * inner HTML, which is copied from the last successfully synced file. JSDOM is
+ * used only to locate source offsets; it never serializes or executes either
+ * document, so scripts, entities, formatting, and the active edit are not
+ * normalized as a side effect of the merge.
+ */
+export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, documentKind) {
+  const selected = documentKind === 'cover' ? 'cover' : documentKind === 'resume' ? 'resume' : '';
+  if (!selected) throw new Error('A valid application document kind is required.');
+  const inactive = selected === 'cover' ? 'resume' : 'cover';
+  const inspect = (html, label) => {
+    const dom = new JSDOM(String(html || ''), { includeNodeLocations: true });
+    const locations = {};
+    for (const kind of ['resume', 'cover']) {
+      const nodes = dom.window.document.querySelectorAll(`[data-ic-document-panel="${kind}"]`);
+      if (nodes.length !== 1) {
+        dom.window.close();
+        throw new Error(`${label} application workspace must contain exactly one ${kind} panel (found ${nodes.length}).`);
+      }
+      if (!nodes[0].querySelector('main.page')) {
+        dom.window.close();
+        throw new Error(`${label} application workspace ${kind} panel is missing its document page.`);
+      }
+      locations[kind] = dom.nodeLocation(nodes[0]);
+    }
+    dom.window.close();
+    if (!locations[inactive]?.startTag || !locations[inactive]?.endTag) {
+      throw new Error(`${label} application workspace ${inactive} panel has no source boundary.`);
+    }
+    return locations;
+  };
+  const incoming = String(incomingHtml || '');
+  const stored = String(storedHtml || '');
+  const incomingLocation = inspect(incoming, 'Incoming')[inactive];
+  const storedLocation = inspect(stored, 'Saved')[inactive];
+  const storedInner = stored.slice(storedLocation.startTag.endOffset, storedLocation.endTag.startOffset);
+  return incoming.slice(0, incomingLocation.startTag.endOffset)
+    + storedInner
+    + incoming.slice(incomingLocation.endTag.startOffset);
+}
+
+// Sync is atomic per file, but an application workspace has one shared HTML
+// source and two derived PDFs. Without a workspace-scoped queue, a resume Sync
+// and cover-letter Sync can render concurrently and interleave their renames:
+// the later HTML can be paired with the earlier PDF. Serialize only callers
+// targeting the same directory; unrelated applications still sync in parallel.
+export function withApplicationSyncWorkspaceLock(workspaceDir, fn) {
+  const key = path.resolve(workspaceDir);
+  const previous = workspaceSyncQueues.get(key) || Promise.resolve();
+  const result = previous.catch(() => {}).then(fn);
+  const tail = result.then(() => {}, () => {});
+  workspaceSyncQueues.set(key, tail);
+  return result.finally(() => {
+    if (workspaceSyncQueues.get(key) === tail) workspaceSyncQueues.delete(key);
+  });
+}
+
+/**
+ * Prove that a promoted Sync revision is the exact HTML/PDF pair rendered for
+ * this request. A `%PDF-` prefix is not sufficient: parse the document and
+ * require at least one real page. The HTML must retain both editable panels
+ * and the same capability that authorized the request, otherwise a successful
+ * edit could silently disable its own next Sync.
+ */
+export async function inspectApplicationSyncRevision({ applicationPath, pdfPath, html, pdf, token }) {
+  const manifest = [];
+  const expected = [
+    { name: path.basename(applicationPath), path: applicationPath, data: Buffer.from(String(html || ''), 'utf8'), kind: 'html' },
+    { name: path.basename(pdfPath), path: pdfPath, data: Buffer.from(pdf || []), kind: 'pdf' },
+  ];
+  for (const item of expected) {
+    const row = { name: item.name, exists: false, readable: false, bytes: 0, matchesSource: false };
+    try {
+      const stat = await fs.promises.stat(item.path);
+      row.exists = stat.isFile();
+      row.mtimeMs = stat.mtimeMs;
+      if (row.exists) {
+        const data = await fs.promises.readFile(item.path);
+        row.readable = true;
+        row.bytes = data.length;
+        row.sha256 = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16);
+        row.matchesSource = data.equals(item.data);
+        if (item.kind === 'html') {
+          const dom = new JSDOM(data.toString('utf8'));
+          try {
+            const document = dom.window.document;
+            const resumePanels = document.querySelectorAll('[data-ic-document-panel="resume"]');
+            const coverPanels = document.querySelectorAll('[data-ic-document-panel="cover"]');
+            let bundle = {};
+            try { bundle = JSON.parse(document.getElementById('ic-application-bundle-data')?.textContent || '{}'); }
+            catch { bundle = {}; }
+            row.syncConfigValid = bundle?.sync?.endpoint === `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`
+              && bundle?.sync?.token === token;
+            row.htmlStructureValid = document.doctype?.name?.toLowerCase() === 'html'
+              && resumePanels.length === 1
+              && coverPanels.length === 1
+              && !!resumePanels[0].querySelector('main.page')
+              && !!coverPanels[0].querySelector('main.page')
+              && row.syncConfigValid;
+          } finally {
+            dom.window.close();
+          }
+        } else {
+          row.pdfHeaderValid = data.subarray(0, 5).toString('ascii') === '%PDF-';
+          row.pdfParsed = false;
+          if (row.pdfHeaderValid) {
+            const parsed = await PDFDocument.load(data);
+            row.pageCount = parsed.getPageCount();
+            if (row.pageCount > 0) {
+              const { width, height } = parsed.getPage(0).getSize();
+              row.firstPagePoints = `${Math.round(width)}x${Math.round(height)}`;
+              row.pdfParsed = true;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      row.error = String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 300);
+    }
+    row.integrityVerified = row.exists && row.readable && row.bytes > 0 && row.matchesSource
+      && (item.kind === 'html' ? row.htmlStructureValid === true : row.pdfParsed === true);
+    manifest.push(row);
+  }
+  if (manifest.some(row => !row.integrityVerified)) {
+    const error = new Error(`Application Sync readback failed for: ${manifest.filter(row => !row.integrityVerified).map(row => row.name).join(', ')}`);
+    error.syncManifest = manifest;
+    throw error;
+  }
+  return manifest;
+}
+
 async function syncWorkspace(payload) {
   const token = typeof payload?.token === 'string' ? payload.token : '';
   const workspace = workspaces.get(token);
@@ -138,57 +296,125 @@ async function syncWorkspace(payload) {
   if (!documentKind || !html.trim() || Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
     throw Object.assign(new Error('Sync received an invalid application document.'), { statusCode: 400 });
   }
-  // The renderer has no filesystem authority. It can only ask us to render one
-  // of these two named documents, and `renderPdf` uses a no-preload window.
-  const rendered = await renderPdf(html, { document: documentKind });
-  if (rendered.fontsLoaded === false) {
-    throw Object.assign(
-      new Error('The application fonts are unavailable. Reconnect to the internet and retry Sync so the existing PDF is not replaced with fallback typography.'),
-      { statusCode: 503 },
-    );
-  }
-  let pdf = rendered.bytes;
-  // Read the variant back out of the very document we just rendered, so the
-  // OCG decision is made from the same attributes the CSS itself cascaded from
-  // (the root `<html>` element — see extractVariantAttrs). A synced PDF must be
-  // indistinguishable from the one the generate path wrote beside it; applying
-  // the cream layer to a variant that already paints its own opaque background
-  // produces a page that is neither.
-  if (isDualMode(extractVariantAttrs(html))) pdf = await applyDualPdf(pdf);
-  const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath : workspace.resumePdfPath;
-  await fs.promises.mkdir(workspace.workspaceDir, { recursive: true });
-  // Each replacement is an atomic same-directory rename. Both output files
-  // are fully staged before either visible artifact is changed.
-  const htmlTemp = path.join(workspace.workspaceDir, `.Application.html.${crypto.randomUUID()}.tmp`);
-  const pdfTemp = path.join(workspace.workspaceDir, `.${path.basename(pdfPath)}.${crypto.randomUUID()}.tmp`);
+  const attemptId = crypto.randomUUID();
+  const attempt = {
+    attemptId,
+    workspaceDir: workspace.workspaceDir,
+    document: documentKind,
+    startedAt: Date.now(),
+    status: 'running',
+    phase: 'queued',
+  };
+  recordApplicationSyncTelemetry(attempt);
   try {
-    await Promise.all([fs.promises.writeFile(htmlTemp, html, 'utf8'), fs.promises.writeFile(pdfTemp, pdf)]);
-    await fs.promises.rename(htmlTemp, workspace.applicationPath);
-    await fs.promises.rename(pdfTemp, pdfPath);
-  } finally {
-    await Promise.all([fs.promises.unlink(htmlTemp).catch(() => {}), fs.promises.unlink(pdfTemp).catch(() => {})]);
+    return await withApplicationSyncWorkspaceLock(workspace.workspaceDir, async () => {
+      updateSyncAttempt(attemptId, { phase: 'reading saved workspace' });
+      // The request may have queued behind a newly generated replacement for
+      // this same directory. Re-check after acquiring the lock so a token that
+      // was valid at receipt time cannot overwrite the newly saved workspace.
+      if (workspaces.get(token) !== workspace) {
+        throw Object.assign(new Error('This workspace was replaced by a newer generated application. Reopen the latest Application.html before syncing.'), { statusCode: 409 });
+      }
+      let storedHtml;
+      try {
+        storedHtml = await fs.promises.readFile(workspace.applicationPath, 'utf8');
+      } catch (error) {
+        throw Object.assign(new Error(`The saved application workspace could not be read: ${error?.message || error}`), { statusCode: 409 });
+      }
+      let mergedHtml;
+      try {
+        mergedHtml = mergeSelectedApplicationPanel(html, storedHtml, documentKind);
+      } catch (error) {
+        throw Object.assign(new Error(`The application workspace could not be merged safely: ${error?.message || error}`), { statusCode: 400 });
+      }
+      updateSyncAttempt(attemptId, { phase: 'rendering PDF' });
+      // The renderer has no filesystem authority. It can only ask us to render one
+      // of these two named documents, and `renderPdf` uses a no-preload window.
+      const rendered = await renderPdf(mergedHtml, { document: documentKind });
+      if (rendered.fontsLoaded === false) {
+        throw Object.assign(
+          new Error('The application fonts are unavailable. Reconnect to the internet and retry Sync so the existing PDF is not replaced with fallback typography.'),
+          { statusCode: 503 },
+        );
+      }
+      let pdf = rendered.bytes;
+      // Read the variant back out of the very document we just rendered, so the
+      // OCG decision is made from the same attributes the CSS itself cascaded from
+      // (the root `<html>` element — see extractVariantAttrs). A synced PDF must be
+      // indistinguishable from the one the generate path wrote beside it; applying
+      // the cream layer to a variant that already paints its own opaque background
+      // produces a page that is neither.
+      if (isDualMode(extractVariantAttrs(mergedHtml))) pdf = await applyDualPdf(pdf);
+      const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath : workspace.resumePdfPath;
+      await fs.promises.mkdir(workspace.workspaceDir, { recursive: true });
+      // HTML and its derived PDF are one logical revision. A failure promoting
+      // either file restores both prior versions, so Sync cannot leave a new
+      // editable document paired with an old employer-facing PDF.
+      updateSyncAttempt(attemptId, { phase: 'writing and verifying revision' });
+      const manifest = await replaceApplicationBundleAtomically([
+        { destination: workspace.applicationPath, data: mergedHtml },
+        { destination: pdfPath, data: pdf },
+      ], {
+        verify: () => inspectApplicationSyncRevision({
+          applicationPath: workspace.applicationPath,
+          pdfPath,
+          html: mergedHtml,
+          pdf,
+          token,
+        }),
+      });
+      updateSyncAttempt(attemptId, {
+        status: 'completed', phase: 'completed', finishedAt: Date.now(), manifest,
+      });
+      logger.info(`[ApplicationSync] Synced ${documentKind} and verified destination revision in ${workspace.workspaceDir}`);
+      return { document: documentKind, pdfPath };
+    });
+  } catch (error) {
+    updateSyncAttempt(attemptId, {
+      status: 'failed', failedAt: Date.now(),
+      error: String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500),
+      ...(Array.isArray(error?.syncManifest) ? { manifest: error.syncManifest } : {}),
+    });
+    throw error;
   }
-  return { document: documentKind, pdfPath };
 }
 
 export function applicationSyncConfig(token) {
   return { endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`, token, version: 1 };
 }
 
-export async function registerApplicationSyncWorkspace(workspaceDir) {
+export function applicationSyncStatusSnapshot() {
+  return {
+    serverListening: Boolean(server?.listening),
+    serverStarting: Boolean(server && !server.listening),
+    endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`,
+    lastError: lastServerError,
+  };
+}
+
+export async function registerApplicationSyncWorkspace(workspaceDir, requestedToken = '') {
   await loadWorkspaces();
   if (!workspaceDir || typeof workspaceDir !== 'string') throw new Error('A workspace directory is required for application sync.');
   const normalizedDir = path.resolve(workspaceDir);
   if (!normalizedDir || !path.isAbsolute(normalizedDir)) throw new Error('A workspace directory is required for application sync.');
+  const token = requestedToken && /^[a-f0-9]{64}$/i.test(requestedToken)
+    ? requestedToken
+    : crypto.randomBytes(32).toString('hex');
+  const previous = [...workspaces.entries()].filter(([, existing]) => existing.workspaceDir === normalizedDir);
   // Regenerating the same application replaces its on-disk workspace, so an
   // older copied HTML must not retain authority to overwrite the new version.
   for (const [existingToken, existing] of workspaces) {
     if (existing.workspaceDir === normalizedDir) workspaces.delete(existingToken);
   }
-  const token = crypto.randomBytes(32).toString('hex');
   const workspace = normalizeWorkspace({ token, workspaceDir: normalizedDir });
   workspaces.set(token, workspace);
-  await persistWorkspacesSerialized();
+  try {
+    await persistWorkspacesSerialized();
+  } catch (error) {
+    workspaces.delete(token);
+    for (const [previousToken, previousWorkspace] of previous) workspaces.set(previousToken, previousWorkspace);
+    throw error;
+  }
   return applicationSyncConfig(token);
 }
 
@@ -219,9 +445,11 @@ export async function startApplicationSyncServer() {
     });
   } catch (error) {
     server = null;
-    logger.warn(`[ApplicationSync] Could not start sync service on 127.0.0.1:${APPLICATION_SYNC_PORT}: ${error?.message || error}`);
+    lastServerError = String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500);
+    logger.warn(`[ApplicationSync] Could not start sync service on 127.0.0.1:${APPLICATION_SYNC_PORT}: ${lastServerError}`);
     return false;
   }
+  lastServerError = null;
   logger.info(`[ApplicationSync] Listening on 127.0.0.1:${APPLICATION_SYNC_PORT}`);
   return true;
 }
@@ -236,3 +464,4 @@ export async function stopApplicationSyncServer() {
 // Test seams: deterministic suites do not bind a port, but can verify that
 // persisted capabilities reconstruct only their canonical sibling paths.
 export function __normaliseApplicationSyncWorkspaceForTests(raw) { return normalizeWorkspace(raw); }
+export function __withApplicationSyncWorkspaceLockForTests(workspaceDir, fn) { return withApplicationSyncWorkspaceLock(workspaceDir, fn); }

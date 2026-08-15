@@ -4,10 +4,11 @@ import fs from 'fs';
 import path from 'path';
 import { getJobsTelemetry } from '../jobs.js';
 import { getApplicationTelemetry } from '../jobApplication.js';
+import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
-import { appliedJobsSnapshot } from '../appliedJobs.js';
+import { appliedJobsSnapshot, isJobApplied } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
@@ -75,11 +76,33 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { t = getJobsTelemetry(); } catch { return ''; }
   let browserScrape = null;
   try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
-  const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
-  const hasLinkedInEnrich = Array.isArray(t?.linkedinEnrich) && t.linkedinEnrich.length > 0;
-  const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
+  let hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
+  let hasLinkedInEnrich = Array.isArray(t?.linkedinEnrich) && t.linkedinEnrich.length > 0;
+  let hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
   let appGen = null;
   try { appGen = getApplicationTelemetry(); } catch { /* generator may not be loaded */ }
+  // Application telemetry is a last-one-wins main-process singleton. Scope it
+  // independently from the jobs funnel: a window can generate an application
+  // after another window most recently searched for jobs, and neither report
+  // may borrow the other's evidence. Older attempts without windowId remain
+  // local for backward compatibility, matching pipelineScope's policy.
+  const applicationScope = appGen ? pipelineScope(appGen.nodeId, appGen.windowId, currentNodeIds, reportWindowId, {
+    label: 'Application card',
+    deletedNoun: 'card',
+  }) : null;
+  const scopedApplication = applicationScope?.foreign ? null : appGen;
+  let applicationSync = null;
+  try { applicationSync = getApplicationSyncTelemetry(); } catch { /* Sync service may not be loaded */ }
+  // Sync is initiated by a file:// document rather than an Electron window, so
+  // it has no webContents id. Attribute it to the saved canvas by requiring its
+  // workspace to live below that canvas's deterministic Applied Jobs root.
+  if (applicationSync?.workspaceDir && canvasFilePath) {
+    const appliedRoot = path.resolve(path.dirname(canvasFilePath), 'Applied Jobs');
+    const relative = path.relative(appliedRoot, path.resolve(applicationSync.workspaceDir));
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) applicationSync = null;
+  } else {
+    applicationSync = null;
+  }
   // Model resolution (§8) and the applied-jobs store (§6) are both app-global —
   // neither is scoped to a job run, so they can carry signal even on a report
   // with no fresh search this session (e.g. "why did this posting never come
@@ -91,18 +114,28 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
-  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
+  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
     deletedNoun: 'hub',
   });
-  if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
+  if (scope.foreign) {
+    if (!scopedApplication && !applicationSync) return `\n## Job Search Pipeline\n${scope.note}`;
+    // A local application generation/Sync must remain reportable even when a
+    // different window owns the process-global last jobs run. Drop only that
+    // foreign funnel rather than returning before the local sections render.
+    t = {};
+    browserScrape = null;
+    hasResolves = false;
+    hasLinkedInEnrich = false;
+    hasBrowserScrape = false;
+  }
   const boardScope = pipelineScope(t.boardNodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Job Board node',
     deletedNoun: 'board',
   });
-  const attributionNote = `${scope.note}${boardScope.note}`;
+  const attributionNote = scope.foreign ? '' : `${scope.note}${boardScope.note}`;
 
   // Read session cache once — used to annotate pagination warnings with login status.
   let sessionCache = {};
@@ -1423,11 +1456,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // application rendering bug shows (stray mid-sentence newline, literal \n/\t,
   // broken structure). Fields are JSON.stringify'd so whitespace/escapes are
   // visible literally (a real newline shows as \n, a double-escaped one as \\n).
-  if (appGen) {
-    const a = appGen;
+  if (scopedApplication) {
+    const a = scopedApplication;
     const cl = a.coverLetter || {};
     const escScan = (s) => /\\[a-z]/.test(String(s ?? '')) ? ' ⚠️ literal backslash-escape present' : '';
     lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
+    if (applicationScope?.note) lines.push(applicationScope.note.trimEnd());
     lines.push(`- Job: ${a.jobTitle || '(untitled)'} @ ${a.company || '(no company)'}${a.nodeId ? ` · node ${a.nodeId}` : ''}`);
     // A generation failure commonly happens before any document markup exists
     // (for example, a provider quota error during company research). Render the
@@ -1444,6 +1478,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (Array.isArray(a.stages) && a.stages.length > 0) {
         lines.push(`- Lifecycle: ${a.stages.map(item => item?.stage).filter(Boolean).join(' → ')}`);
       }
+      if (Array.isArray(a.taskOutcomes) && a.taskOutcomes.length > 0) {
+        const outcomes = a.taskOutcomes.map((outcome) => {
+          const actual = outcome?.model ? ` / \`${outcome.model}\`` : '';
+          const fallback = outcome?.fallback?.attempts
+            ? ` (fallback after ${outcome.fallback.attempts}: ${outcome.fallback.reason || 'unknown'})`
+            : '';
+          const failure = outcome?.error ? ` — ${String(outcome.error).replace(/\s+/g, ' ').slice(0, 180)}` : '';
+          return `${outcome?.task || '?'} → ${outcome?.provider || '?'}${actual} [${outcome?.status || 'unknown'}]${fallback}${failure}`;
+        });
+        lines.push(`- Actual task outcomes: ${outcomes.join('; ')}`);
+      }
       if (a.status === 'failed' || a.status === 'cancelled') {
         if (a.error) lines.push(`- ${a.status === 'failed' ? 'Error' : 'Cancellation'}: \`${String(a.error).replace(/`/g, "'").slice(0, 800)}\``);
         // There is intentionally no fake blank résumé/cover-letter snapshot
@@ -1453,10 +1498,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     if (a.companyResearch) {
       if (a.companyResearch.available === false) {
-        lines.push(`- ⚠️ Company/role research unavailable — generation used only the scraped job description${a.companyResearch.error ? `: \`${String(a.companyResearch.error).replace(/`/g, "'").slice(0, 300)}\`` : ''}`);
+        const descriptionMissing = a.jobContext?.scrapedDescriptionAvailable === false;
+        lines.push(descriptionMissing
+          ? `- ⚠️ **Limited application context:** company/role research unavailable AND no scraped job description was captured — generation used only job metadata plus candidate career data${a.companyResearch.error ? `: \`${String(a.companyResearch.error).replace(/`/g, "'").slice(0, 300)}\`` : ''}`
+          : `- ⚠️ Company/role research unavailable — generation used only the scraped job description${a.companyResearch.error ? `: \`${String(a.companyResearch.error).replace(/`/g, "'").slice(0, 300)}\`` : ''}`);
       } else if (a.companyResearch.available === true) {
         lines.push('- Company/role research: live web context available.');
       }
+    }
+    if (a.jobContext) {
+      lines.push(`- Job-context evidence: scraped description ${a.jobContext.scrapedDescriptionChars ?? '?'} char(s)${a.jobContext.scrapedDescriptionAvailable === false ? ' (missing)' : ''} · live research ${a.jobContext.researchAvailable === true ? 'available' : a.jobContext.researchAvailable === false ? 'unavailable' : 'not resolved'}`);
     }
     if (a.status !== 'failed' && a.status !== 'cancelled') {
     // Achievement ledger (résumé design §3.6) — reused-vs-mined tells apart the
@@ -1467,7 +1518,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       reused: 'reused from hub cache', mined: 'freshly mined this generation',
       unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
     }[ach.source] || ach.source || 'unknown';
-    lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
+    lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.suppressedWeakened ? ` · ${ach.suppressedWeakened} refute-weakened item(s) withheld from application prompts` : ''}${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
     // Local render → page-count → fit loop (jobApplication.js's
     // renderResumeWithFit / resumeRender.js, SKILL.md §5) — the only place a
     // "why did I get a 2-page résumé" or "why is there no PDF" question is
@@ -1481,7 +1532,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // a "#1=3p" that actually rendered in fallback fonts doesn't look
       // identical to a genuine good render.
       const attemptsStr = (Array.isArray(r.attempts) ? r.attempts : [])
-        .map((att) => `#${att.attempt}${att.density ? `[${att.density}]` : ''}=${att.error ? `error(${att.error})` : `${att.pageCount}p${att.fontsLoaded === false ? '[fonts-unloaded]' : ''}`}`)
+        .map((att) => {
+          const markup = att.markup;
+          const shape = markup
+            ? ` {${markup.chars ?? '?'} chars, ${markup.roles ?? '?'} roles/${markup.bullets ?? '?'} bullets/${markup.skillRows ?? '?'} skill rows, ${markup.hash || '?'}}`
+            : '';
+          return `#${att.attempt}${att.density ? `[${att.density}]` : ''}=${att.error ? `error(${att.error})` : `${att.pageCount}p${att.fontsLoaded === false ? '[fonts-unloaded]' : ''}`}${shape}`;
+        })
         .join(', ');
       // renderResumeWithFit (jobApplication.js) deliberately measures the
       // WORST CASE — every candidate skill visible, so a later all-verified
@@ -1490,6 +1547,21 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // pages, since a hidden skill takes zero layout space.
       lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${r.revisionApplied ? ' · 1 length-revision call' : ''}`);
       if (attemptsStr) lines.push(`  - attempts: ${attemptsStr}`);
+      if (r.revisionDiagnostics?.input && r.revisionDiagnostics?.output) {
+        const before = r.revisionDiagnostics.input;
+        const after = r.revisionDiagnostics.output;
+        lines.push(`  - length revision: ${before.chars ?? '?'}→${after.chars ?? '?'} chars · bullets ${before.bullets ?? '?'}→${after.bullets ?? '?'} · role summaries ${before.roleSummaries ?? '?'}→${after.roleSummaries ?? '?'} · skill rows ${before.skillRows ?? '?'}→${after.skillRows ?? '?'} · hash ${before.hash || '?'}→${after.hash || '?'}`);
+        // The editor's own output vs. the post-clamp document. Identical
+        // hashes mean the model honoured the cut and enforcement was a no-op;
+        // a difference is the clamp truncating work the model kept. Without
+        // this split, "2 bullets per role" cannot be attributed to either.
+        const editor = r.revisionDiagnostics.editorOutput;
+        if (editor) {
+          lines.push(editor.hash === after.hash
+            ? `    - structural clamp: no-op (editor already met the one-page contract at ${editor.bullets ?? '?'} bullet(s) / ${editor.roleSummaries ?? '?'} summary(ies))`
+            : `    - structural clamp: APPLIED — editor returned ${editor.chars ?? '?'} chars · bullets ${editor.bullets ?? '?'} · role summaries ${editor.roleSummaries ?? '?'} · skill rows ${editor.skillRows ?? '?'} (hash ${editor.hash || '?'}), clamp cut it to the values above`);
+        }
+      }
       if (r.error) lines.push(`  - ⚠️ ${r.error}`);
       // The single most important line in this section: without it, "no PDF
       // because fonts never loaded" renders identically to "no PDF because
@@ -1508,6 +1580,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // never completed (see the error line below), not that the number was
       // skipped to save time.
       lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      if (r.locationReviewRequired) {
+        lines.push(`  - ⚠️ Work-location confirmation required before Sync: candidate \`${String(r.candidateLocation || 'unknown').replace(/`/g, "'")}\` → job \`${String(r.jobLocation || 'unknown').replace(/`/g, "'")}\``);
+      }
       if (!r.baselinePdfProduced && r.baselinePdfError) lines.push(`  - ⚠️ ${String(r.baselinePdfError).replace(/`/g, "'").slice(0, 300)}`);
     }
     if (ach.stats) {
@@ -1547,6 +1622,45 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     if (a.variantAttrs) lines.push(`- Résumé variant: \`${String(a.variantAttrs).slice(0, 200)}\``);
     lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${escScan(a.resumeHtmlSample)}`);
+    if (cl.needsAvailable != null || Array.isArray(cl.checks)) {
+      const checks = Array.isArray(cl.checks) ? cl.checks : [];
+      const unmet = checks.filter(check => check?.passed === false);
+      lines.push(`- Cover-letter harness: needs ${cl.needsAvailable ? 'available' : 'unavailable'} (${cl.needsCount ?? 0}) · top need ${cl.topNeedArgued ? 'argued' : 'not argued'} · ${cl.mappingCount ?? 0} mapping(s) · plan ${cl.planRetried ? 'retried once' : 'not retried'}${cl.planDegraded ? ' · direct-prose degrade used' : ''} · prose ${cl.revised ? 'revised once' : 'not revised'} · page count ${cl.pageCount ?? 'not measured'}`);
+      const hasDescription = a.jobContext?.scrapedDescriptionAvailable === true;
+      const hasResearch = a.jobContext?.researchAvailable === true;
+      const needsSource = hasDescription && hasResearch
+        ? 'scraped job description + live research'
+        : hasDescription
+          ? 'scraped job description (research unavailable)'
+          : hasResearch
+            ? 'live research + job metadata'
+            : 'job metadata only (title/company/location/salary; no scraped description or research)';
+      lines.push(`  - needs evidence source: ${needsSource}`);
+      if (cl.needsError) lines.push(`  - needs observation: ${String(cl.needsError).replace(/\s+/g, ' ').slice(0, 300)}`);
+      if (cl.planRetryReason) lines.push(`  - plan retry observation: ${String(cl.planRetryReason).replace(/\s+/g, ' ').slice(0, 500)}`);
+      if (cl.revisionError) lines.push(`  - revision observation: ${String(cl.revisionError).replace(/\s+/g, ' ').slice(0, 300)}`);
+      lines.push(`  - checks: ${checks.length - unmet.length}/${checks.length} passed${unmet.length ? ` · ${unmet.length} unmet` : ''}`);
+      for (const check of unmet.slice(0, 8)) {
+        lines.push(`    - ${String(check?.id || 'unknown').slice(0, 80)}: ${String(check?.detail || '').replace(/\s+/g, ' ').slice(0, 500)}`);
+      }
+      if (unmet.length > 8) lines.push(`    - _${unmet.length - 8} additional unmet check(s) omitted from this bounded report._`);
+      const dropped = Array.isArray(cl.droppedNeeds) ? cl.droppedNeeds : [];
+      for (const item of dropped.slice(0, 6)) {
+        lines.push(`  - dropped need: ${JSON.stringify(String(item?.need || ''))} — ${JSON.stringify(String(item?.reason || ''))}`);
+      }
+      if (dropped.length > 6) lines.push(`  - _${dropped.length - 6} additional dropped need(s) omitted from this bounded report._`);
+    }
+    if (a.coverLetterPlan) {
+      const planJson = JSON.stringify(a.coverLetterPlan, null, 2);
+      const planCap = 8000;
+      lines.push(`- Cover-letter argument plan${planJson.length > planCap ? ' — truncated' : ''}:`);
+      lines.push('```json');
+      lines.push(planJson.slice(0, planCap));
+      lines.push('```');
+      if (planJson.length > planCap) lines.push(`  - _Plan truncated: ${planJson.length - planCap} character(s) omitted._`);
+    } else if (cl.planDegraded) {
+      lines.push('- Cover-letter argument plan: unavailable; direct evidence-backed prose degradation path used.');
+    }
     lines.push('- Cover-letter fields (JSON.stringify — whitespace/escapes shown literally):');
     lines.push(`  - salutation: ${JSON.stringify(cl.salutation || '')}`);
     lines.push(`  - recipient: ${JSON.stringify(cl.recipient || '')}`);
@@ -1577,6 +1691,91 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push('- ⚠️ Résumé Skills block (`<dl class="skills">`) was not found in the final document.');
       }
     }
+    // The head slice starts at <main> and runs out inside the first role's
+    // header, so the repeating Experience block — where the fit loop's
+    // structural edits actually land — had no representation in this report
+    // at all. One whole role shows what shipped: bullet count per role,
+    // whether a role-meta row survived the summary cut, and where the
+    // location ended up.
+    if (a.resumeRoleBlockSample) {
+      if (a.resumeRoleBlockSample.found) {
+        lines.push(`- Résumé role block (first of ${a.resumeRoleBlockSample.roleCount || '?'} \`<article class="role">\`, from the model's final \`<main>\`)${a.resumeRoleBlockSample.truncated ? ' — truncated' : ''}:`);
+        lines.push('```html');
+        lines.push(a.resumeRoleBlockSample.sample);
+        lines.push('```');
+        if (a.resumeRoleBlockSample.truncated) lines.push('  - _Sample truncated at the bound above; full markup exists on disk in the saved workspace._');
+      } else {
+        lines.push('- ⚠️ Résumé role block (`<article class="role">`) was not found in the final résumé markup.');
+      }
+    }
+    if (a.applicationExport) {
+      const ex = a.applicationExport;
+      const exportOutcome = ex.status === 'saved'
+        ? (ex.integrityVerified ? 'saved + integrity verified' : 'saved and read back')
+        : ex.status === 'failed' ? '⚠️ failed' : ex.status || 'unknown';
+      lines.push(`\n### Application Export (last)${ago(ex.savedAt || ex.failedAt)}`);
+      lines.push(`- Outcome: **${exportOutcome}**${ex.phase ? ` · phase: ${ex.phase}` : ''}`);
+      if (ex.destination) lines.push(`- Destination: \`${String(ex.destination).replace(/`/g, "'").slice(0, 1000)}\``);
+      if (ex.error) lines.push(`- Error: \`${String(ex.error).replace(/`/g, "'").slice(0, 800)}\``);
+      if (ex.bundleError) lines.push(`- ⚠️ Bundle warning: ${String(ex.bundleError).replace(/\s+/g, ' ').slice(0, 500)}`);
+      if (Array.isArray(ex.manifest) && ex.manifest.length) {
+        lines.push('- Destination readback manifest:');
+        for (const item of ex.manifest.slice(0, 8)) {
+          const state = item.exists
+            ? `${item.readable ? 'readable' : 'NOT readable'} · ${item.bytes ?? 0} bytes${item.mtimeMs ? ` · mtime ${new Date(item.mtimeMs).toISOString()}` : ''}${item.sha256 ? ` · sha256 ${item.sha256}` : ''}${item.matchesSource != null ? ` · source bytes ${item.matchesSource ? 'exact' : 'MISMATCH'}` : ''}${item.pdfHeaderValid != null ? ` · PDF header ${item.pdfHeaderValid ? 'valid' : 'INVALID'}` : ''}${item.pdfParsed != null ? ` · PDF parse ${item.pdfParsed ? `valid (${item.pageCount ?? '?'}p${item.firstPagePoints ? `, ${item.firstPagePoints}pt` : ''})` : 'INVALID'}` : ''}${item.htmlStructureValid != null ? ` · HTML workspace ${item.htmlStructureValid ? `valid (${item.htmlPanelCount ?? '?'} panels, Sync config ${item.syncConfigValid ? 'valid' : 'INVALID'})` : 'INVALID'}` : ''}${item.markdownNonEmpty != null ? ` · listing ${item.markdownNonEmpty ? 'non-empty' : 'EMPTY'}` : ''}`
+            : item.expected === false ? 'not generated · stale sibling absent' : 'MISSING';
+          lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${String(item.error).replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+        }
+      }
+      if (ex.sync) {
+        const sync = ex.sync;
+        const serviceState = sync.serverListening ? 'listening' : sync.serverStarting ? 'starting (not listening yet)' : 'NOT listening';
+        lines.push(`- Local edit Sync: ${sync.registered ? 'workspace registered' : 'NOT registered'} · service ${serviceState}${sync.endpoint ? ` · ${String(sync.endpoint).slice(0, 200)}` : ''}${sync.error ? ` · ${String(sync.error).replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+      }
+      if (ex.revealSucceeded != null) lines.push(`- Opened destination folder: ${ex.revealSucceeded ? '✅' : `❌${ex.revealError ? ` — ${String(ex.revealError).slice(0, 300)}` : ''}`}`);
+      // Saving a generated bundle intentionally does NOT claim that the user
+      // submitted an application.  State this alongside the export rather
+      // than forcing a reader to compare an unrelated global timestamp above.
+      // It also prevents a successful save from being mistaken for a broken
+      // applied-jobs write when the user has not clicked the explicit action.
+      let appliedForExport = null;
+      try {
+        appliedForExport = isJobApplied({
+          title: a.jobTitle,
+          company: a.company,
+          location: a.jobLocation,
+          url: a.jobUrl,
+          source: a.jobSource,
+        });
+      } catch { /* an unreadable applied store is reported by its own section */ }
+      if (appliedForExport === true) {
+        lines.push('- Applied-jobs record for this export: ✅ marked applied.');
+      } else if (appliedForExport === false) {
+        lines.push('- Applied-jobs record for this export: not marked — saving an application is intentionally separate from the explicit **Mark applied** action, so this job may still appear in future searches.');
+      } else {
+        lines.push('- Applied-jobs record for this export: not resolved (the applied-jobs store could not be read).');
+      }
+    } else if (a.status === 'completed') {
+      lines.push('- Application export: not recorded — generation completed, but this process has no verified destination readback for the last attempt.');
+    }
+    }
+  }
+
+  if (applicationSync) {
+    const syncOutcome = applicationSync.status === 'completed'
+      ? 'completed + integrity verified'
+      : applicationSync.status === 'failed' ? '⚠️ failed' : applicationSync.status || 'unknown';
+    lines.push(`\n### Application Sync (last)${ago(applicationSync.finishedAt || applicationSync.failedAt || applicationSync.startedAt || applicationSync.ts)}`);
+    lines.push(`- Outcome: **${syncOutcome}**${applicationSync.phase ? ` · phase: ${applicationSync.phase}` : ''}`);
+    lines.push(`- Document: ${applicationSync.document === 'cover' ? 'cover letter' : applicationSync.document === 'resume' ? 'résumé' : applicationSync.document || 'unknown'}`);
+    lines.push(`- Workspace: \`${String(applicationSync.workspaceDir).replace(/`/g, "'").slice(0, 1000)}\``);
+    if (applicationSync.error) lines.push(`- Error: \`${String(applicationSync.error).replace(/`/g, "'").slice(0, 500)}\``);
+    if (Array.isArray(applicationSync.manifest) && applicationSync.manifest.length) {
+      lines.push('- Revision readback manifest:');
+      for (const item of applicationSync.manifest.slice(0, 4)) {
+        const state = `${item.readable ? 'readable' : 'NOT readable'} · ${item.bytes ?? 0} bytes${item.mtimeMs ? ` · mtime ${new Date(item.mtimeMs).toISOString()}` : ''}${item.sha256 ? ` · sha256 ${item.sha256}` : ''}${item.matchesSource != null ? ` · source bytes ${item.matchesSource ? 'exact' : 'MISMATCH'}` : ''}${item.pdfParsed != null ? ` · PDF parse ${item.pdfParsed ? `valid (${item.pageCount ?? '?'}p${item.firstPagePoints ? `, ${item.firstPagePoints}pt` : ''})` : 'INVALID'}` : ''}${item.htmlStructureValid != null ? ` · HTML workspace ${item.htmlStructureValid ? `valid (Sync config ${item.syncConfigValid ? 'valid' : 'INVALID'})` : 'INVALID'}` : ''}`;
+        lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${String(item.error).replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+      }
     }
   }
 

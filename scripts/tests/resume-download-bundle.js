@@ -1,15 +1,20 @@
 import {
   assert,
   __normaliseApplicationSyncWorkspaceForTests,
+  __withApplicationSyncWorkspaceLockForTests,
   buildResumeDocument,
   embedApplicationSyncConfig,
   createApplicationBundle,
   createZipBuffer,
   extractVariantAttrs,
+  fs,
   formatOriginalJobListingMarkdown,
+  inspectApplicationSyncRevision,
   isDualMode,
   JSDOM,
   normaliseResumeDownloadBundle,
+  path,
+  PDFLib,
   sanitizeApplicationBundlePart,
   zlib,
 } from '../test-dependencies.js';
@@ -60,6 +65,63 @@ export default [
       assert(markdown.includes(scraped), 'captured listing text must remain byte-for-byte present');
       assert(markdown.includes('````text'), 'description fence must exceed the longest backtick run in source text');
       return { markdownBytes: Buffer.byteLength(markdown) };
+    },
+  },
+  {
+    name: 'application workspace: bounded cover-letter audit persists through Sync configuration injection',
+    run: () => {
+      const overlong = `unsafe </script>\n${'x'.repeat(900)}`;
+      const rawAudit = {
+        version: 99,
+        rankedNeeds: Array.from({ length: 20 }, () => ({ need: overlong, quote: overlong, source: 'untrusted', decisiveness: 101, kind: overlong })),
+        finalPlan: {
+          roleThesis: overlong,
+          mappings: Array.from({ length: 8 }, () => ({ needIndex: 1001, need: overlong, evidence: overlong, evidenceRole: overlong, achievementIds: Array.from({ length: 20 }, () => overlong), resumeStatus: overlong, inference: overlong })),
+          companyHook: { detail: overlong, source: overlong, whyItMattersToCandidate: overlong },
+          logistics: overlong,
+          droppedNeeds: Array.from({ length: 20 }, () => ({ needIndex: -1, reason: overlong })),
+        },
+        checks: Array.from({ length: 30 }, () => ({ id: overlong, passed: 'yes', detail: overlong })),
+      };
+      const normalized = normaliseResumeDownloadBundle({ company: 'Acme', coverLetterAudit: rawAudit });
+      const audit = normalized.coverLetterAudit;
+      assert(audit.version === 1 && audit.readiness === 'review-required'
+        && audit.note.includes('not a persuasive-quality score'),
+      'audit normalizer must own version/readiness/note rather than trust raw metadata');
+      assert(audit.rankedNeeds.length === 12 && audit.finalPlan.mappings.length === 4
+        && audit.finalPlan.droppedNeeds.length === 12 && audit.checks.length === 24,
+      'audit arrays must remain bounded before HTML serialization');
+      assert(audit.rankedNeeds[0].need.length === 320 && !/[\r\n]/.test(audit.rankedNeeds[0].need)
+        && audit.rankedNeeds[0].source === '' && audit.finalPlan.mappings[0].needIndex === null
+        && audit.rankedNeeds[0].decisiveness === null && audit.finalPlan.mappings[0].achievementIds.length === 12
+        && audit.finalPlan.mappings[0].achievementIds[0].length === 120 && audit.checks[0].passed === false,
+      'audit strings and enum/index/boolean fields must be safely normalized');
+      const passedAudit = normaliseResumeDownloadBundle({
+        coverLetterAudit: {
+          rankedNeeds: [{ need: 'Run incident response', quote: 'Run incident response', source: 'posting', decisiveness: 92, kind: 'capability' }],
+          finalPlan: { mappings: [{ needIndex: 0, achievementIds: ['receipt-1'] }] },
+          checks: [{ id: 'plan-availability', passed: true, detail: 'available' }],
+        },
+      }).coverLetterAudit;
+      assert(passedAudit.readiness === 'checks-passed' && passedAudit.rankedNeeds[0].decisiveness === 92
+        && passedAudit.finalPlan.mappings[0].achievementIds[0] === 'receipt-1',
+      'valid schema fields must survive normalization and all-passing final checks must be explicit');
+      let doc = buildResumeDocument({
+        docId: 'cover-audit-persistence',
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya</h1></main>',
+        coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role', coverLetterAudit: rawAudit },
+      });
+      const embeddedBeforeSync = /<script id="ic-application-bundle-data" type="application\/json">([\s\S]*?)<\/script>/.exec(doc)?.[1] || '';
+      assert(!embeddedBeforeSync.includes('</script>') && embeddedBeforeSync.includes('\\u003c/script\\u003e'),
+        'inert audit JSON must escape a script terminator before embedding');
+      doc = embedApplicationSyncConfig(doc, { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'd'.repeat(64) });
+      const payload = JSON.parse(/<script id="ic-application-bundle-data" type="application\/json">([\s\S]*?)<\/script>/.exec(doc)?.[1] || '{}');
+      assert(payload.coverLetterAudit?.version === 1
+        && payload.coverLetterAudit?.finalPlan?.roleThesis === audit.finalPlan.roleThesis
+        && payload.sync?.token === 'd'.repeat(64),
+      'Sync config injection must update only its capability while preserving the bounded inert audit');
+      return { needs: audit.rankedNeeds.length, checks: audit.checks.length, syncPreserved: true };
     },
   },
   {
@@ -228,6 +290,74 @@ export default [
       assert(note.textContent.includes('Save this application from Infinite Canvas'), 'legacy HTML must explain how to make Sync available');
       dom.window.close();
       return { legacyResumeRetained: true, syncRequiresSave: true };
+    },
+  },
+  {
+    name: 'application Sync readback verifies exact HTML, parsed PDF, and the retained capability',
+    run: async () => {
+      const dir = await fs.promises.mkdtemp('/tmp/infinite-canvas-sync-readback-');
+      const applicationPath = path.join(dir, 'Application.html');
+      const pdfPath = path.join(dir, 'Resume.pdf');
+      const token = 'd'.repeat(64);
+      const html = `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">Resume</main></section><section data-ic-document-panel="cover"><main class="page">Cover</main></section><script id="ic-application-bundle-data" type="application/json">{"sync":{"endpoint":"http://127.0.0.1:43192/application-sync","token":"${token}"}}</script></body></html>`;
+      const pdf = await PDFLib.PDFDocument.create();
+      pdf.addPage([612, 792]);
+      const pdfBytes = Buffer.from(await pdf.save());
+      try {
+        await Promise.all([
+          fs.promises.writeFile(applicationPath, html),
+          fs.promises.writeFile(pdfPath, pdfBytes),
+        ]);
+        const manifest = await inspectApplicationSyncRevision({ applicationPath, pdfPath, html, pdf: pdfBytes, token });
+        assert(manifest.every(item => item.integrityVerified && item.matchesSource)
+          && manifest.find(item => item.name === 'Resume.pdf')?.pdfParsed,
+        'a Sync revision passes only after exact-byte readback and structural PDF parsing');
+
+        const alteredHtml = html.replace(token, 'e'.repeat(64));
+        await fs.promises.writeFile(applicationPath, alteredHtml);
+        let wrongCapabilityRejected = false;
+        try {
+          await inspectApplicationSyncRevision({ applicationPath, pdfPath, html: alteredHtml, pdf: pdfBytes, token });
+        } catch (error) {
+          wrongCapabilityRejected = /readback failed/.test(error.message)
+            && error.syncManifest?.some(item => item.name === 'Application.html' && item.syncConfigValid === false);
+        }
+        assert(wrongCapabilityRejected,
+          'an incoming shell may not replace the capability that authorized this workspace');
+        return { verified: manifest.length, wrongCapabilityRejected };
+      } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application Sync serializes edits within one workspace while allowing unrelated workspaces to proceed',
+    run: async () => {
+      const order = [];
+      let releaseFirst;
+      const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+      const first = __withApplicationSyncWorkspaceLockForTests('/tmp/company/application', async () => {
+        order.push('first:start');
+        await firstGate;
+        order.push('first:end');
+      });
+      const second = __withApplicationSyncWorkspaceLockForTests('/tmp/company/application', async () => {
+        order.push('second:start');
+        order.push('second:end');
+      });
+      const unrelated = __withApplicationSyncWorkspaceLockForTests('/tmp/company/other-application', async () => {
+        order.push('other:start');
+        order.push('other:end');
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      assert(order.includes('first:start') && order.includes('other:start') && !order.includes('second:start'),
+        'a same-workspace Sync waits behind the active edit while a different workspace is not globally blocked');
+      releaseFirst();
+      await Promise.all([first, second, unrelated]);
+      assert(order.indexOf('first:end') < order.indexOf('second:start'),
+        'same-workspace Sync operations must complete in FIFO order');
+      return { order };
     },
   },
   {

@@ -293,7 +293,7 @@ export const CODE_DEFINITIONS = {
 
   FULL: {
     label: 'Full Report',
-    description: 'Everything — all log lines, all payload sections (for complex or unclear issues)',
+    description: 'All captured report sections and all event-log lines (for complex or unclear issues)',
     preset: 'full',
   },
 };

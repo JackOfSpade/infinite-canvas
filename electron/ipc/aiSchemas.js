@@ -348,26 +348,88 @@ export const APPLICATION_SKILL_OPPORTUNITY_SCHEMA = {
   },
 };
 
-// ── Application cover letter: structured letterhead + body ─────────────────
-// Used by generate-application. The résumé is filled as raw design-system HTML
-// by the model; the cover letter is structured so the builder maps the fields
-// onto the design system's NATIVE cover-letter surface (resumeHtml
-// .buildCoverLetterDocument → cover-letter.html/css). Identity fields
-// (name/tagline/contact) come from the candidate's career data so the letterhead
-// matches the résumé header; signatureTitle is the target role the close signs as.
+// ── Application cover letter: needs, argument plan, then prose ─────────────
+// The needs pass deliberately has no candidate input; the plan selects
+// résumé-grounded evidence; prose receives only the plan. Code owns the
+// letterhead/envelope so the model cannot drift from the final résumé identity.
+export const LETTER_NEEDS_SCHEMA = {
+  type: 'object',
+  required: ['needs'],
+  properties: {
+    needs: {
+      type: 'array',
+      maxItems: 6,
+      description: 'Three to six requirements, ranked most decisive first; empty only when the posting and research have no usable requirements.',
+      items: {
+        type: 'object',
+        required: ['need', 'quote', 'source', 'decisiveness', 'kind'],
+        properties: {
+          need: { type: 'string', description: 'One clause describing what the employer needs someone to be able to do.' },
+          quote: { type: 'string', description: 'Verbatim supporting span from the posting or research.' },
+          source: { type: 'string', enum: ['posting', 'research'] },
+          decisiveness: {
+            type: 'integer', minimum: 1, maximum: 100,
+            description: 'How much failing this requirement disqualifies a candidate, from 1 to 100.',
+          },
+          kind: { type: 'string', enum: ['capability', 'domain', 'scale', 'logistics', 'credential', 'disposition'] },
+        },
+      },
+    },
+  },
+};
+
+export const LETTER_PLAN_SCHEMA = {
+  type: 'object',
+  required: ['roleThesis', 'mappings', 'companyHook', 'logistics', 'droppedNeeds'],
+  properties: {
+    roleThesis: { type: 'string', description: 'One-sentence claim the letter argues, never a generic expression of interest.' },
+    mappings: {
+      type: 'array',
+      maxItems: 2,
+      description: 'One or two selected need-to-résumé argument mappings.',
+      items: {
+        type: 'object',
+        required: ['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference'],
+        properties: {
+          needIndex: { type: 'integer', minimum: 0, description: 'Zero-based index into the ranked needs array.' },
+          need: { type: 'string', description: 'Restatement of the employer need in one clause.' },
+          evidence: { type: 'string', description: 'Near-quote of specific final-résumé text.' },
+          evidenceRole: { type: 'string', description: 'Role block containing the evidence.' },
+          achievementIds: { type: 'array', items: { type: 'string' }, description: 'Ledger receipt ids carried by the cited résumé evidence.' },
+          resumeStatus: { type: 'string', enum: ['stated', 'implied', 'absent'], description: 'Whether the résumé already says the mapped conclusion.' },
+          inference: { type: 'string', description: 'The so-what: name the mechanism that makes this evidence relevant; do not merely assert portability.' },
+        },
+      },
+    },
+    companyHook: {
+      type: 'object',
+      required: ['detail', 'source', 'whyItMattersToCandidate'],
+      properties: {
+        detail: { type: 'string', description: 'Specific research detail; empty when research is unavailable.' },
+        source: { type: 'string', description: 'Research source or empty string when unavailable.' },
+        whyItMattersToCandidate: { type: 'string', description: 'Why the detail matters given the candidate trajectory; empty when no hook applies.' },
+      },
+    },
+    logistics: { type: 'string', description: 'The only field allowed to use career-data facts: explicit logistics or stated motivation. Empty when not applicable.' },
+    droppedNeeds: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['needIndex', 'reason'],
+        properties: {
+          needIndex: { type: 'integer', minimum: 0, description: 'Zero-based index into the ranked needs array.' },
+          reason: { type: 'string', description: 'Why this need is deliberately not argued.' },
+        },
+      },
+    },
+  },
+};
+
 export const APPLICATION_COVER_LETTER_SCHEMA = {
   type: 'object',
-  required: ['name', 'salutation', 'paragraphs', 'closing'],
+  required: ['paragraphs'],
   properties: {
-    name:       { type: 'string', description: "Candidate's full name, exactly as it should appear on the letterhead (from the career data)." },
-    tagline:    { type: 'string', description: 'One short role descriptor under the name, e.g. "Senior Product Marketer". Empty string if not inferable.' },
-    contact:    { type: 'array', items: { type: 'string' }, description: 'Contact-line items in order — location, email, phone, one URL. Plain strings, no labels. Omit any not present in the career data.' },
-    date:       { type: 'string', description: 'Letter date, e.g. "May 31, 2026".' },
-    recipient:  { type: 'string', description: 'Recipient block, one item per line with a literal \\n between lines. First line is the addressee, then the company, then optionally the team/department, e.g. "Hiring Team\\nAcme Inc.\\nProduct Marketing".' },
-    salutation: { type: 'string', description: 'Greeting line, e.g. "Dear Acme Hiring Team,".' },
-    paragraphs: { type: 'array', items: { type: 'string' }, description: '3-4 body paragraphs of plain prose (no markdown). Each ties specific career-data evidence to specific job requirements and the company research.' },
-    closing:    { type: 'string', description: 'Sign-off line, e.g. "Sincerely,".' },
-    signatureTitle: { type: 'string', description: 'Small line under the signature naming the target role, e.g. "Senior Product Marketer · candidate". Use the JOB title being applied to (not the candidate\'s current title) followed by " · candidate". Empty string if no clear role.' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields.' },
   },
 };
 
