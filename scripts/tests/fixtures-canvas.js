@@ -1,4 +1,6 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+
+import { assessDetailSelection, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
 
 export default [
 {
@@ -125,6 +127,117 @@ export default [
       file: 'scripts/fixtures/google-jobs.html',
       extractor: GOOGLE_JOBS_EXTRACTOR,
     }),
+  },
+{
+    // Google exposes each list card through both .EimVGf and jscontroller. The
+    // extractor must visit their DOM union once (not twice), retain the exact
+    // list order, and carry htidocid through to description expansion. Losing
+    // that opaque key makes the generic card clicker appear to jump over cards.
+    name: 'Google Jobs extractor: visits every card once, in DOM order, with stable click identities',
+    run: () => {
+      const cards = [
+        ['first-card', 'First Systems Architect'],
+        ['second-card', 'Second Systems Architect'],
+        ['third/card', 'Third Systems Architect'],
+        ['fourth-card', 'Fourth Systems Architect'],
+        ['fifth-card', 'Fifth Systems Architect'],
+        ['sixth-card', 'Sixth Systems Architect'],
+      ];
+      const html = cards.map(([id, title], index) => {
+        const opaqueId = encodeURIComponent(id);
+        return `<div id="${id}" class="EimVGf" jscontroller="b11o3b"
+          data-share-url="https://www.google.com/search?ibp=htl%3Bjobs&q=Systems+Architect&htidocid=${opaqueId}">
+          <div class="GoEOPd"><div class="tNxQIb" role="heading">${title}</div><div>Acme ${index + 1}</div><div>Toronto, ON • via Acme</div></div>
+          <span>${index + 1} day ago</span>
+        </div>`;
+      }).join('');
+      const dom = new JSDOM(`<html><body>${html}</body></html>`, {
+        url: 'https://www.google.com/search?q=Systems+Architect&udm=8',
+        runScripts: 'outside-only',
+      });
+      // jsdom intentionally lacks innerText; Google extraction runs in Chrome,
+      // where it is present. This compatible getter lets the test exercise the
+      // exact shipped extractor string rather than a copied approximation.
+      Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+        configurable: true,
+        get() { return this.textContent || ''; },
+      });
+      const jobs = dom.window.eval(GOOGLE_JOBS_EXTRACTOR);
+      assert(jobs.length === cards.length,
+        `Google card walk must emit every physical card exactly once, got ${jobs.length}/${cards.length}`);
+      assert(jobs.map(job => job.title).join('|') === cards.map(([, title]) => title).join('|'),
+        'Google card walk must preserve DOM order; never sample every Nth card');
+      const extractedCardIds = jobs.map(job => new URL(job.url).searchParams.get('htidocid'));
+      assert(extractedCardIds.join('|') === cards.map(([id]) => id).join('|'),
+        'each extracted Google row must retain its card htidocid, including URL-encoded opaque IDs');
+      assert(extractedCardIds.every(id => dom.window.document.getElementById(id)),
+        'each retained htidocid must resolve to the corresponding clickable list-card element');
+      assert(new Set(jobs.map(sourceJobKey)).size === cards.length,
+        'distinct Google htidocid values must remain distinct through source-level dedup');
+      assert(jobs.every(job => job.snippet === ''),
+        'Google list-card metadata must not occupy snippet; only a successful detail-panel read counts as description expansion');
+
+      const targets = buildDescriptionCardTargets(jobs, 'google');
+      assert(targets.map(target => target.index).join(',') === '0,1,2,3,4,5'
+        && targets.map(target => target.key).join('|') === extractedCardIds.join('|'),
+      'the sequential click pass must preserve every extracted htidocid target');
+      const fullyPresent = inspectDescriptionCardTargetAvailability(targets, extractedCardIds);
+      assert(fullyPresent.planned === cards.length && fullyPresent.available === cards.length && fullyPresent.missing.length === 0,
+        'a fully mounted card list reports every planned click target available');
+      // Simulate the Google inner scroller virtualizing the first half of the
+      // list after reveal. This must be observable as specific target misses,
+      // never silently reinterpreted as successful expansion of nearby cards.
+      const virtualized = inspectDescriptionCardTargetAvailability(targets, extractedCardIds.slice(3));
+      assert(virtualized.planned === cards.length && virtualized.available === 3
+        && virtualized.missing.map(target => target.index).join(',') === '0,1,2',
+      'a virtualized DOM window exposes exactly which sequential card targets disappeared');
+      const physicalPlan = buildPhysicalCardWalkPlan(jobs, [jobs[0], jobs[3], jobs[5]]);
+      assert(physicalPlan.physicalTotal === 6
+        && physicalPlan.physicalIndexes.join(',') === '1,4,6',
+      'a bounded card walk retains each selected job\'s physical DOM ordinal');
+      return { cards: jobs.length, identities: extractedCardIds, virtualizedMisses: virtualized.missing.length };
+    },
+  },
+{
+    name: 'Google detail panel text ignores cached and preloaded aria-hidden panels',
+    run: () => {
+      const dom = new JSDOM(`
+        <main>
+          <section aria-hidden="true"><span class="OOyDTc">cached previous description</span></section>
+          <section aria-hidden="false">
+            <span class="OOyDTc">active description opening</span>
+            <span class="ejCXj" style="display:none">active hidden continuation</span>
+          </section>
+          <section aria-hidden="true"><span class="OOyDTc">preloaded next description</span></section>
+        </main>`, { runScripts: 'outside-only' });
+      const text = readDescriptionPanelText(dom.window.document, 'span.OOyDTc, span.ejCXj', true);
+      assert(text === 'active description opening\n\nactive hidden continuation',
+        `Google active detail panel should exclude aria-hidden cache/preload panels, got ${JSON.stringify(text)}`);
+      const activeTitle = readActiveGoogleDetailTitle(dom.window.document);
+      assert(activeTitle === '', 'a panel with no heading should stay unverified rather than falsely mismatching');
+      return { text };
+    },
+  },
+{
+    name: 'Google detail selection guard verifies an active heading without accepting an explicit mismatch',
+    run: () => {
+      const dom = new JSDOM(`
+        <main>
+          <article data-share-url="https://example.test/?htidocid=old"><h3>Old list card</h3></article>
+          <section aria-hidden="false"><h2>Systems Architect — Platform</h2></section>
+        </main>`, { runScripts: 'outside-only' });
+      const selectedTitle = readActiveGoogleDetailTitle(dom.window.document);
+      const verified = assessDetailSelection('Systems Architect', selectedTitle);
+      const mismatch = assessDetailSelection('Systems Architect', 'Unrelated Product Manager');
+      const absent = assessDetailSelection('Systems Architect', '');
+      assert(selectedTitle === 'Systems Architect — Platform' && verified.selectionVerified && !verified.selectionMismatch,
+        'the active detail heading should verify a title when it only adds a display suffix');
+      assert(mismatch.selectionMismatch && !mismatch.selectionVerified,
+        'an explicitly different active detail heading must be marked mismatched');
+      assert(!absent.selectionMismatch && !absent.selectionVerified,
+        'missing detail headings must remain resilient/unverified rather than becoming false mismatches');
+      return { selectedTitle };
+    },
   },
 {
     name: 'Indeed DOM extraction',
@@ -642,6 +755,48 @@ export default [
       assert(out2.find(n => n.id === 'top-hub').data.scoredJobs.length === 2, 'runNodeMigrations: idempotent — scoredJobs not duplicated');
       assert(!out2.some(n => n.type === 'jobcard'), 'runNodeMigrations: idempotent — no cascade resurrected');
       return { current: CURRENT_SCHEMA_VERSION };
+    },
+  },
+{
+    name: 'migrateJobHubPageCeiling (v4): retired 10-page default resets to "All", explicit/already-null values are left alone',
+    run: () => {
+      const withOldDefault = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { collectionLimits: { jobsPerPlatform: null, pagesPerPlatform: 10 } } };
+      const withExplicit25 = { id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { collectionLimits: { jobsPerPlatform: null, pagesPerPlatform: 25 } } };
+      const withAlreadyNull = { id: 'h3', type: 'jobhub', position: { x: 0, y: 0 }, data: { collectionLimits: { jobsPerPlatform: null, pagesPerPlatform: null } } };
+      const nonJobhub = { id: 'txt', type: 'text', position: { x: 0, y: 0 }, data: { collectionLimits: { pagesPerPlatform: 10 } } };
+      const nodes = [withOldDefault, withExplicit25, withAlreadyNull, nonJobhub];
+
+      const out = migrateJobHubPageCeiling(nodes);
+      assert(out !== nodes, 'migration: the retired default was present → new array ref');
+      assert(out.find(n => n.id === 'h1').data.collectionLimits.pagesPerPlatform === null,
+        'migration: a hub persisted with the old shipped default (10) resets to "All" (null)');
+      assert(out.find(n => n.id === 'h1').data.collectionLimits.jobsPerPlatform === null,
+        'migration: the untouched jobsPerPlatform field is preserved as-is');
+      assert(out.find(n => n.id === 'h2') === withExplicit25,
+        'migration: an explicitly-set 25 is a deliberate user value, not the shipped default — left untouched (same ref)');
+      assert(out.find(n => n.id === 'h3') === withAlreadyNull,
+        'migration: an already-null pagesPerPlatform has nothing to migrate — left untouched (same ref)');
+      assert(out.find(n => n.id === 'txt') === nonJobhub,
+        'migration: a non-jobhub node carrying the same-shaped data is never touched — the gate is type==="jobhub", not shape sniffing');
+
+      // Idempotent: running again over the migrated output changes nothing.
+      const out2 = migrateJobHubPageCeiling(out);
+      assert(out2 === out, 'migration: idempotent — a second run over already-migrated nodes is a same-ref no-op');
+
+      // Registered in the versioned runner (v4) and reaches a hub nested inside
+      // a group sub-canvas via applyStepRecursive, same as every other step.
+      assert(CURRENT_SCHEMA_VERSION >= 4, 'migration: schema version advanced to include the page-ceiling reset');
+      const nestedTree = [{
+        id: 'grp-pc', type: 'group', position: { x: 0, y: 0 },
+        data: { canvasData: { nodes: [
+          { id: 'nested-hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { collectionLimits: { jobsPerPlatform: null, pagesPerPlatform: 10 } } },
+        ], edges: [], drawings: [] } },
+      }];
+      const viaRunner = runNodeMigrations(nestedTree, 3);
+      const nestedHub = viaRunner[0].data.canvasData.nodes[0];
+      assert(nestedHub.data.collectionLimits.pagesPerPlatform === null,
+        'migration: runs via runNodeMigrations from v3 and reaches a hub nested in a group sub-canvas');
+      return { migrated: out.filter((n, i) => n !== nodes[i]).length };
     },
   },
 {
@@ -1362,10 +1517,12 @@ export default [
       assert(filterJobsByAge([{ title: 'recent-yearless', posted: 'Aug 12' }, { title: 'old-yearless', posted: 'May 29' }], 21, fixedNow)
         .map(job => job.title).join(',') === 'recent-yearless',
       'Job date filter: yearless dates honor the injected look-back clock');
-      // The card-owned collection settings preserve the current production
-      // breadth: unlimited jobs per platform (null) and 10 browser pages.
-      assert(JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT) === JSON.stringify({ jobsPerPlatform: null, pagesPerPlatform: 10 }),
-        'Job collection limits: defaults must preserve unlimited jobs and the 10-page production depth');
+      // The card-owned collection settings now default to "All" on BOTH fields
+      // (stored as null): unlimited jobs per platform, and unlimited browser
+      // pages (bounded only by the JOB_COLLECTION_PAGE_CEILING backstop a
+      // walker resolves at, not by this stored default).
+      assert(JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT) === JSON.stringify({ jobsPerPlatform: null, pagesPerPlatform: null }),
+        'Job collection limits: defaults must be unlimited jobs AND unlimited pages ("All"/"All")');
       assert(JSON.stringify(normalizeJobCollectionLimits()) === JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT),
         'Job collection limits: missing persisted settings must normalize to production defaults');
       assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: '17.9', pagesPerPlatform: '3.8' })) === JSON.stringify({ jobsPerPlatform: 17, pagesPerPlatform: 3 }),
@@ -1376,6 +1533,27 @@ export default [
         'Job collection limits: zero and negative values must fall back safely instead of silently disabling collection');
       assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: Infinity, pagesPerPlatform: NaN })) === JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT),
         'Job collection limits: non-finite inputs must fall back to stable defaults');
+      // resolvePageCeiling/isUnlimitedPages/describeJobCollectionLimits are the
+      // seam every walker uses instead of branching on null itself (the old
+      // `limits.pagesPerPlatform || 10` idiom would silently turn "All" back
+      // into the retired 10-page default).
+      assert(isUnlimitedPages() === true && isUnlimitedPages({ pagesPerPlatform: null }) === true,
+        'isUnlimitedPages: "All" (missing/null pagesPerPlatform) reads as unlimited');
+      assert(isUnlimitedPages({ pagesPerPlatform: 5 }) === false,
+        'isUnlimitedPages: an explicit page count is not unlimited');
+      assert(resolvePageCeiling() === JOB_COLLECTION_PAGE_CEILING,
+        'resolvePageCeiling: "All" resolves to the finite backstop, never null');
+      assert(resolvePageCeiling({ pagesPerPlatform: 3 }) === 3,
+        'resolvePageCeiling: an explicit page count passes through unchanged');
+      assert(Number.isFinite(resolvePageCeiling()) && Number.isFinite(resolvePageCeiling({ pagesPerPlatform: null }))
+        && Number.isFinite(resolvePageCeiling({ pagesPerPlatform: 999 })),
+      'resolvePageCeiling: ALWAYS returns a finite number, regardless of input shape');
+      const describedDefault = describeJobCollectionLimits();
+      assert(describedDefault.jobs === 'all' && describedDefault.pages === `all (backstop ${JOB_COLLECTION_PAGE_CEILING})`,
+        `describeJobCollectionLimits: default breadth must read as "all", got ${JSON.stringify(describedDefault)}`);
+      const describedExplicit = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
+      assert(describedExplicit.jobs === '12' && describedExplicit.pages === '3',
+        `describeJobCollectionLimits: explicit numbers render as plain strings, got ${JSON.stringify(describedExplicit)}`);
       // compsForPricing is unbounded — a small set passes through in full...
       const cSmall = compsForPricing(8, 4);
       assert(cSmall.sold === 8 && cSmall.active === 4, 'Job date and cap helpers: small comp set should pass through unbounded');
@@ -1427,11 +1605,21 @@ export default [
       'manual scraper must preserve user-done semantics while prioritizing a concrete block');
       assert(resolveManualSourceStopReason({}) === 'completed',
         'manual scraper must reserve completed for a normal non-capped finish');
-      return { perSource: 'per-source-cap', page: 'page-cap' };
+      // Data-driven stops outrank the page ceiling: now that pages defaults to
+      // "All", a walk that ends because the DATA said stop must never be
+      // reported as `page-cap` — bug reports flag that reason as "this source
+      // may have more in-window jobs", which would be a lie here.
+      for (const reason of ['age-window', 'no-new-jobs', 'end-of-results']) {
+        assert(resolveManualSourceStopReason({ dataStopReason: reason, hitPageCap: true }) === reason,
+          `a ${reason} stop must outrank the page ceiling, not masquerade as page-cap`);
+      }
+      assert(resolveManualSourceStopReason({ dataStopReason: 'age-window', sourceSkipped: true }) === 'blocked',
+        'a concrete block must still outrank a data-driven stop');
+      return { perSource: 'per-source-cap', page: 'page-cap', data: 'age-window/no-new-jobs/end-of-results' };
     },
   },
 {
-    name: 'Job board relevance filtering',
+    name: 'Job title diagnostics and provider-result admission',
     run: () => {
       const geoTerms = buildGeoTermSet(['Denver, CO', 'hybrid in Chicago']);
       assert(geoTerms.has('denver') && geoTerms.has('chicago'), 'Job board relevance filtering: geo terms should include city tokens');
@@ -1452,6 +1640,27 @@ export default [
         jobRelevanceMatch('Engineering Manager', 'Senior Manager', new Set()),
         'Job board relevance filtering: all-generic role query should still fall back rather than match nothing',
       );
+      assert(
+        !jobRelevanceMatch('Technical Sales Enablement Manager, Partners', 'Technical Lead', new Set())
+          && jobRelevanceMatch('Senior Technical Architect', 'Technical Lead', new Set()),
+        'Job board relevance filtering: broad technical queries retain engineering/architecture roles without leaking into technical sales',
+      );
+      const cappedCandidates = [
+        'Junior Project Buyer', 'Draftsperson', 'Data Coordinator',
+        'Shipping & Logistics Specialist', 'Project Coordinator, New Graduate',
+        'Business Systems Architect', 'Enterprise Platform Systems Architect',
+      ].map(title => ({ title }));
+      const providerRowsBeforeCap = applyFinalJobTitleRelevanceGate(
+        cappedCandidates,
+        ['Systems Architect'],
+      ).slice(0, 5);
+      const localDiagnosticMatches = cappedCandidates.filter(job =>
+        jobMatchesAnyRoleQuery(job, ['Systems Architect'])
+      );
+      assert(providerRowsBeforeCap.map(job => job.title).join('|') === cappedCandidates.slice(0, 5).map(job => job.title).join('|'),
+        'per-platform caps preserve provider order without a second local title gate');
+      assert(localDiagnosticMatches.length === 2,
+        'title matching remains available as diagnostics but does not control provider-result admission');
       // Snapshot regressions: RemoteOK/WWR fetch whole feeds and used to admit
       // rows on one ambient/sub-string query term. A multi-noun role query now
       // needs two role concepts, with a deliberately narrow adjacent-role map.
@@ -1654,22 +1863,19 @@ export default [
       finalGateSources.linkedin.jobs = finalGateJobs.filter(j => j.source === 'linkedin');
       finalGateSources.dice = { jobs: finalGateJobs.filter(j => j.source === 'dice'), errors: 0, warnings: [] };
       finalGateSources.glassdoor.jobs = finalGateJobs.filter(j => j.source === 'glassdoor');
-      const finalAdmitted = applyFinalJobTitleRelevanceGate(
+      const explicitRoleResults = applyFinalJobTitleRelevanceGate(
         finalGateJobs,
         ['Maintenance Technician', 'Facilities Maintenance Technician', 'Lead Server'],
         finalGateSources,
       );
-      assert(finalAdmitted.map(j => j.url).join('|') === 'keep-1|keep-2'
-        && finalGateSources.indeed.jobs.length === 1
-        && finalGateSources.indeed.relevanceDropped === 1
-        && finalGateSources.indeed.relevanceRejected.includes('Field Service Technician - Sign On Bonus!')
-        && finalGateSources.dice.jobs.length === 0
-        && finalGateSources.dice.relevanceRejected.includes('Lead Server Systems Debug Engineer')
-        && finalGateSources.glassdoor.jobs.length === 0
-        && finalGateSources.glassdoor.relevanceDropped === 2
-        && finalGateSources.glassdoor.relevanceRejected.includes('Loss Prevention Specialist')
-        && finalGateSources.glassdoor.relevanceRejected.includes('Armed Driver'),
-      'shared final gate removes browser-ranked title leaks and technical-server false positives before history/scoring');
+      const generatedRoleResults = applyFinalJobTitleRelevanceGate(finalGateJobs, [], finalGateSources);
+      assert(explicitRoleResults.map(j => j.url).join('|') === finalGateJobs.map(j => j.url).join('|')
+        && generatedRoleResults.map(j => j.url).join('|') === finalGateJobs.map(j => j.url).join('|')
+        && finalGateSources.indeed.jobs.length === 2
+        && finalGateSources.dice.jobs.length === 1
+        && finalGateSources.glassdoor.jobs.length === 2
+        && !finalGateSources.indeed.relevanceDropped,
+      'provider-ranked results survive local title wording in explicit-role and generated-query runs');
       return { geoTerms: [...geoTerms].sort(), fallback: true, rejectedTitles };
     },
   },
@@ -1763,11 +1969,33 @@ export default [
       for (const task of [zip, glassdoor, google]) {
         assert(JSON.stringify(task?.options?.collectionLimits) === JSON.stringify(requested),
           'every browser task must carry the exact normalized per-platform job limit');
+        assert(task?.options?.unlimitedPages === false,
+          'an explicit page count must NOT mark the task unlimited');
+        assert(typeof task?.options?.onPageScraped === 'function',
+          'every browser task must carry a makeJobPageStop stop callback');
       }
+      // Missing/legacy card settings ("All" on both fields, the new default):
+      // maxPages resolves to the finite backstop (never null — a walker loop
+      // must never see an unbounded number), and unlimitedPages flips true so
+      // the no-new-jobs pager-stall rule engages.
       const defaultZip = buildJobTasks(['Systems Architect'], 21, { onlySources: new Set(['ziprecruiter']) })[0];
-      assert(defaultZip?.options?.maxPages === 10
-        && defaultZip.options.collectionLimits.jobsPerPlatform === null,
-      'legacy/missing card settings must preserve unlimited jobs and the production 10-page depth');
+      assert(defaultZip?.options?.maxPages === JOB_COLLECTION_PAGE_CEILING
+        && defaultZip.options.unlimitedPages === true
+        && defaultZip.options.collectionLimits.jobsPerPlatform === null
+        && defaultZip.options.collectionLimits.pagesPerPlatform === null,
+      'legacy/missing card settings must resolve "All" pages to the finite backstop and flag the walk unlimited');
+      // Google is a single-page/scroll source (paginates: false) — its own
+      // maxPages: 1 marker in buildJobTasks is unrelated to the resolved
+      // ceiling; the reveal-loop cap it actually gets must still be the same
+      // resolved, finite ceiling as every other source under "All".
+      const defaultGoogle = buildJobTasks(['Systems Architect'], 21, { onlySources: new Set(['google']) })[0];
+      assert(defaultGoogle?.options?.maxPages === JOB_COLLECTION_PAGE_CEILING,
+        'Google must also get the resolved finite backstop for its reveal iterations under "All", not an unbounded value');
+      // Fresh onPageScraped per query — two queries against the same source
+      // must not share pagination-stop state (see jobPageStop.js).
+      const twoQueryTasks = buildJobTasks(['Architect', 'Engineer'], 21, { onlySources: new Set(['ziprecruiter']) });
+      assert(twoQueryTasks.length === 2 && twoQueryTasks[0].options.onPageScraped !== twoQueryTasks[1].options.onPageScraped,
+        'each query must get its own onPageScraped instance, not a shared closure');
       return { browserTasks: tasks.length, pages: requested.pagesPerPlatform, jobs: requested.jobsPerPlatform };
     },
   },
@@ -1856,6 +2084,18 @@ export default [
         && quality.matchedCodes.includes('QUALITY')
         && quality.sectionExclusions.has('nodeInternals'),
       'Bug report code filtering: QUALITY keeps listing-field diagnostics and omits heavy canvas dumps');
+      const cardWalk = applyBugReportCode([
+        ...logs,
+        '[JobSearch][hub] Searching with 1 query',
+        '[JobBoard] results hidden as stale',
+        '[BrowserScraper] Google for Jobs descriptions: 24/25 expanded',
+        'unrelated renderer event',
+      ], {}, 'CARDWALK');
+      assert(cardWalk.filteredLogs.some(line => line.includes('Google for Jobs descriptions: 24/25 expanded'))
+        && cardWalk.filteredLogs.some(line => line.includes('[JobSearch][hub]'))
+        && cardWalk.matchedCodes.includes('CARDWALK')
+        && cardWalk.sectionExclusions.has('nodeInternals'),
+      'Bug report code filtering: CARDWALK retains browser-card traversal context while omitting heavy canvas dumps');
       const sell = applyBugReportCode([...logs, '[SellHub][8e27f3ce] Price-drop plan updated: target=$0'], {}, 'SELL');
       assert(sell.filteredLogs.some(line => line.includes('target=$0')) && sell.matchedCodes.includes('SELL'),
         'Bug report code filtering: SELL should retain SellHub price-drop commits');

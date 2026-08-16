@@ -534,6 +534,26 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}) {
   return result('figure-discipline', true, `${letterFigures.length} figure(s) appear in résumé evidence`);
 }
 
+/**
+ * Some postings contain an application instruction that is neither a role
+ * capability nor cover-letter argument material.  A request for a portfolio,
+ * repository, shipped-work link, or demo must remain visible when the résumé
+ * has no clickable http(s) link; silently omitting it can invalidate an
+ * otherwise polished application.
+ */
+export function checkRequestedWorkSampleLink(jobText = '', resumeMainHtml = '') {
+  const posting = normalized(jobText);
+  const requestsLink = /\b(?:include|provide|submit|share|send|attach)\b[^.!?\n]{0,100}\b(?:link|url)\b[^.!?\n]{0,100}\b(?:built|build|shipped|portfolio|repo(?:sitory)?|github|demo|work sample|project)\b/u.test(posting)
+    || /\b(?:portfolio|repo(?:sitory)?|github|demo|work sample|project)\b[^.!?\n]{0,100}\b(?:link|url)\b/u.test(posting);
+  if (!requestsLink) return result('work-sample-link', true, 'posting does not request a portfolio, repository, demo, or shipped-work link');
+
+  const markup = String(resumeMainHtml || '');
+  const hasHttpLink = /<a\b[^>]*\bhref\s*=\s*(?:"https?:\/\/[^"\s]+"|'https?:\/\/[^'\s]+'|https?:\/\/[^\s>]+)/iu.test(markup);
+  return hasHttpLink
+    ? result('work-sample-link', true, 'posting-requested work-sample link is present in the résumé')
+    : result('work-sample-link', false, 'posting requests a portfolio, repository, demo, or shipped-work link, but the résumé has no clickable http(s) link');
+}
+
 // These are logistics concepts, not a general claim or tone vocabulary. The
 // prose writer receives logistics only through the plan, so a concept absent
 // from that field is necessarily a strengthened availability/location promise.

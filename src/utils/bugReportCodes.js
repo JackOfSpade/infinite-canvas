@@ -169,6 +169,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  CARDWALK: {
+    label: 'Browser Job Card Walk',
+    description: 'Browser job-card traversal diagnostics — compact per-card recovery/miss evidence plus the Job Search Pipeline’s extracted-versus-expanded counts. Use when a visible browser appears to skip, jump over, or select the wrong job cards. Included automatically in FULL; drops heavy canvas/media dumps.',
+    logFilter: line =>
+      /\[JobSearch\]|\[JobBoard\]|\[JobCard\]|\[JobTree\]|browser.*(?:scrape|card)|(?:google|indeed|glassdoor|ziprecruiter).*?(?:scrape|card|description)|(?:scrape|description).*?(?:google|indeed|glassdoor|ziprecruiter)/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   // ── Exclusion Modifiers ───────────────────────────────────────────────────
   // Prefix with X to mean "exclude these from the log"
 

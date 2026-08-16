@@ -149,22 +149,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
           collectionLimits,
+          enabledSourceIds: hubData.enabledSourceIds,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           resumeState,
         });
       } else {
-        const hubQueries = hubData.queries || {};
-        // Keep Resolve on the exact same admission policy as the originating
-        // search. Without these role queries, newly unlocked list rows bypassed
-        // the final title-relevance gate and off-topic Glassdoor recommendations
-        // were scored/persisted as if they matched the user's search.
-        const resolveQueries = Array.isArray(hubData.activeSearchQueries)
-          ? hubData.activeSearchQueries
-          : [
-              ...(hubQueries.targetRoleQueries || []),
-              ...(hubQueries.titleQueries || []),
-              ...(hubQueries.suggestedRoleQueries || []),
-            ];
         result = await window.electronAPI.resolveJobSource({
           url: progress.url,
           sourceId: data.sourceId,
@@ -172,8 +161,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
           collectionLimits,
+          enabledSourceIds: hubData.enabledSourceIds,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
-          queries: resolveQueries,
         });
       }
       // When the captcha-resolve window auto-detects the challenge as

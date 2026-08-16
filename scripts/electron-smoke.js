@@ -55,6 +55,15 @@ async function waitForCount(locator, predicate, label, timeoutMs = 5000) {
   }
 }
 
+async function waitForCheckbox(locator, checked, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await locator.isChecked() === checked) return;
+    if (Date.now() > deadline) assert.fail(`${label} (checked=${await locator.isChecked()})`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function waitForWorkspaceNodeData(page, filePath, nodeType, predicate, label, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -717,6 +726,26 @@ try {
   );
   await waitForCount(page.locator('.react-flow__node-jobhub'), (n) => n === 1, 'dragging Job Search module should create a hub');
 
+  // This is intentionally UI-only: changing a platform must not initiate a
+  // scrape. It proves the real rendered Job Search module exposes every scoped
+  // source and that its controlled allow-list commits an off/on selection.
+  step('Job Search platform allow-list renders and toggles without scraping');
+  const jobHub = page.locator('.react-flow__node-jobhub');
+  const jobPlatforms = jobHub.getByRole('group', { name: 'Job platforms', exact: true });
+  await jobPlatforms.waitFor();
+  const platformCheckboxes = jobPlatforms.getByRole('checkbox');
+  assert.equal(await platformCheckboxes.count(), 9, 'Job platforms should render every production-scoped source');
+  const indeedPlatform = jobPlatforms.getByRole('checkbox', { name: 'Indeed', exact: true });
+  await waitForCheckbox(indeedPlatform, true, 'Indeed should be selected by default on a new Job Search module');
+  // The React Flow minimap can overlap this node at some test-window sizes.
+  // Keyboard activation is geometry-independent and also covers the accessible
+  // interaction path for the native checkbox.
+  await indeedPlatform.focus();
+  await page.keyboard.press('Space');
+  await waitForCheckbox(indeedPlatform, false, 'toggling Indeed off should commit the hub allow-list');
+  await page.keyboard.press('Space');
+  await waitForCheckbox(indeedPlatform, true, 'toggling Indeed on should restore the hub allow-list');
+
   await page.getByText('Job Board Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 120, y: 150 } },
@@ -777,9 +806,25 @@ try {
   assert.deepEqual(rendererErrors, [], 'renderer should not emit runtime errors');
   console.log('Electron smoke test passed');
 } finally {
-  await app?.evaluate(({ app: electronApp }) => {
-    setTimeout(() => electronApp.exit(0), 0);
-  }).catch(() => {});
+  // Terminate the exact process Playwright launched. Closing the last window
+  // can be blocked by the app's unsaved-work guard, which would orphan the main
+  // process and poison the next run's single-instance state after a failure.
+  if (app) {
+    const electronProcess = app.process();
+    if (electronProcess.exitCode === null) {
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 2_000);
+        electronProcess.once('exit', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        electronProcess.kill('SIGTERM');
+      });
+    }
+    if (electronProcess.exitCode === null) {
+      electronProcess.kill('SIGKILL');
+    }
+  }
   await new Promise((resolve) => setTimeout(resolve, 250));
   await fs.rm(userDataDir, { recursive: true, force: true });
   await fs.rm(previewFixtureRoot, { recursive: true, force: true });

@@ -1033,11 +1033,12 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
   );
   const modelOrder = usingVertex
-    ? orderVertexGeminiModels(scopeSuppression, _now)
+    ? orderVertexGeminiModels(scopeSuppression, _now, { excludeModels: genConfig.excludeModels })
     : orderGeminiModels(model, scopeSuppression, _now, {
       entitledTiers,
       responseSchema: !!genConfig.responseSchema,
       grounding: grounded,
+      excludeModels: genConfig.excludeModels,
     });
   const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
   if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
@@ -1220,11 +1221,12 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
     );
     const modelOrder2 = usingVertex
-      ? orderVertexGeminiModels(scopeSuppression2, now2)
+      ? orderVertexGeminiModels(scopeSuppression2, now2, { excludeModels: genConfig.excludeModels })
       : orderGeminiModels(model, scopeSuppression2, now2, {
         entitledTiers: entitledTiers2,
         responseSchema: !!genConfig.responseSchema,
         grounding: grounded,
+        excludeModels: genConfig.excludeModels,
       });
     const _cooling2 = modelOrder2.filter(m => scopeSuppression2.has(m));
     if (_cooling2.length > 0 && _cooling2.length < modelOrder2.length) {

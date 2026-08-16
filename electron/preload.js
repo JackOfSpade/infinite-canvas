@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   parseResume: (args) => ipcRenderer.invoke('parse-resume', args),
   getResumeFingerprint: (args) => ipcRenderer.invoke('get-resume-fingerprint', args),
   generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),
+  resolveJobSearchLocation: (args) => ipcRenderer.invoke('resolve-job-search-location', args),
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
   searchJobsSingleSource: (args) => ipcRenderer.invoke('search-jobs-single-source', args),
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),

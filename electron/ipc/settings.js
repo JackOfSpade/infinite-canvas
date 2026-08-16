@@ -335,9 +335,20 @@ export function saveDiceApiKey(key) {
 // stable platform id (Denver = 1148170 forever), and resolving it requires a
 // Cloudflare-gated, in-browser autocomplete call — so caching it means that
 // lookup happens at most once per location, ever. Keyed by lowercased location.
+//
+// `country` records the ISO the live autocomplete result was VALIDATED against.
+// It is what lets a country-scoped request (e.g. "Canada") be served from cache
+// instead of re-resolving every run: without it the cached pair is just an
+// opaque number that proves nothing about the market it selects. Entries written
+// before this field existed have no `country` and are deliberately re-resolved.
 export function getGlassdoorLocId(locationKey) {
   const map = tryGetStore()?.get('jobs.glassdoorLocIds') || {};
   return map[String(locationKey || '').trim().toLowerCase()] || null;
+}
+
+/** Whole map, for diagnostics: which locations can skip the live lookup. */
+export function getGlassdoorLocIdCache() {
+  return tryGetStore()?.get('jobs.glassdoorLocIds') || {};
 }
 
 export function saveGlassdoorLocId(locationKey, value) {
@@ -346,7 +357,12 @@ export function saveGlassdoorLocId(locationKey, value) {
   const store = tryGetStore();
   if (!store) return;
   const map = store.get('jobs.glassdoorLocIds') || {};
-  map[key] = { locId: String(value.locId), locT: value.locT || 'C' };
+  const entry = { locId: String(value.locId), locT: value.locT || 'C' };
+  if (typeof value.country === 'string' && /^[A-Z]{2}$/.test(value.country)) {
+    entry.country = value.country;
+    entry.verifiedAt = Date.now();
+  }
+  map[key] = entry;
   store.set('jobs.glassdoorLocIds', map);
 }
 

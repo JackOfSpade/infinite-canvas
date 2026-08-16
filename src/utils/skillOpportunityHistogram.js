@@ -4,7 +4,8 @@
  * matching rules usable by the UI, IPC layer, and unit tests.
  */
 
-export const SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 1;
+const LEGACY_SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 1;
+export const SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 2;
 
 /**
  * A deliberately conservative display-name key. This removes formatting
@@ -37,7 +38,12 @@ export function stableOpportunityId(prefix, value) {
 }
 
 export function createEmptySkillOpportunityHistogram() {
-  return { version: SKILL_OPPORTUNITY_HISTOGRAM_VERSION, roles: [] };
+  return {
+    version: SKILL_OPPORTUNITY_HISTOGRAM_VERSION,
+    baselineRoles: [],
+    contributions: [],
+    roles: [],
+  };
 }
 
 function nonEmptyString(value) {
@@ -57,20 +63,12 @@ function assertAliases(aliases, label) {
   }
 }
 
-/** Throws rather than silently discarding a hand-edited/corrupt store. */
-export function assertValidSkillOpportunityHistogram(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
-    throw new Error('Skill-opportunity histogram must be an object.');
+function assertValidRoles(roles, label = 'roles') {
+  if (!Array.isArray(roles)) {
+    throw new Error(`Skill-opportunity histogram has invalid ${label}; expected an array.`);
   }
-  if (snapshot.version !== SKILL_OPPORTUNITY_HISTOGRAM_VERSION) {
-    throw new Error(`Skill-opportunity histogram has unsupported version ${String(snapshot.version)}.`);
-  }
-  if (!Array.isArray(snapshot.roles)) {
-    throw new Error('Skill-opportunity histogram has invalid roles; expected an array.');
-  }
-
   const roleIds = new Set();
-  for (const role of snapshot.roles) {
+  for (const role of roles) {
     if (!role || typeof role !== 'object' || !nonEmptyString(role.id) || !nonEmptyString(role.name)) {
       throw new Error('Skill-opportunity histogram has an invalid role record.');
     }
@@ -96,18 +94,15 @@ export function assertValidSkillOpportunityHistogram(snapshot) {
       }
     }
   }
-  return snapshot;
+  return roles;
 }
 
-function copyHistogram(snapshot) {
-  return {
-    ...snapshot,
-    roles: snapshot.roles.map(role => ({
+function copyRoles(roles) {
+  return roles.map(role => ({
       ...role,
       aliases: [...role.aliases],
       skills: role.skills.map(skill => ({ ...skill, aliases: [...skill.aliases] })),
-    })),
-  };
+    }));
 }
 
 function mergeAliases(existingAliases, candidates, canonicalName) {
@@ -182,29 +177,127 @@ export function normalizeSkillOpportunityAnalysis(analysis) {
   };
 }
 
-/**
- * Applies one resume-generation analysis to a snapshot without mutating it.
- * A role receives exactly one generation increment. Each normalized skill is
- * counted once per call; if a buggy analysis emits it as both kinds, `verify`
- * wins because it is the closer, candidate-supported opportunity.
- */
-export function mergeSkillOpportunityAnalysis(snapshot, analysis, now = new Date().toISOString()) {
-  assertValidSkillOpportunityHistogram(snapshot);
-  const normalizedAnalysis = normalizeSkillOpportunityAnalysis(analysis);
-  const timestamp = nonEmptyString(now);
-  if (!timestamp) throw new Error('Skill-opportunity histogram merge requires a timestamp.');
+function compactSkillOpportunityAnalysis(analysis) {
+  const normalized = normalizeSkillOpportunityAnalysis(analysis);
+  const dedupedItems = new Map();
+  for (const item of normalized.items) {
+    const key = normalizeOpportunityName(item.canonicalSkillName);
+    const current = dedupedItems.get(key);
+    if (!current || (current.kind === 'learn' && item.kind === 'verify')) {
+      dedupedItems.set(key, {
+        canonicalSkillName: item.canonicalSkillName,
+        matchedSkillId: nonEmptyString(item.matchedSkillId),
+        kind: item.kind,
+        jobImportance: item.jobImportance,
+      });
+    }
+  }
+  return {
+    role: { ...normalized.role },
+    items: [...dedupedItems.values()],
+  };
+}
 
-  const next = copyHistogram(snapshot);
+function assertValidCompactAnalysis(analysis, sourceKey) {
+  if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) {
+    throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has invalid analysis.`);
+  }
+  const canonicalName = nonEmptyString(analysis.role?.canonicalName);
+  if (!canonicalName || typeof analysis.role?.sourceTitle !== 'string' || typeof analysis.role?.matchedRoleId !== 'string') {
+    throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has an invalid role analysis.`);
+  }
+  if (!Array.isArray(analysis.items)) {
+    throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has invalid analysis items.`);
+  }
+  const skillKeys = new Set();
+  for (const item of analysis.items) {
+    if (!validOpportunityItem(item) || typeof item.matchedSkillId !== 'string') {
+      throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has an invalid skill analysis item.`);
+    }
+    const skillKey = normalizeOpportunityName(item.canonicalSkillName);
+    if (skillKeys.has(skillKey)) {
+      throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has duplicate normalized skill "${skillKey}".`);
+    }
+    skillKeys.add(skillKey);
+  }
+  return analysis;
+}
+
+function assertValidLegacyHistogram(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new Error('Skill-opportunity histogram must be an object.');
+  }
+  if (snapshot.version !== LEGACY_SKILL_OPPORTUNITY_HISTOGRAM_VERSION) {
+    throw new Error(`Skill-opportunity histogram has unsupported version ${String(snapshot.version)}.`);
+  }
+  assertValidRoles(snapshot.roles);
+  return snapshot;
+}
+
+/** Throws rather than silently discarding a hand-edited/corrupt v2 store. */
+export function assertValidSkillOpportunityHistogram(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new Error('Skill-opportunity histogram must be an object.');
+  }
+  if (snapshot.version !== SKILL_OPPORTUNITY_HISTOGRAM_VERSION) {
+    throw new Error(`Skill-opportunity histogram has unsupported version ${String(snapshot.version)}.`);
+  }
+  assertValidRoles(snapshot.baselineRoles, 'baselineRoles');
+  assertValidRoles(snapshot.roles);
+  if (!Array.isArray(snapshot.contributions)) {
+    throw new Error('Skill-opportunity histogram has invalid contributions; expected an array.');
+  }
+  const sourceKeys = new Set();
+  for (const contribution of snapshot.contributions) {
+    const sourceKey = nonEmptyString(contribution?.sourceKey);
+    if (!sourceKey) throw new Error('Skill-opportunity histogram has a contribution without a sourceKey.');
+    if (sourceKeys.has(sourceKey)) throw new Error(`Skill-opportunity histogram has duplicate contribution sourceKey "${sourceKey}".`);
+    sourceKeys.add(sourceKey);
+    if (!Number.isFinite(contribution.generationStartedAt) || contribution.generationStartedAt < 0) {
+      throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has invalid generationStartedAt.`);
+    }
+    if (!nonEmptyString(contribution.recordedAt) || !Number.isFinite(Date.parse(contribution.recordedAt))) {
+      throw new Error(`Skill-opportunity histogram contribution "${sourceKey}" has invalid recordedAt.`);
+    }
+    assertValidCompactAnalysis(contribution.analysis, sourceKey);
+  }
+  const rebuiltRoles = rebuildRoles(snapshot.baselineRoles, snapshot.contributions);
+  if (JSON.stringify(rebuiltRoles) !== JSON.stringify(snapshot.roles)) {
+    throw new Error('Skill-opportunity histogram roles do not match the deterministic baseline/contribution rebuild.');
+  }
+  return snapshot;
+}
+
+/**
+ * Converts the old aggregate-only format into a v2 snapshot. Old counts cannot
+ * be assigned back to individual cards, so they become an immutable baseline;
+ * all new card-keyed contributions are rebuilt on top of it.
+ */
+export function migrateSkillOpportunityHistogram(snapshot) {
+  if (snapshot?.version === SKILL_OPPORTUNITY_HISTOGRAM_VERSION) {
+    return assertValidSkillOpportunityHistogram(snapshot);
+  }
+  const legacy = assertValidLegacyHistogram(snapshot);
+  const baselineRoles = copyRoles(legacy.roles);
+  return {
+    version: SKILL_OPPORTUNITY_HISTOGRAM_VERSION,
+    baselineRoles,
+    contributions: [],
+    roles: copyRoles(baselineRoles),
+  };
+}
+
+function mergeAnalysisIntoRoles(inputRoles, analysis, timestamp) {
+  const normalizedAnalysis = compactSkillOpportunityAnalysis(analysis);
+  const roles = copyRoles(inputRoles);
   const { role: requestedRole } = normalizedAnalysis;
   const roleNames = [requestedRole.canonicalName, requestedRole.sourceTitle]
     .map(normalizeOpportunityName)
     .filter(Boolean);
-  // IDs supplied by the AI are only hints. Accept a role ID solely if it is
-  // already in this persistent snapshot; otherwise use the stable vocabulary.
-  let role = next.roles.find(candidate => candidate.id === requestedRole.matchedRoleId)
-    || next.roles.find(candidate => roleMatchesName(candidate, roleNames));
+  let role = roles.find(candidate => candidate.id === requestedRole.matchedRoleId)
+    || roles.find(candidate => roleMatchesName(candidate, roleNames));
   if (!role) {
-    const existingIds = new Set(next.roles.map(candidate => candidate.id));
+    const existingIds = new Set(roles.map(candidate => candidate.id));
     role = {
       id: uniqueStableId('role', requestedRole.canonicalName, existingIds),
       name: requestedRole.canonicalName,
@@ -212,22 +305,13 @@ export function mergeSkillOpportunityAnalysis(snapshot, analysis, now = new Date
       generationCount: 0,
       skills: [],
     };
-    next.roles.push(role);
+    roles.push(role);
   }
   role.aliases = mergeAliases(role.aliases, [requestedRole.canonicalName, requestedRole.sourceTitle], role.name);
   role.generationCount += 1;
 
-  const dedupedItems = new Map();
   for (const item of normalizedAnalysis.items) {
-    const key = normalizeOpportunityName(item.canonicalSkillName);
-    const current = dedupedItems.get(key);
-    if (!current || (current.kind === 'learn' && item.kind === 'verify')) dedupedItems.set(key, item);
-  }
-
-  for (const item of dedupedItems.values()) {
     const trustedId = nonEmptyString(item.matchedSkillId);
-    // The ID is trusted only after resolving the selected role, never against
-    // another role's skill list.
     let skill = role.skills.find(candidate => candidate.id === trustedId)
       || role.skills.find(candidate => skillMatchesName(candidate, item.canonicalSkillName));
     if (!skill) {
@@ -248,7 +332,84 @@ export function mergeSkillOpportunityAnalysis(snapshot, analysis, now = new Date
     skill.demandCount += 1;
     if (item.kind === 'verify') skill.verifyCount += 1;
     else skill.learnCount += 1;
-    skill.lastSeenAt = timestamp;
+    if (timestamp < skill.firstSeenAt) skill.firstSeenAt = timestamp;
+    if (timestamp > skill.lastSeenAt) skill.lastSeenAt = timestamp;
   }
-  return next;
+  return roles;
+}
+
+function rebuildRoles(baselineRoles, contributions) {
+  let roles = copyRoles(baselineRoles);
+  const ordered = [...contributions].sort(compareContributions);
+  for (const contribution of ordered) {
+    roles = mergeAnalysisIntoRoles(roles, contribution.analysis, contribution.recordedAt);
+  }
+  return roles;
+}
+
+function compareContributions(a, b) {
+  return a.generationStartedAt - b.generationStartedAt
+    || a.recordedAt.localeCompare(b.recordedAt)
+    || a.sourceKey.localeCompare(b.sourceKey);
+}
+
+/**
+ * Replaces the latest successful contribution for one stable job-card source.
+ * A generation which started before the source's stored generation is stale
+ * and cannot overwrite it. The returned snapshot is rebuilt deterministically
+ * from the immutable migrated baseline plus one contribution per source.
+ */
+export function replaceSkillOpportunityAnalysis(snapshot, sourceKey, analysis, options = {}) {
+  const current = migrateSkillOpportunityHistogram(snapshot);
+  const normalizedSourceKey = nonEmptyString(sourceKey);
+  if (!normalizedSourceKey) {
+    throw new Error('Skill-opportunity histogram replacement requires a stable job-card sourceKey.');
+  }
+  const generationStartedAt = Number(options.generationStartedAt);
+  if (!Number.isFinite(generationStartedAt) || generationStartedAt < 0) {
+    throw new Error('Skill-opportunity histogram replacement requires a valid generationStartedAt.');
+  }
+  const recordedAt = nonEmptyString(options.recordedAt) || new Date().toISOString();
+  const existing = current.contributions.find(entry => entry.sourceKey === normalizedSourceKey);
+  if (existing && generationStartedAt < existing.generationStartedAt) return current;
+
+  const contribution = {
+    sourceKey: normalizedSourceKey,
+    generationStartedAt,
+    recordedAt,
+    analysis: compactSkillOpportunityAnalysis(analysis),
+  };
+  const contributions = current.contributions
+    .filter(entry => entry.sourceKey !== normalizedSourceKey)
+    .map(entry => ({ ...entry, analysis: compactSkillOpportunityAnalysis(entry.analysis) }));
+  contributions.push(contribution);
+  contributions.sort(compareContributions);
+  const next = {
+    version: SKILL_OPPORTUNITY_HISTOGRAM_VERSION,
+    baselineRoles: copyRoles(current.baselineRoles),
+    contributions,
+    roles: rebuildRoles(current.baselineRoles, contributions),
+  };
+  return assertValidSkillOpportunityHistogram(next);
+}
+
+/**
+ * Applies one resume-generation analysis to a snapshot without mutating it.
+ * A role receives exactly one generation increment. Each normalized skill is
+ * counted once per call; if a buggy analysis emits it as both kinds, `verify`
+ * wins because it is the closer, candidate-supported opportunity.
+ */
+export function mergeSkillOpportunityAnalysis(snapshot, analysis, now = new Date().toISOString()) {
+  const timestamp = nonEmptyString(now);
+  if (!timestamp) throw new Error('Skill-opportunity histogram merge requires a timestamp.');
+  const current = migrateSkillOpportunityHistogram(snapshot);
+  const generationStartedAt = Number.isFinite(Date.parse(timestamp))
+    ? Date.parse(timestamp)
+    : current.contributions.length;
+  return replaceSkillOpportunityAnalysis(
+    current,
+    `__unkeyed_append_${current.contributions.length + 1}`,
+    analysis,
+    { generationStartedAt, recordedAt: timestamp },
+  );
 }

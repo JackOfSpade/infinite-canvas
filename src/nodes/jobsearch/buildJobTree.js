@@ -19,7 +19,8 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  * (by matchScore) and salary range (by parsed salary) DETERMINISTICALLY, so a
  * weak model can't drop or duplicate jobs across the three nested levels. Only
  * the role grouping (the creative consolidation) comes from the AI's partition;
- * jobs the AI leaves out fall into a swept "Other" role.
+ * malformed or incomplete partitions are repaired from the scorer's direction
+ * hints before they reach the renderer.
  *
  * Exports:
  *  - parseSalaryToNumeric     → salary text → annual USD
@@ -301,9 +302,15 @@ export function normalizeRanges(ranges) {
 /**
  * Canonicalize model taxonomy before it becomes persisted UI state. Roles remain
  * model-created, but invalid/out-of-range/duplicate membership cannot distort
- * the deterministic tree (first valid role assignment wins, as on the renderer).
+ * the deterministic tree (first valid role assignment wins). Every job is then
+ * assigned exactly once: unassigned jobs recover into their scored
+ * `careerDirection`, with Other reserved for genuinely unhinted jobs.
+ *
+ * `jobs` is optional to keep the old `(tree, jobCount, salaries)` contract
+ * working for saved/legacy callers. New callers should pass the indexed job
+ * metadata as the fourth argument so recovery preserves useful role hints.
  */
-export function sanitizeJobTaxonomy(tree, jobCount = 0, salaries = []) {
+export function sanitizeJobTaxonomy(tree, jobCount = 0, salaries = [], jobs = []) {
   const { bands, repairs: bandRepairs } = normalizeBandsWithRepairs(tree?.likelihoodBands);
   const { real, unspecified, repairs: rangeRepairs } = normalizeRangesWithRepairs(tree?.salaryRanges);
   const repairs = [...bandRepairs, ...rangeRepairs];
@@ -317,8 +324,13 @@ export function sanitizeJobTaxonomy(tree, jobCount = 0, salaries = []) {
   const usedIndices = new Set();
   const roleMap = new Map();
   for (const raw of Array.isArray(tree?.roles) ? tree.roles : []) {
-    const name = String(raw?.name || '').trim().slice(0, 120) || 'Other';
+    const rawName = String(raw?.name || '').trim().replace(/\s+/g, ' ');
+    const name = rawName.slice(0, 120);
     if (name !== raw?.name) repairs.push('canonicalized blank or oversized role name');
+    // A blank role name is not a valid AI assignment. Do not materialize it as
+    // Other: leave its jobs unclaimed so the complete-coverage pass below can
+    // recover them from their career direction.
+    if (!name) continue;
     const valid = [];
     for (const index of Array.isArray(raw?.jobIndices) ? raw.jobIndices : []) {
       if (!Number.isInteger(index) || index < 0 || index >= jobCount) {
@@ -330,16 +342,39 @@ export function sanitizeJobTaxonomy(tree, jobCount = 0, salaries = []) {
         valid.push(index);
       }
     }
-    if (!roleMap.has(name)) roleMap.set(name, []);
-    roleMap.get(name).push(...valid);
+    if (valid.length > 0) {
+      if (!roleMap.has(name)) roleMap.set(name, []);
+      roleMap.get(name).push(...valid);
+    }
   }
-  if (usedIndices.size < jobCount) repairs.push(`${jobCount - usedIndices.size} job(s) omitted from roles; renderer will use Other`);
+
+  let directionRecovered = 0;
+  let otherRecovered = 0;
+  for (let index = 0; index < jobCount; index += 1) {
+    if (usedIndices.has(index)) continue;
+    const direction = normalizeCareerDirection(jobs?.[index]?.careerDirection);
+    const fallbackName = direction || 'Other';
+    if (!roleMap.has(fallbackName)) roleMap.set(fallbackName, []);
+    roleMap.get(fallbackName).push(index);
+    usedIndices.add(index);
+    if (direction) directionRecovered += 1;
+    else otherRecovered += 1;
+  }
+  if (directionRecovered > 0) repairs.push(`recovered ${directionRecovered} job(s) into career-direction role(s)`);
+  if (otherRecovered > 0) repairs.push(`recovered ${otherRecovered} unhinted job(s) into Other`);
   return {
     likelihoodBands: bands,
     salaryRanges: [...real, unspecified],
     roles: [...roleMap.entries()].map(([name, jobIndices]) => ({ name, jobIndices })),
     repairs: [...new Set(repairs)],
   };
+}
+
+/** A scorer hint is useful only when it names an actual role family. */
+function normalizeCareerDirection(value) {
+  const direction = String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!direction || /^(?:other|unknown|unspecified|none|null|n\/?a)$/i.test(direction)) return '';
+  return direction;
 }
 
 /** Band a score lands in (first whose minScore it meets, in high→low order).

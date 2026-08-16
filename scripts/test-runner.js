@@ -10,6 +10,8 @@ import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
 import resume_download_bundle from './tests/resume-download-bundle.js';
 import cover_letter_harness from './tests/cover-letter-harness.js';
+import job_collection_limits from './tests/job-collection-limits.js';
+import job_search_queries from './tests/job-search-queries.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -24,6 +26,8 @@ const tests = [
   ...skill_opportunities,
   ...resume_download_bundle,
   ...cover_letter_harness,
+  ...job_collection_limits,
+  ...job_search_queries,
 ];
 
 async function run() {

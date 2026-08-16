@@ -96,11 +96,19 @@ Every application generation now runs a separate structured skill-opportunity an
 research. It emits only missing skills whose possession would materially change the outcome for
 that job, split into `verify` (nearby but unverified) and `learn` (too distant to claim). The AI maps
 role-title and skill-name aliases to the existing app-global taxonomy; deterministic code records
-one demand occurrence per canonical skill per generated application in
-`skill-opportunity-histogram.json`. The single-file résumé HTML is a two-pane workspace with the
+one demand occurrence per canonical skill per job card in `skill-opportunity-histogram.json`.
+Regenerating the same card replaces its prior successful contribution, so only the latest résumé
+generation affects the bars; a failed or stale retry leaves the last successful contribution
+intact. Version 2 preserves pre-upgrade aggregate counts as an immutable baseline because the old
+format had no card identity, then deterministically rebuilds the visible aggregate from that
+baseline plus a latest-contribution ledger keyed by the stable job-card `nodeId`. The single-file
+résumé HTML is a two-pane workspace with the
 review queue, private learning queue, and a role-selectable horizontal demand histogram. Export is
 gated until every `verify` item is resolved; only user-confirmed labels are inserted into the
-printed résumé. `learn` items never enter the résumé.
+printed résumé. `learn` items never enter the résumé. The workspace also discloses the actual
+successful AI model or models used to produce the bundle, including a serving fallback and a
+conditional résumé length-revision pass; failed/degraded calls and provider error details are not
+embedded in `Application.html`.
 
 ---
 

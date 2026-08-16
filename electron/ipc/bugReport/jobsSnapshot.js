@@ -6,7 +6,7 @@ import { getJobsTelemetry } from '../jobs.js';
 import { getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
-import { getJobsSettings } from '../settings.js';
+import { getJobsSettings, getGlassdoorLocIdCache } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
 import { appliedJobsSnapshot, isJobApplied } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
@@ -19,10 +19,10 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // import into electron/ from src/ is an established pattern (electron/ipc/
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
-// The exact relevance gate the pipeline ran (electron/extractors/apiExtractors.js)
-// — imported so a rejected-title sample can explain WHY the gate rejected it
-// instead of only printing the bare title. See its usage below for why
-// recomputing it here, at report time, is an exact replay rather than a guess.
+import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
+// Legacy/synthetic snapshots can still contain title-drop telemetry from older
+// builds. Keep the old decision helper only to explain those historical rejected
+// samples; current provider-trust runs do not execute a local title gate.
 import { jobRelevanceRejection } from '../../extractors/apiExtractors.js';
 
 export function buildJobsConfigSnapshot() {
@@ -47,6 +47,27 @@ export function buildJobsConfigSnapshot() {
       skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
     },
   };
+}
+
+/**
+ * One source-progress entry as text. A paced source's repeated heartbeats are
+ * folded by emitProgress into a single entry carrying a repeat count and a
+ * last-seen offset — printing both is what separates "still working, last seen
+ * 12s in" from "stopped emitting at +0s and never spoke again", which is the
+ * whole question when a run looks stuck.
+ *
+ * Exported for unit testing (formatting is otherwise only reachable through a
+ * full pipeline-snapshot render).
+ */
+export function formatSourceEvent(event) {
+  const status = event?.status || 'unknown';
+  const code = event?.code ? `⚠${event.code}` : '';
+  const start = Math.round((event?.t || 0) / 1000);
+  const lastSeen = event?.lastT == null ? start : Math.round(event.lastT / 1000);
+  const span = lastSeen !== start ? `→+${lastSeen}s` : '';
+  const repeats = event?.repeats > 1 ? ` ×${event.repeats}` : '';
+  const detail = event?.detail ? ` (${String(event.detail).slice(0, 60)})` : '';
+  return `${status}${code}@+${start}s${span}${repeats}${detail}`;
 }
 
 /**
@@ -164,7 +185,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       for (const sourceId of p.pendingSources) {
         const events = t.sourceEvents?.[sourceId] || [];
         const trail = events.length > 0
-          ? events.map(event => `${event.status || 'unknown'}${event.code ? `⚠${event.code}` : ''}@+${Math.round((event.t || 0) / 1000)}s`).join(' → ')
+          ? events.map(formatSourceEvent).join(' → ')
           : '(no progress event retained)';
         lines.push(`  - \`${sourceId}\`: ${trail}`);
       }
@@ -184,7 +205,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       `- Found (raw): ${s.raw}${relevanceStage} → deduped ${s.deduped} → age-dropped ${s.ageDropped} → ` +
       `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
     );
-    lines.push('- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+    lines.push(s.relevanceDropped > 0
+      ? '- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_'
+      : '- _(dedup / age / history drops are by-design — not jobs we failed to analyze; provider-returned rows are not locally title-filtered)_');
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {
       const summary = Object.entries(dedup.counts || {}).map(([reason, count]) => `${reason}=${count}`).join(', ');
@@ -215,7 +238,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : 'unlimited jobs/platform';
       const pages = Number.isFinite(collectionLimits.pagesPerPlatform) && collectionLimits.pagesPerPlatform > 0
         ? `${Math.floor(collectionLimits.pagesPerPlatform)} browser page(s)/search`
-        : 'the default page depth';
+        : `all browser pages/search (safety backstop ${JOB_COLLECTION_PAGE_CEILING})`;
       lines.push(`- **Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform; page depth applies to each generated search on browser platforms (API/feed platforms do not paginate).`);
     }
     if (s.ageBySource && Object.keys(s.ageBySource).length > 0) {
@@ -346,7 +369,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           }).join('; ') || '(no match evidence recorded)';
           const tags = Array.isArray(row?.tags) && row.tags.length ? ` · tags: ${row.tags.join(', ')}` : '';
           const mode = audit?.mode === 'post-hoc-title-audit' ? ' · post-hoc title audit' : ' · admission evidence';
-          const bypass = row?.bypassedTitleGate ? ' ⚠️ no query-title match; source bypassed an app-side title gate' : '';
+          const bypass = row?.providerAcceptedWithoutLocalTitleMatch
+            ? ' · no local query-title match; accepted from provider ranking by design'
+            : '';
           lines.push(`  - [${sourceId}] ${title}${company}: ${why}${tags}${mode}${bypass}`);
         }
       }
@@ -387,16 +412,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Browser scrape order (manual-verification-first): ${annotated.join(' → ')}`);
     }
 
-    // Per-source title-relevant counts — the "was this source silently not
-    // gathered?" line. The final relevance gate mutates sourceResults.jobs, so
-    // these counts reconcile to the funnel's post-relevance total, not `s.raw`.
-    // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
-    // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only
-    // saw the aggregate raw count and couldn't tell which sources contributed.
+    // Per-source gathered counts — the "was this source silently not gathered?"
+    // line. Provider-returned rows are preserved through admission; expected
+    // scope/configuration skips are split from real misses below. Without this
+    // you only saw the aggregate raw count and couldn't tell which sources
+    // contributed.
     if (s.bySource && Object.keys(s.bySource).length > 0) {
       const entries = Object.entries(s.bySource);
       const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
-      lines.push(`- Per source (title-relevant gathered): ${got.length ? got.join(', ') : '(none)'}`);
+      lines.push(`- Per source (provider-returned gathered): ${got.length ? got.join(', ') : '(none)'}`);
       // Date-bounded deep pagination: how deep each paginating source walked and
       // why it stopped. `empty-page` = the source ran out of results. `blocked`
       // = an anti-bot wall cut it short. `page-cap` = hit this card's requested
@@ -447,7 +471,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const collectedBeforeFinalAudit = Number(v.count || 0) + Number(v.finalRelevanceDropped || 0);
         const limit = v.cap?.limit;
         const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
-        lines.push(`  - \`${k}\`: collected ${collectedBeforeFinalAudit} of ${v.gathered} in-window candidate(s) before the final title audit ⚠️ (per-platform job limit${capLabel} — ${overflow} more were not gathered; increase or clear the Jobs per platform setting on the Job Search card to widen.)`);
+        lines.push(`  - \`${k}\`: collected ${collectedBeforeFinalAudit} of ${v.gathered} in-window provider-returned candidate(s) ⚠️ (per-platform job limit${capLabel} — ${overflow} more were not gathered; increase or clear the Jobs per platform setting on the Job Search card to widen.)`);
       }
       const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
       // jobRelevanceRejection is a pure function of (title, query): same inputs,
@@ -492,23 +516,37 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push(`    - rejected sample: ${sample} — if these read as ON-target for the search, the relevance gate is too strict.`);
         }
       }
+      // Scope/configuration skips are deliberate non-requests, not failed
+      // searches. Keep them visible, but never put them under the alarming
+      // "real miss" label used for blocks, selector failures, and safety skips
+      // that unexpectedly prevented a configured source from running.
+      const expectedSkipCodes = new Set(['country-source-skipped', 'config-missing']);
+      const zeroExpectedSkip = entries
+        .filter(([, v]) => v.count === 0 && v.warning && expectedSkipCodes.has(v.warning.code))
+        .map(([k, v]) => {
+          const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
+          return `${k} (${v.warning.code})${evidence}`;
+        });
       const zeroWarn = entries
-        .filter(([, v]) => v.count === 0 && v.warning)
+        .filter(([, v]) => v.count === 0 && v.warning && !expectedSkipCodes.has(v.warning.code))
         .map(([k, v]) => {
           const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
           return `${k} (${v.warning.code})${evidence}`;
         });
       const zeroTitleFiltered = entries
-        .filter(([, v]) => v.count === 0 && !v.warning && Number(v.finalRelevanceDropped || 0) > 0)
-        .map(([k, v]) => `${k} (${v.finalRelevanceDropped} gathered, then title-filtered)`);
+        .filter(([, v]) => v.count === 0 && !v.warning && Number(v.relevanceDropped || 0) > 0)
+        .map(([k, v]) => `${k} (${v.relevanceDropped} gathered, then title-filtered)`);
       const zeroClean = entries
         .filter(([, v]) => v.count === 0 && !v.warning && Number(v.relevanceDropped || 0) === 0)
         .map(([k]) => k);
       if (zeroWarn.length) {
         lines.push(`  - ⚠️ 0 results + flagged (real miss to investigate): ${zeroWarn.join(', ')}`);
       }
+      if (zeroExpectedSkip.length) {
+        lines.push(`  - ℹ️ intentionally not queried (scope/configuration): ${zeroExpectedSkip.join(', ')}`);
+      }
       if (zeroTitleFiltered.length) {
-        lines.push(`  - 0 retained after the final title audit: ${zeroTitleFiltered.join(', ')}`);
+        lines.push(`  - 0 retained after the title relevance gate: ${zeroTitleFiltered.join(', ')}`);
       }
       if (zeroClean.length) {
         lines.push(`  - 0 results, no warning (genuinely empty / off-category): ${zeroClean.join(', ')}`);
@@ -533,8 +571,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (interesting.length > 0) {
         lines.push('- Source progress-event trail (status@+s from search start; ⚠ = warning carried):');
         for (const [sid, evs] of interesting) {
-          const trail = (evs || []).map(e =>
-            `${e.status}${e.code ? `⚠${e.code}` : ''}@+${Math.round((e.t || 0) / 1000)}s`).join(' → ');
+          const trail = (evs || []).map(formatSourceEvent).join(' → ');
           lines.push(`  - \`${sid}\`: ${trail}`);
         }
       }
@@ -928,6 +965,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           isChromephase && e.elapsedMs != null ? `elapsed=${(e.elapsedMs / 1000).toFixed(1)}s`  : null,
           isChromephase && e.error          ? `err=${e.error}`                                   : null,
           isChromephase && e.stderr         ? `stderr=${String(e.stderr).slice(0, 200)}`          : null,
+          // A skipped source has to say WHY on its own line. Without this the
+          // phase read "location-resolution-failed Glassdoor q1/12" and the
+          // actual per-endpoint result lived only in the raw log tail.
+          e.phase === 'location-resolution-failed' && e.location ? `location="${e.location}"`     : null,
+          e.phase === 'location-resolution-failed' && e.failureKind ? `kind=${e.failureKind}`     : null,
+          e.phase === 'location-resolution-failed' && e.reason ? `reason=${String(e.reason).slice(0, 300)}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
         lines.push(`  - ${label}`);
@@ -953,6 +996,161 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (fieldAnomalies.length > shown.length) {
         lines.push(`  - _${fieldAnomalies.length - shown.length} earlier field-quality anomaly event(s) omitted from the bounded trail._`);
       }
+    }
+
+    // Card traversal is distinct from listing-field quality. A browser can
+    // ultimately retain every row yet visibly jump over cards while trying to
+    // target them (for example when a board owns an inner scroll container).
+    // The old `N/N descriptions expanded` aggregate alone could not prove which
+    // positions were recovered or missed, and only a third *consecutive* miss
+    // reached the old stale-selector warning. One bounded summary per expansion
+    // batch gives a FULL/CARDWALK report the actual walk without printing every
+    // successful card or making report size proportional to result count.
+    const cardWalks = allScrapeEvents.filter(e => e?.phase === 'card-walk');
+    if (cardWalks.length > 0) {
+      lines.push('- Browser card traversal (bounded batch summaries):');
+      for (const e of cardWalks.slice(-8)) {
+        const total = Number(e.total ?? e.itemTotal ?? 0);
+        const attempted = Number(e.attempted ?? 0);
+        const expanded = Number(e.expanded ?? 0);
+        const missing = Number(e.missing ?? 0);
+        const panelTimeouts = Number(e.panelTimeouts ?? 0);
+        const titleBypassed = Number(e.titleBypassed ?? 0);
+        // The post-click selected-card probe is separate from the pre-click
+        // hit-test. A correct physical hit does not, by itself, prove that the
+        // board activated that same row after its event handler ran.
+        const selectionMismatches = Number(e.selectionMismatches);
+        // A cancellation is a normal terminal state, but it is very different
+        // from a missing card or selector failure. Keep its position/reason on
+        // the same bounded walk line so a partial walk cannot be mistaken for a
+        // recurring every-Nth-card miss.
+        const aborted = e.aborted === true || e.interrupted === true || e.cancelled === true;
+        // `interruptedAt` is the next 1-based target the walker did not reach;
+        // report it as "before" rather than falsely claiming that card was
+        // attempted. Older/alternate producers may provide an actual completed
+        // `abortedAt` / `abortIndex`, which is correctly phrased as "after".
+        const interruptedAt = Number(e.interruptedAt);
+        const completedAt = Number(e.abortedAt ?? e.abortIndex ?? e.stopIndex ?? attempted);
+        const abortPosition = Number.isFinite(interruptedAt) && interruptedAt > 0
+          ? ` before #${interruptedAt}`
+          : Number.isFinite(completedAt) && completedAt > 0 ? ` after #${completedAt}` : '';
+        const abortReason = e.abortReason ?? e.interruptReason ?? e.stopReason ?? e.reason;
+        const abortLabel = aborted
+          ? `${e.aborted === true || e.cancelled === true ? 'aborted' : 'interrupted'}${abortPosition}${abortReason ? ` (${String(abortReason).slice(0, 160)})` : ''}`
+          : null;
+        const label = [
+          e.srcName || e.sourceId || 'source',
+          e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
+          e.pageNum ? `p${e.pageNum}` : null,
+          `attempted ${attempted}/${total}`,
+          `expanded ${expanded}/${total}`,
+          missing > 0 ? `missing-target ${missing}` : null,
+          panelTimeouts > 0 ? `panel-timeout ${panelTimeouts}` : null,
+          Number.isFinite(selectionMismatches) ? `selection-mismatches ${selectionMismatches}` : null,
+          titleBypassed > 0 ? `title-bypassed ${titleBypassed} (intentional, page-local)` : null,
+          abortLabel,
+        ].filter(Boolean).join(' · ');
+        lines.push(`  - ${label}`);
+        const samples = Array.isArray(e.failureSamples) ? e.failureSamples.slice(0, 6) : [];
+        for (const sample of samples) {
+          const index = Number(sample?.itemIndex);
+          const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+          const key = sample?.key ? ` key=${String(sample.key).slice(0, 100)}` : '';
+          const reason = sample?.reason ? ` reason=${String(sample.reason).slice(0, 160)}` : '';
+          lines.push(`    - ⚠️ ${position}${key}${reason}`);
+        }
+        // Failures alone cannot diagnose a visible "every other card" jump:
+        // all clicks can succeed while the browser resolves a neighbouring
+        // virtualized card. Preserve a small transition trace with both the
+        // requested identity and the element actually hit. Accept `resolved*`
+        // aliases because the browser walker records a resolved DOM identity;
+        // `hit*` makes the report's meaning clearer to the person reading it.
+        const transitions = Array.isArray(e.transitionSamples) ? e.transitionSamples.slice(-8) : [];
+        if (transitions.length > 0) {
+          lines.push('    - Click transition samples (expected → hit):');
+          for (const sample of transitions) {
+            const index = Number(sample?.itemIndex ?? sample?.index);
+            const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+            const physicalIndex = Number(sample?.physicalIndex);
+            const physicalTotal = Number(sample?.physicalTotal);
+            const physicalPosition = Number.isFinite(physicalIndex) && physicalIndex > 0
+              ? ` · physical #${physicalIndex}${Number.isFinite(physicalTotal) && physicalTotal > 0 ? `/${physicalTotal}` : ''}`
+              : '';
+            const skippedSincePrevious = Number(sample?.skippedSincePrevious);
+            const physicalGap = Number.isFinite(skippedSincePrevious) && skippedSincePrevious > 0
+              ? ` · ${skippedSincePrevious} physical card${skippedSincePrevious === 1 ? '' : 's'} skipped since previous`
+              : '';
+            const expectedKey = sample?.expectedKey ?? sample?.expected?.key ?? sample?.key;
+            const expectedTitle = sample?.expectedTitle ?? sample?.expected?.title;
+            const hitKey = sample?.hitKey ?? sample?.resolvedKey ?? sample?.resolved?.key;
+            const hitTitle = sample?.hitTitle ?? sample?.resolvedTitle ?? sample?.resolved?.title;
+            const selectedTitle = sample?.selectedTitle ?? sample?.selected?.title;
+            const lookup = sample?.lookup ? ` via ${String(sample.lookup).slice(0, 80)}` : '';
+            const identityMismatch = sample?.mismatch === true
+              || (!!expectedKey && !!hitKey && String(expectedKey) !== String(hitKey));
+            const selectionMismatch = sample?.selectionMismatch === true;
+            const selectionVerified = sample?.selectionVerified === true;
+            const expected = [
+              expectedKey ? `key=${String(expectedKey).slice(0, 100)}` : null,
+              expectedTitle ? `title=${String(expectedTitle).replace(/\s+/g, ' ').slice(0, 100)}` : null,
+            ].filter(Boolean).join(' ');
+            const hit = [
+              hitKey ? `key=${String(hitKey).slice(0, 100)}` : null,
+              hitTitle ? `title=${String(hitTitle).replace(/\s+/g, ' ').slice(0, 100)}` : null,
+            ].filter(Boolean).join(' ');
+            const selected = selectedTitle
+              ? ` → selected title=${String(selectedTitle).replace(/\s+/g, ' ').slice(0, 100)}`
+              : '';
+            const selectionStatus = selectionMismatch
+              ? ' [SELECTION MISMATCH]'
+              : selectionVerified ? ' [selection verified]'
+                : '';
+            lines.push(`      - ${identityMismatch ? '⚠️ ' : ''}${position}${physicalPosition}${physicalGap} expected ${expected || '(identity unavailable)'} → hit ${hit || '(identity unavailable)'}${lookup}${identityMismatch ? ' [MISMATCH]' : ''}${selected}${selectionStatus}`);
+          }
+          const totalTransitions = e.transitionSamples.length;
+          if (totalTransitions > transitions.length) {
+            lines.push(`      - _${totalTransitions - transitions.length} earlier transition sample(s) omitted from the bounded trace._`);
+          }
+        }
+      }
+      if (cardWalks.length > 8) {
+        lines.push(`  - _${cardWalks.length - 8} earlier card-walk batch summary(s) omitted from the bounded trail._`);
+      }
+    }
+  }
+
+  // Glassdoor's location filter is keyed by a numeric locId that has to be
+  // resolved through a Cloudflare-gated in-browser autocomplete, and a failed
+  // resolve SKIPS the whole source. Whether a cached, country-verified entry
+  // existed is therefore the difference between "this run had to make that
+  // fragile call" and "it should never have needed to" — unanswerable from the
+  // rest of the report, so it is printed whenever the question can come up.
+  const locationSkips = (browserScrape?.events || []).filter(e => e?.phase === 'location-resolution-failed');
+  let glassdoorLocCache = {};
+  try { glassdoorLocCache = getGlassdoorLocIdCache() || {}; } catch { /* store may not be ready */ }
+  const cacheKeys = Object.keys(glassdoorLocCache);
+  if (locationSkips.length > 0 || cacheKeys.length > 0) {
+    lines.push('\n### Glassdoor Location Cache');
+    lines.push('> Persisted location → locId map. `country` is the ISO the entry was validated');
+    lines.push('> against; an entry WITHOUT one predates that field and is deliberately');
+    lines.push('> re-resolved on every country-scoped run rather than trusted.');
+    if (cacheKeys.length === 0) {
+      lines.push('- (empty — every location resolve this run had to go to the live autocomplete)');
+    } else {
+      for (const key of cacheKeys.slice(0, 12)) {
+        const entry = glassdoorLocCache[key] || {};
+        const provenance = entry.country
+          ? `country ${entry.country}${entry.verifiedAt ? ` · verified ${formatAge(Date.now() - entry.verifiedAt)} ago` : ''}`
+          : '⚠️ no country provenance — will be re-resolved when country-scoped';
+        lines.push(`- \`${key}\` → locId ${entry.locId ?? '(none)'}/${entry.locT ?? '?'} · ${provenance}`);
+      }
+      if (cacheKeys.length > 12) lines.push(`- _${cacheKeys.length - 12} further cached location(s) omitted._`);
+    }
+    for (const skip of locationSkips.slice(-3)) {
+      const cached = glassdoorLocCache[String(skip.location || '').trim().toLowerCase()];
+      lines.push(`- Skipped \`${skip.srcName || skip.sourceId}\` for "${skip.location}" (${skip.failureKind || 'kind not recorded'}): `
+        + `${cached ? `a cached entry ${cached.country ? `(country ${cached.country}) ` : '(no country provenance) '}was present` : 'no cached entry was present'}`
+        + `${skip.attempts ? ` · ${skip.attempts} lookup attempt(s) recorded` : ''}`);
     }
   }
 
@@ -1469,11 +1667,48 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           : ' (no merging needed)';
         lines.push(`  - Roles consolidated from ${dirs} distinct scorer careerDirection(s)${note}.`);
       }
-      if (b.missing > 0) {
+      const modelCoverage = b.modelRoleCoverage && typeof b.modelRoleCoverage === 'object'
+        ? b.modelRoleCoverage
+        : null;
+      const repairedCoverage = b.repairedRoleCoverage && typeof b.repairedRoleCoverage === 'object'
+        ? b.repairedRoleCoverage
+        : null;
+      const malformedNameCount = Array.isArray(modelCoverage?.malformedNameIndices)
+        ? modelCoverage.malformedNameIndices.length
+        : 0;
+      const modelDefect = modelCoverage && (
+        Number(modelCoverage.unassigned || 0) > 0
+        || malformedNameCount > 0
+        || Number(modelCoverage.duplicated || 0) > 0
+        || Number(modelCoverage.invalid || 0) > 0
+        || Number(modelCoverage.missing || 0) > 0
+      );
+      if (modelDefect) {
+        const defects = [];
+        if (Number(modelCoverage.unassigned || 0) > 0) defects.push(`${modelCoverage.unassigned} unassigned job(s)`);
+        if (malformedNameCount > 0) defects.push(`${malformedNameCount} job(s) under malformed role name(s)`);
+        if (Number(modelCoverage.duplicated || 0) > 0) defects.push(`${modelCoverage.duplicated} duplicated assignment(s)`);
+        if (Number(modelCoverage.invalid || 0) > 0) defects.push(`${modelCoverage.invalid} invalid job index(es)`);
+        // Defensive fallback for a future telemetry shape that exposes only the
+        // aggregate raw gap rather than its unassigned/malformed breakdown.
+        if (defects.length === 0 && Number(modelCoverage.missing || 0) > 0) {
+          defects.push(`${modelCoverage.missing} job(s) without a usable role assignment`);
+        }
+        lines.push(`  - ⚠️ AI role-partition defect: ${defects.join(', ')}.`);
+
+        const repairedPlaced = Number(repairedCoverage?.placed ?? b.placed);
+        const repairedMissing = Number(repairedCoverage?.missing ?? b.missing);
+        const repairTotal = Number(b.input) || 0;
+        if (repairTotal > 0 && repairedPlaced === repairTotal && repairedMissing === 0) {
+          lines.push(`  - ✅ Deterministic recovery placed ${repairedPlaced}/${repairTotal} job(s) into renderable roles; career-direction/Other details appear in Taxonomy validation repaired below.`);
+        } else if (repairTotal > 0) {
+          lines.push(`  - ⚠️ Deterministic recovery placed ${Number.isFinite(repairedPlaced) ? repairedPlaced : 0}/${repairTotal} job(s) into renderable roles${Number.isFinite(repairedMissing) && repairedMissing > 0 ? `; ${repairedMissing} still missing` : ''}.`);
+        }
+      } else if (b.missing > 0) {
         const idxNote = Array.isArray(b.missingIndices) && b.missingIndices.length > 0
           ? ` Missing indices (0-based): [${b.missingIndices.join(', ')}]`
           : '';
-        lines.push(`  - ⚠️ **${b.missing} job(s) NOT placed in any role by the AI** (common on the weak fallback models quota forces). The renderer sweeps them into an "Other" role — shown, not dropped.${idxNote}`);
+        lines.push(`  - ⚠️ **${b.missing} job(s) NOT placed in any role by the AI.** The renderer sweeps them into an "Other" role — shown, not dropped.${idxNote}`);
       }
       if (b.duplicated > 0) {
         lines.push(`  - ⚠️ ${b.duplicated} job(s) placed in more than one role by the AI (first wins on spawn).`);

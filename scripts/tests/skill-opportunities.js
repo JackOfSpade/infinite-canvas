@@ -1,5 +1,6 @@
 import {
   assert,
+  assertValidSkillOpportunityHistogram,
   __resetSkillOpportunityHistogramCacheForTests,
   buildResumeDocument,
   createEmptySkillOpportunityHistogram,
@@ -7,8 +8,10 @@ import {
   fs,
   loadSkillOpportunityHistogram,
   mergeSkillOpportunityAnalysis,
+  migrateSkillOpportunityHistogram,
   normalizeOpportunityName,
   recordSkillOpportunityAnalysis,
+  replaceSkillOpportunityAnalysis,
   skillOpportunityHistogramFilePath,
 } from '../test-dependencies.js';
 
@@ -107,18 +110,130 @@ export default [
     },
   },
   {
+    name: 'skill opportunity histogram: a retry replaces one card while distinct cards and the migrated baseline remain counted',
+    run: () => {
+      const empty = createEmptySkillOpportunityHistogram();
+      const first = replaceSkillOpportunityAnalysis(empty, 'job-card-a', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Kubernetes' }),
+      ]), { generationStartedAt: 100, recordedAt: '2026-08-15T10:00:00.000Z' });
+      assert(empty.roles.length === 0 && empty.contributions.length === 0, 'projection mutated the durable input snapshot');
+
+      const retry = replaceSkillOpportunityAnalysis(first, 'job-card-a', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Terraform', kind: 'learn', suggestedResumeText: '', verificationQuestion: '', learningAction: 'Build one module.' }),
+      ]), { generationStartedAt: 200, recordedAt: '2026-08-15T11:00:00.000Z' });
+      const retriedRole = retry.roles[0];
+      assert(retry.contributions.length === 1 && retriedRole.generationCount === 1,
+        'a successful retry for one card must replace, not append, its generation');
+      assert(retriedRole.skills.length === 1 && retriedRole.skills[0].name === 'Terraform'
+        && retriedRole.skills[0].demandCount === 1 && retriedRole.skills[0].learnCount === 1,
+      'replacement did not remove the superseded skill contribution');
+
+      const distinct = replaceSkillOpportunityAnalysis(retry, 'job-card-b', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Terraform', kind: 'verify' }),
+      ]), { generationStartedAt: 300, recordedAt: '2026-08-15T12:00:00.000Z' });
+      const combinedRole = distinct.roles[0];
+      assert(combinedRole.generationCount === 2 && combinedRole.skills[0].demandCount === 2
+        && combinedRole.skills[0].verifyCount === 1 && combinedRole.skills[0].learnCount === 1,
+      'two distinct cards must each contribute exactly once');
+
+      const stale = replaceSkillOpportunityAnalysis(distinct, 'job-card-a', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Obsolete retry' }),
+      ]), { generationStartedAt: 150, recordedAt: '2026-08-15T10:30:00.000Z' });
+      assert(stale === distinct && !stale.roles[0].skills.some(skill => skill.name === 'Obsolete retry'),
+        'an older attempt overwrote the newer successful generation');
+
+      let missingKeyRejected = false;
+      try {
+        replaceSkillOpportunityAnalysis(distinct, '', analysis('Platform Engineer', []), { generationStartedAt: 400 });
+      } catch (error) {
+        missingKeyRejected = /sourceKey/.test(error.message);
+      }
+      assert(missingKeyRejected, 'a missing nodeId/sourceKey silently entered a shared histogram bucket');
+
+      const tampered = JSON.parse(JSON.stringify(distinct));
+      tampered.roles[0].generationCount += 1;
+      let tamperRejected = false;
+      try { assertValidSkillOpportunityHistogram(tampered); } catch (error) { tamperRejected = /deterministic/.test(error.message); }
+      assert(tamperRejected, 'a persisted aggregate inconsistent with its source ledger was accepted');
+      const malformed = JSON.parse(JSON.stringify(distinct));
+      malformed.contributions[0].analysis.items[0].kind = 'maybe';
+      let malformedRejected = false;
+      try { assertValidSkillOpportunityHistogram(malformed); } catch (error) { malformedRejected = /invalid skill analysis item/.test(error.message); }
+      assert(malformedRejected, 'a malformed persisted contribution was silently filtered during validation');
+
+      const legacy = { version: 1, roles: mergeSkillOpportunityAnalysis(createEmptySkillOpportunityHistogram(), analysis('Legacy Role', [item()]), '2026-08-14T10:00:00.000Z').roles };
+      const migrated = migrateSkillOpportunityHistogram(legacy);
+      const withCard = replaceSkillOpportunityAnalysis(migrated, 'job-card-c', analysis('New Role', [item({ canonicalSkillName: 'Rust' })]), {
+        generationStartedAt: 500,
+        recordedAt: '2026-08-15T13:00:00.000Z',
+      });
+      const replacedCard = replaceSkillOpportunityAnalysis(withCard, 'job-card-c', analysis('New Role', [item({ canonicalSkillName: 'Go' })]), {
+        generationStartedAt: 600,
+        recordedAt: '2026-08-15T14:00:00.000Z',
+      });
+      assert(replacedCard.baselineRoles[0].name === 'Legacy Role'
+        && replacedCard.baselineRoles[0].skills[0].demandCount === 1,
+      'v1 migration did not preserve old unkeyed counts as an immutable baseline');
+      assert(replacedCard.roles.find(role => role.name === 'New Role')?.skills[0]?.name === 'Go',
+        'rebuilding a keyed contribution damaged the migrated baseline or retained its superseded value');
+      return { oneCardCount: retriedRole.generationCount, distinctCardCount: combinedRole.generationCount };
+    },
+  },
+  {
     name: 'skill opportunity store: demand survives reload and external corruption fails loudly',
     run: () => {
-      const stored = recordSkillOpportunityAnalysis(analysis('Platform Engineer', [
+      const stored = recordSkillOpportunityAnalysis('store-card', analysis('Platform Engineer', [
         item({ canonicalSkillName: 'Kubernetes', kind: 'learn', suggestedResumeText: '', verificationQuestion: '', learningAction: 'Deploy one service.' }),
-      ]));
+      ]), { generationStartedAt: 1000, recordedAt: '2026-08-15T10:00:00.000Z' });
       assert(stored.roles[0]?.skills[0]?.demandCount === 1, 'record did not persist the first demand observation');
       __resetSkillOpportunityHistogramCacheForTests();
       const reloaded = loadSkillOpportunityHistogram();
       assert(reloaded.roles[0]?.name === 'Platform Engineer' && reloaded.roles[0]?.skills[0]?.name === 'Kubernetes',
         'histogram did not survive a cold reload');
 
+      const replaced = recordSkillOpportunityAnalysis('store-card', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Terraform', kind: 'learn', suggestedResumeText: '', verificationQuestion: '', learningAction: 'Build one module.' }),
+      ]), { generationStartedAt: 2000, recordedAt: '2026-08-15T11:00:00.000Z' });
+      assert(replaced.roles[0]?.generationCount === 1 && replaced.roles[0]?.skills[0]?.name === 'Terraform',
+        'store retry appended instead of replacing its card contribution');
+      __resetSkillOpportunityHistogramCacheForTests();
+      const replacementReloaded = loadSkillOpportunityHistogram();
+      assert(replacementReloaded.roles[0]?.generationCount === 1 && replacementReloaded.contributions.length === 1,
+        'source-key replacement did not survive a cold reload');
+
+      // A pure projection models analysis followed by any later generation,
+      // render, or write failure: without record(), durable state must not move.
+      replaceSkillOpportunityAnalysis(replacementReloaded, 'store-card', analysis('Platform Engineer', [item({ canonicalSkillName: 'Never committed' })]), {
+        generationStartedAt: 3000,
+        recordedAt: '2026-08-15T12:00:00.000Z',
+      });
+      assert(loadSkillOpportunityHistogram().roles[0]?.skills[0]?.name === 'Terraform',
+        'an uncommitted projection changed the durable histogram');
+
       const filePath = skillOpportunityHistogramFilePath();
+      const newer = recordSkillOpportunityAnalysis('store-card', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Go' }),
+      ]), { generationStartedAt: 4000, recordedAt: '2026-08-15T13:00:00.000Z' });
+      const stale = recordSkillOpportunityAnalysis('store-card', analysis('Platform Engineer', [
+        item({ canonicalSkillName: 'Stale rollback' }),
+      ]), { generationStartedAt: 3500, recordedAt: '2026-08-15T12:30:00.000Z' });
+      assert(stale === newer && stale.roles[0]?.skills[0]?.name === 'Go',
+        'store accepted a stale generation over its newer source contribution');
+
+      const legacyOnDisk = { version: 1, roles: stale.roles };
+      fs.writeFileSync(filePath, `${JSON.stringify(legacyOnDisk, null, 2)}\n`, 'utf8');
+      __resetSkillOpportunityHistogramCacheForTests();
+      const migratedReload = loadSkillOpportunityHistogram();
+      assert(migratedReload.version === 2 && migratedReload.contributions.length === 0
+        && migratedReload.baselineRoles[0]?.skills[0]?.name === 'Go',
+      'cold-load migration did not preserve the aggregate-only v1 file as a baseline');
+      const postMigration = recordSkillOpportunityAnalysis('post-migration-card', analysis('Security Engineer', [
+        item({ canonicalSkillName: 'Threat modeling' }),
+      ]), { generationStartedAt: 5000, recordedAt: '2026-08-15T14:00:00.000Z' });
+      assert(postMigration.baselineRoles[0]?.skills[0]?.name === 'Go'
+        && postMigration.contributions.length === 1 && postMigration.roles.length === 2,
+      'first v2 write after migration discarded the immutable v1 baseline');
+
       fs.writeFileSync(filePath, '{ broken', 'utf8');
       __resetSkillOpportunityHistogramCacheForTests();
       let failedLoudly = false;
@@ -195,6 +310,55 @@ export default [
       assert(!document.querySelector('[data-ic-not-mine-plan]').hidden, 'Not mine should reveal the bounded learning fallback');
       dom.window.close();
       return { ok: true };
+    },
+  },
+  {
+    name: 'application workspace: model provenance shows only distinct successful actual models and escapes display data',
+    run: () => {
+      const html = buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Jane</h1></main>',
+        modelProvenance: [
+          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed', fallback: { attempts: 2 } },
+          // The resume writer can appear twice in task telemetry after a retry;
+          // the immutable workspace should name that same actual model once.
+          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed', fallback: { attempts: 2 } },
+          { task: 'application-cover-letter', provider: 'claude', model: 'claude-sonnet-5', status: 'completed' },
+          { task: 'application-resume-revision', provider: 'gemini', model: '<img id="provenance-xss">', status: 'completed' },
+          { task: 'application-letter-plan', provider: 'gemini', model: 'failed-model-must-not-show', status: 'failed' },
+          { task: 'company-research', provider: 'gemini', model: 'degraded-model-must-not-show', status: 'degraded' },
+        ],
+      });
+      const dom = new JSDOM(html);
+      const provenance = dom.window.document.querySelector('[data-ic-model-provenance]');
+      assert(provenance, 'a successful model outcome did not render provenance in Application.html');
+      const rows = [...provenance.querySelectorAll('li')].map(row => row.textContent);
+      assert(rows.length === 3, `expected two models plus one escaped revision entry after dedupe, got ${rows.length}`);
+      assert(rows.filter(row => row.includes('Résumé writing and fit')).length === 1,
+        'duplicate task/model outcomes were repeated in the saved bundle');
+      assert(rows.some(row => row.includes('gemini-3.7-flash') && row.includes('(fallback)')),
+        'the actual fallback-serving model was not identified as a fallback');
+      assert(rows.some(row => row.includes('Cover-letter writing') && row.includes('claude-sonnet-5')),
+        'a second successful provider/model was not listed');
+      assert(rows.some(row => row.includes('Résumé length revision') && row.includes('<img id="provenance-xss">')),
+        'a successful length-revision model was not displayed as text');
+      assert(!provenance.querySelector('#provenance-xss') && !html.includes('<img id="provenance-xss">'),
+        'model provenance was inserted as HTML instead of escaped text');
+      assert(!provenance.textContent.includes('failed-model-must-not-show')
+        && !provenance.textContent.includes('degraded-model-must-not-show'),
+      'failed or degraded calls were presented as bundle-generating models');
+      dom.window.close();
+
+      const singleModelDom = new JSDOM(buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Jane</h1></main>',
+        modelProvenance: [
+          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed' },
+        ],
+      }));
+      assert(singleModelDom.window.document.querySelector('[data-ic-model-provenance] summary')?.textContent
+        === 'AI model: Google · gemini-3.7-flash',
+      'a single serving model was not shown with the singular, visible bundle label');
+      singleModelDom.window.close();
+      return { entries: rows.length };
     },
   },
   {

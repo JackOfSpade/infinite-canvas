@@ -996,27 +996,45 @@ ${rows}
       ? `\n- 🔄 **Listing status checks in flight: ${statusQueueDepth}** — 1 running, ${statusQueueDepth - 1} queued behind the FIFO lock (per-card "Check" + "Check All" serialize globally to avoid doubling the single-IP burst; see statusCheckLock.js). A nonzero depth while the UI looks frozen = checks awaiting their turn, NOT hung.`
       : '\n- Listing status-check queue: idle (no Check / Check All running).';
     if (localTasks.length > 0) {
-      // Staleness = time since the most recent main-process log line that names
-      // this node. A task registered long ago whose node hasn't logged in a
-      // while is the fingerprint of a hang (e.g. a navigation on a dead VPN IP
-      // that never times out) — the thing a bare count can't tell you.
+      // Staleness = time since this node last showed ANY sign of life. Log lines
+      // alone are not that signal: most scraper logs never interpolate a nodeId,
+      // so a node grinding through a long sequential walk looks silent and gets
+      // flagged as hung. Fold in the run's own progress heartbeat, and name which
+      // signal the age came from so the number is never mistaken for more than it
+      // measures.
       const allLogs = getRecentLogs() || [];
-      const HUNG_HINT_MS = 180_000; // 3 min of no node-tagged activity = suspect
+      const HUNG_HINT_MS = 180_000; // 3 min with no signal of any kind = suspect
       const fmtAge = (ms) => (ms == null ? '—' : `${Math.round(ms / 1000)}s`);
-      const lastLogAgeForNode = (nodeId) => {
-        let latest = 0;
+      const jobsTel = getJobsTelemetry();
+      const mktTel = getMarketplaceTelemetry();
+      const lastActivityForNode = (nodeId) => {
+        const signals = [];
+        let latestLog = 0;
         for (const l of allLogs) {
-          if (l.ts > latest && typeof l.message === 'string' && l.message.includes(nodeId)) latest = l.ts;
+          if (l.ts > latestLog && typeof l.message === 'string' && l.message.includes(nodeId)) latestLog = l.ts;
         }
-        return latest ? Date.now() - latest : null;
+        if (latestLog) signals.push({ ts: latestLog, label: 'node-tagged log' });
+        if (jobsTel?.nodeId === nodeId && jobsTel?.pipeline?.ts) {
+          signals.push({ ts: jobsTel.pipeline.ts, label: 'search progress heartbeat' });
+        }
+        // Marketplace telemetry stamps `ts` per STAGE, not on the root — take
+        // the newest stage that actually ran.
+        if (mktTel?.nodeId === nodeId) {
+          const stageTs = [mktTel.analyze?.ts, mktTel.scrape?.ts, mktTel.synthesis?.ts,
+            ...Object.values(mktTel.resolves || {}).map(r => r?.ts)].filter(Number.isFinite);
+          if (stageTs.length > 0) signals.push({ ts: Math.max(...stageTs), label: 'marketplace stage telemetry' });
+        }
+        if (signals.length === 0) return null;
+        const newest = signals.reduce((a, b) => (b.ts > a.ts ? b : a));
+        return { ms: Date.now() - newest.ts, label: newest.label };
       };
       const rows = localTasks
         .map(t => {
-          const lastMs = lastLogAgeForNode(t.nodeId);
-          // Suspect a hang when the node has been silent past the hint window
-          // (or never logged) while a task is still registered and aging.
-          const suspect = (lastMs == null ? t.oldestAgeMs : lastMs) > HUNG_HINT_MS;
-          const lastCell = lastMs == null ? 'no node-tagged log' : `${fmtAge(lastMs)} ago`;
+          const last = lastActivityForNode(t.nodeId);
+          // Suspect a hang when the node has shown no signal past the hint window
+          // (or none at all) while a task is still registered and aging.
+          const suspect = (last == null ? t.oldestAgeMs : last.ms) > HUNG_HINT_MS;
+          const lastCell = last == null ? 'no node activity recorded' : `${fmtAge(last.ms)} ago (${last.label})`;
           const flag = suspect ? ' ⚠️ possibly hung' : '';
           const chans = t.channels?.length ? t.channels.join(', ') : '—';
           return `| \`${shortId(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
@@ -1027,12 +1045,15 @@ ${rows}
 > Nodes with backend AbortControllers still registered at report time.
 > A node showing tasks here while its UI looks idle means a cancel/abort
 > request never reached the backend. **Oldest task age** = how long the
-> longest-running task has been registered; **Last node log** = time since the
-> newest main-process log line naming this node. A large age + stale last-log
-> (⚠️ possibly hung, >3m of silence) is the signature of a stuck task — e.g. a
-> request hanging on a network call that never returns.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
+> longest-running task has been registered; **Last node activity** = time since
+> the newest signal naming this node, with the signal that supplied it in
+> parentheses (a main-process log line, or the run's own progress heartbeat —
+> most scraper log lines carry no nodeId, so logs alone understate activity).
+> A large age + stale activity (⚠️ possibly hung, >3m of silence) is the
+> signature of a stuck task — e.g. a request hanging on a network call that
+> never returns.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
 
-| Node ID | Tasks | Oldest task age | Last node log | Channel(s) |
+| Node ID | Tasks | Oldest task age | Last node activity | Channel(s) |
 |---|---|---|---|---|
 ${rows}
 ${statusQueueLine}

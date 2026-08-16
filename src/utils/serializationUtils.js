@@ -198,6 +198,30 @@ export function migrateMarketplaceCardCreatedAt(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Retire the old shipped default (10) for a job-search hub's
+ * `collectionLimits.pagesPerPlatform`. Both collection limits now default to
+ * "All" (null) — see jobCollectionLimits.js — but a hub saved before that
+ * change persisted the literal `10` on disk, so without this it would keep
+ * paging to the retired 10-page ceiling forever even though a brand-new hub
+ * gets `null` (unlimited). Shape-gated on the exact value 10, so it runs once
+ * per hub and never touches any other explicit number.
+ *
+ * Trade-off: a user who deliberately typed 10 is indistinguishable from one
+ * who never touched the field, and gets migrated too — accepted, since 10 was
+ * the only default this field ever shipped with.
+ */
+export function migrateJobHubPageCeiling(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    if (n.type !== 'jobhub' || n.data?.collectionLimits?.pagesPerPlatform !== 10) return n;
+    changed = true;
+    return { ...n, data: { ...n.data, collectionLimits: { ...n.data.collectionLimits, pagesPerPlatform: null } } };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -224,6 +248,7 @@ const MIGRATIONS = [
   { version: 1, name: 'group→canvasData',        migrate: migrateGroupNodes,          selfRecursive: true  },
   { version: 2, name: 'legacy-jobhub→scoredJobs', migrate: migrateLegacyJobHubResults, selfRecursive: false },
   { version: 3, name: 'marketplacecard+createdAt', migrate: migrateMarketplaceCardCreatedAt, selfRecursive: false },
+  { version: 4, name: 'jobhub-page-ceiling→all',  migrate: migrateJobHubPageCeiling,   selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

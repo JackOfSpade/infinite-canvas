@@ -17,6 +17,7 @@ import {
   checkNeedsPortfolio,
   checkPlanGate,
   checkRedundancy,
+  checkRequestedWorkSampleLink,
   checkShape,
   checkTopNeedDisposition,
   coverLetterCheckSummary,
@@ -501,6 +502,16 @@ export default [
       const allPassNotice = coverLetterCheckSummary([{ id: 'shape', passed: true, detail: 'fits' }]);
       assert(allPassNotice.includes('deterministic checks passed') && allPassNotice.includes('not a persuasive-quality certification'),
         'an all-pass workspace must explicitly avoid treating mechanical checks as a persuasive-quality score');
+      const requestedWorkSample = 'Please include a link to something you have built and shipped — a repo, a deployed app, or a demo — with your application.';
+      const missingWorkSample = checkRequestedWorkSampleLink(requestedWorkSample, '<main><a href="mailto:maya@example.test">Email</a></main>');
+      const linkedWorkSample = checkRequestedWorkSampleLink(requestedWorkSample, '<main><a href="https://example.test/demo">Demo</a></main>');
+      const notRequested = checkRequestedWorkSampleLink('Build and ship internal tools.', '<main></main>');
+      assert(!missingWorkSample.passed && missingWorkSample.id === 'work-sample-link'
+        && linkedWorkSample.passed && notRequested.passed,
+      'a posting-requested work-sample link must stay visible unless the résumé contains a clickable http(s) URL');
+      const punctuationNotice = coverLetterCheckSummary([{ id: 'punctuation', passed: false, detail: 'already punctuated.' }]);
+      assert(!punctuationNotice.includes('punctuated..'),
+        'the bounded workspace notice must not append a second terminal period');
       return { validChecks: valid.checks.length, retryChecks: allStated.checks.length, sourcedLogistics: sourcedLogistics.detail, portfolio: betterPortfolio.selected, topNeed: topDisposition.detail, nonTopEligibility: nonTopEligibility.detail, proseChecks: proseChecks.length };
     },
   },

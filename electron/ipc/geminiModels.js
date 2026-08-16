@@ -358,9 +358,15 @@ export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), n
     .filter((entry) => !opts.responseSchema || entry.supportsStructuredOutput !== false)
     .filter((entry) => !opts.grounding || entry.supportsGrounding !== false)
     .map((entry) => entry.id));
+  const excluded = new Set(Array.isArray(opts.excludeModels) ? opts.excludeModels.filter(Boolean) : []);
+  const withoutExcluded = base.filter(id => !excluded.has(id));
+  // Adversarial second passes can exclude the exact model that authored the
+  // material under review. Reuse it only if a future catalog leaves no other
+  // compatible model at all; an empty cascade would be less safe.
+  const eligible = withoutExcluded.length ? withoutExcluded : base;
 
-  const ready = base.filter((id) => (suppressedUntil.get(id) || 0) <= now);
-  const suppressed = base.filter((id) => (suppressedUntil.get(id) || 0) > now);
+  const ready = eligible.filter((id) => (suppressedUntil.get(id) || 0) <= now);
+  const suppressed = eligible.filter((id) => (suppressedUntil.get(id) || 0) > now);
   return [...ready, ...suppressed];
 }
 
@@ -369,10 +375,13 @@ export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), n
  * registry or entitlement probes. Suppressed models retain the normal
  * last-resort behavior: cool them to the tail, but never make a chain empty.
  */
-export function orderVertexGeminiModels(suppressedUntil = new Map(), now = Date.now()) {
-  const ready = VERTEX_GEMINI_MODEL_FALLBACKS
+export function orderVertexGeminiModels(suppressedUntil = new Map(), now = Date.now(), opts = {}) {
+  const excluded = new Set(Array.isArray(opts.excludeModels) ? opts.excludeModels.filter(Boolean) : []);
+  const withoutExcluded = VERTEX_GEMINI_MODEL_FALLBACKS.filter(id => !excluded.has(id));
+  const eligible = withoutExcluded.length ? withoutExcluded : VERTEX_GEMINI_MODEL_FALLBACKS;
+  const ready = eligible
     .filter((id) => (suppressedUntil.get(id) || 0) <= now);
-  const suppressed = VERTEX_GEMINI_MODEL_FALLBACKS
+  const suppressed = eligible
     .filter((id) => (suppressedUntil.get(id) || 0) > now);
   return [...ready, ...suppressed];
 }

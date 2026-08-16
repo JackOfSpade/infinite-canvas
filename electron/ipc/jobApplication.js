@@ -56,6 +56,7 @@ import {
   ACHIEVEMENT_REFUTE_SCHEMA,
   LETTER_NEEDS_SCHEMA,
   LETTER_PLAN_SCHEMA,
+  LETTER_GROUNDING_AUDIT_SCHEMA,
 } from './aiSchemas.js';
 import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
@@ -70,7 +71,10 @@ import {
   loadSkillOpportunityHistogram,
   recordSkillOpportunityAnalysis,
 } from './skillOpportunityStore.js';
-import { mergeSkillOpportunityAnalysis } from '../../src/utils/skillOpportunityHistogram.js';
+import {
+  createEmptySkillOpportunityHistogram,
+  replaceSkillOpportunityAnalysis,
+} from '../../src/utils/skillOpportunityHistogram.js';
 import { formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from './applicationBundle.js';
 import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
@@ -82,6 +86,7 @@ import {
   evaluateCoverLetterChecks,
   authorCoverLetterEnvelope,
   selectBetterLetterNeeds,
+  checkRequestedWorkSampleLink,
 } from './coverLetterChecks.js';
 
 const { shell } = electronPkg;
@@ -326,7 +331,9 @@ Prefer concrete, recent, verifiable facts with rough dates. If you cannot find r
  */
 export async function getCompanyResearchContext(job, signal, researchFn = researchCompanyAndRole, meta = null) {
   try {
-    return { text: await researchFn(job, signal, meta), available: true, error: null };
+    const text = String(await researchFn(job, signal, meta) ?? '').trim();
+    if (!text) throw new Error('Live company and role research returned no usable content.');
+    return { text, available: true, error: null };
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
     const message = String(error?.message || error).replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -418,7 +425,7 @@ Return only high-impact missing skills. suggestedResumeText must be only the con
  * simply re-mines next time (nothing here is cached until the caller stores
  * the returned object on the hub).
  */
-async function mineAchievementLedger(careerData, signal) {
+async function mineAchievementLedger(careerData, signal, onCompletedTask = null) {
   const miningPrompt = `You are mining a candidate's full career-data corpus for résumé-worthy ACCOMPLISHMENTS the candidate never stated directly — the kind that only become visible when you JOIN facts that live in different places in the corpus (e.g. a 2019 balance sheet + a 2023 balance sheet + a stated tenure span → "cut debt 74%").
 
 CAREER DATA (every file the candidate dropped, concatenated; "===== FILE: <name> =====" headers mark where each file's content starts):
@@ -476,11 +483,21 @@ Return one verdict per id. Use 'drop' whenever the item's CORE claim or figure w
   const refuteMeta = {};
   const refuteResult = await callLLMText(refutePrompt, {
     signal, task: 'career-achievement-refute', responseSchema: ACHIEVEMENT_REFUTE_SCHEMA, meta: refuteMeta,
+    excludeModels: [miningMeta.model].filter(Boolean),
   });
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
   const verdicts = Array.isArray(refuteResult?.verdicts) ? refuteResult.verdicts : [];
   const { ledger, stats: refuteStats } = applyRefuteVerdicts(checkedLedger, verdicts);
+
+  // Do not claim either model in the application workspace unless the whole
+  // miner/refuter pass produced a usable ledger. A refuter failure discards
+  // this result, so exposing the successful miner alone would misstate which
+  // AI work actually informed the shipped bundle.
+  if (typeof onCompletedTask === 'function') {
+    onCompletedTask('career-achievement-mining', miningMeta);
+    onCompletedTask('career-achievement-refute', refuteMeta);
+  }
 
   return {
     version: LEDGER_VERSION,
@@ -876,10 +893,10 @@ CURRENT <main> BLOCK TO REVISE:
 ${mainHtml}`;
 }
 
-async function reviseResumeForLength({ careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied }, signal) {
+async function reviseResumeForLength({ careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied }, signal, meta = null) {
   const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
   const prompt = buildResumeLengthRevisionPrompt({ mainHtml, pageCount, targetPageCount, compactApplied });
-  return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix });
+  return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix, meta });
 }
 
 // Absolute safety net on the render → fit loop (SKILL.md §5 / decideFitStep
@@ -923,7 +940,7 @@ function throwIfAbortedApp(signal) {
  *   compactApplied: boolean, revisionApplied: boolean, renderError: string|null,
  * }>}
  */
-async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount, skillInsights }, signal) {
+async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount, skillInsights, reviseResume = reviseResumeForLength }, signal) {
   const attempts = [];
   let mainHtml = resumeMainHtml;
   // The length-revision model may cut copy but must not silently change the
@@ -995,7 +1012,7 @@ async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, 
     revisionTried = true;
     try {
       const input = summarizeResumeMarkup(mainHtml);
-      const revised = await reviseResumeForLength({
+      const revised = await reviseResume({
         careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied: compactTried,
       }, signal);
       // Snapshot the editor's own output before the structural clamp runs.
@@ -1184,6 +1201,52 @@ FACTUAL CHECK OBSERVATIONS TO RESOLVE:\n${wrapUntrustedText('letter-check-observ
   });
 }
 
+function buildLetterGroundingAuditCachedPrefix() {
+  return `Audit cover-letter prose for unsupported factual claims. Return JSON matching the supplied schema.
+
+The ALLOWED FACTUAL SOURCE block is the complete factual boundary the writer received. The target title and company may be named, but do not use outside knowledge. When that block contains careerDataLogisticsOnly, it may support only explicit logistics or stated motivation, never accomplishments or capabilities. Flag every concrete candidate fact, outcome, scope, operating condition, employer fact, or logistics promise that is absent from or stronger than the allowed source. In particular, flag invented uptime, reliability, speed, volume, adoption, automation, coverage, causation, and before/after outcomes. An interpretive explanation of why supported evidence matters is allowed when it does not assert a new fact.
+
+For each violation, claim must be an exact verbatim span copied from the supplied paragraphs and should include the smallest span that preserves the unsupported assertion. Return an empty violations array only when every factual assertion is supported. This is an adversarial audit: never repair the prose and never excuse an unsupported claim because it sounds plausible.`;
+}
+
+function normalizeLetterGroundingViolations(result, paragraphs) {
+  const prose = (Array.isArray(paragraphs) ? paragraphs : []).join('\n');
+  const normalizedProse = prose.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const violations = [];
+  const seen = new Set();
+  for (const item of Array.isArray(result?.violations) ? result.violations.slice(0, 8) : []) {
+    const claim = String(item?.claim || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const reason = String(item?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    if (!claim || !reason) continue;
+    const normalizedClaim = claim.normalize('NFKC').toLowerCase();
+    if (!normalizedProse.includes(normalizedClaim)) continue;
+    const key = `${normalizedClaim}\u0000${reason.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    violations.push({ claim, reason });
+  }
+  return violations;
+}
+
+async function auditLetterGrounding({ allowedSource, paragraphs, job, excludeModels = [] }, signal, meta = null) {
+  const prompt = `TARGET:\n${wrapUntrustedText('job-title-company', `Title: ${job?.title || ''}\nCompany: ${job?.company || ''}`)}
+
+ALLOWED FACTUAL SOURCE:
+${wrapUntrustedText('letter-grounding-source', JSON.stringify(allowedSource || {}))}
+
+COVER-LETTER PARAGRAPHS TO AUDIT:
+${wrapUntrustedText('letter-paragraphs', JSON.stringify(Array.isArray(paragraphs) ? paragraphs : []))}`;
+  const result = await callLLMText(prompt, {
+    signal,
+    task: 'application-letter-grounding',
+    responseSchema: LETTER_GROUNDING_AUDIT_SCHEMA,
+    cachedPrefix: buildLetterGroundingAuditCachedPrefix(),
+    meta,
+    excludeModels,
+  });
+  return normalizeLetterGroundingViolations(result, paragraphs);
+}
+
 function buildDirectLetterCachedPrefix({ revision = false } = {}) {
   const rubricText = getEditorialRubric();
   return `Write a concise, truthful cover letter without a precomputed plan. Return JSON matching the supplied schema.
@@ -1302,7 +1365,8 @@ export function coverLetterCheckSummary(checks) {
   }
   const visible = failed.slice(0, MAX_COVER_LETTER_CHECK_DETAILS)
     .map(check => String(check.detail || check.id || 'unmet check').replace(/\s+/g, ' ').trim()
-      .slice(0, MAX_COVER_LETTER_CHECK_DETAIL_CHARS))
+      .slice(0, MAX_COVER_LETTER_CHECK_DETAIL_CHARS)
+      .replace(/[.!?]+$/u, ''))
     .filter(Boolean);
   const omitted = Math.max(0, failed.length - visible.length);
   const noun = failed.length === 1 ? 'check' : 'checks';
@@ -1546,15 +1610,23 @@ export function registerJobApplicationHandlers() {
         researchAvailable: null,
       },
       taskRoutes: [
+        'career-achievement-mining',
+        'career-achievement-refute',
         'company-research',
         'application-skill-opportunity',
         'application-resume',
         'application-letter-needs',
         'application-letter-plan',
         'application-cover-letter',
+        'application-letter-grounding',
         'application-letter-revise',
       ]
         .map(task => ({ task, provider: providerForTask(task), model: modelForTask(task) })),
+    };
+    const skillOpportunitySourceKey = String(nodeId || '').trim();
+    const skillOpportunityRecordOptions = {
+      generationStartedAt: applicationAttempt.startedAt,
+      recordedAt: new Date(applicationAttempt.startedAt).toISOString(),
     };
     const updateAttempt = (changes = {}) => {
       // Concurrent Generate clicks are possible on different cards. Do not let
@@ -1569,10 +1641,16 @@ export function registerJobApplicationHandlers() {
     // was chosen.  Without it a FULL report has to reconstruct the actual path
     // from a capped global log tail.
     const taskOutcomes = [];
+    // A résumé length revision is displayed as its own provenance stage, but
+    // uses the normal application-resume model route. Never ask the routing
+    // registry to resolve the display-only pseudo task.
+    const routingTaskForOutcome = (task) => task === 'application-resume-revision'
+      ? 'application-resume'
+      : task;
     const recordTaskOutcome = (task, meta, status = 'completed', error = null) => {
       taskOutcomes.push({
         task,
-        provider: providerForTask(task),
+        provider: providerForTask(routingTaskForOutcome(task)),
         model: meta?.model || null,
         status,
         fallback: meta?.fallback || null,
@@ -1644,7 +1722,7 @@ export function registerJobApplicationHandlers() {
       ledgerSource = 'reused';
     } else if (mineAllowed) {
       try {
-        freshlyMined = await mineAchievementLedger(careerData, signal);
+        freshlyMined = await mineAchievementLedger(careerData, signal, recordTaskOutcome);
         ledgerForPrompt = { ledger: freshlyMined.ledger, gaps: freshlyMined.gaps };
         ledgerSource = 'mined';
       } catch (e) {
@@ -1691,15 +1769,19 @@ export function registerJobApplicationHandlers() {
     //    This is separate from the résumé call so the optimization target
     //    (find consequential gaps) never competes with employer-facing prose.
     //    AI owns semantic aliasing across role/skill names; deterministic code
-    //    owns one-count-per-generation persistence. A failure is visible in the
-    //    workspace but does not cost the user the rest of the application.
+    //    owns one-latest-successful-generation-per-job-card persistence. A
+    //    failure is visible in the workspace but does not cost the user the
+    //    rest of the application.
     markStage('skill-opportunity analysis');
     let skillInsights = { role: { canonicalName: String(job?.title || 'Other'), matchedRoleId: '', sourceTitle: String(job?.title || '') }, items: [] };
-    let skillHistogram = { version: 1, roles: [] };
+    let skillHistogram = createEmptySkillOpportunityHistogram();
     let skillOpportunityError = null;
     let skillAnalysisReady = false;
     try {
       const recorded = await withSkillOpportunityLock(async () => {
+        if (!skillOpportunitySourceKey) {
+          throw new Error('Skill-demand analysis requires the stable job-card nodeId; no demand was recorded.');
+        }
         const histogramBefore = loadSkillOpportunityHistogram();
         const analysis = await runApplicationTask(
           'application-skill-opportunity',
@@ -1707,9 +1789,19 @@ export function registerJobApplicationHandlers() {
         );
         if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         // Project the workspace bars without mutating durable demand yet. The
-        // actual increment happens only after every application artifact has
-        // been written successfully below.
-        return { analysis, histogram: mergeSkillOpportunityAnalysis(histogramBefore, analysis) };
+        // actual replacement happens only after every application artifact has
+        // been written successfully below. Use the exact same operation and
+        // generation timestamp here so the projected workspace bars cannot
+        // disagree with the eventual durable snapshot.
+        return {
+          analysis,
+          histogram: replaceSkillOpportunityAnalysis(
+            histogramBefore,
+            skillOpportunitySourceKey,
+            analysis,
+            skillOpportunityRecordOptions,
+          ),
+        };
       }, signal);
       skillInsights = recorded.analysis;
       skillHistogram = recorded.histogram;
@@ -1754,6 +1846,14 @@ export function registerJobApplicationHandlers() {
         // byte-identical cached prefix on a length-revision call).
         careerData, ledger: ledgerForPrompt, resumeMainHtml, skillInsights,
         docId: resumeDocId, targetPageCount,
+        // A length revision is a separate content-generation call. Route it
+        // through the same outcome wrapper as every other application stage
+        // so Application.html names the model that actually edited the final
+        // résumé (including a Gemini fallback), not merely the preferred one.
+        reviseResume: (args, revisionSignal) => runApplicationTask(
+          'application-resume-revision',
+          (meta) => reviseResumeForLength(args, revisionSignal, meta),
+        ),
       }, signal);
     } catch (e) {
       if (e?.name === 'AbortError') throw e; // a real cancellation must actually cancel, not degrade
@@ -1865,12 +1965,17 @@ export function registerJobApplicationHandlers() {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
     markStage('cover-letter prose');
-    const prose = planDegraded
-      ? await runApplicationTask('application-cover-letter', (meta) => generateDirectLetterProse({
-        careerData, job, research, researchAvailable: companyResearch.available,
-        evidence: resumeEvidence, needs, attribution, skillInsights,
-      }, signal, meta))
-      : await runApplicationTask('application-cover-letter', (meta) => generateLetterProse({ plan: coverLetterPlan, job }, signal, meta));
+    let coverLetterAuthorModel = null;
+    const prose = await runApplicationTask('application-cover-letter', async (meta) => {
+      const result = planDegraded
+        ? await generateDirectLetterProse({
+          careerData, job, research, researchAvailable: companyResearch.available,
+          evidence: resumeEvidence, needs, attribution, skillInsights,
+        }, signal, meta)
+        : await generateLetterProse({ plan: coverLetterPlan, job }, signal, meta);
+      coverLetterAuthorModel = meta?.model || null;
+      return result;
+    });
     const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
     let coverLetter = {
       ...authorCoverLetterEnvelope({ job, evidence: resumeEvidence, today }),
@@ -1889,6 +1994,41 @@ export function registerJobApplicationHandlers() {
       return planDegraded ? checks.filter(check => check.id !== 'shape') : checks;
     };
     let coverLetterChecks = evaluateProseChecks();
+    let coverLetterGroundingCheck = null;
+    let coverLetterGroundingObservations = [];
+    const coverLetterGroundingSource = planDegraded
+      ? {
+          resumeEvidence,
+          rankedEmployerNeeds: needs,
+          companyResearch: researchForChecks,
+          careerDataLogisticsOnly: careerData,
+        }
+      : { argumentPlan: coverLetterPlan || {} };
+    const evaluateGroundingAudit = async () => {
+      markStage('cover-letter factual grounding audit');
+      try {
+        const violations = await runApplicationTask(
+          'application-letter-grounding',
+          (meta) => auditLetterGrounding({
+            allowedSource: coverLetterGroundingSource,
+            paragraphs: coverLetter.paragraphs,
+            job,
+            excludeModels: [coverLetterAuthorModel].filter(Boolean),
+          }, signal, meta),
+        );
+        coverLetterGroundingObservations = violations.map(item => `unsupported factual claim “${item.claim}” — ${item.reason}`);
+        coverLetterGroundingCheck = coverLetterGroundingObservations.length
+          ? { id: 'semantic-grounding', passed: false, detail: coverLetterGroundingObservations.join('; ') }
+          : { id: 'semantic-grounding', passed: true, detail: 'independent factual audit found no claim stronger than the argument plan' };
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        coverLetterGroundingObservations = [];
+        const detail = String(error?.message || error).replace(/\s+/g, ' ').trim().slice(0, 300);
+        coverLetterGroundingCheck = { id: 'semantic-grounding', passed: false, detail: `independent factual audit unavailable: ${detail || 'unknown error'}` };
+        logger.warn(`[JobApplication][${nodeId || '?'}] Cover-letter factual grounding audit unavailable — human review required: ${detail || error}`);
+      }
+    };
+    await evaluateGroundingAudit();
     let coverLetterRevised = false;
     let coverLetterRevisionError = null;
     const reviseCoverLetterForObservations = async (observations) => {
@@ -1896,18 +2036,22 @@ export function registerJobApplicationHandlers() {
       coverLetterRevised = true;
       markStage('cover-letter revision');
       try {
-        const revised = planDegraded
-          ? await runApplicationTask('application-letter-revise', (meta) => generateDirectLetterProse({
-            careerData, job, research, researchAvailable: companyResearch.available,
-            evidence: resumeEvidence, needs, attribution, skillInsights,
-            paragraphs: coverLetter.paragraphs, violations: observations,
-          }, signal, meta))
-          : await runApplicationTask('application-letter-revise', (meta) => reviseLetterProse({
-            paragraphs: coverLetter.paragraphs,
-            plan: coverLetterPlan,
-            violations: observations,
-            job,
-          }, signal, meta));
+        const revised = await runApplicationTask('application-letter-revise', async (meta) => {
+          const result = planDegraded
+            ? await generateDirectLetterProse({
+              careerData, job, research, researchAvailable: companyResearch.available,
+              evidence: resumeEvidence, needs, attribution, skillInsights,
+              paragraphs: coverLetter.paragraphs, violations: observations,
+            }, signal, meta)
+            : await reviseLetterProse({
+              paragraphs: coverLetter.paragraphs,
+              plan: coverLetterPlan,
+              violations: observations,
+              job,
+            }, signal, meta);
+          coverLetterAuthorModel = meta?.model || coverLetterAuthorModel;
+          return result;
+        });
         if (!hasUsableCoverLetterParagraphs(revised?.paragraphs)) {
           coverLetterRevisionError = 'Cover-letter revision returned no usable paragraphs.';
           logger.warn(`[JobApplication][${nodeId || '?'}] ${coverLetterRevisionError} Shipping current prose.`);
@@ -1915,6 +2059,7 @@ export function registerJobApplicationHandlers() {
         }
         coverLetter = { ...coverLetter, paragraphs: normalizeCoverLetterParagraphs(revised.paragraphs) };
         coverLetterChecks = evaluateProseChecks();
+        await evaluateGroundingAudit();
         return true;
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
@@ -1923,7 +2068,10 @@ export function registerJobApplicationHandlers() {
         return false;
       }
     };
-    const initialProseObservations = coverLetterChecks.filter(check => !check.passed).map(check => check.detail);
+    const initialProseObservations = [
+      ...coverLetterChecks.filter(check => !check.passed).map(check => check.detail),
+      ...coverLetterGroundingObservations,
+    ];
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
     const candidateLocation = candidateLocationFromContact(coverLetter?.contact);
@@ -1959,6 +2107,7 @@ export function registerJobApplicationHandlers() {
       skillHistogram,
       skillOpportunityError,
       coverLetterCheckSummary: coverLetterCheckSummary(coverLetterChecks),
+      modelProvenance: taskOutcomes,
       jobContext: {
         title: job?.title || '', company: job?.company || '',
         location: job?.location || '', candidateLocation,
@@ -2026,7 +2175,9 @@ export function registerJobApplicationHandlers() {
     const planAvailabilityStatus = planDegraded
       ? [{ id: 'plan-availability', passed: false, detail: 'argument plan unavailable; direct evidence-only fallback used' }]
       : [];
-    coverLetterChecks = [...coverLetterChecks, pageCheck, ...needsPortfolioStatus, ...planGateStatuses, ...planAvailabilityStatus];
+    const workSampleLinkCheck = checkRequestedWorkSampleLink(jobText, finalMainHtml);
+    coverLetterChecks = [workSampleLinkCheck, ...coverLetterChecks, coverLetterGroundingCheck, pageCheck, ...needsPortfolioStatus, ...planGateStatuses, ...planAvailabilityStatus]
+      .filter(Boolean);
     const coverLetterAudit = {
       version: 1,
       rankedNeeds: needs,
@@ -2204,7 +2355,11 @@ export function registerJobApplicationHandlers() {
     if (skillAnalysisReady) {
       try {
         skillHistogram = await withSkillOpportunityLock(
-          async () => recordSkillOpportunityAnalysis(skillInsights),
+          async () => recordSkillOpportunityAnalysis(
+            skillOpportunitySourceKey,
+            skillInsights,
+            skillOpportunityRecordOptions,
+          ),
           signal,
         );
       } catch (e) {

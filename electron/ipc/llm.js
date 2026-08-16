@@ -79,6 +79,9 @@ const TASK_MODELS = {
   'application-letter-needs':  { gemini: 'gemini-3.7-flash' },
   'application-letter-plan':   { gemini: 'gemini-3.7-flash' },
   'application-cover-letter':  { gemini: 'gemini-3.7-flash' },
+  // Independent factual audit: deliberately one generation below the writer
+  // so it does not simply grade its own prose with the same primary model.
+  'application-letter-grounding': { gemini: 'gemini-3.5-flash' },
   'application-letter-revise': { gemini: 'gemini-3.7-flash' },
   // Evidence-bound analysis of job-significant, adjacent skills. This runs
   // before the employer-facing artefact and feeds the candidate-only review /
@@ -169,6 +172,7 @@ const TASK_GROUPS = {
   'application-letter-needs':  { group: 'generation', step: 1 }, // feeds generation, isn't the artifact
   'application-letter-plan':   { group: 'generation' },
   'application-cover-letter':  { group: 'generation' },
+  'application-letter-grounding': { group: 'generation', step: 1 },
   'application-letter-revise': { group: 'generation' },
   'application-skill-opportunity': { group: 'generation' },
   'career-achievement-mining': { group: 'generation' },
@@ -320,6 +324,7 @@ const TASK_MAX_TOKENS = {
   'application-letter-needs':  2048,
   'application-letter-plan':   3072,
   'application-cover-letter':  3072,  // body paragraphs generated from a vetted plan
+  'application-letter-grounding': 2048,
   'application-letter-revise': 3072,
   // Short structured analysis: one role plus only job-significant verify/learn
   // candidates, with evidence and safe follow-up text. Sized for several
@@ -603,7 +608,7 @@ async function assertAttachmentPromptFits(prompt, { task, hints, signal, attachm
  *   repeated prefix. No API-level cache plumbing needed.
  */
 export async function callLLMText(prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels } = normalizeOpts(opts);
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` (the model that actually served the call) for per-stage
   // telemetry. The Gemini fallback loop writes it; for Claude there's no
@@ -629,7 +634,7 @@ export async function callLLMText(prompt, opts = {}) {
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
-    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
+    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta, excludeModels });
   } catch (err) {
     throw enhanceLLMError(err, provider);
   }
@@ -789,11 +794,11 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || Object.keys(opts).length === 0)) {
-    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding };
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || Object.keys(opts).length === 0)) {
+    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [] };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.
-  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false };
+  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, excludeModels: [] };
 }
 
 /**

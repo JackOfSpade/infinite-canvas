@@ -17,7 +17,8 @@ import { randomUUID } from 'node:crypto';
 import {
   createEmptySkillOpportunityHistogram,
   assertValidSkillOpportunityHistogram,
-  mergeSkillOpportunityAnalysis,
+  migrateSkillOpportunityHistogram,
+  replaceSkillOpportunityAnalysis,
 } from '../../src/utils/skillOpportunityHistogram.js';
 
 const { app } = electronPkg;
@@ -64,7 +65,9 @@ function readHistogramSync(filePath) {
     throw new Error(`Skill-opportunity histogram at ${filePath} is corrupt (${error.message}). Fix or remove it by hand — it will not be reset automatically.`);
   }
   try {
-    return assertValidSkillOpportunityHistogram(histogram);
+    return histogram?.version === 1
+      ? migrateSkillOpportunityHistogram(histogram)
+      : assertValidSkillOpportunityHistogram(histogram);
   } catch (error) {
     throw new Error(`Skill-opportunity histogram at ${filePath} is corrupt (${error.message}). Fix or remove it by hand — it will not be reset automatically.`);
   }
@@ -113,12 +116,14 @@ export function loadSkillOpportunityHistogram() {
 }
 
 /**
- * Atomically records one completed AI analysis. The analysis merge itself
- * enforces one role-generation and one demand increment per normalized skill.
+ * Atomically records the latest completed AI analysis for one stable job-card
+ * source. A retry replaces that card's earlier contribution; a stale attempt
+ * cannot overwrite a later-started generation which finished first.
  */
-export function recordSkillOpportunityAnalysis(analysis) {
+export function recordSkillOpportunityAnalysis(sourceKey, analysis, options = {}) {
   const current = loadSkillOpportunityHistogram();
-  const next = mergeSkillOpportunityAnalysis(current, analysis);
+  const next = replaceSkillOpportunityAnalysis(current, sourceKey, analysis, options);
+  if (next === current) return current;
   const filePath = skillOpportunityHistogramFilePath();
   const signature = writeHistogramAtomic(filePath, next);
   cache = { histogram: next, path: filePath, signature };

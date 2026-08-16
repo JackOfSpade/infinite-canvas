@@ -1,5 +1,6 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
-import { PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
+import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 
 export default [
 {
@@ -1018,6 +1019,27 @@ export default [
 {
     name: 'job pipeline report: distinguishes raw role queries from Google-expanded keywords',
     run: () => {
+      const issuedQueries = [];
+      recordIssuedManualQuery(issuedQueries, { url: 'https://google.test/failed' }, false);
+      recordIssuedManualQuery(issuedQueries, { url: 'https://google.test/sent' }, true);
+      assert(issuedQueries.length === 1 && issuedQueries[0].url.endsWith('/sent'),
+        'a failed location assignment never enters the sent-query telemetry');
+      const executed = extractExecutedGoogleQueryStrings({
+        google: {
+          executedQueries: [{ url: 'https://www.google.com/search?q=Camera%20Operator%20Toronto%20jobs&udm=8' }],
+        },
+      });
+      assert(executed.join('|') === 'Camera Operator Toronto jobs',
+        'Google query telemetry derives only navigation-issued requests, not every planned task');
+      const funnel = reconcileTitleRelevanceFunnel(21, 21, {
+        google: { preCapRelevanceDropped: 1 },
+        indeed: { preCapRelevanceDropped: 4 },
+        linkedin: { preCapRelevanceDropped: 3 },
+        glassdoor: { preCapRelevanceDropped: 5 },
+        ziprecruiter: { preCapRelevanceDropped: 1 },
+      });
+      assert(funnel.raw === 35 && funnel.relevanceDropped === 14 && funnel.finalDropped === 0,
+        'top-level funnel retains candidates rejected before browser caps (35 → 14 dropped → 21 admitted)');
       const telemetry = getJobsTelemetry();
       const saved = {
         nodeId: telemetry.nodeId,
@@ -1045,9 +1067,9 @@ export default [
           && report.includes('`Camera Operator Toronto, ON jobs`')
           && report.includes('`Film Editor Toronto jobs`'),
         'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
-        assert(report.includes('Per source (title-relevant gathered): google=2')
+        assert(report.includes('Per source (provider-returned gathered): google=2')
           && !report.includes('Per source (raw gathered)'),
-        'per-source counts are labeled as post-relevance so they reconcile with the aggregate funnel');
+        'per-source counts identify provider-returned rows without implying a local title admission gate');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -1092,6 +1114,45 @@ export default [
       return { ok: true };
     },
   },
+{
+    name: 'job pipeline report: intentional source skips are not reported as failed searches',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'intentional-skip-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 0, relevanceDropped: 0, deduped: 0,
+          ageDropped: 0, historyDropped: 0, kept: 0,
+          bySource: {
+            dice: { count: 0, warning: { code: 'country-source-skipped', severity: 'info', evidence: 'excluded for Canada' } },
+            usajobs: { count: 0, warning: { code: 'config-missing', severity: 'info', evidence: 'API key missing' } },
+            glassdoor: { count: 0, warning: { code: 'location-resolution-failed', severity: 'info', evidence: 'autocomplete unavailable' } },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['intentional-skip-diagnostics']), null, null);
+        assert(report.includes('intentionally not queried (scope/configuration):')
+          && report.includes('dice (country-source-skipped)')
+          && report.includes('usajobs (config-missing)'),
+        'scope/configuration skips remain visible under a neutral label');
+        const realMissLine = report.split('\n').find(line => line.includes('real miss to investigate')) || '';
+        assert(realMissLine.includes('glassdoor (location-resolution-failed)')
+          && !realMissLine.includes('country-source-skipped')
+          && !realMissLine.includes('config-missing'),
+        'only an unexpected runtime/safety skip is labeled a real miss');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+},
 {
     name: 'job pipeline report: remote-feed relevance trace shows title evidence, not tags',
     run: () => {
@@ -1203,11 +1264,29 @@ export default [
         },
       });
       try {
-        const report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
+        let report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
         assert(report.includes('Taxonomy validation repaired: canonicalized salary label "$120k process/yr"')
           && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**')
           && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)'),
         'job pipeline report makes salary placement, repair evidence, and taxonomy fallback cause visible');
+
+        telemetry.bucketing = {
+          ts: Date.now(), input: 20, roleCount: 4, placed: 20, missing: 0, duplicated: 0,
+          modelRoleCoverage: {
+            placed: 0, structuralPlaced: 8, missing: 20, duplicated: 0, invalid: 0,
+            malformedNames: 1, malformedNameIndices: [0, 1, 2, 3, 4, 5, 6, 7],
+            unassigned: 12, unassignedIndices: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+          },
+          repairedRoleCoverage: { roleCount: 4, placed: 20, missing: 0, duplicated: 0, invalid: 0 },
+          bandSummary: [], salaryRangeLabels: [], roleSummary: [],
+          taxonomyRepairs: ['recovered 8 job(s) into career-direction role(s)', 'recovered 12 unhinted job(s) into Other'],
+          taxonomyAudit: [], taxonomyAuditOmitted: 0, error: null,
+        };
+        report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
+        assert(report.includes('AI role-partition defect: 12 unassigned job(s), 8 job(s) under malformed role name(s).')
+          && report.includes('Deterministic recovery placed 20/20 job(s) into renderable roles; career-direction/Other details appear in Taxonomy validation repaired below.')
+          && !report.includes('NOT placed in any role by the AI'),
+        'job pipeline report distinguishes the raw model role defect from complete deterministic recovery');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -1445,12 +1524,19 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['collection-limit-diagnostics']), null, null);
         assert(report.includes('Collection limits: 10 job(s)/platform; 2 browser page(s)/search'),
           'the report must retain the exact card-owned collection limits used by the run');
+        telemetry.search.collectionLimits = { jobsPerPlatform: null, pagesPerPlatform: null };
+        const unboundedReport = buildJobsPipelineSnapshot(new Set(['collection-limit-diagnostics']), null, null);
+        assert(unboundedReport.includes(`Collection limits: unlimited jobs/platform; all browser pages/search (safety backstop ${JOB_COLLECTION_PAGE_CEILING})`),
+          'the report identifies an all-pages run and its shared finite safety backstop');
+        assert(unboundedReport.includes('dedup / age / history drops are by-design')
+          && !unboundedReport.includes('title-relevance / dedup / age / history drops are by-design'),
+        'a current provider-trust run does not imply title drops when none occurred');
         assert(report.includes('per-platform job limit (10)') && report.includes('increase or clear the Jobs per platform setting'),
           'API and browser truncation must point back to the editable card setting');
         assert(report.includes('stopped: per-source-cap'),
           'browser source-limit stops must remain visible rather than looking completed');
         assert(!report.includes('`glassdoor`: collected 0 of 5')
-          && report.includes('0 retained after the final title audit: glassdoor (5 gathered, then title-filtered)')
+          && report.includes('0 retained after the title relevance gate: glassdoor (5 gathered, then title-filtered)')
           && !report.includes('genuinely empty / off-category): glassdoor'),
         'final title rejections must not be mislabeled as cap truncation or a genuinely empty source');
         assert(!report.includes('disable fast mode') && !report.includes('JOB_RESULT_CAP'),
@@ -2120,6 +2206,36 @@ export default [
     },
   },
 {
+    name: 'Job tree: ZipRecruiter Canadian hourly range keeps display text and salary placement',
+    run: () => {
+      const rawSalary = 'CA$40 - CA$85/hr';
+      const result = buildJobTreeNodes({
+        displayedJobs: [{
+          title: 'Software Developer - Cloud Solutions', company: 'PulseLearning', location: 'Toronto, ON',
+          salary: rawSalary, snippet: 'x', matchScore: 68, reasoning: 'r', careerDirection: 'Full-Stack Engineering',
+          source: 'ziprecruiter', url: 'https://jobs/pulselearning', posted: '17 days ago',
+        }],
+        bucketTree: {
+          salaryRanges: [
+            { label: '$120k+', minSalary: 120000, maxSalary: 0 },
+            { label: '$80k–$120k', minSalary: 80000, maxSalary: 120000 },
+            { label: 'Under $80k', minSalary: 1, maxSalary: 80000 },
+            { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+          ],
+          roles: [{ name: 'Full-Stack Engineering', jobIndices: [0] }],
+        },
+        originalPos: { x: 0, y: 0 }, hubId: 'hub-pulselearning', baseNodeId: 'job-pulselearning',
+      });
+      const salaryGroup = result.newNodes.find(node => node.data?.kind === 'salary');
+      const card = result.newNodes.find(node => node.type === 'jobcard');
+      assert(salaryGroup?.data.label === '$80k–$120k/yr',
+        `PulseLearning salary: CA$40/hr annualizes into $80k–$120k/yr (got "${salaryGroup?.data.label}")`);
+      assert(card?.data.salary === rawSalary,
+        `PulseLearning card: preserves the complete source range (got "${card?.data.salary}")`);
+      return { salaryGroup: salaryGroup.data.label, display: card.data.salary };
+    },
+  },
+{
     name: 'USAJobs salary: RateIntervalCode maps to a cadence the shared annualizer can read',
     run: () => {
       // Real captured values from a live run (bug report): "/ PH" (per hour)
@@ -2333,6 +2449,41 @@ export default [
       assert(taxonomy.likelihoodBands.map(b => b.minScore).join(',') === '85,65,40,0',
         'taxonomy sanitization: likelihood thresholds stay aligned with the scoring rubric');
       assert(taxonomy.roles[0].jobIndices.join(',') === '0', 'taxonomy sanitization: drops duplicate/out-of-range role indexes');
+      assert(taxonomy.roles.find(role => role.name === 'Other')?.jobIndices.join(',') === '1',
+        'taxonomy sanitization: legacy callers without job metadata recover unassigned jobs into Other');
+
+      // A real Claude tool call under the legacy grouped-index contract returned
+      // this shape: a blank role containing only part of the input. Keep the
+      // sanitizer backstop even though the new positional contract structurally
+      // requires full coverage: useful scorer directions must recover malformed
+      // saved/provider output, while valid AI assignments stay authoritative.
+      const roleRecovery = sanitizeJobTaxonomy({
+        salaryRanges: [],
+        roles: [
+          { name: '', jobIndices: [0, 1, 3] },
+          { name: 'Platform Architecture', jobIndices: [2, 2, 99] },
+        ],
+      }, 5, [], [
+        { careerDirection: ' Software Engineering ' },
+        { careerDirection: 'Data Engineering' },
+        { careerDirection: 'Solutions Architecture' },
+        { careerDirection: 'Software Engineering' },
+        { careerDirection: 'Other' },
+      ]);
+      const recoveredByName = new Map(roleRecovery.roles.map(role => [role.name, role.jobIndices]));
+      assert(recoveredByName.get('Platform Architecture')?.join(',') === '2',
+        'taxonomy role recovery: valid AI assignment remains authoritative');
+      assert(recoveredByName.get('Software Engineering')?.join(',') === '0,3'
+        && recoveredByName.get('Data Engineering')?.join(',') === '1',
+      'taxonomy role recovery: blank/missing assignments use normalized career directions');
+      assert(recoveredByName.get('Other')?.join(',') === '4',
+        'taxonomy role recovery: only a genuinely unhinted/generic direction uses Other');
+      const recoveredIndexes = roleRecovery.roles.flatMap(role => role.jobIndices).sort((a, b) => a - b);
+      assert(recoveredIndexes.join(',') === '0,1,2,3,4',
+        'taxonomy role recovery: every job index is assigned exactly once');
+      assert(roleRecovery.repairs.includes('recovered 3 job(s) into career-direction role(s)')
+        && roleRecovery.repairs.includes('recovered 1 unhinted job(s) into Other'),
+      'taxonomy role recovery: diagnostics distinguish direction recovery from unhinted Other');
 
       const result = buildJobTreeNodes({
         displayedJobs: [{ title: 'Weekly', company: 'Acme', location: 'Remote', salary: '$1.6K - $2.0K/wk', snippet: '', matchScore: 50, source: 'dice', url: 'https://jobs/weekly' }],
@@ -2384,6 +2535,24 @@ export default [
         'ZipRecruiter: malformed abbreviated hourly chip is blanked when the JD cannot correct it');
       assert(reconcileZipRecruiterDomSalary('$29/hr', 'Base Salary: Starting at $65,000 annually') === '$29/hr',
         'ZipRecruiter: plausible hourly chips remain authoritative over a separate annual JD figure');
+      const pulseLearningPay = extractZipRecruiterDomSalaryText('CA$40 - CA$85/hr');
+      assert(pulseLearningPay === 'CA$40 - CA$85/hr',
+        `ZipRecruiter: currency-prefixed range keeps both endpoints and cadence (got "${pulseLearningPay}")`);
+      assert(reconcileZipRecruiterDomSalary(pulseLearningPay, '') === 'CA$40 - CA$85/hr'
+        && parseSalaryToNumeric(pulseLearningPay) === 83200,
+      'ZipRecruiter: the exact PulseLearning chip survives source reconciliation and annualizes from CA$40/hr');
+      const prefixedCadenceRanges = new Map([
+        ['CA$100 - CA$120/hr', 208000],
+        ['CA$2.0K - CA$2.5K/wk', 104000],
+        ['US$17.60 - US$22.00 Per hour', 36608],
+      ]);
+      for (const [raw, annual] of prefixedCadenceRanges) {
+        const extracted = extractZipRecruiterDomSalaryText(raw);
+        assert(extracted === raw && parseSalaryToNumeric(extracted) === annual,
+          `ZipRecruiter: preserves and annualizes prefixed cadence range "${raw}"`);
+      }
+      assert(reconcileZipRecruiterDomSalary('', 'Salary range CA$40 - CA$85 Compensation Type: Hourly') === '$40 - $85/hr',
+        'ZipRecruiter: the description fallback also accepts currency prefixes on both range endpoints');
       const tranePay = 'Annual Base Salary Range or Hourly Base Pay Range: $111308,33 - $155435,00 Compensation Type: Salary';
       const recoveredTranePay = reconcileZipRecruiterDomSalary('$22', tranePay);
       assert(recoveredTranePay === '$111,308.33 - $155,435/yr',
@@ -2421,6 +2590,7 @@ export default [
         'https://googleads.g.doubleclick.net/pagead/viewthroughconversion/995393872/',
         'https://ad.doubleclick.net/ccm/s/collect?fmt=8',
         'https://www.google.com/rmkt/collect/995393872/?fmt=8',
+        'https://www.google.com/ccm/collect?rcb=14&frm=0',
         'https://csp.withgoogle.com/csp/IdentityRotateCookiesHttp',
       ];
       for (const url of ignoredUrls) {
@@ -2502,6 +2672,21 @@ export default [
 
       // A real phase transition still advances `active` — the opt-out is per-call,
       // not a behaviour change for the ordinary path.
+      recordManualScraperTelemetry({
+        phase: 'detail-expand', srcName: 'Glassdoor', key: 'Old Glassdoor listing',
+        itemIndex: 5, itemTotal: 5, descriptionSource: 'jsonLd', reason: 'old detail',
+      });
+      recordManualScraperTelemetry({
+        phase: 'source-start', srcName: 'Google for Jobs', sourceId: 'google', queryTotal: 12,
+      });
+      const afterSourceChange = getManualScraperTelemetry();
+      assert(afterSourceChange.active.srcName === 'Google for Jobs'
+        && afterSourceChange.active.key === undefined
+        && afterSourceChange.active.itemIndex === undefined
+        && afterSourceChange.active.descriptionSource === undefined
+        && afterSourceChange.active.reason === undefined,
+      `source transition must clear prior listing context, got ${JSON.stringify(afterSourceChange.active)}`);
+
       recordManualScraperTelemetry({ phase: 'source-finished', srcName: 'ZipRecruiter' });
       const afterPhase = getManualScraperTelemetry();
       assert(afterPhase.active.phase === 'source-finished',
@@ -2542,6 +2727,77 @@ export default [
         && report.includes('First missing JD') && report.includes('Second missing JD'),
       'FULL pipeline diagnostics retain early per-job description misses after later sources advance the phase trail');
       return { ok: true };
+  },
+},
+{
+    name: 'job pipeline report: bounded browser card-walk evidence identifies misses, click identities, and cancellation',
+    run: () => {
+      recordManualScraperTelemetry({
+        phase: 'card-walk',
+        sourceId: 'google',
+        srcName: 'Google for Jobs',
+        queryIndex: 1,
+        queryTotal: 1,
+        pageNum: 1,
+        itemTotal: 25,
+        attempted: 17,
+        expanded: 15,
+        missing: 1,
+        panelTimeouts: 1,
+        selectionMismatches: 1,
+        titleBypassed: 96,
+        aborted: true,
+        interruptedAt: 18,
+        abortReason: 'user-cancelled',
+        failureSamples: [
+          { itemIndex: 7, key: 'Systems Architect at Example', reason: 'card-not-found' },
+          { itemIndex: 16, key: 'Principal Systems Architect at Example', reason: 'panel-timeout' },
+        ],
+        transitionSamples: [
+          {
+            itemIndex: 1,
+            expectedKey: 'google-card-1',
+            expectedTitle: 'First Systems Architect',
+            hitKey: 'google-card-1',
+            hitTitle: 'First Systems Architect',
+            physicalIndex: 1,
+            physicalTotal: 108,
+            selectedTitle: 'First Systems Architect',
+            selectionVerified: true,
+            lookup: 'primary',
+          },
+          {
+            itemIndex: 2,
+            expectedKey: 'google-card-2',
+            expectedTitle: 'Second Systems Architect',
+            // Exercise the resolved aliases used by the live DOM probe.
+            resolvedKey: 'google-card-3',
+            resolvedTitle: 'Third Systems Architect',
+            physicalIndex: 5,
+            physicalTotal: 108,
+            skippedSincePrevious: 3,
+            selectedTitle: 'Fourth Systems Architect',
+            selectionMismatch: true,
+            lookup: 'data-share-url',
+            mismatch: true,
+          },
+        ],
+      }, { updateActive: false });
+      const telemetry = getJobsTelemetry();
+      const report = buildJobsPipelineSnapshot(
+        telemetry?.nodeId ? new Set([telemetry.nodeId]) : new Set(),
+        telemetry?.windowId ?? null,
+        null,
+      );
+      assert(report.includes('Browser card traversal (bounded batch summaries)')
+        && report.includes('Google for Jobs · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
+        && report.includes('#7 key=Systems Architect at Example reason=card-not-found')
+        && report.includes('#16 key=Principal Systems Architect at Example reason=panel-timeout')
+        && report.includes('Click transition samples (expected → hit):')
+        && report.includes('#1 · physical #1/108 expected key=google-card-1 title=First Systems Architect → hit key=google-card-1 title=First Systems Architect via primary → selected title=First Systems Architect [selection verified]')
+        && report.includes('⚠️ #2 · physical #5/108 · 3 physical cards skipped since previous expected key=google-card-2 title=Second Systems Architect → hit key=google-card-3 title=Third Systems Architect via data-share-url [MISMATCH] → selected title=Fourth Systems Architect [SELECTION MISMATCH]'),
+      'FULL/CARDWALK diagnostics must preserve physical positions, post-click selection identity, failed positions, and cancellation context, not only a misleading expanded aggregate');
+      return { total: 25, attempted: 17, expanded: 15, titleBypassed: 96, selectionMismatches: 1, failures: 2, transitions: 2 };
     },
   },
 {
@@ -2581,6 +2837,144 @@ export default [
         telemetry.pipeline = priorPipeline;
         telemetry.sourceEvents = priorSourceEvents;
       }
+    },
+  },
+{
+    name: 'formatSourceEvent renders a folded heartbeat span, repeat count, and detail',
+    run: () => {
+      // Shape emitProgress produces for a paced source: repeated same-status
+      // heartbeats folded into the previous trail entry, keeping the ORIGINAL
+      // start `t` but gaining `lastT`/`repeats`/`detail` from the newest one.
+      const folded = formatSourceEvent({ t: 0, lastT: 188_000, repeats: 15, status: 'searching', detail: 'q3/12 · p2' });
+      assert(folded === 'searching@+0s→+188s ×15 (q3/12 · p2)',
+        'a folded entry must render its original start, the newest offset as a span, the repeat count, and the newest detail');
+      return { folded };
+    },
+  },
+{
+    name: 'formatSourceEvent renders an unfolded single entry with no span/repeat/detail suffix',
+    run: () => {
+      const single = formatSourceEvent({ t: 0, status: 'searching' });
+      assert(single === 'searching@+0s',
+        'an entry that never folded (no lastT/repeats/detail) must render exactly as status@+Ns with no trailing suffix');
+      return { single };
+    },
+  },
+{
+    name: 'formatSourceEvent still renders a warning code as ⚠<code>',
+    run: () => {
+      const warned = formatSourceEvent({ t: 5_000, status: 'error', code: 'description-detail-miss' });
+      assert(warned === 'error⚠description-detail-miss@+5s',
+        'a carried warning code must render immediately after the status as ⚠<code>, unaffected by the folding change');
+      // A folded entry can ALSO carry a warning code (a source that flips to
+      // the same warning repeatedly) — the code sits before the span/repeat.
+      const foldedWithCode = formatSourceEvent({ t: 5_000, lastT: 65_000, repeats: 4, status: 'error', code: 'description-detail-miss' });
+      assert(foldedWithCode === 'error⚠description-detail-miss@+5s→+65s ×4',
+        'a folded entry with a warning code must render the code before the span/repeat suffix');
+      return { warned, foldedWithCode };
+    },
+  },
+{
+    name: 'job pipeline report: Live Search Stage renders a folded pending-source heartbeat',
+    run: () => {
+      // The real-world case this exists for: a linkedin source mid-walk sends
+      // dozens of identical "searching" heartbeats over minutes. Without the
+      // fold, only the FIRST @+0s survives the array cap and the report reads
+      // as though the source stopped emitting seconds into the run.
+      const telemetry = getJobsTelemetry();
+      const priorPipeline = telemetry.pipeline;
+      const priorSourceEvents = telemetry.sourceEvents;
+      try {
+        telemetry.pipeline = {
+          phase: 'gathering-sources',
+          startedAt: Date.now() - 241_000,
+          ts: Date.now() - 2_000,
+          active: true,
+          pendingSources: ['linkedin'],
+          lastSource: 'linkedin',
+        };
+        telemetry.sourceEvents = {
+          linkedin: [{ t: 0, lastT: 188_000, repeats: 15, status: 'searching', detail: 'q3/12 · p2' }],
+        };
+        const report = buildJobsPipelineSnapshot(
+          telemetry?.nodeId ? new Set([telemetry.nodeId]) : new Set(),
+          telemetry?.windowId ?? null,
+          null,
+        );
+        assert(report.includes('Live Search Stage') && report.includes('Pending source(s): `linkedin`'),
+          'FULL/JOBS telemetry still identifies the live gather stage and the pending source');
+        assert(report.includes('`linkedin`: searching@+0s→+188s ×15 (q3/12 · p2)'),
+          'the Active source progress line must render the folded span, repeat count, and detail — not just the first heartbeat');
+      } finally {
+        telemetry.pipeline = priorPipeline;
+        telemetry.sourceEvents = priorSourceEvents;
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: Glassdoor Location Cache section is absent with no location skips and an empty cache',
+    run: () => {
+      // Scrape telemetry is a process-global singleton, so this negative case
+      // clears the event ring for the duration of the assertion instead of
+      // relying on running before whichever test records a
+      // location-resolution-failed event. Order-dependent negatives rot silently
+      // the moment a test is inserted above them.
+      const telemetry = getJobsTelemetry();
+      const scrapeTelemetry = getManualScraperTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search };
+      const savedEvents = scrapeTelemetry.events;
+      Object.assign(telemetry, {
+        nodeId: 'glassdoor-cache-absent-diagnostics',
+        windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1 },
+      });
+      scrapeTelemetry.events = [];
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['glassdoor-cache-absent-diagnostics']), null, null);
+        assert(!report.includes('### Glassdoor Location Cache'),
+          'the Glassdoor Location Cache section must not render when this run had no location skip and the persisted cache is empty');
+      } finally {
+        Object.assign(telemetry, saved);
+        scrapeTelemetry.events = savedEvents;
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: Glassdoor Location Cache section names a skipped location, its failureKind, and cache absence',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search };
+      Object.assign(telemetry, {
+        nodeId: 'glassdoor-cache-diagnostics',
+        windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1 },
+      });
+      recordManualScraperTelemetry({
+        phase: 'location-resolution-failed',
+        sourceId: 'glassdoor',
+        srcName: 'Glassdoor',
+        queryIndex: 1,
+        queryTotal: 3,
+        location: 'Erie, PA',
+        reason: 'autocomplete returned no verified exact match',
+        failureKind: 'no-match',
+        attempts: 2,
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['glassdoor-cache-diagnostics']), null, null);
+        assert(report.includes('### Glassdoor Location Cache'),
+          'a location-resolution-failed scrape event must render the Glassdoor Location Cache section');
+        assert(report.includes('Skipped `Glassdoor` for "Erie, PA" (no-match): no cached entry was present'),
+          'the section must name the skipped location, its failureKind, and state that no cached entry existed for it');
+        const phaseLine = (report.split('\n').find(line => line.includes('location-resolution-failed') && line.includes('Erie, PA')) || '');
+        assert(phaseLine.includes('kind=no-match') && phaseLine.includes('reason=autocomplete returned no verified exact match'),
+          'the Recent browser-scrape phases line for a location skip must surface kind= and reason=, not just the bare phase name');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
     },
   },
 {

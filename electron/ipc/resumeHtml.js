@@ -564,6 +564,10 @@ const INJECTED_CHROME_CSS = `
 .ic-workspace-kicker { margin: 0 0 5px; color: #d6a86c; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
 .ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
 .ic-workspace-context { margin: 8px 0 18px; color: #cfc2b0; font-size: 12px; }
+.ic-model-provenance { margin: -8px 0 18px; color: #cfc2b0; font-size: 11px; }
+.ic-model-provenance summary { color: #f7f1e6; cursor: pointer; }
+.ic-model-provenance ul { margin: 7px 0 0; padding-left: 18px; }
+.ic-model-provenance li + li { margin-top: 3px; }
 .ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
 .ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
 .ic-workspace-sidebar .ic-toolbar .ic-hint { margin: 5px 0 0; color: #cfc2b0; font-size: 11px; }
@@ -836,6 +840,62 @@ function normaliseSkillInsights(raw) {
   }).filter(Boolean);
 }
 
+const GENERATION_TASK_LABELS = Object.freeze({
+  'career-achievement-mining': 'Achievement mining',
+  'career-achievement-refute': 'Achievement review',
+  'company-research': 'Company research',
+  'application-skill-opportunity': 'Skill-gap analysis',
+  'application-resume': 'Résumé writing and fit',
+  'application-resume-revision': 'Résumé length revision',
+  'application-letter-needs': 'Cover-letter needs',
+  'application-letter-plan': 'Cover-letter plan',
+  'application-cover-letter': 'Cover-letter writing',
+  'application-letter-grounding': 'Cover-letter factual audit',
+  'application-letter-revise': 'Cover-letter revision',
+});
+
+// Application generation can legitimately use more than one model, either
+// because tasks have different routes or because a provider fallback served a
+// later call. Keep the disclosure sourced from actual successful call metadata
+// and reduce it to a small, display-only contract before it reaches the HTML.
+function normaliseModelProvenance(raw) {
+  const source = Array.isArray(raw) ? raw : [];
+  const clean = (value, max) => String(value ?? '')
+    .replace(/[\s\S]/g, char => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ? ' ' : char)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+  const entries = [];
+  const seen = new Set();
+  for (const outcome of source.slice(0, 32)) {
+    if (!outcome || outcome.status !== 'completed') continue;
+    const model = clean(outcome.model, 120);
+    if (!model) continue;
+    const task = clean(outcome.task, 80);
+    const provider = clean(outcome.provider, 40);
+    const fallbackUsed = Number(outcome.fallback?.attempts) > 0;
+    const key = `${task}\u0000${provider}\u0000${model}\u0000${fallbackUsed}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fallbackLabel = fallbackUsed ? ' (fallback)' : '';
+    entries.push({
+      task: GENERATION_TASK_LABELS[task] || task.replace(/^application-/, '').replace(/-/g, ' ') || 'Generation',
+      model,
+      provider,
+      fallbackLabel,
+    });
+  }
+  const models = [];
+  const modelKeys = new Set();
+  for (const entry of entries) {
+    const key = `${entry.provider}\u0000${entry.model}`;
+    if (modelKeys.has(key)) continue;
+    modelKeys.add(key);
+    models.push(entry.provider ? `${entry.provider === 'claude' ? 'Anthropic' : entry.provider === 'gemini' ? 'Google' : entry.provider} · ${entry.model}` : entry.model);
+  }
+  return { entries, models };
+}
+
 // The histogram is intentionally kept generic: generation can return an
 // array of role buckets, a { roles } object, or a flat list. We merge role and
 // skill spelling variants here as a defensive last mile; the AI should still
@@ -1047,7 +1107,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -1069,6 +1129,11 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
     && cityKey(candidateLocation) && cityKey(jobLocation) && cityKey(candidateLocation) !== cityKey(jobLocation);
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
+  const provenance = normaliseModelProvenance(modelProvenance);
+  const provenanceMarkup = provenance.models.length ? `<details class="ic-model-provenance" data-ic-model-provenance>
+  <summary>AI model${provenance.models.length === 1 ? '' : 's'}: ${provenance.models.map(escapeHtml).join(' · ')}</summary>
+  <ul>${provenance.entries.map(entry => `<li>${escapeHtml(entry.task)} — ${escapeHtml(entry.model)}${escapeHtml(entry.fallbackLabel)}</li>`).join('')}</ul>
+</details>` : '';
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
   <p class="ic-insight-meta">${escapeHtml(item.importance || 'high')} impact · ${item.kind === 'verify' ? 'nearby — verify first' : 'learn first'}</p>
@@ -1109,6 +1174,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <p class="ic-workspace-kicker">Application workspace</p>
   <h1 class="ic-workspace-title">Application, with receipts.</h1>
   <p class="ic-workspace-context">${escapeHtml(context)}</p>
+  ${provenanceMarkup}
   ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
@@ -1560,6 +1626,10 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
  *   A legacy `pdfBase64` is still accepted as résumé migration data.
  * @param {object} [args.coverLetter] Structured generated cover-letter fields.
  *   The cover is rendered into a second editable panel in this same HTML.
+ * @param {Array<object>} [args.modelProvenance] Actual successful AI task
+ *   outcomes for this bundle. The sidebar shows the serving model(s), including
+ *   provider fallbacks, while prompts, errors, credentials, and settings stay
+ *   out of the generated file.
  * @param {string} [args.coverLetterCheckSummary] Modest factual status line
  *   shown only when the shipped letter retains deterministic check failures.
  * @param {boolean} [args.showAllVerifySkills] Internal page-fit mode: reveal
@@ -1567,7 +1637,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: if the model wrapped its answer in a full document or fences,
   // extract just the <main> block.
@@ -1581,7 +1651,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = stripMainVariantAttrs(main);
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
-  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary });
+  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance });
   main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);

@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, decodeHtmlEntities, deriveLocationParam, detectLanguage, foldVerificationSample, getSellMonitorConfig, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeLocationAdherence, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, detectLanguage, foldVerificationSample, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -37,6 +37,84 @@ export default [
     },
   },
 {
+    // The reported failure: glassdoor.ca answered the location autocomplete with
+    // HTTP 504 and its legacy endpoint with HTTP 503, which skipped Glassdoor for
+    // the whole run and told the user to check their spelling. A transport result
+    // is not a verdict on the location text — it must be retried and reported as
+    // what it was.
+    name: 'Glassdoor location lookup: server-side failures are transient, a parsed answer is a verdict',
+    run: () => {
+      const gatewayTimeout = { host: 'www.glassdoor.ca', path: '/autocomplete/location?term=Canada', status: 504 };
+      const unavailable = { host: 'www.glassdoor.ca', path: '/findPopularLocationAjax.htm?term=Canada', status: 503 };
+      assert(glassdoorLookupAttemptIsTransient(gatewayTimeout), 'HTTP 504 is a transport failure worth retrying');
+      assert(glassdoorLookupAttemptIsTransient(unavailable), 'HTTP 503 is a transport failure worth retrying');
+      assert(glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', error: 'no response within 8s' }),
+        'a request that never got a response is transient');
+      assert(glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', status: 200, error: 'non-json response' }),
+        'a 200 that is not parseable JSON never answered the question');
+      // A parsed answer — even an empty one — is a real verdict, not a retry candidate.
+      assert(!glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', status: 200, rows: 0 }),
+        'a parsed empty result is an answer, not a transport failure');
+      assert(!glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', status: 200, rows: 4 }),
+        'a parsed populated result is an answer');
+      assert(!glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', status: 403 }),
+        'a hard rejection is not retried into a longer outage');
+      assert(!glassdoorLookupAttemptIsTransient(null), 'a missing attempt is not treated as transient');
+
+      // The trail reads as observations, collapses repeats, and names every host tried.
+      const trail = summarizeGlassdoorLookupAttempts([
+        gatewayTimeout, gatewayTimeout, unavailable, unavailable,
+        { host: 'www.glassdoor.com', path: '/autocomplete/location?term=Canada', status: 200, rows: 0 },
+      ]);
+      assert(trail.includes('www.glassdoor.ca/autocomplete/location→HTTP 504 ×2'), `trail collapses repeats: ${trail}`);
+      assert(trail.includes('www.glassdoor.ca/findPopularLocationAjax.htm→HTTP 503 ×2'), `trail names the legacy endpoint: ${trail}`);
+      assert(trail.includes('www.glassdoor.com/autocomplete/location→HTTP 200 with 0 location(s)'), `trail records the fallback host answer: ${trail}`);
+      assert(!trail.includes('term=Canada'), 'the query string is stripped — the endpoint is the observation');
+      assert(summarizeGlassdoorLookupAttempts([]) === 'no lookup attempt was recorded', 'an empty trail says so plainly');
+
+      // Wording: a 504 must not be reported as a spelling problem.
+      const transient = describeGlassdoorLocationFailure({ location: 'Canada', failure: `autocomplete lookup failed (${trail})`, failureKind: 'transient' });
+      assert(/skipped before navigating its locKeyword-only nationwide URL/.test(transient.evidence), 'evidence still states the safety boundary');
+      assert(!/spelling/i.test(transient.suggestion), `a transport failure must not blame spelling: ${transient.suggestion}`);
+      assert(/retrying Glassdoor is the fix/i.test(transient.suggestion), 'transient failures tell the user to retry');
+      const rejected = describeGlassdoorLocationFailure({ location: 'Candada', failure: 'selected CA, but the requested country is US', failureKind: 'rejected' });
+      assert(/spelling/i.test(rejected.suggestion), 'a rejected match DOES point at the location text');
+      const cancelled = describeGlassdoorLocationFailure({ location: 'Canada', failure: 'search was cancelled during location resolution', failureKind: 'cancelled' });
+      assert(/nothing to correct/i.test(cancelled.suggestion) && !/spelling/i.test(cancelled.suggestion),
+        'a user-cancelled run is never presented as a location mistake');
+      const unknown = describeGlassdoorLocationFailure({ location: 'Canada', failure: 'autocomplete returned no verified exact match', failureKind: 'unknown' });
+      assert(/spelling/i.test(unknown.suggestion), 'an unclassified failure keeps the original conservative advice');
+      return { ok: true, trail };
+    },
+  },
+  {
+    // A locId alone is an opaque number. Country provenance is what lets a
+    // country-scoped run reuse it — without that, "Canada" re-ran an
+    // outage-prone Cloudflare-gated lookup on every single run.
+    name: 'Glassdoor locId cache: only country-verified entries may skip the live lookup',
+    run: () => {
+      const canada = { locId: '3', locT: 'N', country: 'CA' };
+      assert(glassdoorCachedLocationUsable(canada, 'Canada'), 'a CA-verified country entry serves a Canada search');
+      assert(!glassdoorCachedLocationUsable({ locId: '3', locT: 'N' }, 'Canada'),
+        'a legacy entry with no country provenance is re-resolved, never trusted');
+      assert(!glassdoorCachedLocationUsable({ locId: '1', locT: 'N', country: 'US' }, 'Canada'),
+        'a US entry never serves a Canada search');
+      assert(!glassdoorCachedLocationUsable({ locId: '1001', locT: 'C', country: 'CA' }, 'Canada'),
+        'a country-only search rejects a cached city, matching the live validation rule');
+      assert(glassdoorCachedLocationUsable({ locId: '1148170', locT: 'C', country: 'US' }, 'Denver, CO'),
+        'a city entry serves its own city search');
+      assert(!glassdoorCachedLocationUsable({ locId: '1148170', locT: 'C', country: 'CA' }, 'Denver, CO'),
+        'country inferred from a state code is still enforced');
+      // Unqualified locations have no country to check, so any stable id is fine.
+      assert(glassdoorCachedLocationUsable({ locId: '2552', locT: 'C' }, 'Berlin'),
+        'an unqualified location can use a legacy entry');
+      assert(!glassdoorCachedLocationUsable({ locId: '0', locT: 'N', country: 'CA' }, 'Canada'), 'a non-positive id is not usable');
+      assert(!glassdoorCachedLocationUsable({ locT: 'N', country: 'CA' }, 'Canada'), 'a missing id is not usable');
+      assert(!glassdoorCachedLocationUsable(null, 'Canada'), 'no cache entry is not usable');
+      return { ok: true };
+    },
+  },
+  {
     name: 'normalizeLocationInput: country, province/state, and city scopes remain board-ready',
     run: () => {
       const cases = [

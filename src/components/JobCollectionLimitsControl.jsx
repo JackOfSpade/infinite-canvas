@@ -43,14 +43,15 @@ export function JobCollectionLimitsControl({ collectionLimits, setCollectionLimi
             data-native-undo="true"
             min={1}
             max={JOB_COLLECTION_LIMITS_MAX.pagesPerPlatform}
-            value={limits.pagesPerPlatform}
+            value={limits.pagesPerPlatform ?? ''}
             onChange={(event) => change('pagesPerPlatform', event.target.value)}
-            className="mt-0.5 w-full bg-white/5 border border-white/10 rounded text-center text-white/70 text-[10px] py-0.5 outline-none focus:border-blue-400/50 disabled:cursor-not-allowed disabled:opacity-50"
+            placeholder="All"
+            className="mt-0.5 w-full bg-white/5 border border-white/10 rounded text-center text-white/70 text-[10px] py-0.5 outline-none focus:border-blue-400/50 placeholder:text-white/25 disabled:cursor-not-allowed disabled:opacity-50"
           />
         </label>
       </div>
       <p id={jobsHelpId} className="mt-1 text-[8px] leading-snug text-white/25">Leave jobs blank for all in-window matches.</p>
-      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Per generated search on browser boards. Default: 10.</p>
+      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Per generated search on browser boards. Leave blank to keep paging until results run out or fall outside the look-back.</p>
     </fieldset>
   );
 }

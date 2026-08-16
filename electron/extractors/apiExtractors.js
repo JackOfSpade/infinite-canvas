@@ -80,8 +80,14 @@ function stripHtml(html) {
  * Accepts a single query string or an array of up to 3 query strings.
  * Multiple queries are walked sequentially with an inter-query jitter pause
  * and deduplicated by job URL so the same posting isn't returned twice.
+ *
+ * @param {(payload: { completed: number, total: number, count: number, detail: string }) => void} [onProgress]
+ *   Optional heartbeat, called at each query boundary and after every page is
+ *   fetched+parsed. The multi-minute humanDelay-paced walk below otherwise emits
+ *   nothing until the whole function resolves — a false "hung" read downstream
+ *   (see fetchHttpSources). Never throws into the scrape.
  */
-export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '') {
+export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '', onProgress = null) {
   const locParam = String(location || '').trim();
   const queryList = Array.isArray(queries) ? queries : [queries];
   const seenUrls = new Set();
@@ -98,6 +104,12 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     if (qi > 0) await new Promise(res => setTimeout(res, humanDelay(4500)));
 
     const query = queryList[qi];
+    // Query-boundary heartbeat — see onProgress doc above.
+    try {
+      onProgress?.({ completed: qi, total: queryList.length, count: allJobs.length, detail: `q${qi + 1}/${queryList.length}` });
+    } catch {
+      // Progress callback is diagnostics-only — never let it break the scrape.
+    }
     // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
     // anti-bot, so depth is PACED, not blitzed:
     //   • a humanDelay log-normal gap (~6s anchor) before each page after the first
@@ -207,6 +219,13 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       // Log URL extraction misses so we can diagnose degraded card HTML.
       if (pageUrlMisses > 0) {
         logger.warn(`[LinkedIn API] Query ${qi + 1} page ${start / 25}: ${pageUrlMisses} card(s) had no extractable URL`);
+      }
+
+      // Page-boundary heartbeat — see onProgress doc above.
+      try {
+        onProgress?.({ completed: qi, total: queryList.length, count: allJobs.length, detail: `q${qi + 1}/${queryList.length} · p${start / 25 + 1}` });
+      } catch {
+        // Progress callback is diagnostics-only — never let it break the scrape.
       }
 
       // Page added nothing new → results exhausted (or a soft block served an empty
@@ -686,6 +705,16 @@ const JOB_ROLE_CONCEPT_ALIASES = new Map([
 // use of `server` is computing-related. A query that includes one of those
 // companion words is explicitly a technical-server search and remains valid.
 const AMBIGUOUS_ROLE_DOMAIN_GUARDS = new Map([
+  // "Technical" is a useful broad engineering/architecture signal, but it is
+  // also the standard adjective on commercial titles such as "Technical Sales
+  // Enablement Manager".  A generated "Technical Lead" query used to admit
+  // that sales role on `technical` alone because `lead` is intentionally a
+  // generic modifier.  Preserve genuine Technical Architect/Engineer matches,
+  // while requiring an explicitly commercial query before commercial uses of
+  // the word can count as role evidence.
+  ['technical', new Set([
+    'sales', 'enablement',
+  ])],
   ['server', new Set([
     'software', 'engineering', 'engineer', 'systems', 'system', 'sql', 'dba',
     'database', 'storage', 'infrastructure', 'cloud', 'devops', 'vmware',
@@ -965,6 +994,13 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   return !!jobRelevanceEvidence(roleText, query, geoTerms);
 }
 
+/** Shared admission predicate for multi-query browser result pages. */
+export function jobMatchesAnyRoleQuery(job, queries) {
+  const roleQueries = (Array.isArray(queries) ? queries : []).filter(q => String(q || '').trim());
+  return roleQueries.length === 0
+    || roleQueries.some(query => jobRelevanceEvidence(job?.title, query));
+}
+
 /** USAJobs Keyword searches the whole announcement; the app needs role-title relevance. */
 export function filterUSAJobsByTitleRelevance(jobs, query) {
   return (Array.isArray(jobs) ? jobs : []).filter((job) =>
@@ -1107,37 +1143,18 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       source: 'usajobs',
     };
   });
-  // Keyword searches look throughout the full announcement and include
-  // synonyms, which let a single generic word (e.g. "Assistant") admit an
-  // unrelated title. The app is searching for roles, so require the returned
-  // position title to carry the same conservative relevance evidence used for
-  // remote feeds. This mirrors USAJobs' documented PositionTitle semantics
-  // without issuing a second request or silently inventing phrase syntax.
-  const relevant = filterUSAJobsByTitleRelevance(mapped, query);
-  const items = relevant;
-  // A bounded sample of what the gate THREW AWAY. The count alone ("rejected 53
-  // rows") can't distinguish a gate doing its job from one that over-rejects and
-  // silently starves the source — the titles are the only way to tell, and they
-  // are unrecoverable after this function returns. Kept tiny and title-only so it
-  // can never pollute cards, scoring prompts, snapshots or history rows.
-  // `filterUSAJobsByTitleRelevance` returns the original mapped objects, so
-  // identity is the exact kept/rejected discriminator. URL membership is not:
-  // a malformed row can have no URL, and duplicate URLs would make an unrelated
-  // row look kept merely because another row with that URL passed the gate.
-  const relevantRows = new Set(relevant);
-  const relevanceRejected = mapped
-    .filter(job => !relevantRows.has(job))
-    .map(job => job.title)
-    .filter(Boolean)
-    .slice(0, 8);
+  // Trust USAJobs' own keyword matching and ranking. Position-title wording can
+  // legitimately differ from the user's role phrase, so a second local title
+  // gate would throw away provider-approved results.
+  const items = mapped;
   return {
     items,
     warning: r.warning,
-    gathered: relevant.length,
+    gathered: mapped.length,
     providerGathered: resultItems.length,
-    relevanceDropped: resultItems.length - relevant.length,
-    relevanceRejected,
-  }; // gathered: relevant pre-cap matches (see fetchLinkedInJobs)
+    relevanceDropped: 0,
+    relevanceRejected: [],
+  };
 }
 
 
@@ -1161,7 +1178,7 @@ export function isRemoteOkSponsoredPlacement(job) {
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
-export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchRemoteOKJobs(queries, signal = null) {
   const r = await safeApiFetch('https://remoteok.com/api', {
     headers: {
       'Accept': 'application/json',
@@ -1180,8 +1197,8 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
 
-  // Filter: job matches if relevant to ANY query (OR logic across all queries),
-  // after dropping RemoteOK's sponsored placements. Those are product ads sold
+  // Keep every real feed row after dropping RemoteOK's sponsored placements.
+  // Those are product ads sold
   // into the same /api feed, not postings: `company` is the literal pseudo-
   // employer "AI Supermarket", `position` holds a PRODUCT name, and the
   // description is ~14k chars of boilerplate ad copy repeated verbatim across
@@ -1189,39 +1206,23 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // almost any query, so they sail through relevance — a live run surfaced six
   // of them ("Apify", "Beehiiv", "Meshy"…) as 6 of RemoteOK's 10 results, all
   // scored and shown to the user as if they were jobs.
-  const qs = Array.isArray(queries) ? queries : [queries];
   const sponsored = [];
-  const matched = jobs.flatMap(job => {
+  const providerRows = jobs.flatMap(job => {
     if (isRemoteOkSponsoredPlacement(job)) {
       sponsored.push(String(job.position || '?'));
       return [];
     }
-    // RemoteOK tags are broad, user-supplied metadata rather than the job's
-    // actual role (a coffee-roaster row can carry customer-service tags). Keep
-    // whole-feed relevance anchored to the position; company names are likewise
-    // not role evidence (e.g. "Professional Services").
-    const evidence = qs.map(q => jobRelevanceEvidence(job.position, q, geoTerms)).filter(Boolean);
-    return evidence.length > 0 ? [{ job, evidence }] : [];
+    return [job];
   });
   if (sponsored.length > 0) {
     logger.info(`[RemoteOK API] dropped ${sponsored.length} sponsored ad placement(s): ${sponsored.slice(0, 6).join(', ')}`);
   }
 
-  const relevanceTrace = [];
-  const items = matched.map(({ job, evidence }) => {
+  const items = providerRows.map((job) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
     const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
     const tags = (job.tags || []).join(', ');
     const url = job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '';
-    relevanceTrace.push({
-      url,
-      title: String(job.position || '').slice(0, 160),
-      company: String(job.company || '').slice(0, 120),
-      matched: evidence,
-      // Included specifically to prove they were NOT relevance evidence: the
-      // matcher intentionally reads the position only.
-      tags: Array.isArray(job.tags) ? job.tags.map(t => String(t).slice(0, 50)).slice(0, 20) : [],
-    });
     return {
       title: job.position || '',
       company: job.company || '',
@@ -1245,8 +1246,8 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     };
   });
   const withDesc = items.filter(j => j.description).length;
-  logger.info(`[RemoteOK API] ${items.length} jobs matched, ${withDesc}/${items.length} have descriptions`);
-  return { items, warning: r.warning, gathered: matched.length, relevanceTrace }; // gathered: pre-cap matches (see fetchLinkedInJobs)
+  logger.info(`[RemoteOK API] ${items.length} platform-returned jobs, ${withDesc}/${items.length} have descriptions`);
+  return { items, warning: r.warning, gathered: items.length, relevanceDropped: 0, relevanceRejected: [], relevanceTrace: [] };
 }
 
 
@@ -1310,7 +1311,7 @@ function contextAround(s, index, length, pad = 70) {
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchWeWorkRemotelyJobs(queries, signal = null) {
   const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
     headers: {
       'Accept': 'application/rss+xml, application/xml, text/xml',
@@ -1326,13 +1327,10 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   }
 
   const xml = r.text;
-  const qs = Array.isArray(queries) ? queries : [queries];
-
   // Parse RSS items with regex (no XML parser dependency needed)
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
   const rssItems = xml.match(itemPattern) || [];
   const jobs = [];
-  const relevanceTrace = [];
 
   for (const item of rssItems) {
     const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/i) ||
@@ -1352,13 +1350,6 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
     const company = titleParts.length > 1 ? titleParts[0].trim() : '';
     const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
 
-    // Filter: job matches if relevant to ANY query (OR logic across all queries).
-    // RSS titles are "Company: Job title". A company such as "Customer.io" or
-    // "Professional Services" must not make an unrelated vacancy relevant, so
-    // match only the parsed job-title portion.
-    const evidence = qs.map(q => jobRelevanceEvidence(jobTitle, q, geoTerms)).filter(Boolean);
-    if (evidence.length === 0) continue;
-
     // WWR RSS <description> CDATA is the full job HTML — strip tags to plain text.
     const descText = stripHtml(descMatch?.[1] || '').trim();
 
@@ -1374,21 +1365,13 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
       source: 'weworkremotely',
     });
-    relevanceTrace.push({
-      url,
-      title: String(jobTitle).slice(0, 160),
-      company: String(company).slice(0, 120),
-      matched: evidence,
-      tags: [],
-    });
   }
 
   const withDesc = jobs.filter(j => j.description).length;
-  logger.info(`[WWR RSS] ${jobs.length} jobs matched, ${withDesc}/${jobs.length} have descriptions`);
+  logger.info(`[WWR RSS] ${jobs.length} platform-returned jobs, ${withDesc}/${jobs.length} have descriptions`);
 
   const items = jobs;
-  const returnedUrls = new Set(items.map(job => job.url));
-  return { items, warning: r.warning, gathered: jobs.length, relevanceTrace: relevanceTrace.filter(row => returnedUrls.has(row.url)) }; // gathered: pre-cap matches (see fetchLinkedInJobs)
+  return { items, warning: r.warning, gathered: jobs.length, relevanceDropped: 0, relevanceRejected: [], relevanceTrace: [] };
 }
 
 
@@ -2201,39 +2184,17 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   // the returned rows are the most-relevant in-window jobs. The global pass is
   // a no-op here, not a second policy; `gathered` remains the pre-limit count.
   const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
-  // Dice's search endpoint is deliberately broad: a query for "Housekeeping
-  // Supervisor" can return generic Maintenance/Production/Shift Supervisor
-  // roles. Score relevance on the position title before result caps so those
-  // rows do not consume the source budget or AI scoring slots. Keep both sides
-  // of the decision in bounded diagnostics; queryFanOut merges this telemetry.
-  const admitted = [];
-  const relevanceRejected = [];
-  const relevanceTrace = [];
-  for (const job of inWindow) {
-    const evidence = jobRelevanceEvidence(job.title, query);
-    if (!evidence) {
-      if (relevanceRejected.length < 8) relevanceRejected.push(job.title);
-      continue;
-    }
-    admitted.push(job);
-    if (relevanceTrace.length < 20) {
-      relevanceTrace.push({
-        url: job.url,
-        title: job.title,
-        company: job.company,
-        matched: [evidence],
-      });
-    }
-  }
-  const items = admitted;
+  // Dice has already searched and ranked these rows for `query`; preserve the
+  // complete in-window result set even when its title uses adjacent wording.
+  const items = inWindow;
   return {
     items,
     warning: r.warning,
-    gathered: admitted.length,
+    gathered: inWindow.length,
     providerGathered: inWindow.length,
-    relevanceDropped: inWindow.length - admitted.length,
-    relevanceRejected,
-    relevanceTrace,
+    relevanceDropped: 0,
+    relevanceRejected: [],
+    relevanceTrace: [],
   };
 }
 

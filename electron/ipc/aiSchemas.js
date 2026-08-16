@@ -202,39 +202,50 @@ export const MARKETPLACE_HUB_SCAN_SCHEMA = {
 // the model creates only the remaining taxonomy metadata:
 //   1. salaryRanges    — salary bands fitted to the distribution; renderer
 //      places jobs by parsed salary. Always include an "Unspecified" range.
-//   2. roles           — the creative consolidation: the model groups the jobs
-//      into clean role/job-family names (merging the scorer's per-job
-//      careerDirection guesses). This is the ONLY partition the model owns;
-//      jobs it omits are swept into "Other".
-export const JOB_BUCKETING_SCHEMA = {
-  type: 'object',
-  required: ['salaryRanges', 'roles'],
-  properties: {
-    salaryRanges: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['label', 'minSalary', 'maxSalary'],
-        properties: {
-          label:     { type: 'string',  description: 'Annual display label, e.g. "$120k+/yr", "$80k–$120k/yr", "Unspecified". The server canonicalizes it from the numeric bounds.' },
-          minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 for the Unspecified range' },
-          maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended ("$200k+") or Unspecified' },
+//   2. roleByIndex     — exactly one role-family label per input job. The
+//      server groups matching labels into the persisted `{ name, jobIndices }`
+//      shape. This turns complete index coverage from an advisory prompt rule
+//      into a provider-visible structural constraint.
+//
+// The count is input-specific, so this must be built at the call site rather
+// than exported as one static schema. Gemini's adapter preserves min/maxItems;
+// Claude receives the same standard JSON Schema as its forced tool input.
+export function buildJobBucketingSchema(jobCount = 0) {
+  const count = Math.max(0, Math.floor(Number(jobCount) || 0));
+  return {
+    type: 'object',
+    required: ['salaryRanges', 'roleByIndex'],
+    properties: {
+      salaryRanges: {
+        type: 'array',
+        // One Unspecified-only range is legitimate when every input lacks
+        // parseable compensation; the semantic sanitizer still supplies real
+        // ranges when a model misses them despite observed pay.
+        minItems: 1,
+        maxItems: 5,
+        items: {
+          type: 'object',
+          required: ['label', 'minSalary', 'maxSalary'],
+          properties: {
+            label:     { type: 'string', minLength: 1, description: 'Annual display label, e.g. "$120k+/yr", "$80k–$120k/yr", "Unspecified". The server canonicalizes it from the numeric bounds.' },
+            minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 for the Unspecified range' },
+            maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended ("$200k+") or Unspecified' },
+          },
+        },
+      },
+      roleByIndex: {
+        type: 'array',
+        minItems: count,
+        maxItems: count,
+        items: {
+          type: 'string',
+          minLength: 1,
+          description: 'A concise non-empty role-family label for the job at this exact input index. Reuse exactly the same label for jobs in the same family.',
         },
       },
     },
-    roles: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['name', 'jobIndices'],
-        properties: {
-          name:       { type: 'string', description: 'AI-chosen role/job-family name fitting the candidate\'s field (e.g. "Brand Marketing", "Growth"), consolidated from the scorer\'s careerDirection labels.' },
-          jobIndices: { type: 'array', items: { type: 'integer' }, description: '0-based indices into the input job array' },
-        },
-      },
-    },
-  },
-};
+  };
+}
 
 // ── Resume parse: file → structured profile ────────────────────────────────
 export const RESUME_PARSE_SCHEMA = {
@@ -266,9 +277,32 @@ export const CAREER_FILE_EXTRACT_SCHEMA = {
 };
 
 // ── Job-query generation: profile → search query bundles ──────────────────
-// targetRoleQueries is populated only when the caller supplies a targetRole.
-// The schema keeps it required so providers can't silently omit it; an
-// absent target role results in an empty array.
+// No target role: the model explores — titleQueries/suggestedRoleQueries/
+// skillsOnlyQueries are populated and targetRoleQueries is empty.
+// A target-role run does not use this schema: its only query is constructed
+// directly from the user-supplied role. The schema keeps all four arrays
+// required for the exploratory, no-target-role flow.
+// A target-role run uses this narrower response shape: it may still need AI to
+// correct/infer location, but it does not ask the model to generate any query.
+export const JOB_LOCATION_RESOLUTION_SCHEMA = {
+  type: 'object',
+  required: ['canonicalLocation'],
+  properties: {
+    canonicalLocation: {
+      type: 'object',
+      required: ['city', 'stateCode', 'region', 'country', 'isRemote', 'display'],
+      properties: {
+        city:      { type: 'string' },
+        stateCode: { type: 'string' },
+        region:    { type: 'string' },
+        country:   { type: 'string' },
+        isRemote:  { type: 'boolean' },
+        display:   { type: 'string' },
+      },
+    },
+  },
+};
+
 export const JOB_QUERY_GENERATION_SCHEMA = {
   type: 'object',
   required: ['titleQueries', 'suggestedRoleQueries', 'skillsOnlyQueries', 'targetRoleQueries', 'canonicalLocation'],
@@ -419,6 +453,30 @@ export const LETTER_PLAN_SCHEMA = {
         properties: {
           needIndex: { type: 'integer', minimum: 0, description: 'Zero-based index into the ranked needs array.' },
           reason: { type: 'string', description: 'Why this need is deliberately not argued.' },
+        },
+      },
+    },
+  },
+};
+
+// Independent final-pass audit for cover-letter prose.  The writer receives
+// only the argument plan, so every concrete factual claim in its output must
+// be traceable to that same plan.  Keeping the audit response to exact quoted
+// spans makes a failed check useful both to the bounded revision call and to
+// the saved workspace's human-review notice.
+export const LETTER_GROUNDING_AUDIT_SCHEMA = {
+  type: 'object',
+  required: ['violations'],
+  properties: {
+    violations: {
+      type: 'array',
+      maxItems: 8,
+      items: {
+        type: 'object',
+        required: ['claim', 'reason'],
+        properties: {
+          claim: { type: 'string', description: 'Exact verbatim span from the cover-letter paragraphs containing the unsupported factual claim.' },
+          reason: { type: 'string', description: 'Concise explanation of what the plan does not support.' },
         },
       },
     },

@@ -15,7 +15,8 @@ import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
-import { normalizeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
+import { normalizeJobCollectionLimits, resolvePageCeiling, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
+import { makeJobPageStop } from '../ipc/jobPageStop.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
 import { humanCooldown } from '../utils/humanDelay.js';
@@ -289,7 +290,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
   const host         = indeedHostForLocation(location);
   const limits       = normalizeJobCollectionLimits(collectionLimits);
   const resultCap    = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
-  const maxPages     = limits.pagesPerPlatform;
+  // resolvePageCeiling ALWAYS returns a finite number (the JOB_COLLECTION_PAGE_CEILING
+  // backstop when the hub's page setting is "All") — the page-walk loops below key
+  // off this directly (`p < maxPages`), so it must never be null.
+  const maxPages     = resolvePageCeiling(limits);
+  const unlimitedPages = isUnlimitedPages(limits);
 
   let executablePath;
   try { executablePath = await findSystemChromePath() || await findChromePath(); } catch (e) {
@@ -372,7 +377,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       logger.warn('[Indeed/Browser] PPID not in persistent cookie store — proceeding based on landing URL (session cookies from native Chrome --app mode may not appear in CDP store)');
     }
 
-    logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${maxPages} pages`);
+    // Say "All" explicitly (with its backstop) rather than just printing the
+    // resolved ceiling number — otherwise a user who chose "All" sees a plain
+    // "up to 1000 pages" log line that reads like a deliberate 1000-page setting.
+    logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${describeJobCollectionLimits(limits).pages} pages`);
 
     // ── Escalation table ────────────────────────────────────────────────────
     // Cooldown after the Nth failure before the (N+1)th attempt. Other queries
@@ -386,6 +394,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     const allJobs = [];
     const seenKeys = new Set();
+    const providerSeenKeys = new Set();
     let totalChallenges = 0;
     let gaveUpCount = 0;
     const gaveUpPages = []; // { q, p } for each page that exhausted all retries
@@ -407,6 +416,19 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       retryCount: 0,
       availableAt: 0,
     }));
+
+    // Data-driven per-page stop, one instance PER QUERY (indexed by qi, not per
+    // workList entry): a deferred CF retry or an opportunistic next-page advance
+    // (below) is still the SAME logical query resuming, and its age-window /
+    // no-new-jobs streak state must accumulate across that query's own pages —
+    // sharing an instance across two different queries would let one query's
+    // stale streak wrongly end another's walk. Declared fresh on every call to
+    // this function, so a resume-job-source re-entry (which passes its own
+    // `startPage`) always starts with clean streak state, never state left over
+    // from before the crash/interrupt.
+    const queryPageStops = queryList.map(() =>
+      makeJobPageStop({ maxAgeDays: days, unlimited: unlimitedPages, sourceLabel: 'Indeed' })
+    );
 
     // nextPageAdvanced tracks which (qi, startPage) pairs have already been
     // injected as opportunistic next-page entries so the same advance isn't
@@ -643,7 +665,20 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           } catch { return null; }
         }).catch(() => null);
         const rawPageJobs = extractIndeedJobsFromHtml(html, windowMosaicResults);
-        const pageJobs   = rawPageJobs.slice(0, Math.max(0, resultCap - allJobs.length));
+        // Indeed already ranks and fuzzily matches this page for the issued
+        // search query. Keep every distinct returned row instead of applying a
+        // second local title gate that can discard legitimate adjacent titles.
+        const newProviderCandidates = [];
+        const pageProviderKeys = new Set();
+        for (const job of rawPageJobs) {
+          const key = sourceJobKey(job);
+          if (providerSeenKeys.has(key) || pageProviderKeys.has(key)) continue;
+          pageProviderKeys.add(key);
+          newProviderCandidates.push({ key, job });
+        }
+        const pageJobs = newProviderCandidates
+          .map(candidate => candidate.job)
+          .slice(0, Math.max(0, resultCap - allJobs.length));
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
@@ -665,7 +700,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
              document.querySelector('a[href*="&start="]'))
         ).catch(() => null);
 
-        logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${pageJobs.length} jobs (${htmlKB}KB${hasNextPage === false ? ', last page' : ''})`);
+        logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${pageJobs.length} platform-returned job(s) from ${rawPageJobs.length} candidate(s) (${htmlKB}KB${hasNextPage === false ? ', last page' : ''})`);
         onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}${retryCount > 0 ? ` (retry ${retryCount})` : ''}`);
 
         if (rawPageJobs.length === 0) break;
@@ -700,6 +735,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
         if (signal?.aborted) break outer;
 
+        // Commit provider accounting only after enrichment succeeds.
+        // A CF-blank page is retried; committing before that retry would make
+        // every card look like a duplicate and silently skip its second attempt.
+        for (const { key } of newProviderCandidates) {
+          providerSeenKeys.add(key);
+        }
+
         const pageAdded = [];
         for (let i = 0; i < pageJobs.length; i++) {
           const job = pageJobs[i];
@@ -728,6 +770,28 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         if (onPageJobs && pageAdded.length > 0) {
           try { await onPageJobs({ sourceId: 'indeed', query: q, page: p + 1, jobs: pageAdded }); }
           catch (e) { logger.warn(`[Indeed/Browser] onPageJobs failed (non-fatal): ${e?.message || e}`); }
+        }
+
+        // Data-driven stop (age-window / no-new-jobs) — an ADDITIONAL, possibly
+        // EARLIER-terminating signal than the "hasNextPage" heuristic just below,
+        // needed now that pages defaults to "All" rather than a fixed ceiling.
+        // Reached only on a genuinely successful extraction: every failure path
+        // above (challenge, soft-block, nav error, page.content() error) `break`s
+        // or `continue`s before this point, so a failed page is never fed to the
+        // callback as if it were a real (empty) one. Fed rawPageJobs — the FULL
+        // page of candidates, not the relevance-filtered/capped pageJobs — since
+        // the age/staleness rules are pager signals, independent of title
+        // relevance (a page of only off-target titles can still be genuinely
+        // in-window and freshly-paged).
+        let stopDecision = null;
+        try {
+          stopDecision = await queryPageStops[qi]({ items: rawPageJobs, pageIndex: p });
+        } catch (e) {
+          logger.warn(`[Indeed/Browser] onPageScraped threw (non-fatal): ${e?.message || e}`);
+        }
+        if (stopDecision?.stop) {
+          logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${stopDecision.detail || stopDecision.reason}`);
+          break;
         }
 
         if (rawPageJobs.length < 10 || hasNextPage === false) break;
@@ -833,7 +897,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       };
     }
 
-    return { items, warning, gathered: inWindow.length };
+    return {
+      items,
+      warning,
+      gathered: inWindow.length,
+      providerGathered: providerSeenKeys.size,
+      relevanceDropped: 0,
+      preCapRelevanceDropped: 0,
+      relevanceRejected: [],
+    };
 
   } finally {
     if (browser) {

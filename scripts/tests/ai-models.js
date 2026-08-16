@@ -1,4 +1,4 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -58,6 +58,11 @@ export default [
         'plan schema caps the argument at two evidence mappings');
       assert(LETTER_PLAN_SCHEMA.required.includes('logistics') && LETTER_PLAN_SCHEMA.required.includes('droppedNeeds'),
         'plan preserves logistics isolation and visible dropped needs');
+      const groundingViolation = LETTER_GROUNDING_AUDIT_SCHEMA.properties.violations;
+      assert(LETTER_GROUNDING_AUDIT_SCHEMA.required.includes('violations')
+        && groundingViolation.maxItems === 8
+        && JSON.stringify(groundingViolation.items.required) === JSON.stringify(['claim', 'reason']),
+      'final factual audit is bounded and requires an exact claim plus explanation');
       const providerNeeds = toGeminiSchema(LETTER_NEEDS_SCHEMA);
       const providerPlan = toGeminiSchema(LETTER_PLAN_SCHEMA);
       assert(providerNeeds.properties.needs.maxItems === 6
@@ -110,6 +115,26 @@ export default [
     },
   },
 {
+    name: 'job bucketing: positional role-label contract structurally covers every input job',
+    run: () => {
+      const schema = buildJobBucketingSchema(3);
+      assert(JSON.stringify(schema.required) === JSON.stringify(['salaryRanges', 'roleByIndex'])
+        && !('roles' in schema.properties),
+      'bucketing contract replaces fragile grouped jobIndices with positional role labels');
+      const labels = schema.properties.roleByIndex;
+      assert(labels.minItems === 3 && labels.maxItems === 3 && labels.items.type === 'string' && labels.items.minLength === 1,
+        'bucketing contract requires exactly one role label for every input index');
+      const gemini = toGeminiSchema(schema);
+      assert(gemini.properties.roleByIndex.minItems === 3 && gemini.properties.roleByIndex.maxItems === 3
+        && !('minLength' in gemini.properties.roleByIndex.items),
+      'Gemini receives exact positional coverage bounds while omitting unsupported string constraints');
+      const empty = buildJobBucketingSchema(0).properties.roleByIndex;
+      assert(empty.minItems === 0 && empty.maxItems === 0,
+        'dynamic bucketing contract remains valid and deterministic for an empty defensive input');
+      return { labels: labels.maxItems };
+    },
+  },
+{
     name: 'application generation: research quota fallback distinguishes scraped-description from metadata-only context',
     run: async () => {
       const quotaError = new Error('All Gemini models failed. 8 model(s) exhausted their daily quota.');
@@ -131,6 +156,15 @@ export default [
       assert(withDescription.text.includes('scraped target job description')
         && !withDescription.text.includes('no scraped job description was captured'),
       'a real scraped description remains the truthful fallback context when research fails');
+      const blankResearch = await getCompanyResearchContext(
+        { company: 'Acme', title: 'Engineer', snippet: 'Build and maintain production systems.' },
+        null,
+        async () => '   \n ',
+      );
+      assert(blankResearch.available === false
+        && blankResearch.error.includes('returned no usable content')
+        && blankResearch.text.includes('scraped target job description'),
+      'a fulfilled but blank research response must degrade explicitly instead of masquerading as live context');
       let abortPassedThrough = false;
       try {
         await getCompanyResearchContext({}, null, async () => {
@@ -198,6 +232,15 @@ export default [
       const deferred = orderGeminiModels('gemini-3.7-flash', new Map([['gemini-3.7-flash', now + 1000]]), now);
       assert(deferred[0] === 'gemini-3.6-flash' && deferred.at(-1) === 'gemini-3.7-flash',
         'known-suppressed preferred model moves to the tail without being removed');
+      const adversarial = orderGeminiModels('gemini-3.5-flash', new Map(), now, {
+        responseSchema: true,
+        excludeModels: ['gemini-3.7-flash'],
+      });
+      assert(!adversarial.includes('gemini-3.7-flash') && adversarial.length > 1,
+        'an adversarial structured-output pass can exclude the exact model that authored the material under review');
+      const vertexAdversarial = orderVertexGeminiModels(new Map(), now, { excludeModels: ['gemini-2.5-flash'] });
+      assert(JSON.stringify(vertexAdversarial) === JSON.stringify(['gemini-2.5-flash-lite']),
+        'the Vertex cascade honors the same author-model exclusion when another supported model exists');
       return { models: GEMINI_MODEL_FALLBACKS.length };
     },
   },
@@ -634,6 +677,8 @@ export default [
       }
       assert(modelForTask('career-achievement-refute', geminiSettings) === 'gemini-3.5-flash',
         'the Gemini achievement refuter remains independent from the 3.7 miner');
+      assert(modelForTask('application-letter-grounding', geminiSettings) === 'gemini-3.5-flash',
+        'the Gemini letter factual auditor remains independent from the 3.7 writer');
       // Callers that pass an explicit malformed/missing settings snapshot must
       // fail safely to the default provider instead of crashing on
       // `settings.provider` while handling a real task.
@@ -658,6 +703,7 @@ export default [
         'application-letter-needs':  SONNET, // feeds generation, isn't the artifact
         'application-letter-plan':   OPUS,
         'application-cover-letter':  OPUS,
+        'application-letter-grounding': SONNET,
         'application-letter-revise': OPUS,
         'application-skill-opportunity': OPUS,
         'career-achievement-mining': OPUS,

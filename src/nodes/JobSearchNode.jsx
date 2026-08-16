@@ -34,8 +34,11 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { JobCollectionLimitsControl } from '../components/JobCollectionLimitsControl';
+import { JobPlatformSelectionControl } from '../components/JobPlatformSelectionControl';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
+import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import { normalizeLocationInput } from '../utils/jobLocation';
+import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
 // Collection limits are always user-controlled; this switch affects scoring only.
@@ -84,6 +87,7 @@ function buildResumeSummary(profile) {
 
 function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation }) {
   return JSON.stringify({
+    strategyVersion: 2, // v2: a set target role bypasses variation generation
     resumeFingerprint: String(resumeFingerprint || ''),
     targetRole: String(targetRole || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
@@ -170,6 +174,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const setCollectionLimits = useCallback((limits) => {
     updateGlobal(id, { collectionLimits: normalizeJobCollectionLimits(limits) });
   }, [id, updateGlobal]);
+  // A missing allow-list is the saved-canvas-compatible "all platforms" default.
+  // The effective list also excludes any platform temporarily unsafe under the
+  // selected breadth settings; its persisted preference remains intact and
+  // automatically returns when those settings become safe again.
+  const enabledSourceIds = useMemo(
+    () => normalizeEnabledJobSourceIds(data.enabledSourceIds),
+    [data.enabledSourceIds],
+  );
+  const activeEnabledSourceIds = useMemo(
+    () => getRunnableJobSourceIds(enabledSourceIds, ACTIVE_JOB_SOURCES, collectionLimits),
+    [enabledSourceIds, collectionLimits],
+  );
+  const setEnabledSourceIds = useCallback((sourceIds) => {
+    updateGlobal(id, { enabledSourceIds: normalizeEnabledJobSourceIds(sourceIds) });
+  }, [id, updateGlobal]);
+  const enabledBrowserLoginSourceIds = useMemo(
+    () => activeEnabledSourceIds.filter(sourceId => ['indeed', 'glassdoor', 'ziprecruiter'].includes(sourceId)),
+    [activeEnabledSourceIds],
+  );
   useEffect(() => {
     return () => {
       if (settingsDebounceTimerRef.current) {
@@ -191,7 +214,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const hubState = data.hubState || 'empty';
   const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
   const inputDropsBlocked = !!dropLockReason;
-  const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['indeed', 'glassdoor', 'ziprecruiter']);
+  const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(enabledBrowserLoginSourceIds);
 
   useEffect(() => {
     if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
@@ -289,13 +312,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [sourceProgress, id, getNodes, scheduleCleanSourceCardDismiss, cancelCleanSourceCardDismiss]);
 
   const getPrimaryQuery = useCallback(() => {
-    const q = data.queries;
-    if (!q) return '';
-    const {
-      targetRoleQueries = [], titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = []
-    } = q;
-    const all = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
-    return all[0] || '';
+    return flattenJobSearchQueries(data.queries)[0] || '';
   }, [data.queries]);
 
   // Background-streamed scored jobs (the late USAJobs refresh) used to spawn cards
@@ -333,8 +350,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRef.current) return;
-    if (!isJobSourceEnabledInScope('usajobs')) {
-      EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped by job source test-mode scope.`);
+    if (!isJobSourceEnabledInScope('usajobs') || !activeEnabledSourceIds.includes('usajobs')) {
+      EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because its platform is disabled.`);
       return;
     }
 
@@ -360,6 +377,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // and crash the node. Mirrors runPipeline's `data.maxAgeDays || 21`.
         maxAgeDays: data.maxAgeDays || 21,
         collectionLimits,
+        enabledSourceIds,
         canvasFilePath,
         nodeId: currentId,
         // Prefer the query-gen-normalized location (typo-safe) over the raw input
@@ -463,7 +481,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, collectionLimits, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
+  }, [id, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -532,9 +550,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     updateGlobal(id, { maxAgeDays: n });
   }, [id, updateGlobal]);
 
-  // Optional target/pivot role. Free text — the ONLY effect is adding
-  // target-specific queries to the generated set (see generate-job-queries);
-  // scoring, display, and categorization are identical to a no-target run.
+  // Optional target/pivot role. When set, it is the one literal scrape query;
+  // variation generation is skipped. Scoring/display remain unchanged.
   // Persisted so it survives saves and re-runs.
   // Role / location are edited through LOCAL draft state, not bound straight to
   // data.* . React Flow feeds node data via an external store (useSyncExternalStore);
@@ -658,13 +675,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);
 
   const pruneDisabledSourceCards = useCallback(() => {
-    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
+    const allowedSourceIds = new Set(activeEnabledSourceIds);
     const staleCards = getNodes().filter(
       n => n.type === 'jobsourcecard' && n.data?.hubId === id && !allowedSourceIds.has(n.data?.sourceId),
     );
     if (staleCards.length === 0) return;
     deleteElements({ nodes: staleCards.map(n => ({ id: n.id })) });
-  }, [id, getNodes, deleteElements]);
+  }, [id, getNodes, deleteElements, activeEnabledSourceIds]);
 
   useEffect(() => {
     pruneDisabledSourceCards();
@@ -672,7 +689,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const ensureSourceCards = useCallback(({ frameSourceCards = true } = {}) => {
     const existingCards = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
-    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
+    const allowedSourceIds = new Set(activeEnabledSourceIds);
     const staleCards = existingCards.filter(n => !allowedSourceIds.has(n.data?.sourceId));
     if (staleCards.length > 0) {
       deleteElements({ nodes: staleCards.map(n => ({ id: n.id })) });
@@ -682,7 +699,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         .filter(n => allowedSourceIds.has(n.data?.sourceId))
         .map(n => n.data?.sourceId),
     );
-    const missing = ACTIVE_JOB_SOURCES
+    const missing = activeEnabledSourceIds
       .map(sid => JOB_SOURCE_BY_ID[sid])
       .filter(s => s && !existingSourceIds.has(s.id));
     if (missing.length === 0) return;
@@ -699,7 +716,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         fitView({ duration: fitViewDuration(total), padding: 0.2 });
       });
     }
-  }, [id, getNodes, deleteElements, spawnSourceCardsAround, fitView]);
+  }, [id, getNodes, deleteElements, spawnSourceCardsAround, fitView, activeEnabledSourceIds]);
 
   // Guarantee every blocked source has a visible, actionable card when we pause
   // in 'sources-ready'. The block decision is finalized only at search END, but
@@ -712,7 +729,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
     const blocks = (blockingWarnings || []).filter(w => isJobSourceWarningGating(w) && w.sourceId);
     if (blocks.length === 0) return;
-    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
+    const allowedSourceIds = new Set(activeEnabledSourceIds);
     const existingSourceIds = new Set(
       getNodes()
         .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
@@ -736,7 +753,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }));
     spawnSourceCardsAround(items, 'rgba(239,68,68,0.6)');
     EventLogger.log(`[JobSearch][${id}] Re-spawned ${missing.length} blocked source card(s) to resolve: ${missing.map(w => w.sourceId).join(', ')}`);
-  }, [id, getNodes, spawnSourceCardsAround]);
+  }, [id, getNodes, spawnSourceCardsAround, activeEnabledSourceIds]);
 
   // (Result-card filter re-apply + height-driven re-flow moved to the Job Board
   // Module along with the displayed cascade.)
@@ -1064,6 +1081,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     frameSourceCards = true,
   } = {}) => {
     if (!window.electronAPI || processingRef.current) return;
+    if (activeEnabledSourceIds.length === 0) {
+      const message = 'Select at least one job platform before running the search.';
+      updateGlobal(id, { errorMessage: message });
+      addToast({ title: 'Choose a Job Platform', description: message, type: 'error' });
+      return;
+    }
     // Career data can come from one OR many dropped files; normalize to a list.
     // A single `filePath` (canvas-created hub) still works as a one-element list.
     const paths = (Array.isArray(filePaths) && filePaths.length)
@@ -1120,7 +1143,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Pre-flight: check only sources that require a browser session before
       // expensive scraping starts. LinkedIn is intentionally excluded; its job
       // fetch + description enrichment are anonymous/public flows.
-      const JOB_LOGIN_IDS = getJobAuthPreflightSourceIds();
+      const JOB_LOGIN_IDS = getJobAuthPreflightSourceIds(
+        ids => ids.filter(platformId => activeEnabledSourceIds.includes(platformId)),
+      );
       const notLoggedIn = (await Promise.all(
         JOB_LOGIN_IDS.map(async (platformId) => {
           const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
@@ -1195,6 +1220,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           queryModel: data.queryModel || null,
         };
         EventLogger.log(`[JobSearch][${currentId}] Resume/query inputs unchanged — reusing stored search queries`);
+      } else if (activeTargetRole) {
+        // Do not pay a query-generation model to create work we do not want.
+        // Location correction/country inference is a separate, location-only
+        // operation; the scrape bundle itself is constructed deterministically.
+        const locationResult = await window.electronAPI.resolveJobSearchLocation({
+          profile,
+          nodeId: currentId,
+          preferredLocation: activePreferredLocation,
+        });
+        if (cancelled()) return;
+        if (!locationResult.success) {
+          const err = new Error(locationResult.error || 'Failed to resolve search location');
+          if (locationResult.isRateLimit) err.isRateLimit = true;
+          throw err;
+        }
+        queriesResult = {
+          success: true,
+          queries: buildExactTargetRoleQueryBundle(activeTargetRole),
+          queryModel: null,
+          canonicalLocation: locationResult.canonicalLocation,
+        };
+        EventLogger.log(`[JobSearch][${currentId}] Target role set — skipping query variation generation and searching exactly "${activeTargetRole}"`);
       } else {
         queriesResult = await window.electronAPI.generateJobQueries({
           profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
@@ -1206,15 +1253,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           throw err;
         }
       }
-      const {
-        titleQueries = [], suggestedRoleQueries = [], targetRoleQueries = [],
-      } = queriesResult.queries || {};
-      const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries];
+      const allQueries = flattenJobSearchQueries(queriesResult.queries);
       const queryModel = queriesResult.queryModel || null;
-      // The query-gen LLM normalizes the free-form location (typos/abbreviations)
-      // so the programmatic filters (USAJobs LocationName, Dice location, geoTerms)
-      // don't choke on "denvr". On a cache hit we reuse the persisted canonical;
-      // fall back to the raw input so this is never worse than before.
+      // The location resolver (or the exploratory query call when role is blank)
+      // normalizes free-form locations so board filters do not receive a typo.
+      // On a cache hit reuse the persisted canonical; raw input is the fallback.
       const canonicalLocation =
         (canReuseQueries ? data.canonicalLocation : queriesResult.canonicalLocation)
         || activePreferredLocation;
@@ -1225,10 +1268,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: 'searching',
         queryCount: allQueries.length,
         queries: queriesResult.queries,
-        // Keep the exact flattened role set that this run gave to search-jobs.
-        // Source-card Solve can fire much later (or after a hot reload), when it
-        // must apply the same final title-relevance policy to recovered rows.
-        activeSearchQueries: allQueries,
         queryModel,
         queryCacheKey,
         canonicalLocation,
@@ -1239,6 +1278,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         collectionLimits,
+        enabledSourceIds,
         canvasFilePath,
         preferredLocation: canonicalLocation,
         // The user's ORIGINAL free-form input (e.g. "denvr") — telemetry only, so
@@ -1406,7 +1446,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, collectionLimits, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast]);
 
   const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1552,8 +1592,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const handleResumeRun = useCallback(async () => {
     const cfp = canvasFilePath;
     const offer = resumeOffer;
-    setResumeOffer(null);
     if (processingRef.current || !offer) return;
+    if (activeEnabledSourceIds.length === 0) {
+      const message = 'Select at least one job platform before resuming the search.';
+      updateGlobal(id, { errorMessage: message });
+      addToast({ title: 'Choose a Job Platform', description: message, type: 'error' });
+      return;
+    }
     if (!canResumeOffer) {
       updateGlobal(id, {
         errorMessage: offer.locationRecorded
@@ -1567,8 +1612,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Need a profile (persists in node data across restarts) + the run's queries.
     if (!profile || queries.length === 0) {
       await window.electronAPI?.discardJobRun?.({ canvasFilePath: cfp }).catch(() => {});
+      setResumeOffer(null);
       return;
     }
+    // Preserve the recovery offer on validation failures (including no selected
+    // platforms); it disappears only once we actually begin or discard the run.
+    setResumeOffer(null);
     processingRef.current = true;
     const currentId = id;
     const cancelled = epoch.start();
@@ -1605,6 +1654,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         collectionLimits,
+        enabledSourceIds,
         canvasFilePath: cfp,
         preferredLocation: data.canonicalLocation || data.preferredLocation || '',
         rawLocation: data.preferredLocation || '',
@@ -1636,7 +1686,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, collectionLimits, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
+  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, addToast]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1947,6 +1997,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const handleRerun = useCallback(({ frameSourceCards = true } = {}) => {
     if (data.locked || processingRef.current) return;
+    if (activeEnabledSourceIds.length === 0) {
+      const message = 'Select at least one job platform before running the search.';
+      updateGlobal(id, { errorMessage: message });
+      addToast({ title: 'Choose a Job Platform', description: message, type: 'error' });
+      return;
+    }
     const droppedPaths = lastDroppedPathsRef.current;
     const effectivePaths = (Array.isArray(droppedPaths) && droppedPaths.length)
       ? droppedPaths
@@ -1983,7 +2039,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile, { frameSourceCards });
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss]);
+  }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss, activeEnabledSourceIds]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -2272,6 +2328,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   value={targetRole}
                   onChange={(e) => setTargetRole(e.target.value)}
                   placeholder="Target role (optional) — e.g. Product Manager"
+                  title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once."
                   className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
                 />
                 <input
@@ -2299,6 +2356,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   <JobCollectionLimitsControl
                     collectionLimits={collectionLimits}
                     setCollectionLimits={setCollectionLimits}
+                  />
+                )}
+                {!data.locked && (
+                  <JobPlatformSelectionControl
+                    enabledSourceIds={enabledSourceIds}
+                    setEnabledSourceIds={setEnabledSourceIds}
+                    collectionLimits={collectionLimits}
+                    availableSourceIds={ACTIVE_JOB_SOURCES}
                   />
                 )}
                 <label
@@ -2421,6 +2486,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               setMaxAgeDays={setMaxAgeDays}
               collectionLimits={collectionLimits}
               setCollectionLimits={setCollectionLimits}
+              enabledSourceIds={enabledSourceIds}
+              setEnabledSourceIds={setEnabledSourceIds}
+              availableSourceIds={ACTIVE_JOB_SOURCES}
               preferredLocation={preferredLocation}
               setPreferredLocation={setPreferredLocation}
               targetRole={targetRole}

@@ -27,6 +27,7 @@ import { humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
+import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
 
@@ -109,7 +110,7 @@ function isKnownTelemetryNoiseUrl(rawUrl) {
     if (hostIs('impactradius-event.com')) return true;
     if (hostIs('doubleclick.net')) return true;
     if (hostIs('googleadservices.com') || hostIs('googlesyndication.com')) return true;
-    if (host === 'www.google.com' && pathname.startsWith('/rmkt/')) return true;
+    if (host === 'www.google.com' && (pathname.startsWith('/rmkt/') || pathname.startsWith('/ccm/collect'))) return true;
     if (host === 'csp.withgoogle.com' && pathname === '/csp/identityrotatecookieshttp') return true;
 
     // Preserve the pre-existing low-value telemetry exclusions in one shared
@@ -159,10 +160,21 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
   if (!updateActive) return;
-  manualScraperTelemetry.active = {
-    ...(manualScraperTelemetry.active || {}),
-    ...entry,
-  };
+  // A source/query/page boundary is a new diagnostic context, not an update to
+  // the prior listing. Replacing at those boundaries prevents a Glassdoor
+  // detail key/reason/evidence from being reported as the current Google item
+  // after the next source starts. Fine-grained phases within one context still
+  // merge so browser/challenge metadata can accumulate while it is current.
+  const resetsContext = new Set(['source-start', 'query-start', 'page-extract', 'source-finished']);
+  manualScraperTelemetry.active = resetsContext.has(entry.phase)
+    ? entry
+    : { ...(manualScraperTelemetry.active || {}), ...entry };
+}
+
+/** Record a query only when Chrome accepted the location-assignment command. */
+export function recordIssuedManualQuery(executedQueries, entry, navigationIssued) {
+  if (navigationIssued && Array.isArray(executedQueries)) executedQueries.push(entry);
+  return executedQueries;
 }
 
 function clearManualScraperTelemetry(status = 'idle') {
@@ -182,6 +194,7 @@ export function resolveManualSourceStopReason({
   hitPerSourceCap = false,
   hitPageCap = false,
   hitEmptyPage = false,
+  dataStopReason = null,
 } = {}) {
   if (sourceSkipped) return 'blocked';
   if (aborted) return 'aborted';
@@ -190,6 +203,13 @@ export function resolveManualSourceStopReason({
   // pass `aborted` only for an actual cancelled signal.
   if (earlyExit) return 'user-done';
   if (hitPerSourceCap) return 'per-source-cap';
+  // A data-driven stop (age-window / no-new-jobs, from makeJobPageStop via
+  // task.options.onPageScraped) means the walk ended because the DATA said
+  // stop, not because it was cut short by the hub's page ceiling — surface it
+  // under its own reason so bug reports never read a complete, data-driven
+  // finish as the `page-cap` "this source may have additional in-window jobs"
+  // warning (see bugReport/jobsSnapshot.js's stopReason flagging).
+  if (dataStopReason) return dataStopReason;
   if (hitPageCap) return 'page-cap';
   if (hitEmptyPage) return 'empty-page';
   return 'completed';
@@ -298,6 +318,7 @@ const SCROLL_SOURCES = new Set(['ziprecruiter', 'google']);
 //   cardAttr      — if set, find card via [cardAttr="{key}"] querySelector
 //   cardIdPrefix  — if set (cardAttr/cardHrefKey null), find card via getElementById(prefix + key)
 //   cardHrefKey   — if set (others null), find card via a[href*="{cardHrefKey}{key}-"]
+//   cardDataUrlParam — stable result-card identity carried in its data-share-url
 //   clickSelector — element to click within the found card; null = click card itself
 //   panelSelector — CSS selector for the description panel that updates after each click
 //   panelMulti    — if true, querySelectorAll + join textContent (for split-element panels)
@@ -308,10 +329,13 @@ const DESC_CONFIGS = {
     keyRegex:      null,
     keyDecode:     true,
     cardAttr:      null,
-    cardIdPrefix:  '',           // getElementById(key) = the [role="button"] clickable element
+    cardIdPrefix:  '',           // legacy fallback: getElementById(key) = the clickable element
     cardHrefKey:   null,
+    // Google's virtualized list can replace the element ID while its surrounding
+    // result card remains mounted. data-share-url carries the same stable key.
+    cardDataUrlParam: 'htidocid',
     clickSelector: null,
-    panelSelector: '.OOyDTc, .ejCXj',
+    panelSelector: 'span.OOyDTc, span.ejCXj',
     panelMulti:    true,         // description split across visible + hidden spans
     closeSelector: null,
   },
@@ -379,6 +403,121 @@ const DESC_CONFIGS = {
 };
 
 /**
+ * Produce the stable DOM target for each card-click description attempt.
+ *
+ * Keeping this derivation in one place matters for virtualized lists: every
+ * on-demand click receives the extracted listing's opaque identity instead of
+ * relying on a mutable visible-list position.
+ */
+export function buildDescriptionCardTargets(jobs, sourceId) {
+  const cfg = DESC_CONFIGS[sourceId];
+  if (!cfg) return [];
+  return (Array.isArray(jobs) ? jobs : []).map((job, index) => {
+    const rawKey = (cfg.keyField && job?.[cfg.keyField])
+      ? job[cfg.keyField]
+      : cfg.keyRegex
+        ? job?.url?.match(new RegExp(cfg.keyRegex))?.[1]
+        : job?.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
+    let key = rawKey || '';
+    if (key && cfg.keyDecode) {
+      try { key = decodeURIComponent(key); } catch { key = ''; }
+    }
+    return { index, key: String(key || '') };
+  });
+}
+
+/**
+ * Preserve where selected cards came from in a physical, DOM-ordered result
+ * list. The normal walk now includes every provider row; retaining the ordinal
+ * still proves that result caps and virtualized remounts did not change click
+ * identity, without adding transient fields to persisted/scored job objects.
+ */
+export function buildPhysicalCardWalkPlan(extractedJobs, selectedJobs) {
+  const extracted = Array.isArray(extractedJobs) ? extractedJobs : [];
+  const selected = Array.isArray(selectedJobs) ? selectedJobs : [];
+  const ordinals = new Map(extracted.map((job, index) => [job, index + 1]));
+  return {
+    physicalTotal: extracted.length,
+    physicalIndexes: selected.map(job => ordinals.get(job) ?? null),
+  };
+}
+
+function normalizedDetailTitle(title) {
+  return String(title || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+/**
+ * A missing detail heading is ordinary Google markup variation and must not
+ * turn a good panel read into a false miss. When both titles are present,
+ * however, a non-equivalent heading is positive evidence that the click
+ * selected a different job and its description must not be attached.
+ */
+export function assessDetailSelection(expectedTitle, selectedTitle) {
+  const expected = normalizedDetailTitle(expectedTitle);
+  const selected = normalizedDetailTitle(selectedTitle);
+  if (!expected || !selected) {
+    return { selectedTitle: String(selectedTitle || '').trim(), selectionVerified: false, selectionMismatch: false };
+  }
+  const equivalent = expected === selected || expected.includes(selected) || selected.includes(expected);
+  return {
+    selectedTitle: String(selectedTitle || '').trim(),
+    selectionVerified: equivalent,
+    selectionMismatch: !equivalent,
+  };
+}
+
+/** Read a heading from Google's active detail region, never a left-list card. */
+export function readActiveGoogleDetailTitle(root) {
+  if (!root?.querySelectorAll) return '';
+  const candidates = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"]'))
+    .filter(el => !el.closest?.('[aria-hidden="true"]'))
+    .filter(el => !el.closest?.('[data-share-url]'))
+    .filter(el => !!el.closest?.('[aria-hidden="false"]'))
+    .map(el => el.textContent?.replace(/\s+/g, ' ').trim() || '')
+    .filter(Boolean);
+  return candidates[0] || '';
+}
+
+/**
+ * Read the visible Google detail-panel text without accidentally accepting a
+ * cached previous card or a preloaded next card. Google keeps those panels in
+ * the DOM under aria-hidden="true" while the active panel can include a
+ * CSS-hidden `.ejCXj` continuation under aria-hidden="false". The latter is
+ * real description text and must stay; only the ARIA-hidden ancestor is a
+ * reliable exclusion boundary.
+ *
+ * Kept DOM-root based and side-effect free so fixture tests exercise the same
+ * selection policy that runs in the browser page.
+ */
+export function readDescriptionPanelText(root, panelSelector, panelMulti = false) {
+  if (!root?.querySelectorAll || !panelSelector) return '';
+  if (panelMulti) {
+    return Array.from(root.querySelectorAll(panelSelector))
+      .filter(el => el.matches?.('span') && !el.closest?.('[aria-hidden="true"]'))
+      .map(el => el.textContent?.trim()).filter(Boolean).join('\n\n').trim();
+  }
+  return root.querySelector(panelSelector)?.innerText?.trim()
+    || root.querySelector(panelSelector)?.textContent?.trim()
+    || '';
+}
+
+/**
+ * Deterministic virtual-list diagnostic: which planned click targets are still
+ * present in the current DOM window. The live clicker reports these misses and
+ * never treats a list-card snippet as a recovered full description.
+ */
+export function inspectDescriptionCardTargetAvailability(targets, availableKeys) {
+  const available = new Set(Array.isArray(availableKeys) ? availableKeys : []);
+  const planned = Array.isArray(targets) ? targets : [];
+  const missing = planned.filter(target => target?.key && !available.has(target.key));
+  return {
+    planned: planned.filter(target => target?.key).length,
+    available: planned.filter(target => target?.key && available.has(target.key)).length,
+    missing,
+  };
+}
+
+/**
  * Turn ATS application-mode links into read-only detail pages for enrichment,
  * without changing the user-facing job URL. Trakstar's `?apply=true` mode hides
  * its `.jobdesciption` body behind the application form, and some Trakstar
@@ -434,6 +573,22 @@ export function formatJsonLdSalary(bs) {
   return '';
 }
 
+// A ZipRecruiter pay chip may prefix either endpoint with a compact currency
+// marker ("CA$40 - CA$85/hr", "US$17.60 - US$22.00 Per hour"). Keep the
+// prefix inside the match: starting at the first bare `$` used to stop at
+// "$40" when the second endpoint began with `CA$`, losing both the range and
+// its cadence. The prefix is tied to a currency symbol so prose immediately
+// before an ordinary dollar amount cannot be swallowed.
+const ZIPRECRUITER_MONEY_SRC = String.raw`(?:[A-Za-z]{1,3}(?=\$))?\$\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?(?:\s?(?:[-–—]|to)\s?(?:(?:[A-Za-z]{1,3}(?=\$))?\$)?\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?)?(?:\s?(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week)|(?:hour|year|month|week|annual|bi[-\s]?week)ly|an hour|a year|a month|a week|per (?:hour|year|month|week)))?`;
+
+/** Extract one bounded ZipRecruiter pay-chip value from visible text. */
+export function extractZipRecruiterDomSalaryText(text) {
+  const value = String(text || '').trim();
+  if (!value || value.length > 60) return '';
+  const match = value.match(new RegExp(ZIPRECRUITER_MONEY_SRC, 'i'));
+  return match?.[0]?.trim() || '';
+}
+
 /**
  * ZipRecruiter's client-rendered estimate occasionally combines an annual K
  * amount with an hourly cadence (for example "$65K/hr"). Prefer an explicit,
@@ -451,7 +606,7 @@ export function reconcileZipRecruiterDomSalary(rawSalary, description) {
   // generic money regex correctly refuses to guess at. Recover only from an
   // explicitly pay-labelled block and normalize it to the shared annualizer's
   // unambiguous display format.
-  const localizedAmount = String.raw`[$€£]?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,}(?:[.,]\d{2})?|\d+(?:[.]\d{1,2})?)`;
+  const localizedAmount = String.raw`(?:[A-Za-z]{1,3}(?=[$€£]))?[$€£]?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,}(?:[.,]\d{2})?|\d+(?:[.]\d{1,2})?)`;
   const labelledRange = new RegExp(
     String.raw`\b(annual\s+base\s+salary\s+range(?:\s+or\s+hourly\s+base\s+pay\s+range)?|base\s+salary(?:\s+range)?|salary\s+range|compensation(?:\s+range)?)\b[^$€£]{0,60}${localizedAmount}\s*(?:[-–—]|to)\s*${localizedAmount}`,
     'i',
@@ -504,7 +659,7 @@ export function reconcileZipRecruiterDomSalary(rawSalary, description) {
           : 2080;
   if (!Number.isFinite(base) || base * multiplier <= 10_000_000) return raw;
 
-  const money = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
+  const money = String.raw`(?:[A-Za-z]{1,3}(?=\$))?\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?(?:(?:[A-Za-z]{1,3}(?=\$))?\$)?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
   const annual = String.raw`(?:\s*(?:USD|CAD|AUD|EUR|GBP)\b)?\s*(?:(?:per|a)\s+(?:year|annum)|\/\s*(?:yr|year)|annually|annual|yearly)`;
   const explicitPay = new RegExp(
     String.raw`\b(?:base\s+)?(?:salary|compensation|pay)\b[^$]{0,80}(${money}${annual})`,
@@ -978,11 +1133,16 @@ async function runExtractor(page, extractorJS) {
 // selectors appear stale (≥ DESC_STALE_THRESHOLD consecutive failures of the same
 // type). A non-null descError is an abort signal — the caller must set earlyExit
 // and surface the error just like a SITE_CHANGED extraction failure.
-async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null) {
+async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null, walkPlan = null) {
   const cfg = DESC_CONFIGS[sourceId];
-  if (!cfg || jobs.length === 0) return { jobs, descError: null, descWarning: null };
+  if (!cfg || jobs.length === 0) return { jobs, descError: null, descWarning: null, expandedCount: 0 };
 
   const enhanced  = [...jobs];
+  const cardTargets = buildDescriptionCardTargets(enhanced, sourceId);
+  const physicalTotal = Number.isFinite(Number(walkPlan?.physicalTotal))
+    ? Number(walkPlan.physicalTotal)
+    : enhanced.length;
+  const physicalIndexes = Array.isArray(walkPlan?.physicalIndexes) ? walkPlan.physicalIndexes : [];
   // Jobs collected before this batch starts — used to increment the overlay counter
   // one-by-one (baseCount + i + 1) rather than jumping to totalSoFar immediately.
   const baseCount = totalSoFar - jobs.length;
@@ -1025,6 +1185,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     let descMissDiagDone = false;
     let dateMissDiagDone = false;
     let descWarning = null;
+    let expandedCount = 0;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
@@ -1439,11 +1600,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // salary of nineteen dollars. Word forms are alternated in here; the
             // suffix stays optional so a genuinely unit-less chip still yields the
             // amount (parseSalaryToNumeric then refuses to annualize it).
-            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?)?(?:\s?(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week)|(?:hour|year|month|week|annual|bi[-\s]?week)ly|an hour|a year|a month|a week|per (?:hour|year|month|week)))?`;
             await fetchPage.waitForFunction((src) => {
               const re = new RegExp(src, 'i');
               return [...document.querySelectorAll('p')].some(p => re.test(p.textContent || ''));
-            }, { timeout: 1500 }, MONEY_SRC).catch(() => {});
+            }, { timeout: 1500 }, ZIPRECRUITER_MONEY_SRC).catch(() => {});
             jsonLdSalary = await fetchPage.evaluate((src) => {
               const re = new RegExp(src, 'i');
               for (const p of document.querySelectorAll('p')) {
@@ -1454,7 +1614,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 if (t.length <= 60 && re.test(t)) { const m = t.match(re); return (m && m[0].trim()) || ''; }
               }
               return '';
-            }, MONEY_SRC).catch(() => '');
+            }, ZIPRECRUITER_MONEY_SRC).catch(() => '');
           }
           // Record every partial row in the dedicated anomaly ring. The rich page
           // context below remains first-only so one degraded batch cannot crowd out
@@ -1527,6 +1687,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             reconciledSalary,
             jsonLdCompany,
           });
+          if (text) expandedCount++;
           // Date-miss diagnostic (once per batch): a description was recovered but
           // NO posted date — not from the list extractor, the JobPosting JSON-LD,
           // OR the visible "Posted X ago" DOM fallback. Capture the JSON-LD @types
@@ -1601,7 +1762,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     try { await injectOverlay(page); } catch {
       // Overlay reinjection is best-effort after detail navigation.
     }
-    return { jobs: enhanced.filter(Boolean), descError: null, descWarning };
+    return { jobs: enhanced.filter(Boolean), descError: null, descWarning, expandedCount };
   }
 
   // Start from empty so the first card's already-visible description is captured
@@ -1610,6 +1771,43 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let consecutiveClickFails    = 0;
   let consecutivePanelTimeouts = 0;
   let descError = null;
+  let expandedCount = 0;
+  let attemptedCount = 0;
+  let missingCount = 0;
+  let panelTimeoutCount = 0;
+  let selectionMismatchCount = 0;
+  const failureSamples = [];
+  const firstTransitionSamples = [];
+  const lastTransitionSamples = [];
+  const mismatchTransitionSamples = [];
+  const selectionMismatchSamples = [];
+  let interruptedAt = null;
+  const rememberCardWalkFailure = (itemIndex, key, reason) => {
+    if (failureSamples.length < 6) {
+      failureSamples.push({ itemIndex, key: String(key || '?').slice(0, 80), reason });
+    }
+  };
+  // A full successful-card trace would make reports scale with result count.
+  // Keep the opening, trailing, and suspicious transitions instead: together
+  // they prove whether the browser started and ended on the intended card, and
+  // preserve every observed wrong-card hit within a small cap.
+  const rememberCardTransition = (sample) => {
+    if (firstTransitionSamples.length < 3) firstTransitionSamples.push(sample);
+    lastTransitionSamples.push(sample);
+    if (lastTransitionSamples.length > 3) lastTransitionSamples.shift();
+    if (sample.mismatch && mismatchTransitionSamples.length < 6) {
+      mismatchTransitionSamples.push(sample);
+    }
+  };
+  const rememberTransitionMismatch = (sample) => {
+    if (mismatchTransitionSamples.length < 6
+      && !mismatchTransitionSamples.some(current => current.itemIndex === sample.itemIndex)) {
+      mismatchTransitionSamples.push(sample);
+    }
+  };
+  const rememberSelectionMismatch = (sample) => {
+    if (selectionMismatchSamples.length < 6) selectionMismatchSamples.push(sample);
+  };
 
   const abortWithError = async (evidence, suggestion) => {
     logger.warn(`[BrowserScraper] ${sourceId}: ${evidence}`);
@@ -1628,126 +1826,150 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     };
   };
 
-  // ── Reveal pass ───────────────────────────────────────────────────────────────
-  // Scroll through all job cards once to ensure they're loaded into the DOM, then
-  // reset to the top of the list. This mirrors Google's preloadContent pattern:
-  // we know the full count N before clicking begins, giving stable
-  // "Reading job X/N" progress rather than a blind scroll-per-card approach.
-  {
-    let revealedCount = 0;
-    for (let ri = 0; ri < enhanced.length; ri++) {
-      if (signal?.aborted || page.isClosed()) break;
-      const job = enhanced[ri];
-      const rawKey = (cfg.keyField && job[cfg.keyField])
-        ? job[cfg.keyField]
-        : cfg.keyRegex
-          ? job.url?.match(new RegExp(cfg.keyRegex))?.[1]
-          : job.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
-      if (!rawKey) continue;
-      const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
-
-      const found = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, k) => {
-        let card;
-        if (cardAttr) {
-          card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
-        } else if (cardHrefKey != null) {
-          card = document.querySelector(`a[href*="${cardHrefKey}${k}-"]`);
-        } else {
-          card = document.getElementById((cardIdPrefix || '') + k);
-        }
-        if (!card) return false;
-        const rect = card.getBoundingClientRect();
-        if (rect.top < 0 || rect.bottom > window.innerHeight) {
-          const dest = window.scrollY + rect.top - window.innerHeight * 0.35;
-          const start = window.scrollY;
-          const delta = dest - start;
-          const steps = 4 + Math.floor(Math.random() * 4);
-          for (let s = 1; s <= steps; s++) {
-            window.scrollTo(0, start + delta * s / steps);
-            await new Promise(r => setTimeout(r, 25 + Math.random() * 45));
-          }
-        }
-        return true;
-      }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, key).catch(() => false);
-
-      if (found) revealedCount++;
-      await updateOverlay(page, {
-        ...overlayBase,
-        count:  baseCount,
-        status: `Revealing cards… ${ri + 1}/${enhanced.length}`,
-      }).catch(() => {});
-      await new Promise(r => setTimeout(r, humanDelay(50)));
-    }
-    await page.evaluate(async () => {
-      const start = window.scrollY;
-      const steps = 4 + Math.floor(Math.random() * 4);
-      for (let s = 1; s <= steps; s++) {
-        window.scrollTo(0, start * (1 - s / steps));
-        await new Promise(r => setTimeout(r, 25 + Math.random() * 55));
-      }
-    }).catch(() => {});
-    await new Promise(r => setTimeout(r, humanDelay(200)));
-    logger.info(`[BrowserScraper] expandDescriptions(${sourceId}): reveal pass found ${revealedCount}/${enhanced.length} cards — starting click pass`);
-  }
-
+  // preloadContent already exposes the complete Google list before extraction.
+  // A separate reveal walk duplicated the visible selection sequence, making it
+  // look like cards were skipped even though the later click pass was ordered.
+  // Target and scroll each card only when it is about to be clicked.
   for (let i = 0; i < enhanced.length; i++) {
     const clickPause = await waitIfPaused(page, signal);
-    if (clickPause === 'abort') break;
+    if (clickPause === 'abort') {
+      interruptedAt = i + 1;
+      break;
+    }
 
     const job = enhanced[i];
+    const physicalIndex = Number.isFinite(Number(physicalIndexes[i]))
+      ? Number(physicalIndexes[i])
+      : i + 1;
 
-    const rawKey = (cfg.keyField && job[cfg.keyField])
-      ? job[cfg.keyField]
-      : cfg.keyRegex
-        ? job.url?.match(new RegExp(cfg.keyRegex))?.[1]
-        : job.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
-    if (!rawKey) continue;
-    const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
+    const key = cardTargets[i]?.key;
+    if (!key) {
+      missingCount++;
+      rememberCardWalkFailure(i + 1, job.title || job.url, 'missing-card-key');
+      continue;
+    }
+    attemptedCount++;
 
     await updateOverlay(page, {
       ...overlayBase,
       count:  baseCount + i + 1,
-      status: `Reading job ${i + 1}/${enhanced.length}…`,
+      status: `Opening result card ${i + 1}/${enhanced.length} · result ${physicalIndex}/${physicalTotal}`,
     });
 
     try {
       // Scroll card into view and get coordinates for a real mouse click.
       // Real mouse events are reliably intercepted by the SPA's React event handlers;
       // untrusted DOM .click() may not be and can follow the raw href instead.
-      const clickTarget = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, clickSel, k) => {
-        let card;
-        if (cardAttr) {
-          card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
-        } else if (cardHrefKey != null) {
-          card = document.querySelector(`a[href*="${cardHrefKey}${k}-"]`);
-        } else {
-          card = document.getElementById((cardIdPrefix || '') + k);
-        }
-        if (!card) return { ok: false };
-        const target = clickSel ? card.querySelector(clickSel) : card;
-        if (!target) return { ok: false };
-        const rect0 = target.getBoundingClientRect();
-        if (rect0.top < 0 || rect0.bottom > window.innerHeight) {
-          const dest = window.scrollY + rect0.top - window.innerHeight * 0.3;
-          const start = window.scrollY;
-          const delta = dest - start;
-          const steps = 4 + Math.floor(Math.random() * 4);
-          for (let s = 1; s <= steps; s++) {
-            window.scrollTo(0, start + delta * s / steps);
-            await new Promise(r => setTimeout(r, 25 + Math.random() * 45));
+      const clickTarget = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, cardDataUrlParam, clickSel, k, expectedTitle) => {
+        const cardKey = (el) => {
+          if (!el) return '';
+          const resultCard = el.matches?.('[data-share-url]') ? el : el.closest?.('[data-share-url]');
+          if (resultCard && cardDataUrlParam) {
+            try {
+              return new URL(resultCard.getAttribute('data-share-url') || '', location.href)
+                .searchParams.get(cardDataUrlParam) || '';
+            } catch { /* fall through to a matching id */ }
+          }
+          return el.id === k ? k : '';
+        };
+        const cardTitle = (el) => {
+          const resultCard = el?.matches?.('[data-share-url]') ? el : el?.closest?.('[data-share-url]');
+          return (resultCard?.querySelector('.tNxQIb, [role="heading"], h3')?.textContent || '').trim().slice(0, 120);
+        };
+        const empty = (extra = {}) => ({ ok: false, expectedKey: k, expectedTitle, resolvedKey: '', resolvedTitle: '', hitKey: '', hitTitle: '', mismatch: true, ...extra });
+        let card = null;
+        let resultCard = null;
+        let lookup = 'primary';
+
+        // Google virtualizes result rows. Its id can survive on a stale/recycled
+        // element, so the immutable htidocid carried by the result-card URL is
+        // the primary identity; id is only the compatibility fallback.
+        if (cardDataUrlParam) {
+          resultCard = Array.from(document.querySelectorAll('[data-share-url]')).find((el) => {
+            try {
+              return new URL(el.getAttribute('data-share-url') || '', location.href)
+                .searchParams.get(cardDataUrlParam) === k;
+            } catch { return false; }
+          }) || null;
+          if (resultCard) {
+            const descendants = [resultCard, ...resultCard.querySelectorAll('[role="button"], [id]')];
+            card = descendants.find(el => el.matches?.('[role="button"]') && el.id === k)
+              || descendants.find(el => el.matches?.('[role="button"]'))
+              || descendants.find(el => el.id === k)
+              || resultCard;
+            lookup = 'data-share-url';
           }
         }
+        if (!card && cardAttr) {
+          card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
+        } else if (!card && cardHrefKey != null) {
+          card = document.querySelector(`a[href*="${cardHrefKey}${k}-"]`);
+        } else if (!card) {
+          card = document.getElementById((cardIdPrefix || '') + k);
+          if (card) lookup = 'id-fallback';
+        }
+        if (!card) return empty({ lookup: 'missing' });
+        const target = clickSel ? card.querySelector(clickSel) : card;
+        if (!target) return empty({ lookup, resolvedKey: cardKey(card), resolvedTitle: cardTitle(card) });
+        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         const rect = target.getBoundingClientRect();
-        if (!rect.width || !rect.height) return { ok: false };
+        if (!rect.width || !rect.height) return empty({ lookup, resolvedKey: cardKey(card), resolvedTitle: cardTitle(card) });
+        const x = rect.left + Math.min(rect.width - 1, Math.max(1, rect.width * 0.35));
+        const y = rect.top + Math.min(rect.height - 1, Math.max(1, rect.height * 0.5));
+        const hit = document.elementFromPoint(x, y);
+        const resolvedKey = cardKey(card) || cardKey(resultCard);
+        const hitKey = cardKey(hit);
+        const resolvedTitle = cardTitle(card) || cardTitle(resultCard);
+        const hitTitle = cardTitle(hit);
+        const mismatch = resolvedKey !== k || hitKey !== k;
         return {
-          ok: true,
-          x: rect.left + Math.min(rect.width - 1, Math.max(1, rect.width * 0.35)),
-          y: rect.top + Math.min(rect.height - 1, Math.max(1, rect.height * 0.5)),
+          ok: !mismatch,
+          lookup,
+          x,
+          y,
+          expectedKey: k,
+          expectedTitle,
+          resolvedKey,
+          resolvedTitle,
+          hitKey,
+          hitTitle,
+          mismatch,
         };
-      }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, cfg.clickSelector ?? null, key)
+      }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, cfg.cardDataUrlParam ?? null, cfg.clickSelector ?? null, key, String(job.title || '').slice(0, 120))
         .catch(() => ({ ok: false }));
 
+      const transitionSample = {
+        itemIndex: i + 1,
+        physicalIndex,
+        physicalTotal,
+        expectedKey: key.slice(0, 80),
+        expectedTitle: String(clickTarget.expectedTitle || job.title || '').slice(0, 120),
+        lookup: clickTarget.lookup || 'evaluation-error',
+        resolvedKey: String(clickTarget.resolvedKey || '').slice(0, 80),
+        resolvedTitle: String(clickTarget.resolvedTitle || '').slice(0, 120),
+        hitKey: String(clickTarget.hitKey || '').slice(0, 80),
+        hitTitle: String(clickTarget.hitTitle || '').slice(0, 120),
+        mismatch: clickTarget.mismatch !== false,
+        selectedTitle: '',
+        selectionVerified: false,
+        selectionMismatch: false,
+      };
+      rememberCardTransition(transitionSample);
+
       if (!clickTarget.ok) {
+        missingCount++;
+        const reason = clickTarget.mismatch ? 'card-hit-mismatch' : 'card-not-in-dom';
+        rememberCardWalkFailure(i + 1, key, reason);
+        recordManualScraperTelemetry({
+          phase:     'detail-card-miss',
+          sourceId,
+          srcName:   overlayBase.srcName,
+          itemIndex: i + 1,
+          itemTotal: enhanced.length,
+          key:       key.slice(0, 80),
+          reason,
+        }, { updateActive: false });
         consecutiveClickFails++;
         consecutivePanelTimeouts = 0;
         if (consecutiveClickFails >= DESC_STALE_THRESHOLD) {
@@ -1760,6 +1982,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         continue;
       }
       consecutiveClickFails = 0;
+      if (clickTarget.lookup === 'id-fallback') {
+        recordManualScraperTelemetry({
+          phase:     'detail-card-recovered',
+          sourceId,
+          srcName:   overlayBase.srcName,
+          itemIndex: i + 1,
+          itemTotal: enhanced.length,
+          key:       key.slice(0, 80),
+          reason:    'id-fallback',
+        }, { updateActive: false });
+      }
 
       await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
       await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
@@ -1771,6 +2004,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const text = await page.evaluate((panelSel, panelMulti) => {
             if (panelMulti) {
               return Array.from(document.querySelectorAll(panelSel))
+                // Google leaves old/preloaded panels mounted. CSS-hidden .ejCXj
+                // continuations in the active aria-hidden=false panel remain
+                // valid, but nothing below an aria-hidden=true panel may count.
+                .filter(e => e.matches('span') && !e.closest('[aria-hidden="true"]'))
                 .map(e => e.textContent?.trim()).filter(Boolean).join('\n\n').trim();
             }
             return document.querySelector(panelSel)?.innerText?.trim() || '';
@@ -1791,16 +2028,72 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         panelText = await pollPanel();
       }
 
+      // The list-card htidocid check above proves where the click landed. Google
+      // can still lag its detail panel, so validate the active panel heading as
+      // a second independent identity before accepting text into this job. A
+      // missing heading is tolerated (markup varies); an explicit different
+      // heading is not.
+      const readSelectedGoogleTitle = () => page.evaluate((expectedTitle) => {
+        const activeRoots = Array.from(document.querySelectorAll('[aria-hidden="false"]'));
+        const headings = activeRoots.flatMap(region => Array.from(region.querySelectorAll('h1, h2, h3, [role="heading"]')))
+          .filter(el => !el.closest('[aria-hidden="true"]'))
+          .filter(el => !el.closest('[data-share-url]'))
+          .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+        const expected = String(expectedTitle || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+        return headings.find((heading) => {
+          const value = heading.toLocaleLowerCase();
+          return expected && (value === expected || value.includes(expected) || expected.includes(value));
+        }) || headings[0] || '';
+      }, job.title).catch(() => '');
+      let selectedTitle = sourceId === 'google' ? await readSelectedGoogleTitle() : '';
+      let selectionAssessment = assessDetailSelection(job.title, selectedTitle);
+      // Google can paint the new description before replacing the old detail
+      // heading. An explicit mismatch is meaningful only after a short settle
+      // window; an absent heading is intentionally unverified and accepted.
+      if (sourceId === 'google' && selectionAssessment.selectionMismatch) {
+        const selectionDeadline = Date.now() + 1000;
+        while (Date.now() < selectionDeadline) {
+          await new Promise(r => setTimeout(r, 160));
+          selectedTitle = await readSelectedGoogleTitle();
+          selectionAssessment = assessDetailSelection(job.title, selectedTitle);
+          if (!selectionAssessment.selectionMismatch) break;
+        }
+      }
+      transitionSample.selectedTitle = selectionAssessment.selectedTitle.slice(0, 120);
+      transitionSample.selectionVerified = selectionAssessment.selectionVerified;
+      transitionSample.selectionMismatch = selectionAssessment.selectionMismatch;
+      if (selectionAssessment.selectionMismatch) {
+        selectionMismatchCount++;
+        // Selection identity failures are every bit as important as a wrong
+        // list-card hit. Preserve the rich expected→hit transition even when
+        // it occurs in the otherwise-unsampled middle of a long walk.
+        rememberTransitionMismatch(transitionSample);
+        rememberSelectionMismatch({
+          itemIndex: i + 1,
+          physicalIndex,
+          physicalTotal,
+          expectedTitle: String(job.title || '').slice(0, 120),
+          selectedTitle: selectionAssessment.selectedTitle.slice(0, 120),
+        });
+        // The panel explicitly identifies another job, so it is unsafe to
+        // merge this text even if it changed from the previous panel.
+        panelText = null;
+      }
+
       let gotDescription = false;
       if (panelText) {
         enhanced[i] = { ...job, snippet: panelText };
         prevPanelText = panelText;
         gotDescription = true;
+        expandedCount++;
       }
 
       if (gotDescription) {
         consecutivePanelTimeouts = 0;
       } else {
+        panelTimeoutCount++;
+        rememberCardWalkFailure(i + 1, key, selectionAssessment.selectionMismatch ? 'detail-title-mismatch' : 'panel-timeout');
         consecutivePanelTimeouts++;
         if (consecutivePanelTimeouts >= DESC_STALE_THRESHOLD) {
           // Try to close any open modal before aborting so the page is left clean
@@ -1830,7 +2123,58 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     await new Promise(r => setTimeout(r, humanDelay(DESC_CLICK_DELAY_MS)));
   }
 
-  return { jobs: enhanced, descError };
+  // A single bounded batch summary is much more useful than the old
+  // snippet-derived “N/N expanded” line: Google list rows already contain an
+  // employment-type snippet, so they could look expanded even after card
+  // targeting had failed. Keep it out of active telemetry so it cannot replace
+  // the source terminal phase in diagnostics.
+  const transitionSamplesByIndex = new Map();
+  for (const sample of [
+    ...firstTransitionSamples,
+    ...mismatchTransitionSamples,
+    ...lastTransitionSamples,
+  ]) {
+    const current = transitionSamplesByIndex.get(sample.itemIndex);
+    // A mismatch is more useful than a duplicate success record for the same
+    // target (and should retain the richer hit metadata if both exist).
+    if (!current || sample.mismatch) transitionSamplesByIndex.set(sample.itemIndex, sample);
+  }
+  const aborted = Boolean(signal?.aborted);
+  if (aborted && interruptedAt == null && attemptedCount < enhanced.length) {
+    interruptedAt = attemptedCount + 1;
+  }
+  recordManualScraperTelemetry({
+    phase:         'card-walk',
+    sourceId,
+    srcName:        overlayBase.srcName,
+    queryIndex:     overlayBase.queryIndex ?? null,
+    queryTotal:     overlayBase.queryTotal ?? null,
+    pageNum:        overlayBase.pageNum ?? null,
+    total:          enhanced.length,
+    itemTotal:      enhanced.length,
+    attempted:      attemptedCount,
+    expanded:       expandedCount,
+    missing:        missingCount,
+    panelTimeouts:  panelTimeoutCount,
+    selectionMismatches: selectionMismatchCount,
+    selectionMismatchSamples,
+    failureSamples,
+    transitionSamples: [...transitionSamplesByIndex.values()].sort((a, b) => a.itemIndex - b.itemIndex),
+    aborted,
+    interruptedAt,
+    abortReason: aborted ? 'user-cancelled' : null,
+    physicalTotal,
+  }, { updateActive: false });
+
+  return {
+    jobs: enhanced,
+    descError,
+    expandedCount,
+    attemptedCount,
+    missingCount,
+    panelTimeoutCount,
+    selectionMismatchCount,
+  };
 }
 
 /**
@@ -1913,6 +2257,10 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
         // Google for Jobs renders cards in its own scrollable container inside the page.
         // Walk up from the first card to find that container and scroll it; also
         // scroll document.body so either trigger path gets hit.
+        await updateOverlay(page, {
+          ...overlayBase,
+          status: `Loading the full Google list — not selecting cards yet… ${count}`,
+        });
         await page.evaluate(async () => {
           const card = document.querySelector('.EimVGf, [jscontroller="b11o3b"]');
           if (card) {
@@ -2083,31 +2431,153 @@ function glassdoorAutocompleteRows(data) {
   return [];
 }
 
+// Glassdoor's autocomplete answering with a server-side failure says nothing
+// about whether the requested location exists — it is a transport outcome, not
+// a verdict, so it is worth retrying and must never be reported as a spelling
+// problem. A well-formed response that simply has no acceptable match IS a
+// verdict: retrying it just burns the run's time budget.
+const GLASSDOOR_LOOKUP_RETRY_STATUSES = [408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524];
+const GLASSDOOR_LOOKUP_MAX_ATTEMPTS = 2;   // per endpoint, per host
+const GLASSDOOR_LOOKUP_BACKOFF_MS = 800;
+const GLASSDOOR_LOOKUP_FETCH_TIMEOUT_MS = 8000;
+// Whole-lookup ceiling. A gateway that times out on every attempt must not be
+// able to stretch one source's location step past this before we give up.
+const GLASSDOOR_LOOKUP_BUDGET_MS = 40_000;
+
+/**
+ * True when a recorded lookup attempt failed at the transport layer (server
+ * error, refused connection, unparseable body) rather than answering the
+ * question. An attempt with no `status` never got a response at all.
+ */
+export function glassdoorLookupAttemptIsTransient(attempt) {
+  if (!attempt) return false;
+  if (attempt.rows != null) return false;   // a parsed answer, however empty, is a verdict
+  // Reaching here means nothing parseable came back: an unreachable origin, an
+  // aborted request, or a 200 carrying something other than the JSON payload
+  // (an anti-bot interstitial reads exactly like this).
+  if (attempt.error) return true;
+  if (!Number.isFinite(Number(attempt.status))) return true;
+  return GLASSDOOR_LOOKUP_RETRY_STATUSES.includes(Number(attempt.status));
+}
+
+/**
+ * Render the attempt trail as observations — "which endpoint returned what" —
+ * with no claim about the cause. Repeated identical outcomes collapse to `×N`
+ * so a retried lookup stays readable on a source card.
+ */
+export function summarizeGlassdoorLookupAttempts(attempts) {
+  const list = Array.isArray(attempts) ? attempts : [];
+  if (list.length === 0) return 'no lookup attempt was recorded';
+  const order = [];
+  const counts = new Map();
+  for (const attempt of list) {
+    const endpoint = String(attempt?.path || '(unknown endpoint)').split('?')[0];
+    const outcome = attempt?.error
+      ? String(attempt.error)
+      : attempt?.rows != null
+        ? `HTTP ${attempt.status} with ${attempt.rows} location(s)`
+        : `HTTP ${attempt?.status ?? '?'}`;
+    const label = `${attempt?.host ? `${attempt.host}` : ''}${endpoint}→${outcome}`;
+    if (!counts.has(label)) order.push(label);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return order.map(label => (counts.get(label) > 1 ? `${label} ×${counts.get(label)}` : label)).join(', ');
+}
+
+/**
+ * Whether a persisted cache entry is enough proof to skip the live lookup.
+ * A locId is a stable platform id, but on its own it is an opaque number: for a
+ * country-scoped search it only counts once the entry records the country it
+ * was validated against. Entries written before that field existed have no
+ * `country` and are deliberately re-resolved (never silently trusted).
+ */
+export function glassdoorCachedLocationUsable(cached, location) {
+  const locId = String(cached?.locId ?? '').trim();
+  if (!/^\d+$/.test(locId) || Number(locId) <= 0) return false;
+  const requestedCountry = glassdoorRequestedCountry(location);
+  if (!requestedCountry) return true;
+  if (cached.country !== requestedCountry.iso) return false;
+  // Mirrors validateGlassdoorLocationPick: a country-only search must hold the
+  // country object itself, never a similarly-named city inside that country.
+  if (requestedCountry.countryOnly && String(cached.locT || '').toUpperCase() !== 'N') return false;
+  return true;
+}
+
+/**
+ * Word the skip for what was actually observed. A transport failure and an
+ * unrecognized location produce the same outcome (Glassdoor is skipped rather
+ * than searched nationwide) but call for opposite user actions, and telling
+ * someone to check their spelling because a gateway returned 504 sends them
+ * hunting a bug that is not theirs.
+ */
+export function describeGlassdoorLocationFailure({ location, failure, failureKind }) {
+  const evidence = `Glassdoor location "${location}" could not be verified: ${failure}. `
+    + 'The source was skipped before navigating its locKeyword-only nationwide URL.';
+  const suggestion = failureKind === 'transient'
+    ? 'Those are Glassdoor-side transport results, not a rejection of the location text — retrying Glassdoor is the fix. '
+      + 'Once any location verifies once it is cached with its country, so later runs skip this lookup entirely.'
+    : failureKind === 'rejected'
+      ? 'Glassdoor answered, but no result matched the requested location closely enough to be safe to search. '
+        + 'Check the preferred location spelling, or use a more specific form (e.g. "Toronto, Ontario, Canada").'
+      : failureKind === 'cancelled'
+        ? 'The search was stopped before this lookup finished — nothing to correct. Glassdoor will resolve the location on the next run.'
+        : 'Check the preferred location spelling and retry Glassdoor. '
+          + 'If its location autocomplete is unavailable, use the other country-scoped sources for this run.';
+  return { evidence, suggestion };
+}
+
+/**
+ * Park the page on `host` so the autocomplete fetch below is same-origin.
+ * The landing host is CONFIRMED rather than assumed: Glassdoor country-redirects
+ * (a .com request on a CA account lands on .ca — see the login verify trace), and
+ * a relative fetch issued from the wrong origin would silently answer for the
+ * wrong market. Settling is polled because one fixed wait races a slow redirect
+ * chain, which would report a reachable origin as unreachable.
+ */
+async function ensureGlassdoorOrigin(page, host) {
+  const currentHost = () => {
+    try { return new URL(page.url()).hostname.toLowerCase(); } catch { return ''; }
+  };
+  if (currentHost() === host) return true;
+  const originUrl = `https://${host}/Job/index.htm`;
+  await page.evaluate(u => { window.location.href = u; }, originUrl).catch(() => {});
+  let previous = '';
+  for (let settle = 0; settle < 3; settle++) {
+    await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
+    const landed = currentHost();
+    if (landed === host) return true;
+    // Glassdoor country-redirects (a .com request on a CA account lands on .ca).
+    // Once the URL has stopped moving somewhere else, more waiting cannot
+    // change the answer — stop burning settle time on it.
+    if (landed && landed === previous) return false;
+    previous = landed;
+  }
+  return false;
+}
+
 async function resolveGlassdoorLocId(page, location, signal, runCache = null) {
   const key = String(location || '').trim().toLowerCase();
-  if (!key) return { failure: 'no location was supplied' };
+  if (!key) return { failure: 'no location was supplied', failureKind: 'no-location' };
   if (runCache?.has(key)) return runCache.get(key);
-  const requestedCountry = glassdoorRequestedCountry(location);
   const cached = getGlassdoorLocId(key);
-  // Old persistent cache entries contain only locId/locT, not the selected
-  // country. They are safe for unqualified locations, but never enough proof
-  // for CA/US-scoped work — re-resolve and validate those from the live result.
-  if (cached && !requestedCountry) return cached;
-  if (signal?.aborted) return { failure: 'search was cancelled before location resolution' };
+  if (glassdoorCachedLocationUsable(cached, location)) {
+    runCache?.set(key, cached);
+    return cached;
+  }
+  if (cached) {
+    logger.info(`[BrowserScraper] Glassdoor cached locId ${cached.locId}/${cached.locT} for "${location}" lacks matching country provenance — re-resolving`);
+  }
+  if (signal?.aborted) return { failure: 'search was cancelled before location resolution', failureKind: 'cancelled' };
   // Same-origin fetch must use the country site whose autocomplete/search path
   // was verified. Canada uses .ca; United States and unclassified city targets
-  // use .com. Crossing hosts here can change the default market despite locId.
+  // use .com. Crossing hosts here can change the default market despite locId —
+  // which is why .com is only ever a LOOKUP fallback, tried after the country
+  // host fails at the transport layer, and still subject to the same country
+  // validation below. The search navigation itself never changes host.
   const desiredHost = normalizeLocationInput(location).countryCode === 'CA'
     ? 'www.glassdoor.ca'
     : 'www.glassdoor.com';
-  let currentHost = '';
-  try { currentHost = new URL(page.url()).hostname.toLowerCase(); } catch { /* navigate below */ }
-  if (currentHost !== desiredHost) {
-    const originUrl = `https://${desiredHost}/Job/index.htm`;
-    await page.evaluate(u => { window.location.href = u; }, originUrl).catch(() => {});
-    await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
-  }
-  if (signal?.aborted) return { failure: 'search was cancelled during location resolution' };
+  const hosts = desiredHost === 'www.glassdoor.com' ? [desiredHost] : [desiredHost, 'www.glassdoor.com'];
   const normalizedRequest = normalizeLocationInput(location);
   const subdivisionName = normalizedRequest.subdivisionCode
     ? (US_STATES[normalizedRequest.subdivisionCode.toLowerCase()] || CA_PROVINCES[normalizedRequest.subdivisionCode.toLowerCase()] || normalizedRequest.subdivision)
@@ -2115,43 +2585,123 @@ async function resolveGlassdoorLocId(page, location, signal, runCache = null) {
   // Prefer the most specific human-readable label. A US board-ready state scope
   // is "CO", but Glassdoor's autocomplete is more reliable with "colorado".
   const term = normalizedRequest.city || subdivisionName || normalizedRequest.country || (location.split(',')[0] || location).trim();
-  const res = await page.evaluate(async (t) => {
-    // This is the endpoint used by Glassdoor's current visible autocomplete.
-    // Keep its older endpoint as a compatibility fallback, but subject BOTH to
-    // the exact same post-response validation below.
-    const paths = [
-      `/autocomplete/location?locationTypeFilters=CITY,STATE,COUNTRY&caller=jobs&term=${encodeURIComponent(t)}`,
-      `/findPopularLocationAjax.htm?term=${encodeURIComponent(t)}&maxLocationsToReturn=10`,
-    ];
-    let lastError = 'no response';
-    for (const path of paths) {
-      try {
-        const r = await fetch(path, {
-          headers: { 'Accept': 'application/json, text/plain, */*' },
-          credentials: 'include',
-        });
-        if (!r.ok) { lastError = `HTTP ${r.status}`; continue; }
-        const text = await r.text();
-        try { return { data: JSON.parse(text), endpoint: path }; }
-        catch { lastError = 'non-json response'; }
-      } catch (e) { lastError = String((e && e.message) || e); }
+
+  const deadline = Date.now() + GLASSDOOR_LOOKUP_BUDGET_MS;
+  const attempts = [];
+  let rows = [];
+  for (const host of hosts) {
+    if (signal?.aborted) return { failure: 'search was cancelled during location resolution', failureKind: 'cancelled', attempts };
+    if (Date.now() >= deadline) {
+      attempts.push({ host, path: '(budget)', error: `gave up after ${Math.round(GLASSDOOR_LOOKUP_BUDGET_MS / 1000)}s` });
+      break;
     }
-    return { error: lastError };
-  }, term).catch(() => ({ error: 'evaluate-failed' }));
-  const rows = glassdoorAutocompleteRows(res?.data);
-  if (!res || res.error || rows.length === 0) {
-    logger.warn(`[BrowserScraper] Glassdoor locId lookup failed for "${location}" (${res?.error ?? 'no data'})`);
-    return { failure: `autocomplete lookup failed (${res?.error ?? 'no matching locations'})` };
+    if (!await ensureGlassdoorOrigin(page, host)) {
+      attempts.push({ host, path: '(origin)', error: 'could not reach the Glassdoor origin to run the lookup' });
+      continue;
+    }
+    const res = await page.evaluate(async (t, cfg) => {
+      // Runs inside the page: no imports are available here, so the row shapes
+      // and the retry loop are inlined. Keep rowsOf in sync with
+      // glassdoorAutocompleteRows.
+      const rowsOf = (data) => {
+        if (Array.isArray(data)) return data;
+        for (const k of ['data', 'results', 'locations', 'suggestions']) {
+          if (Array.isArray(data?.[k])) return data[k];
+        }
+        return [];
+      };
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      // The first path is Glassdoor's current visible autocomplete; the second
+      // is its older endpoint, kept as a compatibility fallback. BOTH answers
+      // go through the same validation on the Node side.
+      const paths = [
+        `/autocomplete/location?locationTypeFilters=CITY,STATE,COUNTRY&caller=jobs&term=${encodeURIComponent(t)}`,
+        `/findPopularLocationAjax.htm?term=${encodeURIComponent(t)}&maxLocationsToReturn=10`,
+      ];
+      const log = [];
+      for (const path of paths) {
+        for (let attempt = 1; attempt <= cfg.maxAttempts; attempt++) {
+          if (Date.now() >= cfg.deadline) {
+            log.push({ path, error: 'lookup budget exhausted' });
+            return { attempts: log };
+          }
+          const record = { path };
+          let parsed = null;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), cfg.fetchTimeoutMs);
+          try {
+            const r = await fetch(path, {
+              headers: { 'Accept': 'application/json, text/plain, */*' },
+              credentials: 'include',
+              signal: controller.signal,
+            });
+            record.status = r.status;
+            if (r.ok) {
+              const text = await r.text();
+              try { parsed = JSON.parse(text); record.rows = rowsOf(parsed).length; }
+              catch { record.error = 'non-json response'; }
+            }
+          } catch (e) {
+            record.error = controller.signal.aborted
+              ? `no response within ${Math.round(cfg.fetchTimeoutMs / 1000)}s`
+              : String((e && e.message) || e);
+          } finally { clearTimeout(timer); }
+          log.push(record);
+          if (record.rows > 0) return { data: parsed, endpoint: path, attempts: log };
+          // A parsed-but-empty answer is a verdict for this endpoint: move to
+          // the next one rather than asking the same question again.
+          if (record.rows != null) break;
+          const retryable = !Number.isFinite(Number(record.status))
+            || cfg.retryStatuses.includes(Number(record.status));
+          if (!retryable || attempt === cfg.maxAttempts) break;
+          await sleep(cfg.backoffMs * attempt);
+        }
+      }
+      return { attempts: log };
+    }, term, {
+      maxAttempts: GLASSDOOR_LOOKUP_MAX_ATTEMPTS,
+      backoffMs: GLASSDOOR_LOOKUP_BACKOFF_MS,
+      fetchTimeoutMs: GLASSDOOR_LOOKUP_FETCH_TIMEOUT_MS,
+      retryStatuses: GLASSDOOR_LOOKUP_RETRY_STATUSES,
+      deadline,
+    }).catch(e => ({ attempts: [{ path: '(evaluate)', error: String(e?.message || e) }] }));
+
+    for (const attempt of res?.attempts || []) attempts.push({ host, ...attempt });
+    rows = glassdoorAutocompleteRows(res?.data);
+    if (rows.length > 0) break;
+    // Only cross to the fallback host when this one never actually answered.
+    // A real, empty answer would be just as empty over there.
+    if (!(res?.attempts || []).every(attempt => glassdoorLookupAttemptIsTransient(attempt))) break;
+  }
+
+  if (rows.length === 0) {
+    const transient = attempts.length > 0 && attempts.every(attempt => glassdoorLookupAttemptIsTransient(attempt));
+    const trail = summarizeGlassdoorLookupAttempts(attempts);
+    logger.warn(`[BrowserScraper] Glassdoor locId lookup failed for "${location}" — ${trail}`);
+    return {
+      failure: `autocomplete lookup failed (${trail})`,
+      failureKind: transient ? 'transient' : 'no-match',
+      attempts,
+    };
   }
   const picked = pickGlassdoorLocation(rows, location);
   const validationFailure = validateGlassdoorLocationPick(picked, rows, location);
   if (!validationFailure) {
-    saveGlassdoorLocId(key, picked);
-    runCache?.set(key, picked);
-    return picked;
+    // Record the country the pick was validated against so a later run can
+    // trust the cached entry instead of re-running this outage-prone lookup.
+    const candidate = rows.find(item => glassdoorCandidateLocId(item) === String(picked.locId));
+    const country = glassdoorCandidateCountryIso(candidate);
+    const verified = country ? { ...picked, country } : { ...picked };
+    saveGlassdoorLocId(key, verified);
+    runCache?.set(key, verified);
+    return verified;
   }
   logger.warn(`[BrowserScraper] Glassdoor locId lookup rejected for "${location}": ${validationFailure}`);
-  return { failure: validationFailure || 'autocomplete returned no usable location' };
+  return {
+    failure: validationFailure || 'autocomplete returned no usable location',
+    failureKind: 'rejected',
+    attempts,
+  };
 }
 
 // Stealth navigator/screen masking applied on every document of a page (main
@@ -2366,10 +2916,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       const srcName  = SOURCE_LABELS[sourceId] || sourceId;
       const allJobs  = [];
       const seen     = new Set();
+      const providerSeen = new Set();
       // Every task for a source is built from the same persisted hub limits.
       // Keep the aggregate job limit at source scope so several role queries
       // cannot each consume a separate allowance.
-      const collectionLimits = sourceTasks[0]?.options?.collectionLimits || { jobsPerPlatform: null, pagesPerPlatform: 10 };
+      const collectionLimits = sourceTasks[0]?.options?.collectionLimits || { jobsPerPlatform: null, pagesPerPlatform: null };
       const jobsPerPlatform = Number.isFinite(collectionLimits.jobsPerPlatform)
         ? collectionLimits.jobsPerPlatform
         : Infinity;
@@ -2379,6 +2930,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let hitPerSourceCap          = false;
       let hitPageCap               = false;
       let hitEmptyPage             = false;
+      let dataStopReason           = null; // set by task.options.onPageScraped (age-window / no-new-jobs) — see jobPageStop.js
+      // Exact requests that reached the navigation step. The task list is only
+      // a plan: a source can hit its useful-result cap at q1/12.
+      const executedQueries        = [];
 
       // Fresh, fully-isolated Chrome for THIS platform (torn down before the next).
       platform = await launchScrapePlatformBrowser({
@@ -2413,6 +2968,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           srcName,
           qLabel:   `Query ${qi + 1} of ${sourceTasks.length}`,
           qText:    task.query || '',
+          queryIndex: qi + 1,
+          queryTotal: sourceTasks.length,
         };
 
         // Human-scale cooldown between queries (not before the first) — see
@@ -2430,7 +2987,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved) {
           task._locResolved = true;
           const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal, resolvedGlassdoorLocations)
-            .catch(() => ({ failure: 'autocomplete request threw before a location could be verified' }));
+            .catch(() => ({ failure: 'autocomplete request threw before a location could be verified', failureKind: 'transient' }));
           if (picked?.locId) {
             // Replace stale resume params as well as filling the normal
             // locKeyword-only task URL, ensuring the verified location is used.
@@ -2442,11 +2999,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             logger.info(`[BrowserScraper] Glassdoor "${task.resolveGlassdoorLocation}" → locId ${picked.locId}/${picked.locT}`);
           } else {
             const failure = picked?.failure || 'autocomplete returned no verified exact match';
+            const failureKind = picked?.failureKind || 'unknown';
             sourceSiteChangedWarning = {
               code: 'location-resolution-failed',
               severity: 'info',
-              evidence: `Glassdoor location "${task.resolveGlassdoorLocation}" could not be verified: ${failure}. The source was skipped before navigating its locKeyword-only nationwide URL.`,
-              suggestion: 'Check the preferred location spelling and retry Glassdoor. If its location autocomplete is unavailable, use the other country-scoped sources for this run.',
+              ...describeGlassdoorLocationFailure({ location: task.resolveGlassdoorLocation, failure, failureKind }),
             };
             logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
             recordManualScraperTelemetry({
@@ -2458,6 +3015,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               url: task.url,
               location: task.resolveGlassdoorLocation,
               reason: failure,
+              failureKind,
+              attempts: Array.isArray(picked?.attempts) ? picked.attempts.length : 0,
             });
             await updateOverlay(page, {
               ...overlayBase,
@@ -2482,7 +3041,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
         // Navigate via window.location.href — avoids CDP Page.navigate fingerprint
         navStatusRef.last = null;
-        await page.evaluate(u => { window.location.href = u; }, task.url).catch(() => {});
+        const navigationIssued = await page.evaluate(u => { window.location.href = u; }, task.url)
+          .then(() => true)
+          .catch(() => false);
+        recordIssuedManualQuery(executedQueries, { query: task.query || '', url: task.url }, navigationIssued);
         await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
 
         await injectOverlay(page);
@@ -2554,7 +3116,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // before running the extractor. Paginated sources skip this.
         if (SCROLL_SOURCES.has(sourceId)) {
           await preloadContent(page, sourceId, task.extractorJS, overlayBase, signal, {
-            maxPages: task.options?.maxPages || 10,
+            // `??` not `||` — task.options.maxPages is already the resolved,
+            // always-finite ceiling (resolvePageCeiling), but fall back to the
+            // same backstop if a task was ever built without it so this never
+            // silently reinstates the retired 10-page default.
+            maxPages: task.options?.maxPages ?? JOB_COLLECTION_PAGE_CEILING,
             jobsPerPlatform,
             existingJobs: allJobs.length,
           });
@@ -2569,6 +3135,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         let pageNum              = task.options?.startPageNum || 1;
         let siteChangedStreak    = 0;
         let siteChangedWarning   = null;
+        // Pages in THIS query's walk that extracted jobs cleanly. Proof that the
+        // extractor's selectors work against this session's markup — see the
+        // end-of-results branch below.
+        let pagesExtracted       = 0;
         let paginationRecoveries = 0; // times recoverFromChallengeHomeLanding fired on a paginated page
         let evalErrStreak        = 0; // consecutive non-SITE_CHANGED runExtractor throws — see runExtractor's doc comment
 
@@ -2576,10 +3146,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           const pauseResult = await waitIfPaused(page, signal);
           if (pauseResult === 'abort' || signal?.aborted) { earlyExit = true; break; }
 
-          // Hard page ceiling selected on this hub. The per-query walk otherwise
-          // only stops on an empty extraction or failed next-page action, so this
-          // also prevents a stale pager from looping forever.
-          const maxPages = task.options?.maxPages || 10;
+          // Hard page ceiling selected on this hub. `??` not `||`: an
+          // absent/undefined value falls back to the unlimited backstop, not
+          // the retired 10-page default — task.options.maxPages is normally
+          // already the resolved, always-finite ceiling (resolvePageCeiling).
+          // The per-query walk otherwise only stops on the data-driven
+          // onPageScraped signal below, an empty extraction, or a failed
+          // next-page action, so this ceiling is purely the backstop against a
+          // stale pager looping forever.
+          const maxPages = task.options?.maxPages ?? JOB_COLLECTION_PAGE_CEILING;
           if (pageNum > maxPages) {
             logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit browser pages/query (${maxPages}) — stopping pagination`);
             hitPageCap = true;
@@ -2643,6 +3218,38 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           evalErrStreak = 0;
 
           if (siteChangedError) {
+            // Walking off the END of a result set is not a site change. Several
+            // extractors throw SITE_CHANGED when they find zero cards (their
+            // 0-result guard against silent selector rot), and a page past the
+            // last result looks exactly like that: no cards, and none of the
+            // narrow "0 results" sentinels either, because this is a beyond-the-
+            // end page rather than a genuine no-matches page.
+            //
+            // If an EARLIER page in this same query walk extracted jobs, the
+            // selectors demonstrably work against this session's markup, so the
+            // stale-selector explanation is already disproven — the honest
+            // reading is "we ran out of results". Before the page ceiling became
+            // "All" this was mostly unreachable (few walks got deep enough);
+            // now every exhausted source would otherwise end on a hard, false
+            // "extractor broken — site structure changed" block. Under-alarming
+            // on a genuine mid-walk markup flip is the better trade: the walk
+            // still ends cleanly and keeps everything gathered so far, and the
+            // underlying throw is logged rather than swallowed.
+            if (pagesExtracted > 0) {
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1} p${pageNum}: extractor found nothing after ${pagesExtracted} page(s) that extracted cleanly — treating as end of results, not a site change. Underlying: ${siteChangedError.message.slice(0, 200)}`);
+              recordManualScraperTelemetry({
+                phase: 'end-of-results',
+                sourceId,
+                srcName,
+                queryIndex: qi + 1,
+                queryTotal: sourceTasks.length,
+                pageNum,
+                count: allJobs.length,
+                url: page.url(),
+              });
+              dataStopReason = 'end-of-results';
+              break;
+            }
             siteChangedStreak++;
             logger.warn(`[BrowserScraper] ${srcName} SITE_CHANGED (${siteChangedStreak}/${SITE_CHANGED_ABORT_THRESHOLD}): ${siteChangedError.message}`);
 
@@ -2690,14 +3297,19 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             hitEmptyPage = true;
             break;
           }
+          pagesExtracted++;   // this page's selectors worked — see the SITE_CHANGED branch above
 
-          // Deduplicate and accumulate page results
+          // Trust the platform's ranked/fuzzy search results. Every distinct row
+          // returned for the issued query is eligible for detail expansion; the
+          // app must not impose a second exact-ish title admission policy.
           const newJobs = [];
           for (const job of extracted) {
             // One listing can surface in two role queries. Google embeds that
             // query in `q`/the fragment, so raw URL equality misses an exact
             // duplicate; sourceJobKey preserves its stable htidocid instead.
             const key = sourceJobKey(job);
+            if (providerSeen.has(key)) continue;
+            providerSeen.add(key);
             if (!seen.has(key)) { seen.add(key); newJobs.push(job); }
           }
 
@@ -2705,9 +3317,17 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // and pages. Stop expanding as soon as its remaining allowance is full.
           const remainingSourceSlots = Math.max(0, jobsPerPlatform - allJobs.length);
           const jobsToExpand = newJobs.slice(0, remainingSourceSlots);
-          const { jobs: enhanced, descError, descWarning } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
+          const walkPlan = buildPhysicalCardWalkPlan(extracted, jobsToExpand);
+          await updateOverlay(page, {
+            ...overlayBase,
+            pageNum,
+            count: allJobs.length,
+            status: `Opening all ${jobsToExpand.length} platform-returned cards`,
+          }).catch(() => {});
+          const { jobs: enhanced, descError, descWarning, expandedCount } = await expandDescriptions(
+            page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + newJobs.length, signal, walkPlan,
+          );
 
-          const withSnippet = enhanced.filter(j => j.snippet?.length > 0).length;
           const descCfg = DESC_CONFIGS[sourceId];
           if (descCfg?.panelSelector || descCfg?.expandViaNavigation) {
             const strategy = [
@@ -2715,7 +3335,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               descCfg?.nextDataField && `nd(${descCfg.nextDataField.split('.').slice(-1)[0]})`,
               'sel',
             ].filter(Boolean).join('+');
-            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: ${withSnippet}/${jobsToExpand.length} expanded (${strategy}: ${descCfg?.panelSelector?.slice(0, 40) ?? 'none'})`);
+            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: ${expandedCount}/${jobsToExpand.length} expanded (${strategy}: ${descCfg?.panelSelector?.slice(0, 40) ?? 'none'})`);
           }
 
           allJobs.push(...enhanced);
@@ -2749,6 +3369,39 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           if (allJobs.length >= jobsPerPlatform) {
             logger.info(`[BrowserScraper] ${srcName} hit jobsPerPlatform (${jobsPerPlatform}) — stopping source`);
             hitPerSourceCap = true;
+            break;
+          }
+
+          // Data-driven stop (age-window / no-new-jobs from makeJobPageStop):
+          // an ADDITIONAL, earlier-terminating signal on top of the empty-page
+          // break below, needed now that pages defaults to "All" rather than a
+          // fixed 10-page ceiling. Fed THIS page's raw extracted rows (not the
+          // title-filtered/deduped `allJobs`) — the age/staleness rules are
+          // relevance-agnostic pager signals and need the full page to judge.
+          // Absent for tasks built without an onPageScraped instance (e.g. some
+          // resume paths) — the empty-extraction break above remains the safety
+          // net in that case. Mirrors browserPool.js's onPageScraped call: a
+          // throw is non-fatal and never stops the walk.
+          let stopDecision = null;
+          try {
+            stopDecision = await task.options?.onPageScraped?.({ items: extracted, pageIndex: pageNum - 1 });
+          } catch (e) {
+            logger.warn(`[BrowserScraper] ${srcName} onPageScraped threw (non-fatal): ${e?.message || e}`);
+          }
+          if (stopDecision?.stop) {
+            logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: ${stopDecision.detail || stopDecision.reason}`);
+            dataStopReason = stopDecision.reason || 'data-stop';
+            recordManualScraperTelemetry({
+              phase: 'page-stop',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              pageNum,
+              count: allJobs.length,
+              reason: stopDecision.reason,
+              detail: stopDecision.detail,
+            });
             break;
           }
 
@@ -2810,6 +3463,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitPerSourceCap,
         hitPageCap,
         hitEmptyPage,
+        dataStopReason,
       });
       const result = {
         id:          `${sourceId}-0`,
@@ -2819,6 +3473,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         pagesWalked: sourcePagesWalked,
         stopReason,
         warning:     sourceSiteChangedWarning || null,
+        executedQueries,
+        providerGathered: providerSeen.size,
+        relevanceDropped: 0,
+        preCapRelevanceDropped: 0,
+        relevanceRejected: [],
       };
       results.push(result);
       onResult?.(result);

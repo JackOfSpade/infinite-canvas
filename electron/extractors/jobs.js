@@ -253,7 +253,11 @@ export const GOOGLE_JOBS_EXTRACTOR = `
         }
       }
 
-      jobs.push({ title, company, location, salary, snippet: empType, url, posted, source: 'google' });
+      // The employment label is useful metadata but is not a job description.
+      // Keeping it out of the snippet field lets the description-expansion walk report
+      // (and downstream scoring receive) the truthful empty state until the
+      // card panel was actually read.
+      jobs.push({ title, company, location, salary, employmentType: empType, snippet: '', url, posted, source: 'google' });
     } catch {}
   });
 

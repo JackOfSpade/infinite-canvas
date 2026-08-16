@@ -3,6 +3,7 @@ import { RefreshCw, Target, MapPin, Bot, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
+import { JobPlatformSelectionControl } from '../../components/JobPlatformSelectionControl';
 
 // e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
@@ -32,6 +33,9 @@ export function JobSearchDoneState({
   setMaxAgeDays,
   collectionLimits,
   setCollectionLimits,
+  enabledSourceIds,
+  setEnabledSourceIds,
+  availableSourceIds,
   preferredLocation = '',
   setPreferredLocation,
   // Target/pivot role input — surfaces on the done state so the user can
@@ -135,7 +139,7 @@ export function JobSearchDoneState({
               onChange={(e) => setTargetRole?.(e.target.value)}
               placeholder="Target role (optional)"
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
-              title="Set or change the role to pivot into. Applies on next Re-run Search."
+              title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once. Applies on next Re-run Search."
             />
           </div>
           <div className="flex items-center gap-1.5 text-[10px] text-white/40">
@@ -169,6 +173,12 @@ export function JobSearchDoneState({
           <JobCollectionLimitsControl
             collectionLimits={collectionLimits}
             setCollectionLimits={setCollectionLimits}
+          />
+          <JobPlatformSelectionControl
+            enabledSourceIds={enabledSourceIds}
+            setEnabledSourceIds={setEnabledSourceIds}
+            collectionLimits={collectionLimits}
+            availableSourceIds={availableSourceIds}
           />
         </div>
       )}

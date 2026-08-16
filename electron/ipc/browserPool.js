@@ -30,6 +30,7 @@ import {
   nextWakeMs,
 } from './rateLimiter.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
+import { JOB_COLLECTION_PAGE_CEILING } from '../../src/utils/jobCollectionLimits.js';
 
 // Queue dispatch cadence. These are housekeeping intervals, not rate limits —
 // the rate limiter (cooldowns) governs actual request pacing. The idle poller
@@ -646,9 +647,16 @@ function jitteredDelay(min, max) {
  * and we stop the instant a hard block appears (never paginate into a tripwire).
  *
  * Stays domain-agnostic — it knows nothing about job dates. The CALLER owns the
- * "have we reached the date cutoff?" decision via `onPageScraped`, which returns
- * { stop, reason }. browserPool only stops on its own for a hard anti-bot block
- * or the `maxPages` ceiling.
+ * "should we keep paging?" decision via `onPageScraped`, which returns
+ * { stop, reason }. The job pipeline's callback (makeJobPageStop, in
+ * electron/ipc/jobPageStop.js) reports one of three data-driven reasons:
+ * `empty-page` (a page extracted zero rows — terminal, lossless), `age-window`
+ * (two consecutive pages conclusively outside the caller's look-back window),
+ * or `no-new-jobs` (the pager has stopped advancing / re-serving seen rows).
+ * browserPool itself only stops independently for a hard anti-bot block or the
+ * `maxPages` ceiling — with the hub's page count now defaulting to "All", that
+ * ceiling is a BACKSTOP against a runaway pager, not the expected way a
+ * well-behaved walk ends.
  *
  * Mirrors executeScrape's per-page readiness + anti-bot block; the shared
  * READINESS constants (scrapeBudget.js) keep the two loops from drifting — the
@@ -665,7 +673,7 @@ async function executeScrapePaginated(extractorJS, options = {}) {
     scrollFirst = false,
     dismissCookies = true,
     referer = null,
-    maxPages = 1,
+    maxPages: maxPagesOption = 1,
     nextUrl,
     onPageScraped = null,
     pageDelayMs = [4000, 9000],
@@ -675,6 +683,15 @@ async function executeScrapePaginated(extractorJS, options = {}) {
     // params, so URL pagination is broken — one load + N button clicks instead.
     loadMoreSelector = null,
   } = options;
+  // Defensive: a `null`/non-finite maxPages (e.g. a caller forwarding an
+  // un-resolved "All" pagesPerPlatform straight through) must fall back to the
+  // shared backstop, NOT the `= 1` destructuring default — that default only
+  // triggers for `undefined`, so an explicit `maxPages: null` would otherwise
+  // survive as literal `null` and make `p < maxPages` false on the very first
+  // iteration, silently returning a 0-page "success" instead of scraping.
+  const maxPages = Number.isFinite(maxPagesOption) && maxPagesOption > 0
+    ? Math.floor(maxPagesOption)
+    : JOB_COLLECTION_PAGE_CEILING;
 
   if (typeof nextUrl !== 'function') throw new Error('executeScrapePaginated requires options.nextUrl');
   const domain = extractDomain(nextUrl(0));
