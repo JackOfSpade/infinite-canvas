@@ -37,6 +37,11 @@ const HEADER = 'seen_date,source,company,title,location,url';
 // different listing lost to a bad identity key. Keep a small trail for the bug
 // report; never retain an unbounded copy of every job in this return value.
 const MAX_COLLISION_SAMPLES = 5;
+// Read-time history suppression is normally an expected outcome, but when it
+// is not (for example, an identity normalizer collapsed two distinct listings)
+// the caller needs enough evidence to diagnose it without opening the CSV.
+// Keep this deliberately as bounded as the write-time collision samples.
+const MAX_DEDUP_SAMPLES = 5;
 
 export function historyPathForCanvas(canvasFilePath) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
@@ -108,6 +113,21 @@ function collisionJobDiagnostic(job) {
     location: diagnosticText(job?.location) || '(no location)',
     url: diagnosticText(job?.url, 500) || '(no URL)',
   };
+}
+
+function historyRowDiagnostic(row) {
+  return {
+    seen_date: diagnosticText(row?.seen_date, 32) || '(unknown date)',
+    ...collisionJobDiagnostic(row),
+  };
+}
+
+function historyKeyDiagnostic(key) {
+  const value = diagnosticText(key, 320);
+  if (value.startsWith('u:')) return { kind: 'url', value };
+  if (value.startsWith('tcl:')) return { kind: 'title-company-location', value };
+  if (value.startsWith('tc:')) return { kind: 'title-company', value };
+  return { kind: 'unknown', value };
 }
 
 function appearsToBeSameListing(first, duplicate) {
@@ -236,9 +256,8 @@ export async function loadJobsHistory(canvasFilePath, stats = null) {
 }
 
 // Per-history-path FIFO mutex. appendJobsHistory is a whole-file
-// read-modify-write; without serialization two overlapping appends (the
-// fire-and-forget pre-scoring write in search-jobs vs. the renderer's
-// post-scoring IPC, or two hubs on one canvas) both read the same baseline and
+// read-modify-write; without serialization two overlapping appends (for
+// example two hubs finishing on one canvas) both read the same baseline and
 // the last rename wins — silently dropping the other's rows from the "never
 // re-show a job" dedup record. Keyed by path so different canvases never block
 // one another. Same dependency-free pattern as jobRunStaging's manifest lock.
@@ -385,16 +404,35 @@ export function filterHistoryForResume(historyRows, recoveredJobs, runStartedAt)
 }
 
 export function dedupAgainstHistory(jobs, historyRows) {
-  const set = new Set();
+  // Retain the first matching history row as well as its key. The Set-only
+  // form told callers merely that something had matched, which made a bad
+  // suppression impossible to investigate from a FULL/JOBS bug report.
+  const historyByKey = new Map();
   for (const r of historyRows) {
-    for (const k of dedupKeysFor(r)) set.add(k);
+    for (const k of dedupKeysFor(r)) {
+      if (!historyByKey.has(k)) historyByKey.set(k, r);
+    }
   }
   const kept = [];
   let removed = 0;
+  const samples = [];
   for (const job of jobs) {
     const keys = dedupKeysFor(job);
-    if (keys.length > 0 && keys.some(k => set.has(k))) { removed++; continue; }
+    const matchedKey = keys.find(k => historyByKey.has(k));
+    if (matchedKey) {
+      removed++;
+      if (samples.length < MAX_DEDUP_SAMPLES) {
+        const key = historyKeyDiagnostic(matchedKey);
+        samples.push({
+          dropped: collisionJobDiagnostic(job),
+          keyKind: key.kind,
+          key: key.value,
+          history: historyRowDiagnostic(historyByKey.get(matchedKey)),
+        });
+      }
+      continue;
+    }
     kept.push(job);
   }
-  return { kept, removed };
+  return { kept, removed, samples };
 }

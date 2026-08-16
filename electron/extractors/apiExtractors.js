@@ -21,6 +21,7 @@ import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -1001,6 +1002,84 @@ export function jobMatchesAnyRoleQuery(job, queries) {
     || roleQueries.some(query => jobRelevanceEvidence(job?.title, query));
 }
 
+/**
+ * Admit rows from a feed that has no query endpoint. Unlike an actual job-search
+ * API, a whole-feed response has not been ranked or filtered for the user's
+ * role, so it must satisfy at least one supplied role query locally before it
+ * consumes collection, history, or scoring capacity. Evidence is deliberately
+ * title-only: company, location, tags, and long descriptions are ambient text
+ * and must not turn an unrelated role into a match.
+ * With no usable role query, the caller requested no role constraint, so rows
+ * are preserved rather than treating an absent search as a rejection.
+ *
+ * `traceExtrasForJob`, when provided, may add source-specific diagnostic-only
+ * fields (for example RemoteOK's tags) to an admitted-row trace. It never
+ * affects admission.
+ */
+export function filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms = EMPTY_GEO, traceExtrasForJob = null) {
+  const providerRows = Array.isArray(jobs) ? jobs : [];
+  const roleQueries = (Array.isArray(queries) ? queries : [queries])
+    .map(query => decodeHtmlEntities(String(query || '')))
+    .filter(query => query.trim());
+  const items = [];
+  const rejectedCandidates = [];
+  const relevanceTrace = [];
+
+  for (const [order, job] of providerRows.entries()) {
+    // Whole-feed extractors can carry encoded text straight from JSON/RSS. The
+    // admission boundary needs the human title, not its serialized HTML form:
+    // `Systems &amp; Analytics Architect` otherwise inserts a fake `amp` word
+    // between the two role concepts and can fail the local-phrase guard. Keep
+    // the source object intact — this normalized value is matcher/telemetry-only
+    // and normal pipeline markup cleanup still owns the persisted job fields.
+    const title = decodeHtmlEntities(String(job?.title || ''));
+    const matched = roleQueries.length === 0
+      ? []
+      : roleQueries
+        .map(query => jobRelevanceEvidence(title, query, geoTerms))
+        .filter(Boolean);
+    if (roleQueries.length > 0 && matched.length === 0) {
+      // Keep the bounded diagnostic sample useful: a title sharing one role
+      // concept is more valuable when debugging a zero than an arbitrary
+      // first-feed-row miss. Sorting only the report sample never changes
+      // provider ordering or admission. Original feed order resolves ties.
+      const closestMatchedConcepts = roleQueries.reduce((best, query) =>
+        Math.max(best, computeJobRelevanceDecision(title, query, geoTerms).matchedConcepts.length), 0);
+      if (title) rejectedCandidates.push({ title, closestMatchedConcepts, order });
+      continue;
+    }
+
+    items.push(job);
+    if (relevanceTrace.length < 20) {
+      const extras = typeof traceExtrasForJob === 'function'
+        ? traceExtrasForJob(job)
+        : null;
+      relevanceTrace.push({
+        url: String(job?.url || ''),
+        title: title.slice(0, 160),
+        company: String(job?.company || '').slice(0, 120),
+        matched,
+        ...(extras && typeof extras === 'object' ? extras : {}),
+      });
+    }
+  }
+
+  return {
+    items,
+    providerGathered: providerRows.length,
+    gathered: items.length,
+    relevanceDropped: providerRows.length - items.length,
+    // The hub's central funnel starts from admitted rows, so carry this
+    // source-admission drop separately to reconstruct the full feed count.
+    preCapRelevanceDropped: providerRows.length - items.length,
+    relevanceRejected: rejectedCandidates
+      .sort((a, b) => b.closestMatchedConcepts - a.closestMatchedConcepts || a.order - b.order)
+      .slice(0, 8)
+      .map(({ title }) => title),
+    relevanceTrace,
+  };
+}
+
 /** USAJobs Keyword searches the whole announcement; the app needs role-title relevance. */
 export function filterUSAJobsByTitleRelevance(jobs, query) {
   return (Array.isArray(jobs) ? jobs : []).filter((job) =>
@@ -1178,7 +1257,7 @@ export function isRemoteOkSponsoredPlacement(job) {
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
-export async function fetchRemoteOKJobs(queries, signal = null) {
+export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const r = await safeApiFetch('https://remoteok.com/api', {
     headers: {
       'Accept': 'application/json',
@@ -1197,7 +1276,8 @@ export async function fetchRemoteOKJobs(queries, signal = null) {
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
 
-  // Keep every real feed row after dropping RemoteOK's sponsored placements.
+  // Remove sponsored placements before role admission. RemoteOK's endpoint is
+  // a whole feed, not a query result, so the remaining rows are filtered below.
   // Those are product ads sold
   // into the same /api feed, not postings: `company` is the literal pseudo-
   // employer "AI Supermarket", `position` holds a PRODUCT name, and the
@@ -1218,7 +1298,7 @@ export async function fetchRemoteOKJobs(queries, signal = null) {
     logger.info(`[RemoteOK API] dropped ${sponsored.length} sponsored ad placement(s): ${sponsored.slice(0, 6).join(', ')}`);
   }
 
-  const items = providerRows.map((job) => {
+  const feedJobs = providerRows.map((job) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
     const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
     const tags = (job.tags || []).join(', ');
@@ -1243,11 +1323,27 @@ export async function fetchRemoteOKJobs(queries, signal = null) {
       url,
       posted: job.date || '',
       source: 'remoteok',
+      // Trace-only source metadata. The shared whole-feed matcher ignores this
+      // field; it is retained solely to show that tags were not admission evidence.
+      _relevanceTraceTags: Array.isArray(job.tags)
+        ? job.tags.map(tag => String(tag).slice(0, 50)).slice(0, 20)
+        : [],
     };
   });
+  const admission = filterWholeFeedJobsByTitleRelevance(
+    feedJobs,
+    queries,
+    geoTerms,
+    job => ({ tags: job._relevanceTraceTags || [] }),
+  );
+  const items = admission.items.map(job => {
+    const cleanJob = { ...job };
+    delete cleanJob._relevanceTraceTags;
+    return cleanJob;
+  });
   const withDesc = items.filter(j => j.description).length;
-  logger.info(`[RemoteOK API] ${items.length} platform-returned jobs, ${withDesc}/${items.length} have descriptions`);
-  return { items, warning: r.warning, gathered: items.length, relevanceDropped: 0, relevanceRejected: [], relevanceTrace: [] };
+  logger.info(`[RemoteOK API] ${items.length}/${admission.providerGathered} role-matched feed jobs, ${withDesc}/${items.length} have descriptions`);
+  return { ...admission, items, warning: r.warning };
 }
 
 
@@ -1311,7 +1407,7 @@ function contextAround(s, index, length, pad = 70) {
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(queries, signal = null) {
+export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
     headers: {
       'Accept': 'application/rss+xml, application/xml, text/xml',
@@ -1367,11 +1463,12 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null) {
     });
   }
 
-  const withDesc = jobs.filter(j => j.description).length;
-  logger.info(`[WWR RSS] ${jobs.length} platform-returned jobs, ${withDesc}/${jobs.length} have descriptions`);
+  const admission = filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms);
+  const { items } = admission;
+  const withDesc = items.filter(j => j.description).length;
+  logger.info(`[WWR RSS] ${items.length}/${admission.providerGathered} role-matched feed jobs, ${withDesc}/${items.length} have descriptions`);
 
-  const items = jobs;
-  return { items, warning: r.warning, gathered: jobs.length, relevanceDropped: 0, relevanceRejected: [], relevanceTrace: [] };
+  return { ...admission, warning: r.warning };
 }
 
 

@@ -25,6 +25,7 @@ export function buildMainProcessLogsMarkdown(lines) {
 > see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
 > did and any errors that were swallowed by an IPC handler before the
 > renderer got a useful response.
+> **Timestamps:** UTC (\`HH:MM:SS.mmm\`).
 
 \`\`\`
 ${lines.join('\n')}
@@ -32,7 +33,11 @@ ${lines.join('\n')}
 `;
 }
 
-const EVENT_HISTORY_HEADING = '## Event History\n';
+// Event history originates in the renderer, whose display timestamps are local
+// to the user. Keep this note in the shared tail heading so uncapped export and
+// every clipboard-cap path cannot drift apart while preserving the stable
+// `## Event History` heading used by filters and clipboard parsing.
+export const EVENT_HISTORY_HEADING = '## Event History\n> **Timestamps:** local time (renderer). See Runtime Identity for the report date, IANA timezone, and UTC offset.\n';
 
 // A hard clipboard cap may land inside ANY large static section (the job
 // pipeline's relevance/taxonomy audits can be larger than Node Diagnostics).

@@ -1,6 +1,6 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 
-import { assessDetailSelection, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
+import { assessDetailSelection, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, createRunOwnershipGuard, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
 
 export default [
 {
@@ -1197,6 +1197,87 @@ export default [
     },
   },
 {
+    name: 'Job Search cancellation keeps retained-profile rerun reachable and stale cleanup cannot unlock a newer run',
+    run: () => {
+      const guard = createRunOwnershipGuard();
+      const first = guard.start();
+      assert(first && guard.active, 'the first Job Search attempt owns the processing guard');
+      assert(guard.start() === null && guard.active,
+        'an active Job Search attempt cannot accidentally acquire a second processing owner');
+      guard.cancel();
+      assert(!guard.active && !guard.finish(first),
+        'cancelling the initial attempt leaves no owner for its late finally block to release');
+      const second = guard.start();
+      assert(second && second !== first && guard.active, 'a replacement attempt can start immediately after cancellation');
+      assert(!guard.finish(first) && guard.active,
+        'the cancelled attempt settling late cannot mark its replacement idle');
+      assert(guard.finish(second) && !guard.active, 'the replacement attempt can release its own guard');
+
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const emptyStateStart = source.indexOf("hubState === 'empty'");
+      const processingStateStart = source.indexOf('{/* Processing state */}', emptyStateStart);
+      const emptyState = source.slice(emptyStateStart, processingStateStart);
+      assert(emptyState.includes('Career files retained')
+        && emptyState.includes('Re-run Search')
+        && emptyState.includes('hasReusableCareerProfile && !data.locked')
+        && emptyState.includes('handleRerun();'),
+      'only a locked empty hub with a retained profile exposes the existing rerun path');
+
+      const resetStart = source.indexOf('const resetHandler = useCallback');
+      const resetEnd = source.indexOf('const handleRerun = useCallback', resetStart);
+      const reset = source.slice(resetStart, resetEnd);
+      assert(reset.includes('processingRunsRef.current.cancel()')
+        && /pendingJobs:\s*null/.test(reset)
+        && /scrapeWarnings:\s*\[\]/.test(reset)
+        && reset.includes('const retainedCareerData = hasReusableCareerProfile')
+        && reset.includes('inputLocked: false')
+        && reset.includes('resumeProfile: null')
+        && reset.includes('careerData: null')
+        && reset.includes('...retainedCareerData')
+        && reset.includes('initialDropAcceptedRef.current = hasReusableCareerProfile')
+        && reset.includes('const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null')
+        && reset.includes('discardJobRun?.({ canvasFilePath, runId: resetRunId })'),
+      'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
+
+      assert(canHubAcceptInitialDrop({
+        type: 'jobhub',
+        data: { hubState: 'empty', inputLocked: false, resumeProfile: null, careerData: null, filePath: null },
+      }), 'cancelling before profile extraction reopens the hub for a replacement initial upload');
+      assert(!canHubAcceptInitialDrop({
+        type: 'jobhub',
+        data: { hubState: 'empty', inputLocked: true, resumeProfile: { skills: [] } },
+      }), 'cancelling after profile extraction keeps the hub bound to its original career files');
+
+      const rerunStart = source.indexOf('const handleRerun = useCallback');
+      const rerunEnd = source.indexOf('const isProcessing =', rerunStart);
+      const rerun = source.slice(rerunStart, rerunEnd);
+      assert(rerun.includes('effectivePaths.length === 0 && !data.resumeProfile')
+        && rerun.includes('startProcessingWithProfile(data.resumeProfile'),
+      'the retained-profile action re-enters the pipeline without requiring the cancelled run\'s file path');
+
+      const batchStart = source.indexOf('const cancelBatchScoring = useCallback');
+      const batchEnd = source.indexOf('Shared post-search disposition', batchStart);
+      const batchCancel = source.slice(batchStart, batchEnd);
+      assert(!/resumeProfile:\s*null/.test(batchCancel) && !/careerData:\s*null/.test(batchCancel),
+        'batch cancellation retains the career profile required by the rerun action');
+      assert(batchCancel.includes('const batchId = data.pendingBatch?.batchId || null')
+        && batchCancel.includes('discardJobBatch?.({ canvasFilePath, nodeId: id, batchId })'),
+      'batch cancellation scopes late sidecar cleanup to the abandoned batch');
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(jobsSource.includes('async function deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId = null } = {})')
+        && jobsSource.includes('current?.batchId !== expectedBatchId')
+        && jobsSource.includes('const removed = await deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId: sidecar.batchId });')
+        && jobsSource.includes('if (!removed) {'),
+      'a late batch poll must neither delete nor return results from a replacement batch sidecar');
+      assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
+        && jobsSource.includes("reason.message === 'Node deleted'")
+        && jobsSource.includes("phase: 'aborted'")
+        && jobsSource.indexOf('await throwIfSearchAborted();\n    await setJobRunStage') >= 0,
+      'a Reset during scrape discards only its token-scoped recovery run and cannot mark the cancelled manifest gathered');
+      return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
+    },
+  },
+{
     name: 'Native text undo guard: opt-in module fields keep Ctrl/Cmd-Z even when empty',
     run: () => {
       const dom = new JSDOM('<div><input id="plain" value=""><input id="marked" data-native-undo="true" value=""><div data-native-undo="true"><textarea id="nested"></textarea></div><input id="checkbox" type="checkbox" data-native-undo="true"></div>');
@@ -1598,6 +1679,8 @@ export default [
         'manual scraper must distinguish a pagination ceiling from a clean completion');
       assert(resolveManualSourceStopReason({ hitEmptyPage: true }) === 'empty-page',
         'manual scraper must retain an exhausted-results terminal reason');
+      assert(resolveManualSourceStopReason({ hitUnhandledPagination: true }) === 'pagination-unhandled',
+        'an enabled next-page control that was not followed must never look completed');
       assert(resolveManualSourceStopReason({ sourceSkipped: true }) === 'blocked',
         'manual scraper must retain a blocked terminal reason');
       assert(resolveManualSourceStopReason({ earlyExit: true }) === 'user-done'
@@ -1605,6 +1688,10 @@ export default [
       'manual scraper must preserve user-done semantics while prioritizing a concrete block');
       assert(resolveManualSourceStopReason({}) === 'completed',
         'manual scraper must reserve completed for a normal non-capped finish');
+      const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
+        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);"),
+      'ZipRecruiter must use its verified Next Page anchor instead of stopping after the first scroll-loaded page');
       // Data-driven stops outrank the page ceiling: now that pages defaults to
       // "All", a walk that ends because the DATA said stop must never be
       // reported as `page-cap` — bug reports flag that reason as "this source
@@ -1615,7 +1702,7 @@ export default [
       }
       assert(resolveManualSourceStopReason({ dataStopReason: 'age-window', sourceSkipped: true }) === 'blocked',
         'a concrete block must still outrank a data-driven stop');
-      return { perSource: 'per-source-cap', page: 'page-cap', data: 'age-window/no-new-jobs/end-of-results' };
+      return { perSource: 'per-source-cap', page: 'page-cap', unhandled: 'pagination-unhandled', data: 'age-window/no-new-jobs/end-of-results' };
     },
   },
 {
@@ -1661,6 +1748,48 @@ export default [
         'per-platform caps preserve provider order without a second local title gate');
       assert(localDiagnosticMatches.length === 2,
         'title matching remains available as diagnostics but does not control provider-result admission');
+      const wholeFeedRows = [
+        { title: 'Business Systems Architect', company: 'Acme', url: 'wwr-1' },
+        { title: 'Enterprise Platform Systems Architect', company: 'Acme', url: 'wwr-2' },
+        // Raw RSS/JSON titles can retain entities. Admission must decode only
+        // its local matcher/telemetry copy, not mutate the source job object.
+        { title: 'Customer Support Systems &amp; Analytics Architect', company: 'Acme', url: 'wwr-entity' },
+        // Company text is intentionally not role evidence for a whole feed.
+        { title: 'Customer Success Engineer', company: 'Systems Architect Group', url: 'wwr-3' },
+        // This near miss follows a total miss in feed order; diagnostics should
+        // rank it first because it shares one of the requested role concepts.
+        { title: 'GRC Analyst', company: 'Acme', url: 'wwr-4' },
+        { title: 'Systems Analyst', company: 'Acme', url: 'wwr-near-miss' },
+        { title: 'Senior Product Designer', company: 'Acme', url: 'wwr-5' },
+      ];
+      const wholeFeedAdmission = filterWholeFeedJobsByTitleRelevance(wholeFeedRows, ['Systems Architect']);
+      assert(wholeFeedAdmission.providerGathered === 7
+        && wholeFeedAdmission.gathered === 3
+        && wholeFeedAdmission.relevanceDropped === 4
+        && wholeFeedAdmission.preCapRelevanceDropped === 4
+        && wholeFeedAdmission.items.map(job => job.url).join('|') === 'wwr-1|wwr-2|wwr-entity'
+        && wholeFeedAdmission.relevanceRejected[0] === 'Systems Analyst'
+        && wholeFeedAdmission.relevanceRejected.includes('Customer Success Engineer')
+        && wholeFeedAdmission.relevanceTrace.length === 3
+        && wholeFeedAdmission.relevanceTrace.every(row => row.matched.length > 0)
+        && wholeFeedAdmission.relevanceTrace.some(row => row.url === 'wwr-entity' && row.title === 'Customer Support Systems & Analytics Architect')
+        && wholeFeedRows[2].title === 'Customer Support Systems &amp; Analytics Architect',
+      'whole-feed relevance: decodes entity-encoded titles for admission/telemetry, keeps source rows intact, and ranks near-miss samples first');
+      const wholeFeedOrAdmission = filterWholeFeedJobsByTitleRelevance(wholeFeedRows, ['Systems Architect', 'Customer Success Engineer']);
+      assert(wholeFeedOrAdmission.items.map(job => job.url).join('|') === 'wwr-1|wwr-2|wwr-entity|wwr-3',
+        'whole-feed relevance: multiple generated role queries use OR admission');
+      const unconstrainedWholeFeed = filterWholeFeedJobsByTitleRelevance(wholeFeedRows, []);
+      assert(unconstrainedWholeFeed.items.length === 7
+        && unconstrainedWholeFeed.gathered === 7
+        && unconstrainedWholeFeed.relevanceDropped === 0
+        && unconstrainedWholeFeed.relevanceRejected.length === 0,
+      'whole-feed relevance: no usable query preserves feed rows rather than treating absent search terms as rejections');
+      const geoStrippedWholeFeed = filterWholeFeedJobsByTitleRelevance([
+        { title: 'Vancouver Systems Analyst', url: 'geo-drop' },
+        { title: 'Systems Architect', url: 'geo-keep' },
+      ], ['Systems Architect Vancouver'], buildGeoTermSet(['Vancouver, BC']));
+      assert(geoStrippedWholeFeed.items.map(job => job.url).join('|') === 'geo-keep',
+        'whole-feed relevance: requested-location title text cannot satisfy a missing role concept');
       // Snapshot regressions: RemoteOK/WWR fetch whole feeds and used to admit
       // rows on one ambient/sub-string query term. A multi-noun role query now
       // needs two role concepts, with a deliberately narrow adjacent-role map.

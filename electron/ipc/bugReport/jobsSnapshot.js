@@ -70,6 +70,66 @@ export function formatSourceEvent(event) {
   return `${status}${code}@+${start}s${span}${repeats}${detail}`;
 }
 
+export function formatPipelineState(pipeline = {}) {
+  if (pipeline.active) return '🔄 active';
+  const phase = String(pipeline.phase || '').toLowerCase();
+  if (phase === 'completed') return '✅ complete';
+  if (phase === 'aborted' || phase === 'cancelled') return '⏹️ cancelled';
+  if (phase.includes('fail') || phase === 'error') return '❌ failed';
+  return '⚠️ stopped';
+}
+
+export function formatGlassdoorCacheProvenance(entry = {}) {
+  if (!entry.country) {
+    return '⚠️ no country provenance — will be upgraded only if it is an exact known nation root; otherwise re-resolved';
+  }
+  return `country ${entry.country}${entry.verifiedAt ? ` · verified ${formatAge(entry.verifiedAt)}` : ''}`;
+}
+
+function historyReportValue(value, fallback, max = 240) {
+  const text = String(value ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/`/g, "'")
+    .trim();
+  if (!text) return fallback;
+  return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
+}
+
+function historyJobReportValue(job, { includeSeenDate = false } = {}) {
+  const row = job || {};
+  const seen = includeSeenDate
+    ? `seen_date=${historyReportValue(row.seen_date, '(unknown date)', 32)}; `
+    : '';
+  return `${seen}source=${historyReportValue(row.source, '?', 60)}; ` +
+    `title="${historyReportValue(row.title, '(untitled)')}"; ` +
+    `company="${historyReportValue(row.company, '(unknown company)')}"; ` +
+    `location="${historyReportValue(row.location, '(no location)')}"; ` +
+    `url=${historyReportValue(row.url, '(no URL)', 500)}`;
+}
+
+function historyKeyKindLabel(kind) {
+  if (kind === 'url') return 'URL';
+  if (kind === 'title-company-location') return 'title + company + location';
+  if (kind === 'title-company') return 'title + company';
+  return 'unknown';
+}
+
+function historyDropEvidenceLines(samples, totalDropped, indent = '') {
+  const bounded = (Array.isArray(samples) ? samples : []).slice(0, 5);
+  if (!(Number(totalDropped) > 0) || bounded.length === 0) return [];
+  const plural = bounded.length === 1 ? '' : 's';
+  const total = Math.max(0, Number(totalDropped) || 0);
+  return [
+    `${indent}- History suppression evidence (${bounded.length}/${total} bounded sample${plural}):`,
+    ...bounded.map((sample) => {
+      const key = historyReportValue(sample?.key, '(unknown key)', 320);
+      const kind = historyKeyKindLabel(sample?.keyKind);
+      return `${indent}  - Dropped {${historyJobReportValue(sample?.dropped)}} → matched ${kind} key \`${key}\` against history {${historyJobReportValue(sample?.history, { includeSeenDate: true })}}`;
+    }),
+  ];
+}
+
 /**
  * Renders the last job-search pipeline funnel (search → scoring → bucketing).
  *
@@ -175,7 +235,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       ? null
       : runAge < 60_000 ? `${Math.round(runAge / 1000)}s`
         : `${Math.floor(runAge / 60_000)}m${Math.round((runAge % 60_000) / 1000)}s`;
-    const state = p.active ? '🔄 active' : '✅ complete';
+    const state = formatPipelineState(p);
     lines.push(`### Live Search Stage`);
     lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${elapsedLabel == null ? '' : ` · run age ${elapsedLabel}`}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
     if (p.error) lines.push(`- Last stage error: \`${String(p.error).replace(/`/g, "'").slice(0, 300)}\``);
@@ -202,8 +262,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       ? ` → title-relevance-dropped ${s.relevanceDropped}`
       : '';
     lines.push(
-      `- Found (raw): ${s.raw}${relevanceStage} → deduped ${s.deduped} → age-dropped ${s.ageDropped} → ` +
-      `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
+      `- Found (raw): ${s.raw}${relevanceStage} → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped} → ` +
+      `history-dropped: ${s.historyDropped} → **new: ${s.kept}**`,
     );
     lines.push(s.relevanceDropped > 0
       ? '- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_'
@@ -221,6 +281,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
       if (dedup.omitted > 0) lines.push(`  - _${dedup.omitted} additional dedup drop(s) omitted from this bounded trace._`);
     }
+    lines.push(...historyDropEvidenceLines(s.historyDropSamples, s.historyDropped));
     // Look-back window the run actually used + a per-platform verdict on whether
     // it bound each source. The window is enforced two ways: a server-side date
     // param (the source never serves out-of-window rows) AND a global client-side
@@ -412,15 +473,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Browser scrape order (manual-verification-first): ${annotated.join(' → ')}`);
     }
 
-    // Per-source gathered counts — the "was this source silently not gathered?"
-    // line. Provider-returned rows are preserved through admission; expected
-    // scope/configuration skips are split from real misses below. Without this
-    // you only saw the aggregate raw count and couldn't tell which sources
-    // contributed.
+    // Per-source provider rows versus the subset retained for this pipeline.
+    // `count` is post whole-feed admission (and post card-level cap), while
+    // providerGathered/gathered is what the source actually returned. Showing
+    // both is essential for a keyword-less feed: 100 provider rows rejected by
+    // title relevance must never render as "provider-returned: (none)".
     if (s.bySource && Object.keys(s.bySource).length > 0) {
       const entries = Object.entries(s.bySource);
-      const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
-      lines.push(`- Per source (provider-returned gathered): ${got.length ? got.join(', ') : '(none)'}`);
+      const providerReturned = (v) => {
+        const raw = v?.providerGathered ?? v?.gathered ?? v?.count ?? 0;
+        const count = Number(raw);
+        return Number.isFinite(count) ? Math.max(0, count) : 0;
+      };
+      const got = entries
+        .filter(([, v]) => providerReturned(v) > 0 || Number(v?.count || 0) > 0)
+        .map(([k, v]) => `${k}=${providerReturned(v)} → ${Math.max(0, Number(v?.count) || 0)}`);
+      lines.push(`- Per source (provider returned → retained for pipeline): ${got.length ? got.join(', ') : '(none)'}`);
       // Date-bounded deep pagination: how deep each paginating source walked and
       // why it stopped. `empty-page` = the source ran out of results. `blocked`
       // = an anti-bot wall cut it short. `page-cap` = hit this card's requested
@@ -432,6 +500,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         let flag = '';
         if (v.stopReason === 'blocked') {
           flag = ' ⚠️';
+        } else if (v.stopReason === 'pagination-unhandled') {
+          flag = ' ⚠️ (the page exposed an enabled Next Page control that the scraper did not follow — later results may be missing; see the source warning/evidence above)';
         } else if (v.stopReason === 'per-source-cap') {
           const limit = v.cap?.limit;
           const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
@@ -590,8 +660,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
       const snapData = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
       const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
-      savedSnapshotJobs = snapJobs;
-      if (snapJobs.length > 0) {
+      const currentRunId = t.search?.runId || null;
+      const snapshotRunId = snapData?.runId || null;
+      const currentHubId = t.nodeId || null;
+      const snapshotHubId = snapData?.sourceHubId || snapData?.nodeId || null;
+      // A modern current run must have an exact snapshot token. Older snapshots
+      // did not carry one, so only enforce the token when the live funnel has
+      // it; the hub identity remains a useful guard for all versions.
+      const runMatches = !currentRunId || snapshotRunId === currentRunId;
+      const hubMatches = !currentHubId || !snapshotHubId || snapshotHubId === currentHubId;
+      if (!runMatches || !hubMatches) {
+        const currentLabel = currentRunId || currentHubId || '(unknown current run)';
+        const snapshotLabel = snapshotRunId || snapshotHubId || '(legacy snapshot without run ID)';
+        lines.push(`- ⚠️ Saved scrape snapshot does not match the current search run (current: \`${currentLabel}\`; snapshot: \`${snapshotLabel}\`). Snippet, salary, and field-quality checks were skipped to avoid stale evidence.`);
+      } else if (snapJobs.length === 0) {
+        savedSnapshotJobs = snapJobs;
+        lines.push('- Saved scrape snapshot (current run): 0 jobs — no snippet, salary, or field-quality rows to report.');
+      } else {
+        savedSnapshotJobs = snapJobs;
         const bySource = {};
         for (const j of snapJobs) {
           const src = j.source || 'unknown';
@@ -1132,16 +1218,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   if (locationSkips.length > 0 || cacheKeys.length > 0) {
     lines.push('\n### Glassdoor Location Cache');
     lines.push('> Persisted location → locId map. `country` is the ISO the entry was validated');
-    lines.push('> against; an entry WITHOUT one predates that field and is deliberately');
-    lines.push('> re-resolved on every country-scoped run rather than trusted.');
+    lines.push('> against; an entry WITHOUT one predates that field and is normally re-resolved');
+    lines.push('> on a country-scoped run. Exact Canada/US nation roots are safely upgraded in place.');
     if (cacheKeys.length === 0) {
       lines.push('- (empty — every location resolve this run had to go to the live autocomplete)');
     } else {
       for (const key of cacheKeys.slice(0, 12)) {
         const entry = glassdoorLocCache[key] || {};
-        const provenance = entry.country
-          ? `country ${entry.country}${entry.verifiedAt ? ` · verified ${formatAge(Date.now() - entry.verifiedAt)} ago` : ''}`
-          : '⚠️ no country provenance — will be re-resolved when country-scoped';
+        const provenance = formatGlassdoorCacheProvenance(entry);
         lines.push(`- \`${key}\` → locId ${entry.locId ?? '(none)'}/${entry.locT ?? '?'} · ${provenance}`);
       }
       if (cacheKeys.length > 12) lines.push(`- _${cacheKeys.length - 12} further cached location(s) omitted._`);
@@ -1201,15 +1285,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (r.kind === 'linkedin-reenrich') {
         const rot = r.contextRotations != null ? `, ${r.contextRotations} ctx-rotation(s)` : '';
         if (r.skippedSameIp) {
-          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **skipped, IP unchanged**${r.warmIp ? ` (still ${r.warmIp})` : ''} — the VPN switch hadn't taken effect, so re-fetch was not re-attempted on the same rate-limited IP.`);
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **immediate retry deferred; observed IP unchanged**${r.warmIp ? ` (still ${r.warmIp})` : ''} — wait about 1 minute, then Solve on this IP, or switch VPN to a different working egress and Solve now.`);
         } else if (r.browserUnavailable) {
           lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **browser/profile contention — retryable**${r.stillEmpty != null ? ` (${r.stillEmpty} still empty)` : ''}. Close the other captcha/login window, then Solve again; no LinkedIn descriptions were fetched in this pass.`);
         } else if (r.walled) {
-          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch **hit IP ceiling** after +${r.enrichSuccess ?? 0}/${r.needEnrich ?? '?'}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}${r.warmIp ? `, IP ${r.warmIp} now warm` : ''}. _Anonymous guest rate-limit, not a login issue — switch VPN to a fresh IP, then Solve to fetch more._`);
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch **hit a guest wall** after +${r.enrichSuccess ?? 0}/${r.needEnrich ?? '?'}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}${r.warmIp ? `, observed IP ${r.warmIp}` : ''}. _Anonymous guest limit, not a login issue — its key may be IP, guest context, or fingerprint/session. Wait about 1 minute then Solve on this IP, or switch VPN to a different working egress and Solve now._`);
         } else if (r.needEnrich != null) {
           lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetched +${r.enrichSuccess ?? 0}/${r.needEnrich}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}`);
         } else {
           lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch (no jobs needed descriptions)`);
+        }
+        continue;
+      }
+      if (r.kind === 'description-retry') {
+        const unavailable = Array.isArray(r.unavailableDescriptions) ? r.unavailableDescriptions : [];
+        lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
+        for (const item of unavailable.slice(0, 5)) {
+          lines.push(`  - Removed unavailable listing: "${String(item?.title || '(untitled)').replace(/[\r\n]+/g, ' ').slice(0, 140)}"${item?.url ? ` · ${String(item.url).slice(0, 500)}` : ''}${item?.reason ? ` (${item.reason})` : ''}`);
         }
         continue;
       }
@@ -1234,6 +1326,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const samples = (Array.isArray(r.relevanceRejected) ? r.relevanceRejected : []).slice(0, 8);
         lines.push(`  - Rejected resolved recommendation(s) before history/scoring${samples.length ? `: ${samples.map(title => `"${title}"`).join(', ')}` : '.'}`);
       }
+      lines.push(...historyDropEvidenceLines(r.historyDropSamples, r.historyDropped, '  '));
       if (r.enrichment) {
         const e = r.enrichment;
         const verdict = (e.empty || 0) === 0 ? '✅' : '⚠️';
@@ -1282,20 +1375,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
-  // LinkedIn anonymous-enrichment egress-IP trail. The guest description limit
-  // is per-IP, so the whole "switch your VPN and Solve again" loop hinges on the
-  // egress IP actually changing — the one variable the rest of this report is
-  // blind to (the resolve telemetry keeps only the latest Solve and records no
-  // IP). This block makes it explicit per pass: which IP it ran on, whether that
-  // changed, and whether the lookup even worked. A null IP means the same-IP
-  // guard is inert (it always proceeds); a never-changing IP means the VPN isn't
-  // switching egress; distinct IPs that all still wall means the exit IPs are
-  // shared/pre-warmed. Those three are indistinguishable without this.
+  // LinkedIn anonymous-enrichment egress-IP trail. It records the egress and
+  // browser process for each pass, but those observations alone do NOT identify
+  // the quota key: every completed pass shrinks the remaining job pool, and a
+  // changed IP can independently be warmer/cooler. The report must preserve that
+  // uncertainty rather than infer IP- or browser-session scope from raw yield.
   const enrichTrail = Array.isArray(t.linkedinEnrich) ? t.linkedinEnrich : [];
   if (enrichTrail.length > 0) {
     lines.push('\n### LinkedIn enrichment — egress IP / browser trail');
-    lines.push('> Guest quota is per-IP OR per-browser-session. "Switch VPN → Solve" only helps if it\'s per-IP — the browser# + lifetime columns separate the two.');
-    lines.push('> To MEASURE the cooldown: stay on one IP (no Re-run), Solve at progressively longer waits — the "idle" column is the gap before each pass; the first pass that returns **clean finish** (no wall) marks the cooldown.');
+    lines.push('> The IP/browser columns document observations; they do not by themselves prove whether a guest limit is IP- or browser/session-scoped. Per-pass yield is not comparable when the remaining pool changes.');
+    lines.push('> A cooldown can be bounded only by a re-attempt on the **same observed IP and browser process** after a wall. The "idle" column is the gap before each pass, not proof that an IP change recovered by waiting.');
     // Compact gap formatter: minutes once past 60s, else seconds.
     const fmtGap = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
     let prevIp = null;
@@ -1321,21 +1410,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const ndStr = nd > 0
         ? `, ${nd} no-desc${e.noDescSoftBlock != null ? ` [${e.noDescSoftBlock} soft-block${e.noDescGenuine ? `, ${e.noDescGenuine} genuine` : ''}]` : ''}`
         : '';
+      const attemptedStr = e.attempted != null
+        ? `, attempted ${e.attempted}${e.remainingBefore != null && e.remainingBefore !== e.attempted ? `/${e.remainingBefore} remaining` : ''}`
+        : '';
       let outcome;
-      if (e.skippedSameIp) outcome = 'skipped — same warm IP, not re-attempted';
+      if (e.skippedSameIp) outcome = 'immediate retry deferred — observed IP unchanged';
       else if (e.browserUnavailable) outcome = `**browser/profile contention — retryable**${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''} · close the other captcha/login window, then Solve`;
       // Dead egress (VPN landed on a server with no internet) — distinct from a
       // rate-limit wall: every fetch failed at the transport layer. The remedy is
       // a DIFFERENT (working) VPN server, not waiting out a cooldown.
       else if (e.noInternet) outcome = `🔌 **no internet on this IP** (egress offline) — +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr} · switch to a WORKING VPN server, then Solve`;
-      else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
+      else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${attemptedStr}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
       // No URL wall, but soft-blocks (gutted pages) mean it was still rate-limited —
       // don't call that a "clean finish", it overstates what happened.
-      else if ((e.noDescSoftBlock || 0) > 0) outcome = `**soft-blocked finish** (no URL wall, but gutted pages), +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
-      else outcome = `**clean finish (cold)**, +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
-      // Browser identity: which process this pass ran on + how much it had already
-      // enriched on that process. Same browser# with rising lifetime across passes
-      // is what lets a reader separate browser-session depletion from IP.
+      else if ((e.noDescSoftBlock || 0) > 0) outcome = `**soft-blocked finish** (no URL wall, but gutted pages), +${e.enriched ?? 0}${attemptedStr}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
+      else outcome = `**clean finish**, +${e.enriched ?? 0}${attemptedStr}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
+      // Browser identity and lifetime are descriptive context only. A rising
+      // lifetime and falling yield are expected as earlier passes consume work.
       let browserStr = '';
       if (e.browserGen != null) {
         const ageS = e.browserAgeMs != null ? `${Math.round(e.browserAgeMs / 1000)}s old` : 'age ?';
@@ -1358,58 +1449,63 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (nullLookups > 0) {
       lines.push(`- ⚠️ **egress IP lookup failed on ${nullLookups} pass(es)** — api.ipify.org unreachable (a VPN may block it). The same-IP guard needs a non-null IP, so with these it silently proceeds every time and can NOT catch "you haven't switched yet."`);
     }
-    // Strongest discriminator: same browser process across passes, IP changed
-    // between them, yet yield collapsed → switching the IP did NOT restore
-    // headroom, so the ceiling is browser/session-scoped, not per-IP.
+    // IP/browser observations, deliberately not a scope verdict. A later pass
+    // has fewer candidates to enrich, so yield collapse is expected even when
+    // the limit is entirely IP-scoped. Likewise, a changed IP may simply be a
+    // colder shared exit. Neither is a controlled A/B test.
+    const hasShrinkingPool = realPasses.some((e, i) => i > 0
+      && e.remainingBefore != null && realPasses[i - 1].remainingBefore != null
+      && e.remainingBefore < realPasses[i - 1].remainingBefore);
     if (realPasses.length >= 2 && gens.size === 1 && ipChangedAcrossPasses) {
-      const first = realPasses[0], last = realPasses[realPasses.length - 1];
-      if ((first.enriched ?? 0) > (last.enriched ?? 0) * 2) {
-        lines.push(`- 🔬 **Same browser process (gen #${[...gens][0]}) across all passes, yet yield collapsed ${first.enriched}→${last.enriched} while the egress IP changed** — switching the IP did NOT restore headroom on the same browser. That points to a **browser/session-scoped** limit (reset by Reset browser session / app restart), NOT per-IP. Caveat: the first pass is also the freshest browser, so the decisive test is: **Reset browser session (or restart) on the SAME IP** — if yield recovers, it's the browser, not the IP.`);
-      }
+      const poolNote = hasShrinkingPool
+        ? ' The remaining input pool also shrank between passes, so raw yields are not comparable.'
+        : '';
+      lines.push(`- 🔬 **Same browser process (gen #${[...gens][0]}) was observed across changing egress IPs.** This trail cannot identify whether the ceiling is IP- or browser/session-scoped:${poolNote} A controlled reset/retry on the same observed IP with a fixed test batch is required.`);
     } else if (solves.length >= 1 && seenIps.length >= 2 && distinctIps.size === 1) {
-      lines.push(`- 🔥 **IP never changed across ${seenIps.length} passes (${[...distinctIps][0]})** — the VPN switch is NOT changing the egress IP LinkedIn sees. Re-Solving on the same warm IP just re-walls; the switch isn't working.`);
+      lines.push(`- 🔥 **Observed egress IP never changed across ${seenIps.length} recorded pass(es) (${[...distinctIps][0]}).** A VPN switch may not have taken effect; retrying it would not test a different IP.`);
     } else if (solves.length >= 2 && distinctIps.size > 1 && solves.every(e => e.walled || e.skippedSameIp)) {
-      lines.push(`- ℹ️ **${distinctIps.size} distinct IPs but every Solve still walled** — could be shared/pre-warmed exit IPs (per-IP, switch can't find a cold one) OR a browser-session limit. Compare the browser# column: same browser# across all ⇒ lean browser-scoped; fresh browser# that still walls on a new IP ⇒ lean per-IP.`);
+      lines.push(`- ℹ️ **${distinctIps.size} observed IPs and every Solve walled.** This is inconclusive: exits can be shared/pre-warmed, and the same browser process was reused. It does not establish either quota scope.`);
     }
-    // Cooldown bracket: pair the idle-before-each-pass with its outcome to bound
-    // how long the limit needs to cool. A real enrichment pass (browserGen set)
-    // that came back clean after some idle ⇒ cooled by then; the longest idle
-    // that still walled is the lower bound.
+    // Cooldown observations are valid only within one observed IP/browser
+    // identity. Never pair a wall on IP A with a clean result on IP B: that
+    // would mistake a changed egress for elapsed-time recovery.
     const fmtGap2 = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
-    const walledIdles = [];
-    const cleanIdles = [];
-    for (let i = 1; i < enrichTrail.length; i++) {
-      const e = enrichTrail[i];
-      if (e.browserGen == null) continue; // skip the same-IP-skip pass (no run)
-      if (e.kind === 'probe') continue;   // probe confirms have 0s idle by design — don't skew the bracket
-      if (e.noInternet) continue;         // offline egress is neither cooled nor walled — not a cooldown signal
-      const idle = Math.max(0, (e.startedAt ?? e.ts) - enrichTrail[i - 1].ts);
-      // A soft-blocked pass (gutted pages, no URL wall) was STILL rate-limited —
-      // not cooled — so it bounds the cooldown from below just like a wall does.
-      // Only a pass with neither a wall nor soft-blocks proves the limit had cleared.
-      const wasRateLimited = e.walled || (e.noDescSoftBlock || 0) > 0;
-      if (wasRateLimited) walledIdles.push(idle);
-      else if (!e.skippedSameIp) cleanIdles.push(idle); // truly clean = cooled
-    }
-    if (cleanIdles.length > 0) {
-      const minClean = Math.min(...cleanIdles);
-      const walledBelow = walledIdles.filter(w => w < minClean);
-      if (walledBelow.length > 0) {
-        const loStr = fmtGap2(Math.max(...walledBelow));
-        const hiStr = fmtGap2(minClean);
-        // When both bounds round to the same label (e.g. ~61s walled vs ~62s clean
-        // both render "1m"), "between 1m and 1m" reads as a contradiction — collapse
-        // it to a single estimate instead.
-        if (loStr === hiStr) {
-          lines.push(`- 🧊 **Cooldown ≈ ${hiStr}** — around ${hiStr} idle was the boundary: a shorter wait still walled, this one came back clean (cold). Wait ≥ ${hiStr} between batches to keep enriching on the same IP/browser.`);
-        } else {
-          lines.push(`- 🧊 **Cooldown ≈ between ${loStr} and ${hiStr}** — a Solve after ${loStr} idle still walled, but after ${hiStr} idle it came back clean (cold). Wait ≥ that between batches to keep enriching on the same IP/browser.`);
+    const cooldownByIdentity = new Map();
+    let previousActual = null;
+    for (const e of enrichTrail) {
+      if (e.browserGen == null || !e.ip || e.skippedSameIp || e.noInternet || e.browserUnavailable || e.kind === 'probe') continue;
+      const isRateLimited = e.walled || (e.noDescSoftBlock || 0) > 0;
+      if (previousActual) {
+        const sameIdentity = e.ip === previousActual.ip && e.browserGen === previousActual.browserGen;
+        const previousWasRateLimited = previousActual.walled || (previousActual.noDescSoftBlock || 0) > 0;
+        if (sameIdentity && previousWasRateLimited) {
+          const key = `${e.ip}\u0000${e.browserGen}`;
+          if (!cooldownByIdentity.has(key)) cooldownByIdentity.set(key, { ip: e.ip, browserGen: e.browserGen, walled: [], clean: [] });
+          const sample = cooldownByIdentity.get(key);
+          const idle = Math.max(0, (e.startedAt ?? e.ts) - previousActual.ts);
+          if (isRateLimited) sample.walled.push(idle);
+          else sample.clean.push(idle);
         }
-      } else {
-        lines.push(`- 🧊 **Cooldown ≤ ${fmtGap2(minClean)}** — a Solve after ${fmtGap2(minClean)} idle came back clean (cold). Try shorter waits to tighten the bound.`);
       }
-    } else if (walledIdles.length > 0) {
-      lines.push(`- ⏳ **Cooldown > ${fmtGap2(Math.max(...walledIdles))}** (longest idle tested so far) — every Solve still walled. Wait longer between Solves (same IP, no Re-run) until one returns "clean finish".`);
+      previousActual = e;
+    }
+    const cooldownSamples = [...cooldownByIdentity.values()];
+    const boundedCooldowns = cooldownSamples.filter(sample => sample.clean.length > 0);
+    if (boundedCooldowns.length > 0) {
+      for (const sample of boundedCooldowns) {
+        const minClean = Math.min(...sample.clean);
+        const walledBelow = sample.walled.filter(wait => wait < minClean);
+        const identity = `IP ${sample.ip}, browser#${sample.browserGen}`;
+        if (walledBelow.length > 0) {
+          const loStr = fmtGap2(Math.max(...walledBelow));
+          const hiStr = fmtGap2(minClean);
+          lines.push(`- 🧊 **Cooldown on ${identity}: between ${loStr} and ${hiStr}.** A same-IP/browser retry still walled after ${loStr}, then one finished clean after ${hiStr}.`);
+        } else {
+          lines.push(`- 🧊 **Cooldown on ${identity}: ≤ ${fmtGap2(minClean)}.** A same-IP/browser retry finished clean after that idle; test shorter waits to tighten the bound.`);
+        }
+      }
+    } else if (realPasses.some(e => e.walled || (e.noDescSoftBlock || 0) > 0)) {
+      lines.push('- ⏳ **Cooldown cannot be estimated from this trail.** No clean retry followed a wall on the same observed IP and browser process; passes that changed IP or browser are excluded because they can represent a different quota state.');
     }
     // Automated cooldown-probe result (JOB_SEARCH_PROBE_COOLDOWN) — the crisp
     // answer when the probe ran the wait-and-test loop unattended.
@@ -1419,6 +1515,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`- ⏳ **Cooldown probe in progress** — ${cd.attempts} attempt(s) so far${cd.aborted ? ' (aborted)' : ''}.`);
       } else if (cd.foundMs != null) {
         lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap2(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap2(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
+      } else if (cd.identityChanged || cd.identityUnverified) {
+        const expected = cd.expectedIdentity?.ip
+          ? `expected IP ${cd.expectedIdentity.ip}, browser#${cd.expectedIdentity.browserGen ?? '?'}`
+          : 'the original wall identity was not fully recorded';
+        const observed = (cd.observedIdentity?.ip || cd.observedIdentity?.browserGen != null)
+          ? `; observed IP ${cd.observedIdentity?.ip || '?'}, browser#${cd.observedIdentity?.browserGen ?? '?'}`
+          : '';
+        lines.push(`- ⚠️ **Cooldown probe invalid — IP/browser identity ${cd.identityChanged ? 'changed' : 'could not be verified'}.** ${expected}${observed}; this does not measure a cooldown. Keep the same VPN egress and browser process, then retry.`);
       } else if (cd.browserUnavailable) {
         lines.push(`- ⏸️ **Cooldown probe paused — browser/profile contention.** A visible captcha/login window held the shared browser profile at attempt ${cd.attempts}; close it and retry. This result says nothing about LinkedIn's cooldown.`);
       } else if (cd.aborted) {
@@ -1441,7 +1545,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // jobs. evalErrors is NOT used (it counts failed ATTEMPTS, not empty jobs).
     const lastAttempt = enrichTrail[enrichTrail.length - 1];
     if (lastAttempt?.browserUnavailable) {
-      lines.push(`- ⚠️ **Residual: ${lastAttempt.stillEmpty ?? '?'} still empty — retryable browser/profile contention.** The final enrichment pass could not start because another visible captcha/login window held the shared browser profile. Close that window, then Solve; this was not a clean finish or an IP-rate-limit result.`);
+      lines.push(`- ⚠️ **Residual: ${lastAttempt.stillEmpty ?? '?'} still empty — retryable browser/profile contention.** The final enrichment pass could not start because another visible captcha/login window held the shared browser profile. Close that window, then Solve; this was not a clean finish or a guest-limit result.`);
     } else {
       const lastReal = [...enrichTrail].reverse().find(e => e.browserGen != null);
       if (lastReal && lastReal.stillEmpty != null) {
@@ -1585,6 +1689,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
       }
       if (audit.omitted > 0) lines.push(`  - _${audit.omitted} additional scored job(s) omitted from the bounded audit._`);
+
+      // SCORE promises ordinary per-job evidence too, not only rows involved in
+      // a rare cross-batch anomaly. Keep the normal sample compact so FULL still
+      // reaches the later history/taxonomy sections.
+      const evidence = audit.rows.slice(0, 10);
+      const totalEvidence = audit.rows.length + (audit.omitted || 0);
+      lines.push(`- Scoring evidence (${evidence.length}/${totalEvidence} bounded row(s)):`);
+      for (const row of evidence) {
+        lines.push(`  - batch ${row.batch || '?'} · score ${row.score ?? '?'} · [${historyReportValue(row.source, '?', 40)}] "${historyReportValue(row.title, '(untitled)', 120)}" — ${historyReportValue(row.direction, '(no direction)', 100)} · input ${row.descriptionChars ?? '?'} chars · reason: "${historyReportValue(row.reason, '(none)', 240)}"`);
+      }
+      if (totalEvidence > evidence.length) {
+        lines.push(`  - _${totalEvidence - evidence.length} additional scoring-evidence row(s) omitted._`);
+      }
     }
   } else {
     lines.push('\n### Scoring\n- (no scoring recorded this session)');
@@ -1593,8 +1710,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   if (t.history && typeof t.history === 'object') {
     lines.push('\n### Seen-history persistence');
     const stages = [
-      ['preScoring', 'Authoritative search write'],
-      ['postScoring', 'Post-scoring resolve reconciliation'],
+      ['preScoring', 'Pre-results write'],
+      ['boardDisplay', 'Board-displayed write'],
     ];
     for (const [key, label] of stages) {
       const h = t.history[key];

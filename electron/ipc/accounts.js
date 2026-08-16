@@ -572,7 +572,11 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight for ${activePlatforms.join(', ')}`);
       _verifyingPlatforms.delete(platformId);
       notify('accounts:verify-update', { platformId, connected });
-      durations.push({ platformId, ms: 0, connected, skipped: true, skipReason: `login flow in flight (${activePlatforms.join(', ')})` });
+      durations.push({
+        platformId, ms: 0, connected, skipped: true,
+        outcome: 'skipped-login-flow',
+        reason: `login flow in flight (${activePlatforms.join(', ')})`,
+      });
       return;
     }
     // CDP-walled on BOTH axes (native LOGIN + native READ) = swappa, mercari: their
@@ -591,7 +595,11 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       logger.info(`[Accounts] Startup verify skipping ${platformId} — CDP-walled native-login+native-read platform; native read owns login state during Check All (kept prior: ${connected ? 'connected' : 'not connected'})`);
       _verifyingPlatforms.delete(platformId);
       notify('accounts:verify-update', { platformId, connected });
-      durations.push({ platformId, ms: 0, connected, skipped: true, skipReason: 'native read owns login state' });
+      durations.push({
+        platformId, ms: 0, connected, skipped: true,
+        outcome: 'skipped-native',
+        reason: 'native read owns login state',
+      });
       return;
     }
     const startedAt = Date.now();
@@ -627,11 +635,27 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       } else {
         await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
       }
-      durations.push({ platformId, ms, connected: keepPrior ? (_statusCache[platformId]?.connected ?? false) : verdict.connected });
+      durations.push({
+        platformId,
+        ms,
+        connected: keepPrior ? (_statusCache[platformId]?.connected ?? false) : verdict.connected,
+        // `connected` alone is not a verifier result when an anti-bot fetch was
+        // inconclusive: it is merely the last cached state we deliberately kept.
+        // Preserve that distinction for the timing/report diagnostic instead of
+        // presenting a retained cache entry as a fresh successful verification.
+        outcome: keepPrior ? 'retained-prior' : 'verified',
+        reason: verdict.reason || null,
+        inconclusive: !!verdict.inconclusive,
+      });
       logger.info(`[Accounts] Startup verify ${platformId}: ${keepPrior ? 'kept prior status' : (verdict.connected ? 'connected' : 'not connected')} (${ms}ms)`);
     } catch (e) {
       const ms = Date.now() - startedAt;
-      durations.push({ platformId, ms, connected: false, error: e?.message || String(e) });
+      durations.push({
+        platformId, ms, connected: false,
+        outcome: 'error',
+        reason: e?.message || String(e),
+        error: e?.message || String(e),
+      });
       logger.warn(`[Accounts] Startup verify ${platformId} threw (${ms}ms):`, e?.message || String(e));
     }
     _verifyingPlatforms.delete(platformId);

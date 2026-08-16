@@ -22,6 +22,7 @@ import { useToast } from '../components/ToastProvider';
 import { getHubDropLockReason } from '../utils/hubDropEligibility';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { filterHandledJobSourceWarnings, isJobSourceWarningGating } from '../utils/jobSourceWarningPolicy';
+import { createRunOwnershipGuard } from '../utils/runOwnership';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
 import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
@@ -135,7 +136,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const addElementsGlobally = nav?.addElementsGlobally;
   const canvasFilePath = nav?.currentFile || null;
   const moduleRunQueue = useModuleRunQueue();
-  const processingRef = useRef(false);
+  const processingRunsRef = useRef(createRunOwnershipGuard());
   const initialDropAcceptedRef = useRef(false);
   const pendingUSAJobsRefreshRef = useRef(false);
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
@@ -212,6 +213,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const lastDroppedPathsRef = useRef(null);
 
   const hubState = data.hubState || 'empty';
+  // A cancelled run is rerunnable only once parsing has produced this persisted
+  // profile. Before then, cancelling must return the hub to a true first-drop
+  // state rather than leaving it locked with nothing usable to rerun.
+  const hasReusableCareerProfile = !!(data.resumeProfile && typeof data.resumeProfile === 'object');
   const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
   const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(enabledBrowserLoginSourceIds);
@@ -285,6 +290,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, []);
 
   useEffect(() => {
+    const hasGatingWarning = (data.scrapeWarnings || []).some(isJobSourceWarningGating);
+    if (hubState === 'sources-ready' || hasGatingWarning) {
+      cancelCleanSourceCardDismiss();
+      return;
+    }
     const sourceCards = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
     if (sourceCards.length === 0) {
       cancelCleanSourceCardDismiss();
@@ -309,7 +319,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } else {
       cancelCleanSourceCardDismiss();
     }
-  }, [sourceProgress, id, getNodes, scheduleCleanSourceCardDismiss, cancelCleanSourceCardDismiss]);
+  }, [sourceProgress, hubState, data.scrapeWarnings, id, getNodes, scheduleCleanSourceCardDismiss, cancelCleanSourceCardDismiss]);
 
   const getPrimaryQuery = useCallback(() => {
     return flattenJobSearchQueries(data.queries)[0] || '';
@@ -349,7 +359,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [id, data.scoredJobs, data.finalSourceCounts, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.scrapeWarnings, updateGlobal]);
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
-    if (processingRef.current) return;
+    if (processingRunsRef.current.active) return;
     if (!isJobSourceEnabledInScope('usajobs') || !activeEnabledSourceIds.includes('usajobs')) {
       EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because its platform is disabled.`);
       return;
@@ -361,7 +371,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return;
     }
 
-    processingRef.current = true;
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
     const currentId = id;
     const cancelled = epoch.start();
 
@@ -419,7 +430,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const remainingBlocks = filteredWarnings.filter(isJobSourceWarningGating);
         if (remainingBlocks.length === 0 && mergedPending.length > 0) {
           EventLogger.log(`[JobSearch][${id}] Auto-resuming scoring from sources-ready state.`);
-          processingRef.current = false;
+          processingRunsRef.current.finish(processingToken);
           await resumeScoringRef.current?.();
         }
       } else if (currentState === 'done') {
@@ -440,6 +451,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             targetRole: activeTargetRole,
             snapshotContext: {
               sourceHubId: currentId,
+              runId: jobRunIdRef.current,
               canvasFilePath,
               resumeSummary: buildResumeSummary(profile),
             },
@@ -476,8 +488,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         errorMessage: err?.message || String(err),
       });
     } finally {
-      if (isMountedRef.current) {
-        processingRef.current = false;
+      if (isMountedRef.current && processingRunsRef.current.finish(processingToken)) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
@@ -506,7 +517,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
         if (hasConfigOrApiWarning) {
           EventLogger.log(`[JobSearch][${id}] USAJobs credentials detected/updated. Refreshing USAJobs...`);
-          if (processingRef.current) {
+          if (processingRunsRef.current.active) {
             pendingUSAJobsRefreshRef.current = true;
             EventLogger.log(`[JobSearch][${id}] Pipeline is currently active. Queued USAJobs background refresh.`);
           } else {
@@ -724,8 +735,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // can be gone by the time we pause, leaving "1 source blocked but nothing to
   // Solve." For any blocked source missing a card, spawn one SEEDED with the
   // failure (the live progress event already fired before this card existed, so
-  // the reason + Solve target must come from persisted state). A blocked source
-  // that still HAS its card already carries the live warning — leave it.
+  // the reason + Solve target must come from persisted state). Existing cards
+  // are synchronously promoted to the final derived warning; this matters when
+  // their last source-progress event was a clean `done` before final QA ran.
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
     const blocks = (blockingWarnings || []).filter(w => isJobSourceWarningGating(w) && w.sourceId);
     if (blocks.length === 0) return;
@@ -735,6 +747,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
         .map(n => n.data?.sourceId),
     );
+    blocks
+      .filter(w => existingSourceIds.has(w.sourceId))
+      .forEach(w => document.dispatchEvent(new CustomEvent('job-source-warning-sync', {
+        detail: { hubId: id, sourceId: w.sourceId, warning: w },
+      })));
     const missing = blocks.filter(w => allowedSourceIds.has(w.sourceId) && !existingSourceIds.has(w.sourceId));
     if (missing.length === 0) return;
 
@@ -742,13 +759,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       source: JOB_SOURCE_BY_ID[w.sourceId] ||
         { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' },
       persistedProgress: {
-        status:  'error',
+        status:  'done',
         // Spread the FULL warning so the re-spawned card keeps resumeState (Indeed
         // 'Continue' resumes instead of full re-scrape), openSecondTab (Glassdoor
         // 2-tab solve), and shortLabel (friendly chip) — not just the 4 base fields.
         warning: { ...w },
         url:     w.url || null,
-        count:   0,
+        count:   w.sourceJobCount || 0,
       },
     }));
     spawnSourceCardsAround(items, 'rgba(239,68,68,0.6)');
@@ -763,8 +780,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    * Extracted so the resume-after-pause path (user cleared their last block
    * warning) can re-enter scoring without re-fetching the resume + search.
    *
-   * The caller is responsible for: setting processingRef true, capturing the
-   * cancellation epoch, finally-clearing processingRef. Mirrors the marketplace
+   * The caller is responsible for: owning the processing guard, capturing the
+   * cancellation epoch, and releasing only its own guard token. Mirrors the marketplace
    * synthesizeAndPrice pattern.
    */
   // Post-scoring: STORE the scored jobs + summary counts → mark done. The Job
@@ -790,22 +807,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const scoreRangeMin = scores.length ? Math.min(...scores) : 0;
     const scoreRangeMax = scores.length ? Math.max(...scores) : 100;
 
-    if (canvasFilePath && displayed.length > 0) {
-      const historyRows = displayed.map(j => ({
-        source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
-      }));
-      // Search-jobs has already awaited the authoritative pre-scoring write.
-      // This serialized follow-up is needed only for jobs that arrived later
-      // through a captcha/paste resolve while scoring was pending; existing rows
-      // dedupe to a no-op. Awaiting removes the old fire-and-forget race and
-      // records this outcome in the FULL diagnostics snapshot.
-      const historyResult = await window.electronAPI.appendJobsHistory({
-        canvasFilePath, jobs: historyRows, nodeId: id, historyStage: 'postScoring',
-      });
-      if (!historyResult?.success || historyResult?.error) {
-        EventLogger.error('[JobSearch] Post-scoring history append failed:', historyResult?.error || 'unknown error');
-      }
-    }
+    // Scoring alone does not expose results. The connected Job Board performs
+    // the authoritative seen-history write only after it has added cards for
+    // this result set to the canvas.
+    // A batch poll can cross the user pressing Cancel while finishing. Do not
+    // let that stale continuation restore a done state after the hub has
+    // already been reset/re-run.
+    if (cancelled()) return;
 
     updateGlobal(id, {
       hubState: 'done',
@@ -849,6 +857,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       batchScoring: !!data.batchScoring,
       snapshotContext: {
         sourceHubId: currentId,
+        runId: jobRunId,
         canvasFilePath,
         resumeSummary: buildResumeSummary(profile),
       },
@@ -971,13 +980,36 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     return () => clearInterval(iv);
   }, [hubState, data.pendingBatch?.batchId, pollBatchOnce]);
 
-  // Abandon a pending batch: cancel it server-side and reset the hub to a fresh
-  // empty state (the gathered jobs aren't held in the renderer, so this is a
-  // start-over, not a switch-to-real-time).
-  const cancelBatchScoring = useCallback(async () => {
-    try { await window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id }); } catch { /* best-effort */ }
-    updateGlobal(id, { hubState: 'empty', pendingBatch: null, resumeProfile: null, careerData: null, filePath: null });
-  }, [canvasFilePath, id, updateGlobal]);
+  // Abandon a pending batch: cancel it server-side and return to a rerunnable
+  // empty state. Keep the career identity/profile—the hub is permanently bound
+  // to it, and clearing the profile while leaving inputLocked set creates an
+  // unrecoverable "Career files locked" screen.
+  const cancelBatchScoring = useCallback(() => {
+    const batchId = data.pendingBatch?.batchId || null;
+    const runId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null;
+    epoch.bump();
+    processingRunsRef.current.cancel();
+    window.electronAPI?.cancelNodeTask?.(id);
+    // Do not wait on the remote Batch API before making Cancel effective in the
+    // renderer. Both sidecars are independently token-fenced, so an immediate
+    // replacement run cannot be deleted by these best-effort abandoned-run
+    // cleanups when they settle later.
+    window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id, batchId }).catch(() => {});
+    if (runId) window.electronAPI?.discardJobRun?.({ canvasFilePath, runId }).catch(() => {});
+    pendingJobsRef.current = null;
+    scrapeWarningsRef.current = [];
+    hiddenAppliedRef.current = 0;
+    handledDuringSearchRef.current.clear();
+    jobRunIdRef.current = null;
+    hubStateRef.current = 'empty';
+    batchCompletingRef.current = false;
+    updateGlobal(id, {
+      hubState: 'empty', pendingBatch: null, pendingJobs: null, pendingTargetRole: null,
+      scrapeWarnings: [], hiddenApplied: 0, filePath: null, queuedModuleRun: null, jobRunId: null,
+      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
+      scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0,
+    });
+  }, [canvasFilePath, data.jobRunId, data.pendingBatch?.batchId, data.pendingBatch?.jobRunId, epoch, id, updateGlobal]);
 
   /**
    * Shared post-search disposition for the search + resume paths: pause in
@@ -994,7 +1026,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    * live closure vs. resume's await-stable snapshot). The test-mode collect and
    * the score handoff (with each path's own gatheredCount) stay with the caller.
    */
-  const handlePostSearchResult = useCallback(({
+  const handlePostSearchResult = useCallback(async ({
     currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
     hiddenApplied = 0, jobRunId = null,
   }) => {
@@ -1007,6 +1039,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     hiddenAppliedRef.current = hiddenApplied;
     jobRunIdRef.current = jobRunId;
     if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
+      cancelCleanSourceCardDismiss();
       // These refs are the synchronous source of truth for an immediate
       // Resolve/Skip click before React commits the update below.
       pendingJobsRef.current = foundJobs;
@@ -1033,7 +1066,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           profile,
           nodeId: currentId,
           targetRole: activeTargetRole,
-          snapshotContext: { sourceHubId: currentId, canvasFilePath: cfp, resumeSummary: buildResumeSummary(profile) },
+          snapshotContext: {
+            sourceHubId: currentId,
+            runId: jobRunId,
+            canvasFilePath: cfp,
+            resumeSummary: buildResumeSummary(profile),
+          },
         }).catch(() => {});
       }
       return false;
@@ -1041,11 +1079,37 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     if (foundJobs.length === 0) {
       // Genuinely empty — no blocked sources left to recover. Terminal 'done'.
+      // Replace the prior analysis snapshot before exposing this terminal state:
+      // otherwise the bug reporter's snapshot-only snippet/salary diagnostics
+      // silently describe the PREVIOUS non-empty run. Await this small local
+      // write so a report opened immediately after the empty result is coherent.
+      try {
+        const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
+          jobs: [],
+          profile,
+          nodeId: currentId,
+          targetRole: activeTargetRole,
+          snapshotContext: {
+            sourceHubId: currentId,
+            runId: jobRunId,
+            canvasFilePath: cfp,
+            resumeSummary: buildResumeSummary(profile),
+          },
+        });
+        if (saved && !saved.success) {
+          EventLogger.error(`[JobSearch][${currentId}] Failed to save empty-run analysis snapshot: ${saved.error || 'unknown error'}`);
+        }
+      } catch (err) {
+        // Saving diagnostics must not prevent a real empty result from
+        // completing. The report's run-ID guard will suppress any older file.
+        EventLogger.error(`[JobSearch][${currentId}] Failed to save empty-run analysis snapshot:`, err);
+      }
       // Reset slider range + counts so the done-state UI doesn't show stale values.
       updateGlobal(currentId, {
         hubState: 'done',
         scoredJobs: [],
         finalSourceCounts: {},
+        jobCount: 0,
         resultCount: 0,
         totalScoredCount: 0,
         scrapedCount: 0,
@@ -1067,7 +1131,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
 
     return true;
-  }, [updateGlobal, ensureBlockedSourceCards]);
+  }, [updateGlobal, ensureBlockedSourceCards, cancelCleanSourceCardDismiss]);
 
   /**
    * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or
@@ -1080,7 +1144,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     profile: providedProfile,
     frameSourceCards = true,
   } = {}) => {
-    if (!window.electronAPI || processingRef.current) return;
+    if (!window.electronAPI || processingRunsRef.current.active) return;
     if (activeEnabledSourceIds.length === 0) {
       const message = 'Select at least one job platform before running the search.';
       updateGlobal(id, { errorMessage: message });
@@ -1093,7 +1157,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       ? filePaths.filter(Boolean)
       : (filePath ? [filePath] : []);
     if (paths.length === 0 && !providedProfile) return;
-    processingRef.current = true;
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
     const currentId = id;
     // Capture cancellation epoch at start; cancelled() returns true after
     // any reset/unmount so we can drop late settlements without mutating
@@ -1336,7 +1401,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Disposition the search result: pause in 'sources-ready' on a gating
       // warning, or terminate 'done' when empty (block-gate MUST precede empty —
       // see handlePostSearchResult). Only proceed to score when neither fires.
-      const shouldScore = handlePostSearchResult({
+      const shouldScore = await handlePostSearchResult({
         currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath, hiddenApplied,
         jobRunId: searchResult.runId || null,
@@ -1352,6 +1417,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             targetRole: activeTargetRole,
             snapshotContext: {
               sourceHubId: currentId,
+              runId: searchResult.runId || null,
               canvasFilePath,
               resumeSummary: buildResumeSummary(profile),
             },
@@ -1360,22 +1426,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           EventLogger.error(`[JobSearch][${currentId}] Failed to save test-mode prompt snapshot:`, err);
         }
         EventLogger.log(`[JobSearch][${currentId}] SKIP_AI_FOR_TESTING — ${foundJobs.length} jobs collected, stopping before AI scoring`);
-        // search-jobs already awaited its authoritative pre-scoring history
-        // write. `foundJobs` may additionally contain jobs merged from a
-        // captcha/paste resolve while the search was running, however; this
-        // collection-only branch bypasses finishScoringAndSpawn, so reconcile
-        // those late arrivals here through the same serialized IPC write.
-        if (canvasFilePath && foundJobs.length > 0) {
-          const historyRows = foundJobs.map(j => ({
-            source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
-          }));
-          const historyResult = await window.electronAPI.appendJobsHistory({
-            canvasFilePath, jobs: historyRows, nodeId: currentId, historyStage: 'postScoring',
-          });
-          if (!historyResult?.success || historyResult?.error) {
-            EventLogger.error('[JobSearch] Collection-only history reconciliation failed:', historyResult?.error || 'unknown error');
-          }
-        }
+        // Collection-only runs do not create board cards, so they must not
+        // enter seen-history. A normal scored run is recorded by the Job Board
+        // only after its results have been displayed.
         updateGlobal(currentId, {
           hubState: 'done',
           scoredJobs: [],
@@ -1434,8 +1487,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
     } finally {
       lease?.release();
-      if (isMountedRef.current) {
-        processingRef.current = false;
+      if (isMountedRef.current && processingRunsRef.current.finish(processingToken)) {
         if (pendingUSAJobsRefreshRef.current) {
           pendingUSAJobsRefreshRef.current = false;
           setTimeout(() => {
@@ -1467,7 +1519,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    *    UI, which also clears any remaining scrapeWarnings before resuming.
    */
   const resumeScoring = useCallback(async () => {
-    if (processingRef.current) return;
+    if (processingRunsRef.current.active) return;
     // Read the live refs, NOT data.pendingJobs/data.scrapeWarnings: onResolved
     // merges freshly-extracted items into pendingJobsRef and then calls this
     // synchronously, before React re-renders — so the data closure still holds
@@ -1485,6 +1537,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // empty pendingJobs (see the block gate in runPipeline).
       updateGlobal(id, {
         hubState: 'done', scoredJobs: [], finalSourceCounts: {},
+        jobCount: 0,
         resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0,
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
@@ -1499,7 +1552,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return;
     }
     if (!profile) return;
-    processingRef.current = true;
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
     const currentId = id;
     const cancelled = epoch.start();
     let lease = null;
@@ -1550,8 +1604,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
     } finally {
       lease?.release();
-      if (isMountedRef.current) {
-        processingRef.current = false;
+      if (isMountedRef.current && processingRunsRef.current.finish(processingToken)) {
         if (pendingUSAJobsRefreshRef.current) {
           pendingUSAJobsRefreshRef.current = false;
           setTimeout(() => {
@@ -1592,7 +1645,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const handleResumeRun = useCallback(async () => {
     const cfp = canvasFilePath;
     const offer = resumeOffer;
-    if (processingRef.current || !offer) return;
+    if (processingRunsRef.current.active || !offer) return;
     if (activeEnabledSourceIds.length === 0) {
       const message = 'Select at least one job platform before resuming the search.';
       updateGlobal(id, { errorMessage: message });
@@ -1611,14 +1664,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const queries = Array.isArray(offer.queries) ? offer.queries : [];
     // Need a profile (persists in node data across restarts) + the run's queries.
     if (!profile || queries.length === 0) {
-      await window.electronAPI?.discardJobRun?.({ canvasFilePath: cfp }).catch(() => {});
+      await window.electronAPI?.discardJobRun?.({ canvasFilePath: cfp, runId: offer.runId || null }).catch(() => {});
       setResumeOffer(null);
       return;
     }
     // Preserve the recovery offer on validation failures (including no selected
     // platforms); it disappears only once we actually begin or discard the run.
     setResumeOffer(null);
-    processingRef.current = true;
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
     const currentId = id;
     const cancelled = epoch.start();
     const activeTargetRole = data.targetRole || '';
@@ -1667,7 +1721,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const blockingWarnings = warnings.filter(isJobSourceWarningGating);
       const hiddenApplied = searchResult?.hiddenApplied || 0;
       // Same post-search disposition as runPipeline (block-gate pause / empty terminal).
-      const shouldScore = handlePostSearchResult({
+      const shouldScore = await handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath: cfp, hiddenApplied,
         jobRunId: searchResult?.runId || null,
@@ -1684,14 +1738,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'empty', errorMessage: error?.message || String(error), isRateLimit: !!error?.isRateLimit });
     } finally {
       lease?.release();
-      if (isMountedRef.current) processingRef.current = false;
+      if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
     }
   }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, addToast]);
 
   const handleDiscardResume = useCallback(async () => {
+    const runId = resumeOffer?.runId || null;
     setResumeOffer(null);
-    try { await window.electronAPI?.discardJobRun?.({ canvasFilePath }); } catch { /* best-effort */ }
-  }, [canvasFilePath]);
+    try { await window.electronAPI?.discardJobRun?.({ canvasFilePath, runId }); } catch { /* best-effort */ }
+  }, [canvasFilePath, resumeOffer]);
 
   // Listen for individual job-source skips dispatched from JobSourceCardNode.
   // Each event drops the matching warning from data.scrapeWarnings; once the
@@ -1726,7 +1781,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
-        !processingRef.current
+        !processingRunsRef.current.active
       ) {
         scheduleCleanSourceCardDismiss('all-blocks-skipped');
         // resumeScoring scores pendingJobs, or finishes in empty 'done' when
@@ -1769,11 +1824,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // incremental pages and keep already-captured same-source jobs.
       const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
       const replaceSourceItems = !!e.detail?.replaceSourceItems;
+      const replaceMatchingItems = !!e.detail?.replaceMatchingItems;
+      const removedItemKeys = Array.isArray(e.detail?.removedItemKeys) ? e.detail.removedItemKeys : [];
       const { fresh, mergedPending, replacedExisting } = mergeResolvedSourceItems(
         prevPending,
         items,
         resolvedSourceId,
-        { replaceSourceItems },
+        { replaceSourceItems, replaceMatchingItems, removedItemKeys },
       );
       pendingJobsRef.current = mergedPending;
       // Drop the resolved source's warning — then re-add it if the resolve came
@@ -1822,7 +1879,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
-        !processingRef.current
+        !processingRunsRef.current.active
       ) {
         scheduleCleanSourceCardDismiss('all-blocks-resolved');
         // resumeScoring scores the merged jobs, or finishes in empty 'done' if
@@ -1876,7 +1933,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // Auto-start when drop-created (must come after startProcessing is declared
   // — referencing it earlier would hit the const TDZ on first render).
   useEffect(() => {
-    if (data.filePath && hubState === 'empty' && !processingRef.current) {
+    if (data.filePath && hubState === 'empty' && !processingRunsRef.current.active) {
       startProcessing(data.filePath);
     }
   }, [data.filePath, hubState, startProcessing]);
@@ -1890,7 +1947,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Each hub is permanently bound to its INITIAL career-data upload. Once that
     // exists, further drops are refused — re-running a search reuses the same
     // résumé, and searching with different career data means a NEW hub.
-    if (initialDropAcceptedRef.current || dropLockReason || processingRef.current) {
+    if (initialDropAcceptedRef.current || dropLockReason || processingRunsRef.current.active) {
       EventLogger.log(`[JobSearch][${id}] Drop rejected: hub already started`);
       addToast({
         title: 'Career data is locked',
@@ -1973,30 +2030,66 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     window.electronAPI?.cancelNodeTask?.(id);
 
     // Also clear filePath. The auto-start effect re-fires runPipeline whenever
-    // `data.filePath && hubState === 'empty' && !processingRef.current`, so
+    // `data.filePath && hubState === 'empty' && !processingRunsRef.current.active`, so
     // leaving filePath set after a reset to 'empty' would immediately re-parse
-    // the same resume — the user clicked Reset, not Retry. They can drop the
-    // resume again or click Try Again on the error state.
+    // the same resume — the user clicked Cancel, not Retry. The empty state
+    // exposes an explicit Re-run Search action backed by the retained profile.
     lastDroppedPathsRef.current = null;
     // Cancel + clean up any pending async batch scoring (best-effort).
-    if (data.pendingBatch?.batchId) window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id }).catch(() => {});
+    const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null;
+    if (data.pendingBatch?.batchId) {
+      window.electronAPI?.discardJobBatch?.({
+        canvasFilePath,
+        nodeId: id,
+        batchId: data.pendingBatch.batchId,
+      }).catch(() => {});
+    }
+    // If search-jobs already returned, the renderer owns the run token and can
+    // discard its recovery sidecars directly. If Reset landed during the scrape,
+    // the main-process abort path performs the same token-scoped cleanup because
+    // the renderer has not received the run ID yet.
+    if (resetRunId) {
+      window.electronAPI?.discardJobRun?.({ canvasFilePath, runId: resetRunId }).catch(() => {});
+    }
     // Drop stale results too: an 'empty' hub must not keep scoredJobs from a prior
     // run — otherwise a connected Job Board could still read them (defense-in-depth
-    // with the board's hubState!=='done' gate). Résumé/careerData are kept (the
-    // hub is locked to its initial résumé — see project memory).
+    // with the board's hubState!=='done' gate). Keep the initial career identity
+    // only after parsing yielded a profile; cancelling while parsing used to leave
+    // `inputLocked` behind with no profile and no possible recovery action.
+    const retainedCareerData = hasReusableCareerProfile
+      ? {}
+      : {
+          inputLocked: false,
+          resumeProfile: null,
+          careerData: null,
+          resumeSummary: null,
+          resumeFingerprint: null,
+          resumeContext: null,
+          filePaths: null,
+          careerFilePaths: null,
+        };
+    initialDropAcceptedRef.current = hasReusableCareerProfile;
+    pendingJobsRef.current = null;
+    scrapeWarningsRef.current = [];
+    hiddenAppliedRef.current = 0;
+    handledDuringSearchRef.current.clear();
+    hubStateRef.current = 'empty';
     updateGlobal(id, {
       hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null,
-      scoredJobs: null, resultCount: 0, totalScoredCount: 0, scoreThreshold: 0, jobRunId: null,
+      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
+      aiSkipped: false, collectionOnly: false, testMode: false,
+      pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], hiddenApplied: 0,
+      ...retainedCareerData,
     });
     jobRunIdRef.current = null;
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();
-    processingRef.current = false;
-  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.pendingBatch, canvasFilePath, moduleRunQueue]);
+    processingRunsRef.current.cancel();
+  }, [data.locked, hasReusableCareerProfile, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.jobRunId, data.pendingBatch, canvasFilePath, moduleRunQueue]);
 
   const handleRerun = useCallback(({ frameSourceCards = true } = {}) => {
-    if (data.locked || processingRef.current) return;
+    if (data.locked || processingRunsRef.current.active) return;
     if (activeEnabledSourceIds.length === 0) {
       const message = 'Select at least one job platform before running the search.';
       updateGlobal(id, { errorMessage: message });
@@ -2112,8 +2205,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [savedAnalysisMeta, addToast]);
 
   const handleResumeSavedScrape = useCallback(async () => {
-    if (data.locked || processingRef.current || platformsVerifying) return;
+    if (data.locked || processingRunsRef.current.active || platformsVerifying) return;
     if (!window.electronAPI?.getLastJobAnalysisSnapshot) return;
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
 
     setSavedAnalysisLoading(true);
     try {
@@ -2132,7 +2227,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       EventLogger.log(`[JobSearch][${id}] Resuming from saved scrape (${savedJobs.length} job(s))`);
-      processingRef.current = true;
       cancelCleanSourceCardDismiss();
       resetSourceProgress();
       const currentId = id;
@@ -2173,10 +2267,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           errorMessage: error?.message || String(error),
           isRateLimit: !!error?.isRateLimit,
         });
-      } finally {
-        if (isMountedRef.current) processingRef.current = false;
       }
     } finally {
+      if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
   }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, epoch, getNode, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
@@ -2309,8 +2402,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 <p className="text-white/40 text-sm font-medium">Checking connections…</p>
               ) : inputDropsBlocked ? (
                 <>
-                  <p className="text-white/40 text-sm font-medium">Career files locked</p>
-                  <p className="text-white/25 text-[10px] mt-1 text-center">Create a new job search module for different files</p>
+                  <p className="text-white/40 text-sm font-medium">Career files retained</p>
+                  <p className="text-white/25 text-[10px] mt-1 text-center">Re-run with these files, or create a new module for different files</p>
+                  {hasReusableCareerProfile && !data.locked && (
+                    <button
+                      type="button"
+                      className="nodrag mt-3 px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 text-[10px] border border-blue-500/20 transition-colors"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); handleRerun(); }}
+                    >
+                      Re-run Search
+                    </button>
+                  )}
                 </>
               ) : (
                 <>
@@ -2454,6 +2557,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               // with only one Indeed card visible. Skip/resolve already filters
               // warnings by sourceId, so distinct-source count is the truth.
               blockedCount={new Set((data.scrapeWarnings || []).filter(isJobSourceWarningGating).map(w => w.sourceId)).size}
+              hasIncompleteDescriptions={(data.scrapeWarnings || []).some(w => w?.code === 'incomplete-descriptions')}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

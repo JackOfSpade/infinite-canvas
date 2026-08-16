@@ -148,6 +148,42 @@ export const LOCATION_TREATMENT = {
   weworkremotely: 'remote board — location N/A (candidate-city tokens geo-stripped from relevance)',
 };
 
+/**
+ * Describe the location mechanism with the canonical value used for THIS run.
+ * LOCATION_TREATMENT remains the static source-policy map used by other
+ * diagnostics; this helper only makes a report's observed parameter concrete.
+ * It does not construct or alter request URLs.
+ */
+export function describeLocationTreatment(sourceId, canonicalLocation = '') {
+  const location = String(canonicalLocation || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  const generic = LOCATION_TREATMENT[sourceId] || 'unknown';
+  if (!location) {
+    if (['usajobs', 'dice', 'indeed', 'ziprecruiter', 'glassdoor', 'linkedin'].includes(sourceId)) {
+      return 'no location param (unscoped)';
+    }
+    if (sourceId === 'google') return 'keyword-only: no canonical location appended to the query';
+    return generic;
+  }
+
+  switch (sourceId) {
+    case 'usajobs':
+      return `param: LocationName=${location}`;
+    case 'dice':
+      return `hidden-API params: location=${location} + countryCode2=US + radius=30mi (U.S.-only integration)`;
+    case 'indeed':
+      return `param: l=${location}`;
+    case 'ziprecruiter':
+    case 'linkedin':
+      return `param: location=${location}`;
+    case 'glassdoor':
+      return `param: locId= (resolved in-browser from canonical location=${location}; locKeyword text alone is ignored by Glassdoor)`;
+    case 'google':
+      return `keyword-only: canonical location "${location}" appended to the query (no location param available)`;
+    default:
+      return generic;
+  }
+}
+
 // Remote-only job boards: every listing is remote regardless of the city/region in
 // its location field (that's the company HQ or a region hint, not a work-site
 // requirement). Location adherence buckets these as `remote`, never off-target.

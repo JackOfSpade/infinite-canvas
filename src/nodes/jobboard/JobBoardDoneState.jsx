@@ -16,6 +16,7 @@ export function JobBoardDoneState({
   duplicatesRemoved = 0,
   stale = false,
   staleReason = '',
+  canReplaceWithEmpty = false,
   locked = false,
   // Score filter
   scoreThreshold = 0,
@@ -47,10 +48,12 @@ export function JobBoardDoneState({
           <div className="text-white/25 text-2xl font-bold line-through">{resultCount || 0}</div>
           <p className="flex items-center gap-1 text-amber-400/90 text-[11px] font-semibold mt-0.5">
             <AlertTriangle size={11} className="shrink-0" />
-            Connections changed
+            Inputs changed
           </p>
           <p className="text-white/40 text-[10px] text-center leading-snug px-1 mt-0.5">
-            {staleReason ? `${staleReason} — ` : ''}re-combine to update the board
+            {canReplaceWithEmpty
+              ? 'Completed searches have no current jobs — clear the old board'
+              : `${staleReason ? `${staleReason} — ` : ''}re-combine to update the board`}
           </p>
         </>
       ) : (
@@ -112,10 +115,12 @@ export function JobBoardDoneState({
                 ? 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border-amber-500/30'
                 : 'bg-indigo-500/15 text-indigo-300/90 hover:bg-indigo-500/25 border-indigo-500/15'
             }`}
-            title="Re-pull all connected Job Search modules and rebuild the combined board"
+            title={canReplaceWithEmpty
+              ? 'Replace the hidden previous results with the completed searches’ empty result'
+              : 'Re-pull all connected Job Search modules and rebuild the combined board'}
           >
             <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
-            {combining ? 'Combining…' : 'Re-combine'}
+            {combining ? 'Combining…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}
           </button>
           <button
             onClick={onClear}

@@ -515,7 +515,7 @@ export function countMatchingDescendantCards(childIds, getNodeById, filter = {})
  * `filter` = { scoreThreshold?, sourceFilter? } (same shape as jobCardFilters).
  * Pure: returns a new nodes array (or the same ref when nothing changed).
  */
-export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
+export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, forceLayout = false) {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map(n => [n.id, n]));
   const cardMatch = (d) => isJobCardVisible(d || {}, filter);
@@ -600,15 +600,29 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
     if (dim) { const { opacity: _opacity, ...rest } = n.style; next.style = rest; }
     return next;
   });
-  if (!changed) return nodes;
+  // A card can change height without changing which tree nodes are visible
+  // (most notably its local reasoning disclosure). In that case callers that
+  // have just observed the new measurement must still be able to reflow the
+  // visible tree; returning early here would leave later cards/roots at their
+  // positions for the old height. Ordinary visibility/filter calls keep the
+  // same-reference fast path, which avoids layout churn on initial card mounts.
+  if (!changed && !forceLayout) return nodes;
 
   const hubPos = byId.get(hubId)?.position || { x: 0, y: 0 };
-  const positions = computeLayoutPositions(withHidden, hubId, COL_X_, hubPos);
-  return withHidden.map(n => {
+  const laidOutNodes = changed ? withHidden : list;
+  const positions = computeLayoutPositions(laidOutNodes, hubId, COL_X_, hubPos);
+  let positionChanged = false;
+  const result = laidOutNodes.map(n => {
     const p = positions[n.id];
-    if (p && (p.x !== n.position.x || p.y !== n.position.y)) return { ...n, position: p };
+    if (p && (p.x !== n.position.x || p.y !== n.position.y)) {
+      positionChanged = true;
+      return { ...n, position: p };
+    }
     return n;
   });
+  // A forced reflow can be a no-op if the new measurement does not move any
+  // visible descendant. Preserve referential stability in that case too.
+  return changed || positionChanged ? result : nodes;
 }
 
 

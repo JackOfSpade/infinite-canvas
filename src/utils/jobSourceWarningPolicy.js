@@ -9,7 +9,8 @@
 export function isJobSourceWarningGating(warning) {
   return warning?.severity === 'block'
     || warning?.severity === 'paste'
-    || warning?.code === 'linkedin-rate-limited';
+    || warning?.code === 'linkedin-rate-limited'
+    || warning?.code === 'incomplete-descriptions';
 }
 
 /**

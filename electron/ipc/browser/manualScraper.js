@@ -48,6 +48,14 @@ const DESC_CLICK_DELAY_MS    = 600;           // pause between card clicks (natu
 const SITE_CHANGED_ABORT_THRESHOLD = 3;
 const DESC_STALE_THRESHOLD   = 3;             // consecutive click/panel failures before flagging stale selectors
 const DETAIL_DESCRIPTION_WAIT_MS = 6000;      // bounded client-hydration recovery for navigation detail pages
+// ZipRecruiter will serve a plain HTTP 429 page after sustained detail-page
+// navigation. These bounds deliberately slow only detail enrichment (not list
+// collection), retry once, then stop the detail pass rather than hammering a
+// rate-limited session for every remaining card.
+const ZIPRECRUITER_DETAIL_GAP_MS = 2500;
+const ZIPRECRUITER_429_FALLBACK_WAIT_MS = 45_000;
+const ZIPRECRUITER_429_MAX_WAIT_MS = 60_000;
+const ZIPRECRUITER_429_RETRIES = 1;
 
 // Cooldown BETWEEN queries (not before the first). Firing N back-to-back
 // full-page navigations to different search URLs is a velocity signal that
@@ -194,6 +202,7 @@ export function resolveManualSourceStopReason({
   hitPerSourceCap = false,
   hitPageCap = false,
   hitEmptyPage = false,
+  hitUnhandledPagination = false,
   dataStopReason = null,
 } = {}) {
   if (sourceSkipped) return 'blocked';
@@ -203,6 +212,10 @@ export function resolveManualSourceStopReason({
   // pass `aborted` only for an actual cancelled signal.
   if (earlyExit) return 'user-done';
   if (hitPerSourceCap) return 'per-source-cap';
+  // An enabled next control with no successful action is proof that this run
+  // stopped before the board's end. Keep it distinct from a normal completion
+  // and from a user-configured page cap so the report states the real cause.
+  if (hitUnhandledPagination) return 'pagination-unhandled';
   // A data-driven stop (age-window / no-new-jobs, from makeJobPageStop via
   // task.options.onPageScraped) means the walk ended because the DATA said
   // stop, not because it was cut short by the hub's page ceiling — surface it
@@ -299,14 +312,17 @@ const CONTENT_SELECTORS = {
 // These need validation in-browser — flag any that don't work.
 const NEXT_PAGE_SELECTORS = {
   google:       null,
-  ziprecruiter: null,
+  // ZipRecruiter changed from scroll-loading results to a conventional pager.
+  // The current control is an anchor (`<a title="Next Page">`), rather than a
+  // button, so it must be clicked as part of the regular pagination loop.
+  ziprecruiter: 'a[title="Next Page"]',
   glassdoor:    'button[data-test="pagination-next"]',
 };
 
 // Sources that load more jobs by scrolling to the bottom (infinite scroll).
 // Google for Jobs (ibp=htl;jobs mode) lazy-loads more cards as you scroll — initial
 // render is ~10 cards; scrolling reveals the rest before we run the extractor.
-const SCROLL_SOURCES = new Set(['ziprecruiter', 'google']);
+const SCROLL_SOURCES = new Set(['google']);
 
 // Per-source config for clicking cards to expand full job descriptions.
 // null = source doesn't support card-click description expansion.
@@ -544,6 +560,46 @@ export function normalizeDetailNavigationUrl(rawUrl) {
   return input;
 }
 
+/**
+ * ZipRecruiter's ItemList occasionally supplies an employer's outbound
+ * application endpoint (for example a Workday `/apply` URL) instead of its
+ * own read-only detail page. We make a shallow, read-only visit to both its
+ * current `/jobs/...`, legacy `/c/<company>/Job/...`, and employer-provided
+ * external URLs: one navigation, text extraction, then immediately on to the
+ * next listing. The scraper never clicks Apply, fills fields, logs in, or
+ * submits anything on an external page.
+ */
+export function shouldNavigateForDescription(sourceId, rawUrl) {
+  if (sourceId !== 'ziprecruiter') return true;
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/** Convert a Retry-After header to a safe, bounded wait for a single retry. */
+export function zipRecruiterRetryAfterMs(value, now = Date.now()) {
+  const raw = String(value || '').trim();
+  let delay = raw ? Number(raw) * 1000 : NaN;
+  if (!Number.isFinite(delay) || delay < 0) {
+    const at = Date.parse(raw);
+    delay = Number.isFinite(at) ? at - now : ZIPRECRUITER_429_FALLBACK_WAIT_MS;
+  }
+  return Math.max(1000, Math.min(ZIPRECRUITER_429_MAX_WAIT_MS, Math.round(delay)));
+}
+
+async function waitForAbortableDelay(ms, signal) {
+  const deadline = Date.now() + Math.max(0, Number(ms) || 0);
+  while (!signal?.aborted) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return true;
+    await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 500)));
+  }
+  return false;
+}
+
 // Format a schema.org JobPosting.baseSalary object into a compact display string
 // ("$80,000 - $120,000/yr", "$55/hr"). Returns '' for anything unrecognizable so a
 // malformed block never poisons the salary field. Shared by the enrichment path
@@ -674,6 +730,7 @@ export function reconcileZipRecruiterDomSalary(rawSalary, description) {
 // This is deliberately field-by-field so existing list data remains authoritative.
 export function mergeExpandedJobDetail(job, {
   text = '',
+  descriptionCapture = '',
   jsonLdDate = '',
   jsonLdSalary = '',
   salaryChanged = false,
@@ -686,6 +743,7 @@ export function mergeExpandedJobDetail(job, {
   return {
     ...job,
     ...(text ? { snippet: text } : {}),
+    ...(text && descriptionCapture ? { descriptionCapture } : {}),
     ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
     ...(salaryChanged ? { salary: reconciledSalary } : {}),
     // Structured detail pay includes schema.org unitText. Let it repair a
@@ -963,8 +1021,12 @@ async function waitIfPaused(page, signal) {
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
 // Returns 'ok' | 'skip' (challenge timed out) | 'abort' (signal aborted).
-async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null) {
-  const contentSel    = CONTENT_SELECTORS[sourceId];
+async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, { challengeOnly = false } = {}) {
+  // Location autocomplete runs from Glassdoor's origin landing page, before a
+  // results page exists. In that phase there cannot be a job-card selector to
+  // wait for; we only need this function's challenge gate. The origin navigation
+  // has already had NAV_SETTLE_MS to render before this check.
+  const contentSel    = challengeOnly ? null : CONTENT_SELECTORS[sourceId];
   const contentDL     = Date.now() + CONTENT_TIMEOUT_MS;
   let inChallenge              = false;
   let challengeStartedAt       = 0; // when the current challenge wait began (for the heartbeat)
@@ -979,7 +1041,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
 
     const signals     = await getChallengeSignals(page);
     const isChallenge = !!signals?.isChallenge;
-    const hasContent  = !contentSel || await page.evaluate(
+    const hasContent  = challengeOnly || !contentSel || await page.evaluate(
       s => !!document.querySelector(s), contentSel
     ).catch(() => false);
 
@@ -1064,7 +1126,8 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       // periodic heartbeat keeps an unattended wait visible in the logs.
       if (Date.now() - lastChallengeHeartbeat >= CHALLENGE_HEARTBEAT_MS) {
         lastChallengeHeartbeat = Date.now();
-        logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${Math.round((Date.now() - challengeStartedAt) / 60000)} min elapsed)`);
+        const elapsedSec = Math.floor((Date.now() - challengeStartedAt) / 1000);
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m${elapsedSec % 60}s`} elapsed)`);
       }
       await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
       continue;
@@ -1186,6 +1249,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     let dateMissDiagDone = false;
     let descWarning = null;
     let expandedCount = 0;
+    let lastZipRecruiterDetailAt = 0;
+    let zipRecruiter429Retries = 0;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
@@ -1220,8 +1285,29 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }
         viewUrl = normalizeDetailNavigationUrl(viewUrl);
 
+        if (!shouldNavigateForDescription(sourceId, viewUrl)) {
+          const title = (job.title || job.url || '?').slice(0, 65);
+          logger.info(`[BrowserScraper] ${overlayBase.srcName} skipped unsupported detail URL while enriching "${title}"`);
+          recordManualScraperTelemetry({
+            phase: 'desc-miss', srcName: overlayBase.srcName,
+            key: `${title} | unsupported detail URL skipped`,
+            reason: 'unsupported-detail-url', expectedUrl: viewUrl.slice(0, 240),
+          }, { updateActive: false });
+          descWarning ||= {
+            code: 'description-unsupported-url', severity: 'warn',
+            evidence: `${overlayBase.srcName} supplied an unsupported detail URL for "${job.title || 'an untitled listing'}". The listing was retained without navigation.`,
+            suggestion: 'Open the saved job URL yourself if needed, then retry the source later for a full description.',
+          };
+          continue;
+        }
+
         const navPause = await waitIfPaused(page, signal);
         if (navPause === 'abort') break;
+
+        if (sourceId === 'ziprecruiter' && lastZipRecruiterDetailAt) {
+          const waitMs = ZIPRECRUITER_DETAIL_GAP_MS - (Date.now() - lastZipRecruiterDetailAt);
+          if (waitMs > 0 && !(await waitForAbortableDelay(waitMs, signal))) break;
+        }
 
         await updateOverlay(page, {
           ...overlayBase,
@@ -1247,6 +1333,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let navigationResponse = null;
           let navigationError = null;
           try {
+            if (sourceId === 'ziprecruiter') lastZipRecruiterDetailAt = Date.now();
             navigationResponse = await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
           } catch (error) {
             navigationError = error;
@@ -1279,14 +1366,55 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const pageInfo = await fetchPage.evaluate(() => {
             const bodyText = (document.body?.innerText || '').toLowerCase();
             const title    = (document.title || '').toLowerCase();
+            const isRateLimited =
+              title.includes('too many requests') ||
+              bodyText.includes('too many requests') ||
+              bodyText.includes('maximum number of requests allowed') ||
+              bodyText.includes('rate limit exceeded');
             const isNotFound =
               bodyText.includes('page not found') ||
               bodyText.includes("we can't find this page") ||
               bodyText.includes('no longer available') ||
               bodyText.includes('this job has expired') ||
               title.includes('404');
-            return { isNotFound };
-          }).catch(() => ({ isNotFound: false }));
+            return { isNotFound, isRateLimited };
+          }).catch(() => ({ isNotFound: false, isRateLimited: false }));
+
+          if (sourceId === 'ziprecruiter' && (navigationStatus === 429 || pageInfo.isRateLimited)) {
+            const retryAfter = navigationResponse?.headers?.()?.['retry-after'];
+            const waitMs = zipRecruiterRetryAfterMs(retryAfter);
+            const title = (job.title || job.url || '?').slice(0, 65);
+            recordManualScraperTelemetry({
+              phase: 'desc-miss', srcName: overlayBase.srcName,
+              key: `${title} | ZipRecruiter rate limited`, reason: 'http-429',
+              status: navigationStatus, retryAfter: retryAfter || null, retryWaitMs: waitMs,
+              expectedUrl: viewUrl.slice(0, 240), finalUrl: fetchPage.url().slice(0, 240),
+            }, { updateActive: false });
+            if (zipRecruiter429Retries < ZIPRECRUITER_429_RETRIES && !signal?.aborted) {
+              zipRecruiter429Retries++;
+              logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail fetch rate-limited for "${title}" — waiting ${Math.ceil(waitMs / 1000)}s before one retry`);
+              await updateOverlay(page, {
+                ...overlayBase, count: baseCount + i + 1,
+                status: `ZipRecruiter rate-limited — retrying in ${Math.ceil(waitMs / 1000)}s…`,
+              }).catch(() => {});
+              if (!await waitForAbortableDelay(waitMs, signal)) break;
+              i--; // retry this exact job once; do not advance to another detail page
+              continue;
+            }
+            logger.warn(`[BrowserScraper] ${overlayBase.srcName} stayed rate-limited after its bounded retry — stopping detail enrichment`);
+            descWarning = {
+              code: 'description-rate-limited', severity: 'warn',
+              evidence: `${overlayBase.srcName} returned HTTP 429 while fetching "${job.title || 'an untitled listing'}". The scraper waited and retried once, then stopped further detail fetches to avoid extending the rate limit.`,
+              suggestion: `Wait a few minutes before rerunning ${overlayBase.srcName}; list results were retained, but this and later rows may lack full descriptions.`,
+            };
+            const unexpandedCount = enhanced.length - (i + 1);
+            recordManualScraperTelemetry({
+              phase: 'desc-miss', srcName: overlayBase.srcName,
+              key: `${unexpandedCount} unexpanded after 429 | ${title}`,
+              reason: 'rate-limit-detail-pass-stopped', status: navigationStatus,
+            }, { updateActive: false });
+            break;
+          }
 
           if (isChallenge) {
             if (detailPage) {
@@ -1351,7 +1479,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               if (!stillChallenge) { solved = true; break; }
               if (Date.now() - descHeartbeatAt >= CHALLENGE_HEARTBEAT_MS) {
                 descHeartbeatAt = Date.now();
-                logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${Math.round((Date.now() - descChallengeStart) / 60000)} min elapsed)`);
+                const elapsedSec = Math.floor((Date.now() - descChallengeStart) / 1000);
+                logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m${elapsedSec % 60}s`} elapsed)`);
               }
             }
             if (!solved) break;
@@ -1366,16 +1495,37 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
           if (pageInfo.isNotFound) { enhanced[i] = null; continue; } // expired listing — drop it
 
+          const isExternalZipDetail = sourceId === 'ziprecruiter' && await fetchPage.evaluate(() => {
+            const host = location.hostname.toLowerCase();
+            return host !== 'ziprecruiter.com' && !host.endsWith('.ziprecruiter.com');
+          }).catch(() => false);
+
           // Try JSON-LD JobPosting.description first (server-rendered, selector-free).
           // Fall back to __NEXT_DATA__ pageProps probe, then CSS panelSelector.
           // Also harvest `datePosted` from the same JobPosting block — some list
           // extractors (e.g. ZipRecruiter's ItemList) carry no date, so the
           // per-job posting page is the only place to recover it.
           let text = '';
+          let descriptionCapture = '';
           let jsonLdDate = '';
           let jsonLdSalary = ''; // formatted pay from JobPosting.baseSalary (if present)
           let jsonLdCompany = ''; // hiringOrganization.name backfill (if present)
-          if (cfg.jsonLdType) {
+          if (isExternalZipDetail) {
+            // User-authorized shallow external enrichment: retain the complete
+            // rendered page context for this exact URL, then immediately move
+            // on. Do not inspect, click, fill, log in, or submit its form.
+            text = await fetchPage.evaluate(() => (document.body?.innerText || '').trim()).catch(() => '');
+            if (text) {
+              descriptionCapture = 'external-page-full-text';
+              recordManualScraperTelemetry({
+                phase: 'detail-external-page-text', sourceId, srcName: overlayBase.srcName,
+                itemIndex: i + 1, itemTotal: enhanced.length,
+                key: (job.title || job.url || '?').slice(0, 80),
+                url: fetchPage.url().slice(0, 240),
+              }, { updateActive: false });
+            }
+          }
+          if (cfg.jsonLdType && !isExternalZipDetail) {
             const ld = await fetchPage.evaluate((type, field, datePattern) => {
               let desc = '';
               let datePosted = '';
@@ -1454,7 +1604,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             jsonLdCompany = ld.company;
           }
           // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
-          if (!text && cfg.nextDataField) {
+          if (!text && cfg.nextDataField && !isExternalZipDetail) {
             text = await fetchPage.evaluate(fieldPath => {
               try {
                 const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null');
@@ -1472,12 +1622,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               } catch { return ''; }
             }, cfg.nextDataField).catch(() => '');
           }
-          if (!text) {
+          if (!text && !isExternalZipDetail) {
             text = await fetchPage.evaluate(sel => {
               return document.querySelector(sel)?.innerText?.trim() || '';
             }, cfg.panelSelector).catch(() => '');
           }
-          if (!text) {
+          if (!text && !isExternalZipDetail) {
             // Structural fallback: find "Job description" heading and grab next sibling.
             text = await fetchPage.evaluate(() => {
               for (const h of document.querySelectorAll('h2, h3')) {
@@ -1488,7 +1638,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return '';
             }).catch(() => '');
           }
-          if (!text) {
+          if (!text && !isExternalZipDetail) {
             // Some detail pages hydrate their visible description shortly after
             // DOMContentLoaded. Wait for ANY supported carrier, not only the CSS
             // panel: React/Next pages can inject JSON-LD or __NEXT_DATA__ first.
@@ -1591,7 +1741,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // to ZR's churning Tailwind classes). Bounded wait: resolves instantly once
           // the chip hydrates (the common case, since ZR estimates ~every job); only
           // a genuinely pay-less page pays the full timeout.
-          if (cfg.salaryFromDom && !jsonLdSalary) {
+          if (cfg.salaryFromDom && !jsonLdSalary && !isExternalZipDetail) {
             // The cadence must be captured, not just tolerated: ZipRecruiter's chip
             // renders it as a WORD ("$19 Hourly", "$71K Annually") at least as often
             // as a slash ("$36.29/hr"), and the old pattern only listed the slash
@@ -1681,6 +1831,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // guard caused exactly that ZipRecruiter loss).
           enhanced[i] = mergeExpandedJobDetail(job, {
             text,
+            descriptionCapture,
             jsonLdDate,
             jsonLdSalary,
             salaryChanged,
@@ -2201,10 +2352,43 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
 }
 
 // ── Next-page clicker ─────────────────────────────────────────────────────────
-// Returns true if next page was clicked and navigation started, false otherwise.
+// Inspect a conventional next-page control independently of each source's
+// configured selector. This is deliberately narrow: a visible, enabled control
+// whose accessible text/title says "next page" is strong evidence that stopping
+// here would silently truncate a paginated search. It lets us surface selector
+// drift as an actionable warning instead of treating page 1 as a clean finish.
+async function inspectNextPageControl(page) {
+  try {
+    return await page.evaluate(() => {
+      const normalized = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const candidate = [...document.querySelectorAll('a, button')].find((el) => {
+        const label = normalized([
+          el.getAttribute('aria-label'),
+          el.getAttribute('title'),
+          el.textContent,
+          el.querySelector('svg title, img[alt]')?.textContent || el.querySelector('img')?.getAttribute('alt'),
+        ].filter(Boolean).join(' '));
+        const style = window.getComputedStyle(el);
+        const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+        return !disabled && style.display !== 'none' && style.visibility !== 'hidden' &&
+          /\bnext\s+page\b/.test(label);
+      });
+      if (!candidate) return null;
+      return {
+        label: String(candidate.getAttribute('aria-label') || candidate.getAttribute('title') || candidate.textContent || 'Next page').replace(/\s+/g, ' ').trim(),
+        href: candidate instanceof HTMLAnchorElement ? candidate.href : null,
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Returns the click result plus any enabled next-page control that remains
+// unhandled. Callers must never collapse the latter into a normal completion.
 async function clickNextPage(page, sourceId) {
   const sel = NEXT_PAGE_SELECTORS[sourceId];
-  if (!sel) return false;
+  if (!sel) return { clicked: false, unhandled: await inspectNextPageControl(page) };
   try {
     const clicked = await page.evaluate((s) => {
       const btn = document.querySelector(s);
@@ -2212,9 +2396,9 @@ async function clickNextPage(page, sourceId) {
       btn.click();
       return true;
     }, sel);
-    return clicked;
+    return { clicked, unhandled: clicked ? null : await inspectNextPageControl(page) };
   } catch {
-    return false;
+    return { clicked: false, unhandled: await inspectNextPageControl(page) };
   }
 }
 
@@ -2489,7 +2673,8 @@ export function summarizeGlassdoorLookupAttempts(attempts) {
  * A locId is a stable platform id, but on its own it is an opaque number: for a
  * country-scoped search it only counts once the entry records the country it
  * was validated against. Entries written before that field existed have no
- * `country` and are deliberately re-resolved (never silently trusted).
+ * `country` and are deliberately re-resolved unless the resolver can upgrade
+ * one of the two exact, known country-root IDs below.
  */
 export function glassdoorCachedLocationUsable(cached, location) {
   const locId = String(cached?.locId ?? '').trim();
@@ -2501,6 +2686,34 @@ export function glassdoorCachedLocationUsable(cached, location) {
   // country object itself, never a similarly-named city inside that country.
   if (requestedCountry.countryOnly && String(cached.locT || '').toUpperCase() !== 'N') return false;
   return true;
+}
+
+/**
+ * Add provenance to the two stable Glassdoor country-root IDs that the app
+ * already knows how to validate from live autocomplete responses. This is
+ * intentionally limited to country-only requests and N (nation) entries: a
+ * legacy city/province ID remains opaque and must still be resolved live.
+ */
+export function upgradeGlassdoorCountryRootCache(cached, location) {
+  if (!cached || cached.country) return cached;
+  const requested = glassdoorRequestedCountry(location);
+  if (!requested?.countryOnly || String(cached.locT || '').toUpperCase() !== 'N') return cached;
+  const knownRoot = requested.iso === 'CA' ? '3' : requested.iso === 'US' ? '1' : null;
+  if (!knownRoot || String(cached.locId || '').trim() !== knownRoot) return cached;
+  return { ...cached, country: requested.iso };
+}
+
+/**
+ * Classify the aggregate outcome separately from retry policy. HTTP 403 is
+ * deliberately not retried, but it is still an access denial—not evidence that
+ * a human-entered location failed to match.
+ */
+export function classifyGlassdoorLookupFailure(attempts) {
+  const list = Array.isArray(attempts) ? attempts : [];
+  if (list.some(attempt => attempt?.rows != null)) return 'no-match';
+  if (list.some(attempt => [401, 403].includes(Number(attempt?.status)))) return 'access-denied';
+  if (list.length > 0 && list.every(attempt => glassdoorLookupAttemptIsTransient(attempt))) return 'transient';
+  return 'no-match';
 }
 
 /**
@@ -2516,6 +2729,9 @@ export function describeGlassdoorLocationFailure({ location, failure, failureKin
   const suggestion = failureKind === 'transient'
     ? 'Those are Glassdoor-side transport results, not a rejection of the location text — retrying Glassdoor is the fix. '
       + 'Once any location verifies once it is cached with its country, so later runs skip this lookup entirely.'
+    : failureKind === 'access-denied'
+      ? 'Glassdoor denied the browser lookup before it could answer. This is an anti-bot/session result, not a rejection of the location text. '
+        + 'Open Glassdoor in Chrome and clear any human verification, then retry the search.'
     : failureKind === 'rejected'
       ? 'Glassdoor answered, but no result matched the requested location closely enough to be safe to search. '
         + 'Check the preferred location spelling, or use a more specific form (e.g. "Toronto, Ontario, Canada").'
@@ -2555,11 +2771,17 @@ async function ensureGlassdoorOrigin(page, host) {
   return false;
 }
 
-async function resolveGlassdoorLocId(page, location, signal, runCache = null) {
+async function resolveGlassdoorLocId(page, location, signal, runCache = null, overlayBase = null) {
   const key = String(location || '').trim().toLowerCase();
   if (!key) return { failure: 'no location was supplied', failureKind: 'no-location' };
   if (runCache?.has(key)) return runCache.get(key);
-  const cached = getGlassdoorLocId(key);
+  let cached = getGlassdoorLocId(key);
+  const upgradedCache = upgradeGlassdoorCountryRootCache(cached, location);
+  if (upgradedCache !== cached) {
+    cached = upgradedCache;
+    saveGlassdoorLocId(key, cached);
+    logger.info(`[BrowserScraper] Glassdoor upgraded known country-root locId ${cached.locId}/${cached.locT} for "${location}" with ${cached.country} provenance`);
+  }
   if (glassdoorCachedLocationUsable(cached, location)) {
     runCache?.set(key, cached);
     return cached;
@@ -2598,6 +2820,37 @@ async function resolveGlassdoorLocId(page, location, signal, runCache = null) {
     if (!await ensureGlassdoorOrigin(page, host)) {
       attempts.push({ host, path: '(origin)', error: 'could not reach the Glassdoor origin to run the lookup' });
       continue;
+    }
+    // Location resolution happens before the normal results navigation, so it
+    // must run the challenge gate itself. Previously a visible Cloudflare page
+    // was left for the human to watch while both autocomplete calls returned
+    // 403 and the source was incorrectly dismissed as a location no-match.
+    if (overlayBase) {
+      await injectOverlay(page).catch(() => {});
+      await updateOverlay(page, {
+        ...overlayBase,
+        status: 'Checking Glassdoor location…',
+      }).catch(() => {});
+      const originReady = await waitForReady(
+        page,
+        'glassdoor',
+        overlayBase,
+        signal,
+        `https://${host}/Job/index.htm`,
+        { challengeOnly: true },
+      );
+      if (originReady === 'abort' || signal?.aborted) {
+        return { failure: 'search was cancelled during location verification', failureKind: 'cancelled', attempts };
+      }
+      if (originReady === 'hard-block' || originReady === 'skip') {
+        return {
+          failure: originReady === 'hard-block'
+            ? 'the Glassdoor origin showed a non-interactive human-verification block'
+            : 'the Glassdoor origin re-served its human-verification challenge after recovery',
+          failureKind: 'access-denied',
+          attempts,
+        };
+      }
     }
     const res = await page.evaluate(async (t, cfg) => {
       // Runs inside the page: no imports are available here, so the row shapes
@@ -2675,12 +2928,11 @@ async function resolveGlassdoorLocId(page, location, signal, runCache = null) {
   }
 
   if (rows.length === 0) {
-    const transient = attempts.length > 0 && attempts.every(attempt => glassdoorLookupAttemptIsTransient(attempt));
     const trail = summarizeGlassdoorLookupAttempts(attempts);
     logger.warn(`[BrowserScraper] Glassdoor locId lookup failed for "${location}" — ${trail}`);
     return {
       failure: `autocomplete lookup failed (${trail})`,
-      failureKind: transient ? 'transient' : 'no-match',
+      failureKind: classifyGlassdoorLookupFailure(attempts),
       attempts,
     };
   }
@@ -2856,14 +3108,30 @@ export function resetManualScraperDiagnostics() {
   manualScraperTelemetry.fieldAnomalies = [];
 }
 
+// Browser-scrape progress is run-scoped just like the console/network buffers.
+// In particular, an API-only follow-up search never enters this module's normal
+// browser loop, so leaving `active` or the phase ring intact would make a prior
+// Google/Glassdoor scrape look like activity in that new LinkedIn-only run.
+// Call this once at the beginning of every job-search run; per-source dispatch
+// deliberately uses resetManualScraperDiagnostics() instead so sibling browser
+// sources in the SAME run keep their shared diagnostic trail.
+export function resetManualScraperTelemetry() {
+  manualScraperTelemetry.active = null;
+  manualScraperTelemetry.events = [];
+  manualScraperTelemetry.paused = false;
+  resetManualScraperDiagnostics();
+}
+
 // `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null } — for
 // per-source dispatch the orchestrator passes resetDiagnostics:false (it cleared
 // once up front) and the real index/total so the "Starting X/Y" log stays correct.
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null, opts = {}) {
   const { resetDiagnostics = true, sourceIndexBase = 0, sourceTotal = null } = opts;
-  // Clear per-run browser diagnostic buffers so the bug report only shows
-  // what happened in THIS run, not leftovers from a previous one.
-  if (resetDiagnostics) resetManualScraperDiagnostics();
+  // Direct callers start a complete browser-scrape run here. The jobs
+  // orchestrator dispatches one source at a time and has already performed the
+  // equivalent reset at its overall run boundary, so it passes false to retain
+  // the preceding sibling sources' evidence.
+  if (resetDiagnostics) resetManualScraperTelemetry();
 
   if (!Array.isArray(tasks) || tasks.length === 0) {
     clearManualScraperTelemetry('idle');
@@ -2930,6 +3198,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let hitPerSourceCap          = false;
       let hitPageCap               = false;
       let hitEmptyPage             = false;
+      let hitUnhandledPagination   = false;
+      let sourceDetailRateLimited  = false;
       let dataStopReason           = null; // set by task.options.onPageScraped (age-window / no-new-jobs) — see jobPageStop.js
       // Exact requests that reached the navigation step. The task list is only
       // a plan: a source can hit its useful-result cap at q1/12.
@@ -2986,7 +3256,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // safety boundary: resolution failure skips this source before navigation.
         if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved) {
           task._locResolved = true;
-          const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal, resolvedGlassdoorLocations)
+          const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal, resolvedGlassdoorLocations, overlayBase)
             .catch(() => ({ failure: 'autocomplete request threw before a location could be verified', failureKind: 'transient' }));
           if (picked?.locId) {
             // Replace stale resume params as well as filling the normal
@@ -3001,8 +3271,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             const failure = picked?.failure || 'autocomplete returned no verified exact match';
             const failureKind = picked?.failureKind || 'unknown';
             sourceSiteChangedWarning = {
-              code: 'location-resolution-failed',
+              code: failureKind === 'access-denied' ? 'location-lookup-blocked' : 'location-resolution-failed',
               severity: 'info',
+              ...(failureKind === 'access-denied' ? { shortLabel: 'Location lookup blocked' } : {}),
               ...describeGlassdoorLocationFailure({ location: task.resolveGlassdoorLocation, failure, failureKind }),
             };
             logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
@@ -3324,9 +3595,20 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             count: allJobs.length,
             status: `Opening all ${jobsToExpand.length} platform-returned cards`,
           }).catch(() => {});
-          const { jobs: enhanced, descError, descWarning, expandedCount } = await expandDescriptions(
-            page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + newJobs.length, signal, walkPlan,
-          );
+          let detailResult;
+          if (sourceDetailRateLimited) {
+            recordManualScraperTelemetry({
+              phase: 'detail-skipped-rate-limited', sourceId, srcName,
+              queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+              count: allJobs.length, skipped: jobsToExpand.length,
+            });
+            detailResult = { jobs: jobsToExpand, descError: null, descWarning: null, expandedCount: 0 };
+          } else {
+            detailResult = await expandDescriptions(
+              page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + newJobs.length, signal, walkPlan,
+            );
+          }
+          const { jobs: enhanced, descError, descWarning, expandedCount } = detailResult;
 
           const descCfg = DESC_CONFIGS[sourceId];
           if (descCfg?.panelSelector || descCfg?.expandViaNavigation) {
@@ -3357,6 +3639,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // list row. Preserve the row, continue the source, and surface this as a
           // warning in the result rather than converting it into a clean finish.
           if (descWarning && !sourceSiteChangedWarning) sourceSiteChangedWarning = descWarning;
+          if (descWarning?.code === 'description-rate-limited') sourceDetailRateLimited = true;
 
           await updateOverlay(page, {
             ...overlayBase,
@@ -3405,8 +3688,30 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             break;
           }
 
-          const didPage = await clickNextPage(page, sourceId);
-          if (!didPage) break;
+          const nextPage = await clickNextPage(page, sourceId);
+          if (!nextPage.clicked) {
+            if (nextPage.unhandled) {
+              hitUnhandledPagination = true;
+              const control = nextPage.unhandled;
+              const hrefNote = control.href ? ` (${control.href})` : '';
+              const evidence = `${srcName} page ${pageNum} exposed an enabled ${JSON.stringify(control.label || 'Next page')} control${hrefNote}, but the scraper had no working selector for it. Stopping here would omit later result pages.`;
+              logger.warn(`[BrowserScraper] ${evidence}`);
+              if (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block') {
+                sourceSiteChangedWarning = {
+                  code:       'pagination-unhandled',
+                  severity:   'block',
+                  evidence,
+                  suggestion: `The ${srcName} pagination control changed or failed to respond. Update its next-page selector, then rerun this source so later pages are collected.`,
+                };
+              }
+              recordManualScraperTelemetry({
+                phase: 'pagination-unhandled', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                count: allJobs.length, label: control.label || 'Next page', href: control.href || null,
+              });
+            }
+            break;
+          }
 
           pageNum++;
           await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
@@ -3463,6 +3768,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitPerSourceCap,
         hitPageCap,
         hitEmptyPage,
+        hitUnhandledPagination,
         dataStopReason,
       });
       const result = {

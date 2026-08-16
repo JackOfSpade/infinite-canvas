@@ -78,6 +78,29 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     return () => document.removeEventListener('job-source-progress-reset', onReset);
   }, [data.hubId]);
 
+  // Some gating warnings are derived only after the complete, history-filtered
+  // result set is known (notably Indeed's residual description check). The
+  // source's last IPC progress event can therefore be a clean `done`; let the
+  // hub promote that existing card to the derived actionable warning without
+  // deleting/re-spawning it and losing its position.
+  useEffect(() => {
+    const onWarningSync = (event) => {
+      if (event.detail?.hubId !== data.hubId || event.detail?.sourceId !== data.sourceId) return;
+      const nextWarning = event.detail?.warning;
+      if (!nextWarning) return;
+      setDismissed(false);
+      setProgress(prev => ({
+        ...(prev || {}),
+        status: 'done',
+        count: nextWarning.sourceJobCount ?? prev?.count ?? 0,
+        url: nextWarning.url || prev?.url || null,
+        warning: nextWarning,
+      }));
+    };
+    document.addEventListener('job-source-warning-sync', onWarningSync);
+    return () => document.removeEventListener('job-source-warning-sync', onWarningSync);
+  }, [data.hubId, data.sourceId]);
+
   // Mirror progress into node data ONLY on terminal states (done / error / skipped).
   // The sanitizer keeps job-source cards only when persistedProgress carries
   // a warning or error, so writing intermediate 'searching' states is wasted
@@ -114,7 +137,22 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
 
   const handleSolve = async () => {
     if (resolving || hubLocked) return;
+    const warningAction = progress?.warning?.action;
     const resumeState = progress?.warning?.resumeState;
+    // "Open listing" is intentionally not a source resolve. A ZipRecruiter
+    // job-detail URL has no ItemList for the generic resolver to extract, and
+    // treating it as a captcha solve used to close a perfectly good detail
+    // page with a misleading zero-result/site-changed diagnostic.
+    if (warningAction === 'open-external') {
+      const url = progress?.url;
+      if (!url) return;
+      if (window.electronAPI?.openExternal) {
+        await window.electronAPI.openExternal(url);
+      } else {
+        window.open(url, '_blank', 'noopener');
+      }
+      return;
+    }
     if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
     setResolving(true);
     // Optimistically clear the red error/warning so the card reads as "working"
@@ -176,9 +214,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         const items = Array.isArray(result?.items) ? result.items : [];
         const resolvedCount = items.length;
         const replaceSourceItems = !!result.replaceSourceItems;
+        const replaceMatchingItems = !!result.replaceMatchingItems;
+        const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
         const nextCount = (prev) => replaceSourceItems
           ? resolvedCount
-          : (prev?.count || 0) + resolvedCount;
+          : replaceMatchingItems
+            ? (prev?.count || resolvedCount)
+            : (prev?.count || 0) + resolvedCount;
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
           // Carry the resolve's own warning (if any) so the hub can re-derive
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
@@ -190,7 +232,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // forwarding it, the hub's onResolved listener has no way to know
           // this resolve suppressed anything, and the funnel undercounts.
           detail: {
-            hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems,
+            hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, replaceMatchingItems, removedItemKeys,
             warning: result.warning || null, hiddenApplied: result.hiddenApplied || 0,
             jobRunId,
           },
@@ -219,7 +261,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // replacement size; incremental captcha/Continue responses add.
           setProgress(prev => prev ? {
             ...prev,
-            status: 'error',
+            status: result.warning?.code === 'incomplete-descriptions' ? 'done' : 'error',
+            url: result.warning?.url || prev.url,
             warning: result.warning,
             count: nextCount(prev),
           } : prev);
@@ -438,7 +481,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           already directs the user to set the env var — no Solve button. */}
       {warning && !dismissed && (
         <div className="flex border-t border-white/10">
-          {(progress?.url || progress?.warning?.resumeState) && !hasInfo && !hasWarn && (
+          {(progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn)) && !hasInfo && (!hasWarn || warningBlocksScoring) && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}
@@ -446,12 +489,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
-                : progress?.warning?.resumeState
-                  ? 'Log in via Settings → Job Sources first, then click Continue to resume the search from where Indeed blocked'
+                : progress?.warning?.actionTitle
+                  ? progress.warning.actionTitle
+                  : progress?.warning?.resumeState
+                    ? 'Log in via Settings → Job Sources first, then click Continue to resume the search from where Indeed blocked'
                   : 'Open the failed page in a browser sharing your session — solve the captcha or log in, cookies persist for the next Re-run Search'}
             >
               <ExternalLink size={9} />
-              {resolving ? 'Running…' : progress?.warning?.resumeState ? 'Continue' : 'Solve'}
+              {resolving ? 'Running…' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve')}
             </button>
           )}
           <button

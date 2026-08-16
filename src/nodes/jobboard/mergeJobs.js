@@ -172,12 +172,14 @@ export function deriveBoardCardStats(nodes, hubId, currentData = {}) {
 }
 
 /**
- * Canonical signature of the modules that feed a Combine: sorted `id=fingerprint`
- * pairs. Two combines are equivalent (→ the cached board is still valid) iff
- * their signatures are equal — same module set AND same data in each. Order
- * independent (connection order doesn't matter).
+ * Canonical signature of every completed module at Combine time: sorted
+ * `id=fingerprint` pairs. Zero-result completed modules are intentionally
+ * included so a terminal empty re-run is an update, not a disappearance. Two
+ * combines are equivalent (→ the cached board is still valid) iff their
+ * signatures are equal — same completed-module set AND same data in each.
+ * Order independent (connection order doesn't matter).
  *
- * @param {{id: string, fingerprint: string}[]} modules  ready modules (count > 0)
+ * @param {{id: string, fingerprint: string}[]} modules  completed modules (zero-result included)
  * @returns {string}
  */
 export function combineSignature(modules) {
@@ -189,15 +191,19 @@ export function combineSignature(modules) {
 
 /**
  * Human-readable reason a board is stale, by diffing the signature captured at
- * the last Combine against the live module set: how many connections were
- * disconnected, newly added, or had their data change. Powers the board's
- * "Connections changed — re-combine" prompt.
+ * the last Combine against the current completed-module set: how many
+ * connections were disconnected, newly added, are currently re-running, or
+ * had their terminal data change. A completed module that now has zero jobs is
+ * therefore reported as updated, not disconnected. Supplying all connected
+ * modules lets a board distinguish a genuinely removed edge from a still-wired
+ * search that is temporarily non-terminal while it refreshes.
  *
  * @param {string} prevSignature  what `combineSignature` returned at last Combine
- * @param {{id: string, fingerprint: string}[]} liveModules  current ready modules
+ * @param {{id: string, fingerprint: string}[]} liveModules  current completed modules (zero-result included)
+ * @param {{id: string, hubState?: string}[]} [connectedModules] all connected modules, including in-progress ones
  * @returns {string} e.g. "1 disconnected · 1 updated" (or "connections changed")
  */
-export function staleReason(prevSignature, liveModules) {
+export function staleReason(prevSignature, liveModules, connectedModules) {
   const was = new Map(
     String(prevSignature || '').split('|').filter(Boolean).map((s) => {
       const eq = s.lastIndexOf('='); // ids have no '='; fingerprint has no '|'
@@ -205,9 +211,15 @@ export function staleReason(prevSignature, liveModules) {
     })
   );
   const now = new Map((Array.isArray(liveModules) ? liveModules : []).map(m => [m.id, m.fingerprint]));
-  let disconnected = 0, added = 0, updated = 0;
+  const connected = new Map((Array.isArray(connectedModules) ? connectedModules : []).map(m => [m.id, m]));
+  let disconnected = 0, added = 0, updated = 0, updating = 0;
   for (const [mid, fp] of was) {
-    if (!now.has(mid)) disconnected++;
+    if (!now.has(mid)) {
+      // The module left the terminal signature because it is searching/scoring,
+      // not because its edge vanished. Do not tell the user it disconnected.
+      if (connected.has(mid)) updating++;
+      else disconnected++;
+    }
     else if (now.get(mid) !== fp) updated++;
   }
   for (const mid of now.keys()) if (!was.has(mid)) added++;
@@ -215,5 +227,6 @@ export function staleReason(prevSignature, liveModules) {
   if (disconnected) parts.push(`${disconnected} disconnected`);
   if (added) parts.push(`${added} added`);
   if (updated) parts.push(`${updated} updated`);
+  if (updating) parts.push(`${updating} updating`);
   return parts.join(' · ') || 'connections changed';
 }

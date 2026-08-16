@@ -19,7 +19,7 @@ import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
-import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
+import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
@@ -42,6 +42,12 @@ import {
 // it doing the new thing?" failure mode.
 const PROCESS_START_MS = Date.now();
 
+function truncateDiagnosticText(value, max) {
+  const text = String(value || '');
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
 // A report is collected precisely when app state may be malformed. Keep one
 // broken diagnostic section from suppressing the rest, but make that omission
 // explicit (and bounded) so it cannot be mistaken for an observed empty state.
@@ -53,6 +59,112 @@ function diagnosticRenderFailureMarkdown(section, err) {
     .trim()
     .slice(0, 240) || 'unknown error';
   return `\n## ${section}\n_(section failed to render: \`${detail}\`)_\n`;
+}
+
+/** Render one startup-verification outcome without mistaking cached state for proof. */
+export function formatLoginVerificationTimingResult(duration = {}) {
+  const state = duration.connected ? 'connected' : 'not connected';
+  const reason = String(duration.reason || duration.skipReason || '')
+    .replace(/[|\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const boundedReason = truncateDiagnosticText(reason, 120);
+  const withReason = (label) => boundedReason ? `${label} — ${boundedReason}` : label;
+
+  switch (duration.outcome) {
+    case 'verified':
+      return `verified ${state}`;
+    case 'retained-prior':
+      return withReason(`retained prior: ${state}${duration.inconclusive ? ' (inconclusive verify)' : ''}`);
+    case 'skipped-native':
+      return withReason(`skipped native read (prior: ${state})`);
+    case 'skipped-login-flow':
+      return withReason(`skipped during login flow (prior: ${state})`);
+    case 'error':
+      return `error: ${boundedReason || 'unknown verification failure'}`;
+    default:
+      // Older running processes may have duration records from before `outcome`
+      // was introduced. Keep their prior report shape rather than treating them
+      // as an unverified failure.
+      if (duration.skipped) return withReason('skipped');
+      if (duration.error) return `error: ${String(duration.error).replace(/\|/g, '\\|').slice(0, 80)}`;
+      return duration.connected ? 'connected' : 'not connected';
+  }
+}
+
+export function buildLoginVerificationTimingMarkdown(run) {
+  if (!run || !Array.isArray(run.durations) || run.durations.length === 0) return '';
+  const durations = run.durations;
+  const sumMs = durations.reduce((a, d) => a + (d.ms || 0), 0);
+  const slowest = durations[0]; // durations are pre-sorted slowest-first
+  const rows = durations.map(d =>
+    `| \`${d.platformId}\` | ${d.ms} | ${formatLoginVerificationTimingResult(d)} |`,
+  ).join('\n');
+  const savedMs = Math.max(0, sumMs - run.totalMs);
+  // `platformCount` historically meant every platform considered by the
+  // startup pass, including CDP-walled native-read platforms. Count outcomes
+  // from the timing rows so the report never calls a skipped native read a
+  // fresh verification. Old running builds have no `outcome`; retain a useful
+  // best-effort classification from their existing skipped/error fields.
+  const classify = (duration) => {
+    switch (duration?.outcome) {
+      case 'skipped-native': return 'skipped-native';
+      case 'skipped-login-flow': return 'skipped-login-flow';
+      case 'retained-prior': return 'retained-prior';
+      case 'error': return 'error';
+      case 'verified': return 'verified';
+      default:
+        if (duration?.skipped) return 'skipped-legacy';
+        if (duration?.error) return 'error';
+        return 'verified';
+    }
+  };
+  const outcomes = durations.map(classify);
+  const count = (kind) => outcomes.filter(outcome => outcome === kind).length;
+  const considered = durations.length;
+  const summaryCount = Number(run.platformCount);
+  const countMismatch = Number.isFinite(summaryCount) && summaryCount !== considered
+    ? ` (timing rows: ${considered}; run summary: ${summaryCount})`
+    : '';
+  const verified = count('verified');
+  const retained = count('retained-prior');
+  const errors = count('error');
+  const freshAttempts = verified + retained + errors;
+  const skippedNative = count('skipped-native');
+  const skippedLoginFlow = count('skipped-login-flow');
+  const skippedLegacy = count('skipped-legacy');
+  const freshOutcomeParts = [
+    `${verified} fresh verdict${verified === 1 ? '' : 's'}`,
+    retained ? `${retained} retained prior after inconclusive verify` : null,
+    errors ? `${errors} error${errors === 1 ? '' : 's'}` : null,
+  ].filter(Boolean);
+  const skippedOutcomeParts = [
+    skippedNative ? `${skippedNative} native-state read${skippedNative === 1 ? '' : 's'}` : null,
+    skippedLoginFlow ? `${skippedLoginFlow} login-flow skip${skippedLoginFlow === 1 ? '' : 's'}` : null,
+    skippedLegacy ? `${skippedLegacy} legacy generic skip${skippedLegacy === 1 ? '' : 's'}` : null,
+  ].filter(Boolean);
+  return `
+## Login Verification Timing
+> Per-platform startup verify durations (\`verifyAllPlatforms\`). Each platform is
+> considered at startup; each fresh verifier attempt is a full page navigation in
+> the shared stealth browser, while native-state and login-flow skips do not
+> navigate. Fresh attempts run through a bounded concurrency pool (size
+> ${run.concurrency}) — so wall time is well below the sum of per-platform times.
+> Results distinguish a fresh verifier verdict from a prior cached state retained
+> after an inconclusive verify.
+
+- Run started: \`${new Date(run.startedAt).toISOString()}\`
+- Platforms considered: ${considered}${countMismatch}
+- Fresh verifier attempts: ${freshAttempts} — ${freshOutcomeParts.join('; ') || 'no outcome recorded'}
+- Skipped without a verifier navigation: ${skippedNative + skippedLoginFlow + skippedLegacy}${skippedOutcomeParts.length ? ` — ${skippedOutcomeParts.join('; ')}` : ''}
+- Concurrency pool: ${run.concurrency}
+- **Wall-clock total: ${run.totalMs}ms** (sum of per-platform: ${sumMs}ms — concurrency saved ~${savedMs}ms)
+- Slowest: \`${slowest.platformId}\` at ${slowest.ms}ms
+
+| Platform ID | Verify ms | Result |
+|---|---|---|
+${rows}
+`;
 }
 
 
@@ -523,6 +635,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     appVersion: app.getVersion(),
     nodeVersion: process.versions.node,
     electronVersion: process.versions.electron,
+    chromiumVersion: process.versions.chrome,
+    packaged: !!app.isPackaged,
+    generatedAt: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
+    utcOffsetMinutes: -new Date().getTimezoneOffset(),
     totalMemMB: Math.round(os.totalmem() / 1024 / 1024),
     freeMemMB: Math.round(os.freemem() / 1024 / 1024),
   };
@@ -604,7 +721,18 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       const d = nodeDataById[n.id] || {};
       const previewParts = [];
       if (d.hubState) previewParts.push(`hubState: ${d.hubState}`);
-      if (typeof d.scrapedCount === 'number') previewParts.push(`scraped: ${d.scrapedCount}`);
+      // `gatheredCount` is the total number of listings the sources returned;
+      // `scrapedCount` is the smaller post-filter/post-recovery set that was
+      // eligible to enter collection/scoring. Calling the latter "scraped" on
+      // its own made a healthy 31 → 5 → 3 run look as though only three
+      // listings had been fetched. Keep the compact Node Diagnostics preview
+      // truthful without changing the persisted legacy field names.
+      if (typeof d.scrapedCount === 'number') {
+        const gatheredCount = typeof d.gatheredCount === 'number' ? d.gatheredCount : null;
+        previewParts.push(gatheredCount != null && gatheredCount !== d.scrapedCount
+          ? `scraped: ${gatheredCount} → kept: ${d.scrapedCount}`
+          : `kept: ${d.scrapedCount}`);
+      }
       if (typeof d.resultCount === 'number' && d.hubState === 'done') previewParts.push(`results: ${d.resultCount}`);
       // A Job Search Module stores its results in data.scoredJobs (renderer
       // strips the heavy array to a count). `∅ none stored` on a done hub with
@@ -632,6 +760,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
           `merge: ${ms.modules ?? '?'} mod · ${breakdown} → ${ms.unique ?? '?'} unique ` +
           `(${ms.duplicatesRemoved ?? '?'} dup, ${ms.collisionUpgrades ?? 0} score-upgrade)`
         );
+      }
+      // Board cascades are deliberately hidden instead of discarded when their
+      // connected search inputs change. Show the stale marker, its persisted
+      // explanation, and the compact signature baseline so FULL reports can
+      // distinguish an intentional hidden prior result from a ghost board.
+      if (n.type === 'jobboard') {
+        previewParts.push(`stale: ${d.stale ? 'true' : 'false'}`);
+        if (d.staleReason) previewParts.push(`staleReason: ${String(d.staleReason).slice(0, 100)}`);
+        if (d.combineSignature != null) previewParts.push(`combineSignature: ${String(d.combineSignature).slice(0, 160) || '∅'}`);
       }
       if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
@@ -1236,39 +1373,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
   // is the first-class replacement: included under FULL or any auth/automation report.
   let verifyTimingMarkdown = '';
   if (isFullReport || wantsAuthDiagnostics || hasSellNodes || hasJobNodes) try {
-    const run = getVerifyTimingSummary?.();
-    if (run && Array.isArray(run.durations) && run.durations.length > 0) {
-      const sumMs = run.durations.reduce((a, d) => a + (d.ms || 0), 0);
-      const slowest = run.durations[0]; // durations are pre-sorted slowest-first
-      const rows = run.durations.map(d => {
-        const skipReason = d.skipReason ? String(d.skipReason).replace(/\|/g, '\\|').slice(0, 100) : 'not run';
-        const result = d.skipped ? `skipped (${skipReason})`
-          : d.error ? `error: ${String(d.error).replace(/\|/g, '\\|').slice(0, 80)}`
-            : d.connected ? 'connected' : 'not connected';
-        return `| \`${d.platformId}\` | ${d.ms} | ${result} |`;
-      }).join('\n');
-      const savedMs = Math.max(0, sumMs - run.totalMs);
-      verifyTimingMarkdown = `
-## Login Verification Timing
-> Per-platform startup verify durations (\`verifyAllPlatforms\`). Each platform is
-> a full page navigation in the shared stealth browser, run through a bounded
-> concurrency pool (size ${run.concurrency}) — so wall time is well below the sum
-> of per-platform times. A single platform far above the others points at a slow
-> TTFB / redirect chain for that site (cookie-consent interstitials, etc.); a high
-> WALL total despite low per-platform times points at the pool size (raise
-> \`VERIFY_CONCURRENCY\` in accounts.js).
-
-- Run started: \`${new Date(run.startedAt).toISOString()}\`
-- Platforms verified: ${run.platformCount}
-- Concurrency pool: ${run.concurrency}
-- **Wall-clock total: ${run.totalMs}ms** (sum of per-platform: ${sumMs}ms — concurrency saved ~${savedMs}ms)
-- Slowest: \`${slowest.platformId}\` at ${slowest.ms}ms
-
-| Platform ID | Verify ms | Result |
-|---|---|---|
-${rows}
-`;
-    }
+    verifyTimingMarkdown = buildLoginVerificationTimingMarkdown(getVerifyTimingSummary?.());
   } catch { /* never break the report on diagnostic failure */ }
 
   // ── Active auth/login window snapshot ─────────────────────────────────────
@@ -1441,7 +1546,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
         // default for all 60 lines would.
         const raw = (l.message || '').replace(/\r?\n/g, ' ⏎ ');
         const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
-        const msg = raw.slice(0, cap);
+        const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
       });
     }
@@ -1633,6 +1738,12 @@ ${filterSummaryMarkdown}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
+
+## Runtime Identity
+- App: ${systemInfo.appVersion} · ${systemInfo.packaged ? 'packaged' : 'development'}
+- Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
+- OS release: ${systemInfo.osRelease}
+- Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
 ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
@@ -1672,7 +1783,7 @@ ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMark
 
   // Logs and the Event History heading live outside baseMarkdown so the
   // clipboard path (enforceClipboardMarkdownCap) can trim them independently.
-  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + '\n## Event History\n' + trimmedEventsMarkdown;
+  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + trimmedEventsMarkdown;
   if (options?.maxChars) {
     return enforceClipboardMarkdownCap(baseMarkdown, includedEventLines, mainProcessLogLines, options.maxChars);
   }

@@ -340,7 +340,8 @@ export function saveDiceApiKey(key) {
 // It is what lets a country-scoped request (e.g. "Canada") be served from cache
 // instead of re-resolving every run: without it the cached pair is just an
 // opaque number that proves nothing about the market it selects. Entries written
-// before this field existed have no `country` and are deliberately re-resolved.
+// before this field existed have no `country` and are deliberately re-resolved,
+// except for the exact Canada/US nation roots upgraded by manualScraper.
 export function getGlassdoorLocId(locationKey) {
   const map = tryGetStore()?.get('jobs.glassdoorLocIds') || {};
   return map[String(locationKey || '').trim().toLowerCase()] || null;

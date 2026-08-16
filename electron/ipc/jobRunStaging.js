@@ -127,24 +127,30 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
 
 /**
  * Flush one page's raw jobs to staging and bump the (source,query) ledger.
- * `now` is the caller-stamped timestamp. No-op when there is no canvas/manifest.
+ * `now` is the caller-stamped timestamp. `expectedRunId` makes late work from
+ * a cancelled predecessor a no-op after a fresh run has replaced the manifest.
+ * No-op when there is no canvas/manifest.
  */
-export async function recordSourcePage(canvasFilePath, { sourceId, query = '', page = 0, jobs = [], now }) {
+export async function recordSourcePage(canvasFilePath, { sourceId, query = '', page = 0, jobs = [], now, expectedRunId = null }) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
     try {
+      // Check the token BEFORE appending: a manifest write is atomic, whereas
+      // staging is append-only and cannot be rolled back after an old run has
+      // leaked rows into its successor's file.
+      const manifest = await readManifest(canvasFilePath);
+      if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
       if (Array.isArray(jobs) && jobs.length > 0) {
         const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
         await fs.promises.appendFile(files.staging, lines, 'utf8');
       }
-      const manifest = await readManifest(canvasFilePath);
-      if (!manifest) return;
       const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
       const q = src.queries[query] || (src.queries[query] = { lastPage: -1 });
       q.lastPage = Math.max(q.lastPage ?? -1, page);
       manifest.lastUpdated = now ?? manifest.lastUpdated;
       await atomicWriteJson(files.manifest, manifest);
+      return true;
     } catch (e) {
       // Staging is best-effort recovery scaffolding — never let it break a scrape.
       logger.warn(`[JobRunStaging] recordSourcePage(${sourceId}) failed: ${e?.message || e}`);
@@ -152,31 +158,31 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
   });
 }
 
-/** Set a source's terminal status ('done' | 'blocked'). */
-export async function markSourceStatus(canvasFilePath, sourceId, status, now) {
+/** Set a source's terminal status ('done' | 'blocked') for the expected run. */
+export async function markSourceStatus(canvasFilePath, sourceId, status, now, { expectedRunId = null } = {}) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
     const manifest = await readManifest(canvasFilePath);
-    if (!manifest) return;
+    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
     manifest.lastUpdated = now ?? manifest.lastUpdated;
-    try { await atomicWriteJson(files.manifest, manifest); }
+    try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] markSourceStatus failed: ${e?.message || e}`); }
   });
 }
 
 /** Advance the pipeline stage ('searching'→'gathered'; see the header). */
-export async function setStage(canvasFilePath, stage, now) {
+export async function setStage(canvasFilePath, stage, now, { expectedRunId = null } = {}) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
     const manifest = await readManifest(canvasFilePath);
-    if (!manifest) return;
+    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     manifest.stage = stage;
     manifest.lastUpdated = now ?? manifest.lastUpdated;
-    try { await atomicWriteJson(files.manifest, manifest); }
+    try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] setStage failed: ${e?.message || e}`); }
   });
 }

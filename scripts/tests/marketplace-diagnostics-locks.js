@@ -1491,6 +1491,56 @@ export default [
     },
   },
 {
+    // A cancelled browser/API task can settle after the renderer has already
+    // begun a replacement scan on the same canvas. The staging file is
+    // append-only, so checking only when the manifest is written is too late:
+    // predecessor rows would already pollute the successor's resumable run.
+    name: 'job run staging: late predecessor writes cannot contaminate a replacement run',
+    run: async () => {
+      const dir = path.join(os.tmpdir(), `ic-jobstaging-fence-${process.pid}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const canvas = path.join(dir, 'test-canvas.json');
+      const T0 = 1_750_000;
+      try {
+        await startRun(canvas, { runId: 'old', startedAt: T0, queries: ['old'], sourceIds: ['indeed'] });
+        await recordSourcePage(canvas, {
+          sourceId: 'indeed', query: 'old', page: 0, jobs: [{ title: 'old-before-cancel' }],
+          now: T0 + 1, expectedRunId: 'old',
+        });
+        await startRun(canvas, { runId: 'new', startedAt: T0 + 2, queries: ['new'], sourceIds: ['indeed'] });
+
+        const [latePage, lateStatus, lateStage] = await Promise.all([
+          recordSourcePage(canvas, {
+            sourceId: 'indeed', query: 'old', page: 1, jobs: [{ title: 'old-late' }],
+            now: T0 + 3, expectedRunId: 'old',
+          }),
+          markSourceStatus(canvas, 'indeed', 'done', T0 + 4, { expectedRunId: 'old' }),
+          setStage(canvas, 'gathered', T0 + 5, { expectedRunId: 'old' }),
+        ]);
+        assert(latePage === false && lateStatus === false && lateStage === false,
+          'every late predecessor write is rejected by the replacement run token');
+
+        const state = await readRunState(canvas, T0 + 6);
+        assert(state?.manifest?.runId === 'new' && state.manifest.stage === 'searching',
+          'predecessor cannot advance the replacement manifest');
+        assert(state.manifest.sources.indeed.status === 'pending',
+          'predecessor cannot mark a replacement source done');
+        assert(state.stagedJobs.length === 0,
+          'predecessor cannot append a row to replacement staging');
+
+        const currentPage = await recordSourcePage(canvas, {
+          sourceId: 'indeed', query: 'new', page: 0, jobs: [{ title: 'new-current' }],
+          now: T0 + 7, expectedRunId: 'new',
+        });
+        assert(currentPage === true && (await readStagedJobs(canvas))[0]?.job?.title === 'new-current',
+          'the replacement run can still stage its own page');
+        return { ok: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
     // Regression: the per-source completion loop in jobs.js fires one
     // markSourceStatus per source WITHOUT awaiting — all concurrent. Before the
     // per-path mutex + unique tmp name, every write shared `<manifest>.<pid>.tmp`

@@ -1,7 +1,21 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, detectLanguage, foldVerificationSample, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
+  {
+    name: 'Salary currency labels prioritize listing text and clearly mark location fallback',
+    run: () => {
+      assert(explicitSalaryCurrency('CA$95,000 - CA$120,000/yr') === 'CAD', 'country-qualified dollar values are recognized');
+      assert(explicitSalaryCurrency('US$90,000/yr') === 'USD', 'US-qualified dollar values are recognized');
+      assert(explicitSalaryCurrency('€80,000/yr') === 'EUR', 'unambiguous currency symbols are recognized');
+      const inferredCanada = inferSalaryCurrency('$95,000 - $120,000/yr', 'Toronto, ON');
+      assert(inferredCanada?.currency === 'CAD' && inferredCanada.inferred, 'an ambiguous dollar value uses the Canadian job location');
+      const inferredUS = inferSalaryCurrency('90,000 - 120,000/yr', 'Denver, CO');
+      assert(inferredUS?.currency === 'USD' && inferredUS.inferred, 'a currency-less listing uses the US job location');
+      assert(formatSalaryCurrencyLabel('$90,000/yr', 'Remote') === 'Currency not specified', 'unresolved remote locations are not guessed');
+      return { explicit: 3, inferred: 2 };
+    },
+  },
 {
     name: 'auth-cookie contract: Reverb uses active credentials cookie, not historical marker',
     run: () => {
@@ -59,6 +73,14 @@ export default [
         'a parsed populated result is an answer');
       assert(!glassdoorLookupAttemptIsTransient({ path: '/autocomplete/location', status: 403 }),
         'a hard rejection is not retried into a longer outage');
+      assert(classifyGlassdoorLookupFailure([
+        { path: '/autocomplete/location', status: 403 },
+        { path: '/findPopularLocationAjax.htm', status: 403 },
+      ]) === 'access-denied', 'HTTP 403 is access denial, never a location no-match');
+      assert(classifyGlassdoorLookupFailure([gatewayTimeout, unavailable]) === 'transient',
+        'retryable transport-only attempts remain transient');
+      assert(classifyGlassdoorLookupFailure([{ path: '/autocomplete/location', status: 200, rows: 0 }]) === 'no-match',
+        'a parsed empty response is the only lookup-level no-match verdict');
       assert(!glassdoorLookupAttemptIsTransient(null), 'a missing attempt is not treated as transient');
 
       // The trail reads as observations, collapses repeats, and names every host tried.
@@ -77,6 +99,9 @@ export default [
       assert(/skipped before navigating its locKeyword-only nationwide URL/.test(transient.evidence), 'evidence still states the safety boundary');
       assert(!/spelling/i.test(transient.suggestion), `a transport failure must not blame spelling: ${transient.suggestion}`);
       assert(/retrying Glassdoor is the fix/i.test(transient.suggestion), 'transient failures tell the user to retry');
+      const denied = describeGlassdoorLocationFailure({ location: 'Canada', failure: 'autocomplete lookup failed (HTTP 403)', failureKind: 'access-denied' });
+      assert(/anti-bot\/session result/i.test(denied.suggestion) && !/spelling/i.test(denied.suggestion),
+        `an access denial tells the user to clear verification, not edit the location: ${denied.suggestion}`);
       const rejected = describeGlassdoorLocationFailure({ location: 'Candada', failure: 'selected CA, but the requested country is US', failureKind: 'rejected' });
       assert(/spelling/i.test(rejected.suggestion), 'a rejected match DOES point at the location text');
       const cancelled = describeGlassdoorLocationFailure({ location: 'Canada', failure: 'search was cancelled during location resolution', failureKind: 'cancelled' });
@@ -111,6 +136,16 @@ export default [
       assert(!glassdoorCachedLocationUsable({ locId: '0', locT: 'N', country: 'CA' }, 'Canada'), 'a non-positive id is not usable');
       assert(!glassdoorCachedLocationUsable({ locT: 'N', country: 'CA' }, 'Canada'), 'a missing id is not usable');
       assert(!glassdoorCachedLocationUsable(null, 'Canada'), 'no cache entry is not usable');
+      const upgradedCanada = upgradeGlassdoorCountryRootCache({ locId: '3', locT: 'N' }, 'Canada');
+      assert(upgradedCanada.country === 'CA' && glassdoorCachedLocationUsable(upgradedCanada, 'Canada'),
+        'the stable Canada country root receives CA provenance and becomes reusable');
+      const upgradedUs = upgradeGlassdoorCountryRootCache({ locId: '1', locT: 'N' }, 'United States');
+      assert(upgradedUs.country === 'US' && glassdoorCachedLocationUsable(upgradedUs, 'United States'),
+        'the stable US country root receives US provenance and becomes reusable');
+      assert(upgradeGlassdoorCountryRootCache({ locId: '2281069', locT: 'C' }, 'Toronto, Ontario, Canada').country == null,
+        'legacy city IDs remain opaque and still require live verification');
+      assert(upgradeGlassdoorCountryRootCache({ locId: '1', locT: 'N' }, 'Canada').country == null,
+        'a mismatched known country root is never blessed with provenance');
       return { ok: true };
     },
   },
@@ -178,6 +213,12 @@ export default [
       assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'San Francisco, CA' }) === 'San Francisco, CA', 'place-shaped display accepted');
       assert(LOCATION_TREATMENT.google === 'keyword-only: canonical location appended to the query (no location param available)',
         'Google diagnostics state that the canonical location is appended to its keyword query, not only LLM-baked');
+      assert(describeLocationTreatment('linkedin', 'Canada') === 'param: location=Canada',
+        'LinkedIn report telemetry includes the actual canonical location parameter value');
+      assert(describeLocationTreatment('linkedin', 'Toronto, Ontario, Canada') === 'param: location=Toronto, Ontario, Canada',
+        'location-report formatting preserves a multi-part canonical board value');
+      assert(describeLocationTreatment('linkedin', '') === 'no location param (unscoped)',
+        'a genuinely unscoped run does not claim that a blank location parameter was sent');
       return { ok: true };
     },
   },

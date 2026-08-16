@@ -125,6 +125,35 @@ const CARD_SELECTOR  = '[data-testid="jobTitle"] a, .jobTitle a, h2.jobTitle a, 
 const PANEL_SELECTOR = '#jobsearch-ViewjobPaneWrapper, .jobsearch-RightPane, [data-testid="jobPanel"], #vjs-container';
 const DESC_SELECTOR  = '#jobDescriptionText, .jobsearch-jobDescriptionText, [data-testid="job-description"]';
 
+// An expired detail URL is neither a missing description nor a bot wall.  In
+// particular, retrying it cannot recover score evidence, so keep this narrow
+// and require Indeed's own unavailable-page wording rather than matching a
+// phrase that could appear in a legitimate job description.
+export function classifyIndeedUnavailablePage({ title = '', body = '' } = {}) {
+  const text = `${title}\n${body}`.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!text) return null;
+  if (
+    text.includes("we can't find this page") &&
+    (text.includes("this page doesn't exist") || text.includes("isn't available right now"))
+  ) return 'page-unavailable';
+  if (text.includes('this job is no longer available') || text.includes('job is no longer available')) {
+    return 'job-unavailable';
+  }
+  return null;
+}
+
+async function getIndeedUnavailableReason(page) {
+  try {
+    const pageText = await page.evaluate(() => ({
+      title: document.title || '',
+      body: document.body?.innerText || '',
+    }));
+    return classifyIndeedUnavailablePage(pageText);
+  } catch {
+    return null;
+  }
+}
+
 // Scroll card into view + real mouse move + click — mirrors the probe step 5/6 approach
 // that generated the mouse-event sequence Cloudflare behavioral scoring expects.
 async function humanClick(page, selector, idx) {
@@ -263,6 +292,128 @@ async function getChallengeSignals(page) {
     });
   } catch {
     return { isChallenge: false, reason: null };
+  }
+}
+
+/**
+ * Retry the exact Indeed detail pages that survived the search funnel without
+ * enough description text for scoring. This deliberately does not repeat the
+ * search query: it is both slower and less precise, and older builds may already
+ * have written these rows to seen-history before the review decision. Direct
+ * detail retries replace the low-evidence pending rows regardless of history.
+ */
+export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir = null) {
+  const rows = (Array.isArray(jobs) ? jobs : []).map(job => ({ ...job, source: 'indeed' }));
+  const targets = rows.filter(job =>
+    String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
+  );
+  if (targets.length === 0) {
+    return { jobs: rows, attempted: 0, recovered: 0, remaining: 0, unavailable: [], challengeReason: null };
+  }
+
+  const userDataDir = profileDir || await getUserDataDir().catch(() => getProfileDir());
+  const executablePath = await findSystemChromePath() || await findChromePath();
+  const launchOpts = {
+    headless: false,
+    executablePath,
+    userDataDir,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: LAUNCH_ARGS,
+    defaultViewport: { width: 1400, height: 900 },
+    ignoreHTTPSErrors: true,
+  };
+
+  let browser;
+  let recovered = 0;
+  let challengeReason = null;
+  const unavailable = [];
+  try {
+    try {
+      browser = await puppeteer.launch(launchOpts);
+    } catch (launchErr) {
+      if (!/browser is already running/i.test(launchErr.message)) throw launchErr;
+      logger.warn('[Indeed/Browser] Description retry found a Chrome zombie — killing it and retrying launch');
+      await killChromeHoldingProfile(userDataDir);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      browser = await puppeteer.launch(launchOpts);
+    }
+
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+    logger.info(`[Indeed/Browser] Retrying ${targets.length} exact low-evidence description(s)`);
+
+    for (let index = 0; index < targets.length; index++) {
+      if (signal?.aborted) break;
+      const job = targets[index];
+      const host = indeedHostForLocation(job.location || '');
+      let safeJobUrl = null;
+      if (job.url) {
+        try {
+          const parsed = new URL(job.url);
+          if (parsed.protocol === 'https:' && (parsed.hostname === 'indeed.com' || parsed.hostname.endsWith('.indeed.com'))) {
+            safeJobUrl = parsed.toString();
+          }
+        } catch {
+          // Fall through to the source-native key below.
+        }
+      }
+      const safeJobKey = /^[a-z0-9_-]+$/i.test(String(job.jobkey || '')) ? String(job.jobkey) : '';
+      const jobUrl = safeJobUrl || (safeJobKey ? `https://${host}/viewjob?jk=${encodeURIComponent(safeJobKey)}` : null);
+      if (!jobUrl) continue;
+      try {
+        await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await injectOverlay(page);
+        await updateOverlay(page, {
+          srcName: 'Indeed',
+          srcLabel: 'Retrying descriptions…',
+          count: index + 1,
+          status: `${index + 1}/${targets.length}`,
+        }).catch(() => {});
+        await new Promise(resolve => setTimeout(resolve, 3000 + Math.round(Math.random() * 1000)));
+        const signals = await getChallengeSignals(page);
+        if (signals.isChallenge) {
+          challengeReason = signals.reason || 'challenge';
+          logger.warn(`[Indeed/Browser] Description retry blocked (${challengeReason}) after ${index}/${targets.length} listing(s)`);
+          break;
+        }
+        const unavailableReason = await getIndeedUnavailableReason(page);
+        if (unavailableReason) {
+          unavailable.push({
+            key: sourceJobKey(job),
+            title: String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 140),
+            url: jobUrl,
+            reason: unavailableReason,
+          });
+          logger.info(`[Indeed/Browser] Description retry retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+          continue;
+        }
+        const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+        if (description.length >= 400) {
+          job.description = description;
+          job.snippet = description;
+          recovered++;
+        }
+        if (index < targets.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1500 + Math.round(Math.random() * 1000)));
+        }
+      } catch (error) {
+        logger.warn(`[Indeed/Browser] Description retry failed (${job.jobkey || job.url || 'no-key'}): ${error.message}`);
+      }
+    }
+
+    const unavailableKeys = new Set(unavailable.map(item => item.key));
+    const activeRows = rows.filter(job => !unavailableKeys.has(sourceJobKey(job)));
+    const remaining = activeRows.filter(job =>
+      String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
+    ).length;
+    logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
+    return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };
+  } finally {
+    if (browser) {
+      await browser.close().catch(error => logger.warn(`[Indeed/Browser] retry browser.close() failed: ${error.message}`));
+      await killChromeHoldingProfile(userDataDir);
+    }
   }
 }
 
@@ -853,6 +1004,40 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
       logger.info(`[Indeed/Browser] Re-enrich complete: ${reEnriched}/${missingDescJobs.length} recovered`);
+
+      // A second, deliberately slower pass gives transiently blank detail panes
+      // one clean chance to settle before the caller has to ask the user whether
+      // low-evidence rows should be scored. Keep it bounded to the residual set:
+      // it is a recovery attempt, not another crawl of every result.
+      const residualDescJobs = missingDescJobs.filter(job => !job.description || job.description.trim() === '');
+      if (residualDescJobs.length > 0 && !signal?.aborted) {
+        logger.info(`[Indeed/Browser] Slow re-enriching ${residualDescJobs.length} residual job(s)`);
+        let slowRecovered = 0;
+        for (let ri = 0; ri < residualDescJobs.length; ri++) {
+          if (signal?.aborted) break;
+          const job = residualDescJobs[ri];
+          const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
+          if (!jobUrl) continue;
+          try {
+            await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            await new Promise(r => setTimeout(r, 3000 + Math.round(Math.random() * 1000)));
+            const sigs = await getChallengeSignals(page);
+            if (sigs.isChallenge) {
+              logger.warn(`[Indeed/Browser] Slow re-enrich: CF active (${sigs.reason}) — skipping remaining ${residualDescJobs.length - ri}, CF window still hot`);
+              break;
+            }
+            const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+            if (desc) { job.description = desc; job.snippet = desc; slowRecovered++; }
+            if (ri < residualDescJobs.length - 1) {
+              await new Promise(r => setTimeout(r, 1500 + Math.round(Math.random() * 1000)));
+            }
+          } catch (e) {
+            logger.warn(`[Indeed/Browser] Slow re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
+          }
+        }
+        reEnriched += slowRecovered;
+        logger.info(`[Indeed/Browser] Slow re-enrich complete: ${slowRecovered}/${residualDescJobs.length} recovered`);
+      }
     }
 
     // Compact per-query summary — 1 line per query so the full run picture fits

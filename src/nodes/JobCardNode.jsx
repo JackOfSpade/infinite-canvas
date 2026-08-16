@@ -10,6 +10,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
+import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -54,7 +55,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
   const [applied, setApplied] = useState(false);
   const [markingApplied, setMarkingApplied] = useState(false);
-  const pendingReasoningReflowRef = useRef(false);
   const measuredHeight = useStore(
     useCallback((store) => store.nodeLookup.get(id)?.measured?.height ?? null, [id])
   );
@@ -67,22 +67,30 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const isMountedRef = useIsMountedRef();
 
   // Reasoning disclosure changes the card's DOM height asynchronously through
-  // ResizeObserver. Re-run the tree layout only after that measured height lands
-  // in ReactFlow, otherwise a tall card can overlap the card below it.
+  // ResizeObserver. Re-run the tree layout only after a *subsequent* visible
+  // measurement change lands in ReactFlow, otherwise a tall card can overlap
+  // the card/root below it. Skipping a null → first-measurement transition
+  // avoids N reflows when a fresh cascade initially mounts. The same guard also
+  // fixes collapse → re-expand: hidden cards unmount and reset this local
+  // disclosure state, so an old 308px measurement can legitimately become the
+  // normal 210px measurement when the card returns.
   useEffect(() => {
-    const changed = previousMeasuredHeightRef.current !== measuredHeight;
+    const previousMeasuredHeight = previousMeasuredHeightRef.current;
     previousMeasuredHeightRef.current = measuredHeight;
-    if (!pendingReasoningReflowRef.current || !changed) return;
+    const isVisible = !getNode(id)?.hidden;
+    if (!isVisible
+      || !Number.isFinite(previousMeasuredHeight)
+      || !Number.isFinite(measuredHeight)
+      || previousMeasuredHeight === measuredHeight) return;
     const frame = requestAnimationFrame(() => {
-      pendingReasoningReflowRef.current = false;
       const hubData = getNode(data.hubId)?.data || {};
       setNodes((nodes) => computeJobTreeView(nodes, data.hubId, {
         scoreThreshold: hubData.scoreThreshold ?? 0,
         sourceFilter: hubData.sourceFilter ?? null,
-      }));
+      }, undefined, true));
     });
     return () => cancelAnimationFrame(frame);
-  }, [measuredHeight, data.hubId, getNode, setNodes]);
+  }, [id, measuredHeight, data.hubId, getNode, setNodes]);
 
   // Local disclosure state is intentionally non-persistent, but report it while
   // mounted so a bug report can explain a measured-height/layout discrepancy.
@@ -111,6 +119,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
+  const salaryCurrencyLabel = useMemo(
+    () => formatSalaryCurrencyLabel(data.salary, data.location),
+    [data.salary, data.location]
+  );
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
@@ -485,7 +497,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{data.location ? ` · ${data.location}` : ''}</div>
-          {data.salary && <div className="text-emerald-400/80 text-xs mt-0.5">{data.salary}</div>}
+          {data.salary && (
+            <div className="text-emerald-400/80 text-xs mt-0.5">
+              <span>{data.salary}</span>
+              <span className="text-emerald-300/60" title={salaryCurrencyLabel.includes('inferred') ? 'Salary currency inferred from the job location' : 'Salary currency stated explicitly in the listing, when available'}>
+                {' · '}{salaryCurrencyLabel}
+              </span>
+            </div>
+          )}
 
           <button
             onClick={data.locked ? undefined : () => dismissCard()}
@@ -535,7 +554,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           onClick={(e) => {
             e.stopPropagation();
             const nextExpanded = !showFullReasoning;
-            pendingReasoningReflowRef.current = true;
             setShowFullReasoning(nextExpanded);
             EventLogger.log(`[JobCard] reasoning ${nextExpanded ? 'expanded' : 'collapsed'} id=${id}`);
           }}

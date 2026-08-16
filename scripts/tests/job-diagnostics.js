@@ -1,8 +1,67 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
+import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 
 export default [
+{
+    name: 'Job-hub Node Diagnostics distinguishes fetched listings from kept scoring input',
+    run: () => {
+      const report = generateMarkdown({
+        description: 'Counter wording regression fixture.',
+        nodes: [{
+          id: 'job-hub-counter-fixture', type: 'jobhub',
+          data: { hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3, scoredJobs: [{}, {}, {}] },
+        }],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [{
+          id: 'job-hub-counter-fixture', type: 'jobhub', position: { x: 0, y: 0 },
+          measured: { width: 260, height: 140 },
+        }],
+      }).markdown;
+      assert(report.includes('scraped: 31 → kept: 3')
+        && !report.includes('hubState: done, scraped: 3, results: 3'),
+      'Node Diagnostics must not label the post-filter scoring input as the total scraped count');
+      return { scraped: 31, kept: 3 };
+    },
+  },
+{
+    name: 'Login verification timing distinguishes verified, retained, and native-skipped state',
+    run: () => {
+      const report = buildLoginVerificationTimingMarkdown({
+        startedAt: Date.UTC(2026, 0, 2, 3, 4, 5),
+        totalMs: 900,
+        concurrency: 4,
+        platformCount: 7,
+        durations: [
+          { platformId: 'indeed', ms: 500, connected: true, outcome: 'retained-prior', inconclusive: true, reason: 'transient fetch failure' },
+          { platformId: 'linkedin', ms: 400, connected: true, outcome: 'verified', reason: 'feed loaded' },
+          { platformId: 'mercari', ms: 0, connected: false, outcome: 'skipped-native', reason: 'native read owns login state' },
+          { platformId: 'swappa', ms: 0, connected: false, outcome: 'skipped-login-flow', reason: 'login flow owns verification' },
+          { platformId: 'legacy-ok', ms: 20, connected: false },
+          { platformId: 'legacy-skip', ms: 0, connected: false, skipped: true },
+          { platformId: 'failed', ms: 10, connected: false, outcome: 'error', error: 'navigation failed' },
+        ],
+      });
+      assert(report.includes('retained prior: connected (inconclusive verify) — transient fetch failure'),
+        'verification timing must not render a retained cache state as freshly connected');
+      assert(report.includes('verified connected'),
+        'verification timing must mark a fresh verifier verdict');
+      const clipped = formatLoginVerificationTimingResult({
+        connected: true, outcome: 'retained-prior', inconclusive: true,
+        reason: `Anti-bot wall at https://example.test/${'very-long-path/'.repeat(20)}`,
+      });
+      assert(clipped.endsWith('…') && clipped.length < 180,
+        'bounded verification reasons mark truncation with an ellipsis instead of ending mid-token silently');
+      assert(report.includes('skipped native read (prior: not connected) — native read owns login state'),
+        'verification timing must distinguish an intentional native-read skip');
+      assert(report.includes('Platforms considered: 7')
+        && report.includes('Fresh verifier attempts: 4 — 2 fresh verdicts; 1 retained prior after inconclusive verify; 1 error')
+        && report.includes('Skipped without a verifier navigation: 3 — 1 native-state read; 1 login-flow skip; 1 legacy generic skip'),
+      'verification timing must count considered platforms separately from fresh verifier attempts, outcome types, native/login skips, and legacy records');
+      return { outcomes: 7 };
+    },
+  },
 {
     name: 'Bug report clipboard cap reserves the logs + event timeline',
     run: () => {
@@ -17,8 +76,24 @@ export default [
       const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
       assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
         'Clipboard cap: roomy budget keeps logs + full event history untouched');
+      assert(roomy.markdown.includes('**Timestamps:** UTC (`HH:MM:SS.mmm`).')
+        && roomy.markdown.includes('**Timestamps:** local time (renderer).'),
+      'Clipboard cap: timestamp bases are labeled for main-process and renderer evidence');
       assert(roomy.markdown.includes('EVT 0 ') && roomy.markdown.includes('EVT 199 '),
         'Clipboard cap: roomy budget keeps both oldest and newest events');
+
+      // The normal file/export path does not invoke the clipboard cap. Its
+      // independently assembled Event History heading must carry the same local
+      // time basis as the cap helper's shared tail.
+      const uncapped = generateMarkdown({
+        description: 'Timestamp-basis regression fixture.',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: ['12:00:00 renderer event'],
+      }).markdown;
+      assert(uncapped.includes('## Event History\n> **Timestamps:** local time (renderer). See Runtime Identity'),
+        'Uncapped report labels renderer Event History timestamps as local time');
+      assert(uncapped.includes('## Runtime Identity') && uncapped.includes('timezone ') && uncapped.includes('UTC offset '),
+        'FULL report renders runtime versions and the date/timezone correlation anchor it already collects');
 
       // Phase 1: base fits but full tail doesn't — oldest events trimmed first,
       // newest events + the logs survive.
@@ -46,6 +121,9 @@ export default [
       assert(phase2.hardTruncated, 'Clipboard cap: phase-2 should flag a hard truncation');
       assert(phase2.markdown.includes('## Event History') && phase2.markdown.includes('EVT 199 '),
         'Clipboard cap: phase-2 MUST preserve the recent event timeline (regression guard)');
+      assert(phase2.markdown.includes('**Timestamps:** UTC (`HH:MM:SS.mmm`).')
+        && phase2.markdown.includes('**Timestamps:** local time (renderer).'),
+      'Clipboard hard cap preserves both timestamp-basis notes with the retained diagnostics');
       assert(phase2.markdown.includes('## Recent Main-Process Logs') && phase2.markdown.includes('LOG 59'),
         'Clipboard cap: phase-2 MUST preserve the main-process logs (regression guard)');
       assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
@@ -107,6 +185,73 @@ export default [
         && secondaryHard.markdown.includes('"S9" cut mid-section'),
       'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
+    },
+  },
+{
+    name: 'LinkedIn Solve telemetry reflects the latest attempt and permits cooled same-IP retry',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const prior = {
+        nodeId: telemetry.nodeId,
+        boardNodeId: telemetry.boardNodeId,
+        windowId: telemetry.windowId,
+        bucketing: telemetry.bucketing,
+        sourceEvents: telemetry.sourceEvents,
+        sourceEventsT0: telemetry.sourceEventsT0,
+        pipeline: telemetry.pipeline,
+        resolves: telemetry.resolves,
+      };
+      try {
+        recordJobsSourceScope('linkedin-resolve-telemetry-test', 901);
+        telemetry.sourceEvents = {};
+        telemetry.sourceEventsT0 = Date.now() - 1_000;
+        telemetry.pipeline = { phase: 'completed', active: false, ts: Date.now() - 1_000, pendingSources: [] };
+
+        const first = recordLinkedinResolveAttempt('linkedin', {
+          needEnrich: 9, enrichSuccess: 0, walled: true, skippedSameIp: true, warmIp: '70.48.176.119', stillEmpty: 9,
+        });
+        const second = recordLinkedinResolveAttempt('linkedin', {
+          needEnrich: 1, enrichSuccess: 1, walled: false, stillEmpty: 0,
+        });
+        const latest = telemetry.resolves.linkedin;
+        assert(latest === second && second.ts >= first.ts && !('skippedSameIp' in latest) && !('warmIp' in latest),
+          'LinkedIn Solve telemetry must be a fresh latest-attempt snapshot, without a prior skip/IP leaking into a successful pass');
+
+        recordLinkedinResolveAttempt('linkedin', {
+          needEnrich: 4, enrichSuccess: 2, walled: true, stillEmpty: 2, warmIp: '185.98.171.115',
+        });
+        const blockedSolveReport = buildJobsPipelineSnapshot(new Set(['linkedin-resolve-telemetry-test']), 901, null);
+        assert(blockedSolveReport.includes('hit a guest wall')
+          && blockedSolveReport.includes('key may be IP, guest context, or fingerprint/session')
+          && blockedSolveReport.includes('Wait about 1 minute then Solve on this IP'),
+        'LinkedIn Solve report must present wait-or-switch guidance without asserting an IP-only limit');
+
+        recordJobSourceProgress({ sourceId: 'linkedin', status: 'error', warning: { code: 'linkedin-rate-limited', severity: 'throttle' } });
+        telemetry.pipeline = { ...telemetry.pipeline, phase: 'completed', active: false };
+        recordJobSourceProgress({ sourceId: 'linkedin', status: 'done', detail: 're-fetch complete' }, {
+          updatePipeline: false,
+          expectedNodeId: 'linkedin-resolve-telemetry-test',
+        });
+        assert(telemetry.sourceEvents.linkedin.at(-1).status === 'done'
+          && telemetry.pipeline.phase === 'completed' && telemetry.pipeline.active === false,
+        'A post-search Solve must update the source trail to done without resurrecting the completed gather stage');
+
+        const justWalled = linkedInSameIpRetryDecision('185.98.171.115', 1_000_000, '185.98.171.115', 1_000_001);
+        const cooled = linkedInSameIpRetryDecision('185.98.171.115', 1_000_000, '185.98.171.115', 1_060_000);
+        const switched = linkedInSameIpRetryDecision('185.98.171.115', 1_000_000, '149.22.82.90', 1_000_001);
+        assert(justWalled.skip && justWalled.retryAfterMs > 0 && !cooled.skip && cooled.retryAfterMs === 0 && !switched.skip,
+          'Same-IP retry policy must suppress only the immediate retry, then allow a one-minute cooled retry or an IP change');
+        return { latestResolve: latest.enrichSuccess, cooledRetryAllowed: !cooled.skip };
+      } finally {
+        telemetry.nodeId = prior.nodeId;
+        telemetry.boardNodeId = prior.boardNodeId;
+        telemetry.windowId = prior.windowId;
+        telemetry.bucketing = prior.bucketing;
+        telemetry.sourceEvents = prior.sourceEvents;
+        telemetry.sourceEventsT0 = prior.sourceEventsT0;
+        telemetry.pipeline = prior.pipeline;
+        telemetry.resolves = prior.resolves;
+      }
     },
   },
 {
@@ -811,7 +956,7 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['linkedin-browser-contention']), null, null);
         assert(report.includes('browser/profile contention — retryable'),
           'profile reservation renders as a retryable browser contention outcome');
-        assert(report.includes('not a clean finish or an IP-rate-limit result'),
+        assert(report.includes('not a clean finish or a guest-limit result'),
           'residual explains that contention did not prove LinkedIn recovered');
         assert(report.includes('Cooldown probe paused — browser/profile contention'),
           'a contention-paused cooldown probe is not reported as exhausted');
@@ -821,6 +966,70 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+  },
+},
+{
+    name: 'job pipeline report: LinkedIn scope and cooldown inferences require a stable IP/browser identity',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        linkedinEnrich: telemetry.linkedinEnrich,
+        linkedinCooldown: telemetry.linkedinCooldown,
+      };
+      const now = Date.now();
+      try {
+        // This mirrors the misleading real-world pattern: every pass uses the
+        // same browser generation, but each one receives a smaller pool and a
+        // different VPN egress. The final clean result cannot be credited to a
+        // 40s cooldown, and the falling yield cannot identify a session limit.
+        Object.assign(telemetry, {
+          nodeId: 'linkedin-identity-controls', windowId: null, linkedinCooldown: null,
+          linkedinEnrich: [
+            { ts: now - 60_000, startedAt: now - 65_000, kind: 'search', ip: '70.0.0.1', walled: true, attempted: 58, remainingBefore: 58, enriched: 16, stillEmpty: 42, browserGen: 2 },
+            { ts: now - 40_000, startedAt: now - 45_000, kind: 'solve', ip: '185.0.0.1', walled: true, attempted: 42, remainingBefore: 42, enriched: 4, stillEmpty: 38, browserGen: 2 },
+            { ts: now - 20_000, startedAt: now - 25_000, kind: 'solve', ip: '141.0.0.1', walled: true, attempted: 38, remainingBefore: 38, enriched: 5, stillEmpty: 33, browserGen: 2 },
+            { ts: now - 1_000, startedAt: now - 6_000, kind: 'solve', ip: '149.0.0.1', walled: false, attempted: 1, remainingBefore: 1, enriched: 1, stillEmpty: 0, browserGen: 2 },
+          ],
+        });
+        const changedIpReport = buildJobsPipelineSnapshot(new Set(['linkedin-identity-controls']), null, null);
+        assert(changedIpReport.includes('cannot identify whether the ceiling is IP- or browser/session-scoped')
+          && changedIpReport.includes('remaining input pool also shrank')
+          && changedIpReport.includes('attempted 1'),
+        'changed-IP, shrinking-pool trail must be explicitly inconclusive and expose per-pass workload');
+        assert(!changedIpReport.includes('yield collapsed')
+          && !changedIpReport.includes('That points to a **browser/session-scoped** limit')
+          && !changedIpReport.includes('Cooldown ≈')
+          && changedIpReport.includes('Cooldown cannot be estimated from this trail'),
+        'changed IPs must not be turned into a browser-scope verdict or a cooldown estimate');
+
+        telemetry.linkedinCooldown = {
+          running: false, attempts: 2, foundMs: null, waitsMs: [60_000], identityChanged: true,
+          expectedIdentity: { ip: '70.0.0.1', browserGen: 2 },
+          observedIdentity: { ip: '149.0.0.1', browserGen: 2 },
+        };
+        const invalidProbeReport = buildJobsPipelineSnapshot(new Set(['linkedin-identity-controls']), null, null);
+        assert(invalidProbeReport.includes('Cooldown probe invalid — IP/browser identity changed')
+          && !invalidProbeReport.includes('Cooldown confirmed:'),
+        'an automated probe with a changed egress/browser identity must be marked invalid, never confirmed');
+
+        // A cooldown bound is allowed only when the prior wall and retry share
+        // both observed egress IP and browser generation.
+        Object.assign(telemetry, {
+          linkedinCooldown: null,
+          linkedinEnrich: [
+            { ts: now - 30_000, startedAt: now - 35_000, kind: 'search', ip: '70.0.0.1', walled: true, attempted: 10, remainingBefore: 10, enriched: 2, stillEmpty: 8, browserGen: 3 },
+            { ts: now - 1_000, startedAt: now - 6_000, kind: 'solve', ip: '70.0.0.1', walled: false, attempted: 8, remainingBefore: 8, enriched: 8, stillEmpty: 0, browserGen: 3 },
+          ],
+        });
+        const stableIdentityReport = buildJobsPipelineSnapshot(new Set(['linkedin-identity-controls']), null, null);
+        assert(stableIdentityReport.includes('Cooldown on IP 70.0.0.1, browser#3: ≤ 24s'),
+          'a clean retry after a wall can bound cooldown only for its matching IP/browser identity');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { changedIpInconclusive: true, stableIdentityBounded: true };
     },
   },
 {
@@ -1067,9 +1276,12 @@ export default [
           && report.includes('`Camera Operator Toronto, ON jobs`')
           && report.includes('`Film Editor Toronto jobs`'),
         'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
-        assert(report.includes('Per source (provider-returned gathered): google=2')
+        assert(report.includes('Per source (provider returned → retained for pipeline): google=3 → 2')
           && !report.includes('Per source (raw gathered)'),
-        'per-source counts identify provider-returned rows without implying a local title admission gate');
+        'per-source counts distinguish provider-returned candidates from the rows retained for this pipeline');
+        assert(report.includes('Found (raw): 3 → title-relevance-dropped 1 → after dedup: 2 → age-dropped: 0 → history-dropped: 0 → **new: 2**')
+          && !report.includes('→ deduped 2 → age-dropped 0 → already-seen/history 0'),
+        'funnel labels make survivor counts and dropped counts unambiguous');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -1112,6 +1324,70 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: current-run snapshot correlation blocks stale field-quality evidence and shows empty current snapshots',
+    run: () => {
+      const dir = path.join(electronPkg.app.getPath('userData'), 'job-search');
+      const filePath = path.join(dir, 'job-search-last-scrape.json');
+      fs.mkdirSync(dir, { recursive: true });
+      const priorFile = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : null;
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'snapshot-correlation-diagnostics',
+        windowId: null,
+        resolves: {},
+        search: {
+          ts: Date.now(), runId: 'current-empty-run', queries: 1,
+          raw: 100, relevanceDropped: 100, deduped: 0, ageDropped: 0, historyDropped: 0, kept: 0,
+          queryStrings: ['Systems Architect'],
+          bySource: {
+            weworkremotely: {
+              count: 0, gathered: 0, providerGathered: 100, relevanceDropped: 100,
+              relevanceRejected: ['Customer Support Specialist'],
+            },
+          },
+        },
+      });
+      try {
+        fs.writeFileSync(filePath, JSON.stringify({
+          runId: 'prior-71-job-run', sourceHubId: 'snapshot-correlation-diagnostics',
+          jobs: [{
+            source: 'old-source', title: 'Old Snapshot Job', company: 'Old Co',
+            salary: '$90,000/year', posted: '2026-08-01', url: 'https://example.com/old',
+            snippet: 'Stale description that must never be presented as this run. '.repeat(20),
+          }],
+        }), 'utf8');
+        const staleReport = buildJobsPipelineSnapshot(new Set(['snapshot-correlation-diagnostics']), null, null);
+        assert(staleReport.includes('Per source (provider returned → retained for pipeline): weworkremotely=100 → 0')
+          && !staleReport.includes('provider returned → retained for pipeline): (none)'),
+        'whole-feed provider rows remain visible even when title admission retains none');
+        assert(staleReport.includes('Saved scrape snapshot does not match the current search run')
+          && staleReport.includes('Snippet, salary, and field-quality checks were skipped')
+          && !staleReport.includes('Old Snapshot Job')
+          && !staleReport.includes('`old-source`: min'),
+        'a prior-run snapshot cannot leak stale snippets, salary coverage, or quality findings into the current funnel');
+
+        fs.writeFileSync(filePath, JSON.stringify({
+          runId: 'current-empty-run', sourceHubId: 'snapshot-correlation-diagnostics', jobs: [],
+        }), 'utf8');
+        const emptyReport = buildJobsPipelineSnapshot(new Set(['snapshot-correlation-diagnostics']), null, null);
+        assert(emptyReport.includes('Saved scrape snapshot (current run): 0 jobs')
+          && !emptyReport.includes('Saved scrape snapshot does not match the current search run'),
+        'a matching terminal-zero snapshot is explicitly identified as empty rather than treated as stale');
+      } finally {
+        Object.assign(telemetry, saved);
+        if (priorFile == null) fs.rmSync(filePath, { force: true });
+        else fs.writeFileSync(filePath, priorFile, 'utf8');
+      }
+      return { providerRows: 100, retained: 0 };
     },
   },
 {
@@ -1190,6 +1466,49 @@ export default [
     },
   },
 {
+    name: 'jobs history: read-time suppression captures the matched identity and prior row',
+    run: () => {
+      const current = {
+        source: 'weworkremotely', title: 'Customer Support Systems & Analytics Architect', company: 'Mercury',
+        location: 'Anywhere in the World', url: 'https://weworkremotely.com/remote-jobs/mercury-customer-support-systems-analytics-architect',
+      };
+      const prior = {
+        seen_date: '2026-08-16', source: 'weworkremotely', title: 'Customer Support Systems &amp; Analytics Architect', company: 'Mercury',
+        location: 'Anywhere in the World', url: current.url,
+      };
+      const result = dedupAgainstHistory([current], [prior]);
+      const sample = result.samples[0];
+      assert(result.removed === 1 && result.kept.length === 0 && result.samples.length === 1,
+        'a history-suppressed job exposes one bounded provenance sample');
+      assert(sample.keyKind === 'url' && sample.key === 'u:https://weworkremotely.com/remote-jobs/mercury-customer-support-systems-analytics-architect'
+        && sample.dropped.title === current.title && sample.dropped.company === current.company
+        && sample.dropped.location === current.location && sample.dropped.url === current.url
+        && sample.history.seen_date === prior.seen_date && sample.history.title === prior.title && sample.history.url === prior.url,
+      'history provenance identifies the dropped listing, normalized key, and matching durable row');
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search, resolves: telemetry.resolves };
+      Object.assign(telemetry, {
+        nodeId: 'history-read-time-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0,
+          historyDropped: result.removed, historyDropSamples: result.samples, kept: 0,
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['history-read-time-diagnostics']), null, null);
+        assert(report.includes('History suppression evidence (1/1 bounded sample)')
+          && report.includes('matched URL key')
+          && report.includes('Customer Support Systems & Analytics Architect')
+          && report.includes('seen_date=2026-08-16')
+          && report.includes('Customer Support Systems &amp; Analytics Architect'),
+        'FULL/JOBS report renders both the dropped row and matched history evidence');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { keyKind: sample.keyKind, samples: result.samples.length };
+    },
+  },
+{
     name: 'job pipeline report: durable seen-history writes expose success and failure',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -1209,7 +1528,10 @@ export default [
         scoring: null,
         history: {
           preScoring: {
-            ts: Date.now(), input: 5, written: 4, pruned: 2, skipped: null, error: null,
+            ts: Date.now(), input: 5, written: 0, pruned: 0, skipped: 'deferred until results are visible', error: null,
+          },
+          boardDisplay: {
+            ts: Date.now(), input: 6, written: 5, pruned: 2, skipped: null, error: null,
             skips: {
               url: 1, titleCompany: 0, noKey: 0, inBatch: 1, bySource: { google: 1 },
               collisionSamples: [{
@@ -1219,20 +1541,19 @@ export default [
               }],
             },
           },
-          postScoring: { ts: Date.now(), input: 6, written: 1, pruned: 0, skipped: null, error: null },
         },
       });
       try {
         let report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
-        assert(report.includes('Seen-history persistence') && report.includes('Authoritative search write') && report.includes('4 new history row(s), 2 expired row(s) pruned'),
-          'report renders the authoritative pre-scoring durable-write outcome');
+        assert(report.includes('Seen-history persistence') && report.includes('Pre-results write') && report.includes('deferred until results are visible'),
+          'report makes the deliberate pre-results history deferral explicit');
         assert(report.includes('likely the same listing surfaced twice') && report.includes('htidocid=repeat')
           && report.includes('kept:') && report.includes('skipped:'),
         'report exposes collision identity and correctly distinguishes a duplicate query result from a bad history key');
-        assert(report.includes('Post-scoring resolve reconciliation') && report.includes('1 new history row(s)'),
-          'report renders the awaited late-resolve reconciliation outcome');
+        assert(report.includes('Board-displayed write') && report.includes('5 new history row(s), 2 expired row(s) pruned'),
+          'report renders the authoritative board-display history outcome');
 
-        telemetry.history.postScoring = { ts: Date.now(), input: 1, written: 0, pruned: 0, skipped: null, error: 'EACCES' };
+        telemetry.history.boardDisplay = { ts: Date.now(), input: 1, written: 0, pruned: 0, skipped: null, error: 'EACCES' };
         report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
         assert(report.includes('history write failed: `EACCES`'),
           'report makes a durable-history failure explicit rather than silently claiming dedup is healthy');
@@ -1240,6 +1561,34 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+{
+    name: 'seen-history: gathered jobs are deferred until results are exposed',
+    run: () => {
+      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const filterStart = backend.indexOf('const { jobs: appliedFiltered');
+      const enrichmentStart = backend.indexOf('// Enrich Dice jobs', filterStart);
+      const gatheredDisposition = backend.slice(filterStart, enrichmentStart);
+      assert(gatheredDisposition.includes("skipped: canvasFilePath ? 'deferred until results are visible'")
+        && !gatheredDisposition.includes('await appendJobsHistory('),
+      'gathered-but-unshown jobs must not enter durable seen-history');
+
+      const searchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const finishStart = searchRenderer.indexOf('const finishScoringAndSpawn');
+      const finishEnd = searchRenderer.indexOf('const runScoringAndSpawn', finishStart);
+      assert(!searchRenderer.slice(finishStart, finishEnd).includes('appendJobsHistory'),
+        'scoring completion alone does not write seen-history');
+
+      const boardRenderer = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
+      const combineStart = boardRenderer.indexOf('const handleCombine');
+      const combineEnd = boardRenderer.indexOf('\n  return (', combineStart);
+      const combinePath = boardRenderer.slice(combineStart, combineEnd);
+      assert(combinePath.includes('addElementsGlobally')
+        && combinePath.includes("historyStage: 'boardDisplay'")
+        && combinePath.indexOf('addElementsGlobally') < combinePath.indexOf("historyStage: 'boardDisplay'"),
+      'the Job Board writes seen-history only after it adds displayed cards');
+      return { deferred: true };
     },
   },
 {
@@ -1326,6 +1675,10 @@ export default [
           && report.includes('Phoenix, AZ') && report.includes('https://jobs/1')
           && report.includes('Transferable background.'),
         'FULL/JOBS scoring section contains enough bounded evidence to diagnose score drift');
+        assert(report.includes('Scoring evidence (2/2 bounded row(s))')
+          && report.includes('score 55') && report.includes('Field Services')
+          && report.includes('input ') && report.includes('reason: "Transferable background."'),
+        'FULL/JOBS/SCORE reports preserve ordinary per-job score/direction/reason/input evidence, not only anomaly pairs');
         assert(report.includes('Model fallback routes')
           && report.includes('preferred `gemini-3.7-flash`')
           && report.includes('served `gemini-2.5-flash`')
@@ -1727,6 +2080,7 @@ export default [
       const zipPartial = { sourceId: 'ziprecruiter', code: 'description-detail-miss', severity: 'warn' };
       const zipBlocked = { sourceId: 'ziprecruiter', code: 'cloudflare-hard-block', severity: 'block' };
       const linkedinLimited = { sourceId: 'linkedin', code: 'linkedin-rate-limited', severity: 'throttle' };
+      const incompleteDescriptions = { sourceId: 'indeed', code: 'incomplete-descriptions', severity: 'warn' };
       const ordinaryThrottle = { sourceId: 'indeed', code: 'temporary-throttle', severity: 'throttle' };
 
       assert(!isJobSourceWarningGating(zipPartial), 'a partial ZipRecruiter description warning must not delay scoring');
@@ -1734,7 +2088,25 @@ export default [
       assert(isJobSourceWarningGating(zipBlocked), 'a hard ZipRecruiter block must pause for Resolve/Skip');
       assert(jobSourceWarningAction(zipBlocked) === 'skip', 'a gating source action remains Skip');
       assert(isJobSourceWarningGating(linkedinLimited), 'LinkedIn guest rate-limit remains the explicit throttle exception');
+      assert(isJobSourceWarningGating(incompleteDescriptions), 'residual incomplete descriptions must require an explicit low-evidence scoring choice');
       assert(!isJobSourceWarningGating(ordinaryThrottle), 'ordinary source throttles must not delay scoring');
+
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const hub = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(sourceCard.includes("document.addEventListener('job-source-warning-sync'")
+        && sourceCard.includes('(!hasWarn || warningBlocksScoring)')
+        && sourceCard.includes('replaceMatchingItems'),
+      'a derived incomplete-description warning keeps an actionable exact-retry control on its source card');
+      const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const scraper = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(scraper.includes("phase: 'detail-external-page-text'")
+        && scraper.includes('never clicks Apply, fills fields, logs in, or')
+        && scraper.includes("document.body?.innerText || ''")
+        && jobsBackend.includes('read-only visit to every eligible detail or external application page'),
+      'ZipRecruiter external listing URLs are read once for text without any application-form automation');
+      assert(hub.includes("hubState === 'sources-ready' || hasGatingWarning")
+        && hub.includes("new CustomEvent('job-source-warning-sync'"),
+      'a review-gated source card cancels clean-card auto-dismiss and receives the derived warning');
 
       const finalWarnings = filterHandledJobSourceWarnings(
         [zipBlocked, ordinaryThrottle],
@@ -1999,6 +2371,22 @@ export default [
       ], 'linkedin', { replaceSourceItems: true });
       assert(replacement.replacedExisting === 1, 'Job source resolve merge: replacement source should drop stale same-source jobs');
       assert(replacement.mergedPending.filter(j => j.source === 'linkedin').length === 2, 'Job source resolve merge: replacement source should use returned full source set');
+
+      const exactReplacement = mergeResolvedSourceItems(existing, [
+        { title: 'Indeed A', company: 'Acme', url: 'https://jobs/a', source: 'indeed', snippet: 'recovered full description' },
+      ], 'indeed', { replaceMatchingItems: true });
+      assert(exactReplacement.mergedPending.length === existing.length
+        && exactReplacement.replacedExisting === 1
+        && exactReplacement.mergedPending.some(job => job.url === 'https://jobs/a' && job.snippet === 'recovered full description'),
+      'Job source resolve merge: exact retry replaces the matching pending row without dropping unrelated jobs');
+
+      const unavailableRemoval = mergeResolvedSourceItems(existing, [], 'indeed', {
+        removedItemKeys: ['https://jobs/a'],
+      });
+      assert(unavailableRemoval.mergedPending.length === existing.length - 1
+        && unavailableRemoval.mergedPending.every(job => job.url !== 'https://jobs/a')
+        && unavailableRemoval.mergedPending.some(job => job.url === 'https://jobs/li-a'),
+      'Job source resolve merge: an unavailable exact retry removes only that stale listing');
 
       // Cross-source collapse (same-run policy): a resolved LinkedIn copy of a
       // posting Indeed already returned must NOT enter pendingJobs twice — the
@@ -2697,6 +3085,33 @@ export default [
     },
   },
 {
+    name: 'manualScraper telemetry: a new job-search run clears prior browser phases and diagnostics',
+    run: () => {
+      // Simulate a completed Google browser scrape, then the boundary crossed by
+      // a LinkedIn-only/API-only follow-up. That second run never calls the
+      // manual browser loop, so this explicit reset is what prevents the old
+      // source-finished event from being rendered as current work.
+      recordManualScraperTelemetry({
+        phase: 'source-finished', sourceId: 'google', srcName: 'Google for Jobs', count: 117,
+      });
+      recordManualScraperTelemetry(
+        { phase: 'desc-miss', sourceId: 'google', srcName: 'Google for Jobs', key: 'Old Google job' },
+        { updateActive: false },
+      );
+      assert(getManualScraperTelemetry().active?.sourceId === 'google',
+        'fixture must begin with prior browser activity');
+
+      resetManualScraperTelemetry();
+      const fresh = getManualScraperTelemetry();
+      assert(fresh.active === null, 'a new run has no inherited active browser phase');
+      assert(fresh.events.length === 0, 'a new run has no inherited browser phase trail');
+      assert(fresh.fieldAnomalies.length === 0, 'a new run has no inherited field-quality anomaly');
+      assert(fresh.consoleLogs.length === 0 && fresh.networkErrors.length === 0,
+        'a new run has no inherited browser console/network diagnostics');
+      return { ok: true };
+    },
+  },
+{
     name: 'job pipeline report: field-quality scraper anomalies survive later source phases',
     run: () => {
       // Fill the capped telemetry ring exactly as a multi-source run does: two
@@ -2913,6 +3328,23 @@ export default [
     },
   },
 {
+    name: 'job pipeline report: terminal phases and Glassdoor cache ages are truthful',
+    run: () => {
+      assert(formatPipelineState({ active: false, phase: 'completed' }) === '✅ complete'
+        && formatPipelineState({ active: false, phase: 'aborted' }) === '⏹️ cancelled'
+        && formatPipelineState({ active: false, phase: 'source-gather-failed' }) === '❌ failed',
+      'an inactive aborted/failed pipeline must not be mislabeled as a successful completion');
+      const provenance = formatGlassdoorCacheProvenance({
+        country: 'CA', verifiedAt: Date.now() - 65_000,
+      });
+      assert(/country CA · verified 1m ago/.test(provenance)
+        && !provenance.includes('ago ago')
+        && !/\d{4,}h/.test(provenance),
+      'Glassdoor cache provenance passes an epoch to formatAge and appends no duplicate age suffix');
+      return { provenance };
+    },
+  },
+{
     name: 'job pipeline report: Glassdoor Location Cache section is absent with no location skips and an empty cache',
     run: () => {
       // Scrape telemetry is a process-global singleton, so this negative case
@@ -2991,6 +3423,29 @@ export default [
       assert(normalizeDetailNavigationUrl('/jobs/fk0zdvb/?apply=true') === '/jobs/fk0zdvb/?apply=true',
         'relative or malformed source URLs remain unchanged for the normal navigation error path');
       return { normalized };
+    },
+  },
+{
+    name: 'ZipRecruiter detail enrichment reads external application pages without form automation and bounds 429 retry waits',
+    run: () => {
+      assert(shouldNavigateForDescription('ziprecruiter', 'https://www.ziprecruiter.com/jobs/acme/platform-architect?lvk=abc'),
+        'a ZipRecruiter /jobs detail page remains eligible for read-only enrichment');
+      assert(shouldNavigateForDescription('ziprecruiter', 'https://www.ziprecruiter.com/c/Actalent/Job/Principal-Systems-Engineer/-in-Kanata,ON?jid=abc'),
+        'a legacy ZipRecruiter /c/<company>/Job/<title> detail page remains eligible for read-only enrichment');
+      assert(shouldNavigateForDescription('ziprecruiter', 'https://lbg.wd3.myworkdayjobs.com/lbg_Careers/job/Architect_123/apply?utm_source=ziprecruiter'),
+        'an employer Workday page is eligible for one read-only text extraction without clicking its form');
+      assert(shouldNavigateForDescription('ziprecruiter', 'https://xideral.hire.trakstar.com/jobs/fk0ziuq/?apply=true&utm_source=ziprecruiter'),
+        'an external Trakstar page is eligible for one read-only text extraction without clicking its form');
+      assert(!shouldNavigateForDescription('ziprecruiter', 'file:///Users/example/job.html'),
+        'only ordinary HTTP(S) detail URLs are eligible for external-page enrichment');
+      assert(shouldNavigateForDescription('glassdoor', 'https://example.com/apply'),
+        'the ZipRecruiter ownership guard cannot change another source\'s navigation policy');
+      assert(zipRecruiterRetryAfterMs('120') === 60_000
+        && zipRecruiterRetryAfterMs('', 0) === 45_000
+        && zipRecruiterRetryAfterMs('invalid', 0) === 45_000
+        && zipRecruiterRetryAfterMs('0') === 1_000,
+      'Retry-After handling respects server waits where practical, has a safe fallback, and never spins immediately');
+      return { externalApplySkipped: true, retryWaitCappedMs: zipRecruiterRetryAfterMs('120') };
     },
   },
 {
@@ -3240,6 +3695,14 @@ export default [
       // B disconnected:
       assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }]) === '1 disconnected',
         'reason: a removed connection');
+      // B is still wired but is searching, so it temporarily leaves the
+      // terminal signature. That is a refresh, never a disconnection.
+      assert(staleReason(
+        prev,
+        [{ id: 'A', fingerprint: '5.10' }],
+        [{ id: 'A', hubState: 'done' }, { id: 'B', hubState: 'searching' }],
+      ) === '1 updating',
+      'reason: a connected non-terminal module is updating, not disconnected');
       // B re-ran (data changed):
       assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }, { id: 'B', fingerprint: '4.9' }]) === '1 updated',
         'reason: a connection whose data changed');
@@ -3253,6 +3716,47 @@ export default [
       assert(staleReason(prev, [{ id: 'B', fingerprint: '9.9' }, { id: 'C', fingerprint: '1.1' }]) === '1 disconnected · 1 added · 1 updated',
         'reason: disconnected + added + updated together');
       return { ok: true };
+  },
+},
+{
+    name: 'Job Board: terminal zero-result source remains an updated input and can replace stale results',
+    run: () => {
+      const previousJobs = [{ title: 'Architect', company: 'Acme', url: 'https://jobs/acme', matchScore: 90 }];
+      const previous = combineSignature([{ id: 'search-a', fingerprint: moduleFingerprint(previousJobs) }]);
+      const completedZero = [{ id: 'search-a', fingerprint: moduleFingerprint([]) }];
+      assert(combineSignature(completedZero) !== '',
+        'zero-result terminal module stays in the board signature instead of vanishing as a disconnect');
+      assert(staleReason(previous, completedZero) === '1 updated',
+        'zero-result terminal module is reported as updated, not disconnected');
+
+      // The component-level transition clears the prior cascade only after the
+      // user explicitly accepts its empty terminal input. Lock that wiring in
+      // place without adding a heavyweight ReactFlow DOM harness.
+      const boardSource = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
+      const doneStateSource = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardDoneState.jsx'), 'utf8');
+      const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(boardSource.includes('const completedModules = useMemo')
+        && boardSource.includes('() => combineSignature(completedModules)')
+        && boardSource.includes('const allConnectedModulesDone =')
+        && boardSource.includes('staleReason(data.combineSignature, completedModules, connectedModules)')
+        && boardSource.includes('if (nextStale) hideBoardChildren()')
+        && boardSource.includes('replaced stale results with empty completed inputs')
+        && boardSource.includes('const cancelled = epoch.start()')
+        && boardSource.includes('if (cancelled() || !getNode(id))')
+        && boardSource.includes('cancelNodeTask?.(id)')
+        && boardSource.includes('combine cancelled before spawn'),
+      'board tracks terminal zero-result modules, accurately labels connected refreshes, reconciles stale children, and has an explicit empty replacement path');
+      assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
+        'stale zero-result boards expose a truthful action rather than a dead Re-combine button');
+      assert(bugReportSource.includes('staleReason:') && bugReportSource.includes('combineSignature:'),
+        'FULL node diagnostics preserve board stale reason and signature evidence');
+      const terminalZeroStart = jobSearchSource.indexOf('if (foundJobs.length === 0)');
+      const terminalZeroEnd = jobSearchSource.indexOf('return true;', terminalZeroStart);
+      assert(terminalZeroStart >= 0 && terminalZeroEnd > terminalZeroStart
+        && /jobCount:\s*0/.test(jobSearchSource.slice(terminalZeroStart, terminalZeroEnd)),
+      'terminal empty job searches clear stale jobCount instead of retaining the prior result total');
+      return { reason: staleReason(previous, completedZero), zeroSignature: combineSignature(completedZero) };
     },
   },
 {
@@ -3324,6 +3828,39 @@ export default [
       const fSrc = computeJobTreeView(tree(), 'hub', { sourceFilter: 'dice' });
       assert(hiddenOf(fSrc, 'c2') === false && hiddenOf(fSrc, 'c1') === true, 'flat: source filter keeps only matching source');
       return { ok: true };
+    },
+  },
+{
+    name: 'computeJobTreeView: forced measured-card reflow tightens a collapse/re-expand stale height without initial churn',
+    run: () => {
+      // A card's reasoning disclosure is local component state. Collapsing its
+      // role unmounts it; when re-expanded, it resets closed even though React
+      // Flow can still hold the old expanded 308px measurement until its next
+      // ResizeObserver pass reports 210px. The old fast path skipped layout when
+      // visibility was unchanged, leaving the next root positioned for 308px.
+      const tree = (height) => [
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'A', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['R'], expanded: true } },
+        { id: 'R', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', childIds: ['card'], expanded: true, visibleCount: 10 } },
+        { id: 'card', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, measured: { width: 280, height }, data: { hubId: 'hub', matchScore: 90, source: 'lever' } },
+        { id: 'B', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['bcard'], expanded: false } },
+        { id: 'bcard', type: 'jobcard', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 80, source: 'lever' } },
+      ];
+      const stale = computeJobTreeView(tree(308), 'hub', {}, COL_X, true);
+      const staleB = stale.find(n => n.id === 'B')?.position?.y;
+      const tightened = computeJobTreeView(
+        stale.map(n => n.id === 'card' ? { ...n, measured: { ...n.measured, height: 210 } } : n),
+        'hub', {}, COL_X, true,
+      );
+      const tightB = tightened.find(n => n.id === 'B')?.position?.y;
+      assert(staleB === 348 && tightB === 280,
+        `measured reflow: downstream root must tighten from 348 to 280 after 308→210 (got ${staleB}→${tightB})`);
+      // The ordinary path preserves its no-op fast path for a freshly measured
+      // cascade, so initial N-card measurements don't enqueue reflows.
+      const initial = tree(210);
+      assert(computeJobTreeView(initial, 'hub', {}) === initial,
+        'measured reflow: ordinary initial tree remains a same-ref no-op');
+      return { staleB, tightB };
     },
   },
 {
