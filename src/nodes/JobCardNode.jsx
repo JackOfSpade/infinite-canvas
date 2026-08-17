@@ -55,6 +55,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
   const [showFullReasoning, setShowFullReasoning] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
+  // Local AI is deliberately a human-in-the-loop workflow. The durable job
+  // folder is authoritative; this persisted pointer lets a remounted card
+  // reconnect without implying that an application was submitted.
+  const [localApplication, setLocalApplication] = useState(() => {
+    const saved = data.localApplication || null;
+    // An Electron restart can interrupt the renderer after status changed but
+    // before import settled. The on-disk job/result remains safe to validate
+    // again, so resume it as a retryable completed job rather than leaving the
+    // card permanently stuck on a transient "importing" label.
+    return saved?.status === 'importing'
+      ? { ...saved, status: 'completed', message: 'Resuming Local AI result import after restart…' }
+      : saved;
+  });
   const [applied, setApplied] = useState(false);
   const [markingApplied, setMarkingApplied] = useState(false);
   // Per-job context, deliberately separate from the originating hub's career
@@ -71,6 +84,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const idRef = useRef(id);
   useEffect(() => { idRef.current = id; }, [id]);
   const isMountedRef = useIsMountedRef();
+
+  const localApplicationKey = JSON.stringify(localApplication);
+  useEffect(() => {
+    if (JSON.stringify(data.localApplication || null) !== localApplicationKey) {
+      updateGlobal(id, { localApplication: localApplication || null });
+    }
+  }, [id, data.localApplication, localApplication, localApplicationKey, updateGlobal]);
 
   // Reasoning disclosure changes the card's DOM height asynchronously through
   // ResizeObserver. Re-run the tree layout only after a *subsequent* visible
@@ -112,6 +132,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // "generation ≠ applied" split: nothing here implies an application exists
   // until the user explicitly marks it.
   const lastSavedFolderRef = useRef(null);
+  // Poll ticks and React state propagation can overlap by a frame. This latch
+  // ensures a completed local result is imported exactly once.
+  const localImportingRef = useRef(new Set());
   // React state does not disable a button until the next render. Keep a
   // synchronous latch too, so two click events in the same render frame cannot
   // enqueue duplicate applications for this one card.
@@ -125,6 +148,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
+  const localJobPending = !!localApplication && !['saved', 'invalid', 'failed'].includes(localApplication.status);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(data.salary, data.location),
     [data.salary, data.location]
@@ -188,6 +212,79 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     EventLogger.log(`[JobCard] dismissed id=${id} board=${data.hubId} remaining=${stats.resultCount}`);
   }, [id, data.locked, data.hubId, deleteElements, getNode, getNodes, setNodes, updateGlobal, cancelQueuedRunsForNode]);
 
+  // A completed Local AI job is converted into the exact same capability-bound
+  // workspace that the API flow creates, then saved through saveApplication.
+  // The renderer never receives a raw arbitrary path to save.
+  const importCompletedLocalApplication = useCallback(async (jobId) => {
+    if (!jobId || !window.electronAPI?.importLocalApplication || !window.electronAPI?.saveApplication) return;
+    const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+    if (!canvasFilePath) {
+      setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' } : current);
+      return;
+    }
+    setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Claude Code result…' } : current);
+    try {
+      const imported = await window.electronAPI.importLocalApplication({ jobId });
+      if (!imported?.success || !imported.localApplication) throw new Error(imported?.error || 'Could not import the Local AI result.');
+      const local = imported.localApplication;
+      const saved = await window.electronAPI.saveApplication({
+        resumeHtmlPath: local.resumeHtmlPath,
+        resumePdfPath: local.resumePdfPath,
+        coverLetterPdfPath: local.coverLetterPdfPath,
+        jobListingPath: local.jobListingPath,
+        workDir: local.workDir,
+        company: local.company,
+        candidateName: local.candidateName,
+        jobTitle: data.title,
+        location: data.location,
+        canvasFilePath,
+      });
+      if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
+      if (isMountedRef.current) {
+        lastSavedFolderRef.current = saved.dir || null;
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'saved', message: `Saved to ${saved.dir}` } : current);
+        addToast({ title: 'Local AI Application Saved', description: `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.`, type: 'success' });
+      }
+    } catch (error) {
+      if (!isMountedRef.current) return;
+      setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
+      addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
+    }
+  }, [nav, data.title, data.location, addToast, isMountedRef]);
+
+  // Claude Code writes result.json manually/asynchronously. Polling only reads
+  // that app-owned job; the import happens once the result validates.
+  useEffect(() => {
+    const jobId = localApplication?.id;
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'invalid', 'failed', 'importing'].includes(localApplication.status)) return undefined;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const result = await window.electronAPI.getLocalApplicationStatus({ jobId });
+        if (cancelled || !isMountedRef.current) return;
+        if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
+        const next = result.localJob;
+        if (next.status === 'completed') {
+          if (localImportingRef.current.has(jobId)) return;
+          localImportingRef.current.add(jobId);
+          setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'importing', message: 'Claude Code result found — importing…' } : current);
+          try {
+            await importCompletedLocalApplication(jobId);
+          } finally {
+            localImportingRef.current.delete(jobId);
+          }
+        } else {
+          setLocalApplication((current) => current?.id === jobId ? { ...current, ...next } : current);
+        }
+      } catch (error) {
+        if (!cancelled && isMountedRef.current) setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'failed', message: error?.message || String(error) } : current);
+      }
+    };
+    check();
+    const interval = window.setInterval(check, 2500);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [localApplication?.id, localApplication?.status, importCompletedLocalApplication, isMountedRef]);
+
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
   // Reads the merged career data from the ORIGIN Job Search Module — the
   // module whose search produced this job (cards are spawned by the Job Board,
@@ -200,7 +297,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // path because same title + same company + different city is a DIFFERENT job
   // — see src/utils/locationIdentity.js.)
   const generateApplication = useCallback(async () => {
-    if (!window.electronAPI?.generateApplication || applicationSubmissionRef.current || hasApplicationRun) return;
+    if (!window.electronAPI?.generateApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
     if (getNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
     const originHubId = data.originHubId || data.hubId;
     // Fast, non-queued validation prevents a known-invalid card from taking a
@@ -289,6 +386,41 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
           type: 'error',
         });
+        return;
+      }
+
+      // Local AI queues a compact, self-contained job for the user's Claude
+      // Code routine instead of making an API request. The shared FIFO lease
+      // only covers writing that job; it is released below while the user does
+      // the manual Claude Code step.
+      const settings = await window.electronAPI?.getSettings?.();
+      if (settings?.ai?.provider === 'local') {
+        if (!window.electronAPI?.queueLocalApplication) {
+          throw new Error('Local AI is selected, but this app version does not support Local AI jobs. Relaunch Infinite Canvas and try again.');
+        }
+        const queued = await window.electronAPI.queueLocalApplication({
+          nodeId: idRef.current,
+          job: {
+            title: data.title, company: data.company, snippet: data.snippet,
+            location: data.location, salary: data.salary, url: data.url,
+            source: data.source, posted: data.posted, language: data.language,
+          },
+          careerData,
+          additionalNotes: additionalNotes.trim(),
+          reasoning: data.reasoning,
+          matchScore: data.matchScore,
+        });
+        if (!queued?.success || !queued.localJob) {
+          throw new Error(queued?.error || 'Could not queue the Local AI job.');
+        }
+        if (isMountedRef.current) {
+          setLocalApplication(queued.localJob);
+          addToast({
+            title: 'Local AI Job Ready',
+            description: 'Run your Claude Code Local AI routine, then this card will import the completed application automatically.',
+            type: 'success',
+          });
+        }
         return;
       }
 
@@ -418,7 +550,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as
@@ -587,10 +719,37 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           onPointerDown={(e) => e.stopPropagation()}
           onChange={(e) => setAdditionalNotes(e.target.value)}
           onBlur={() => updateGlobal(id, { additionalNotes: additionalNotes.trim() })}
-          disabled={!!data.locked || hasApplicationRun}
+          disabled={!!data.locked || hasApplicationRun || localJobPending}
           className="nodrag nowheel mt-1.5 block w-full resize-y rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-relaxed text-white/75 placeholder:text-white/25 outline-none transition-colors focus:border-blue-400/60 focus:ring-1 focus:ring-blue-400/30 disabled:cursor-default disabled:opacity-50"
         />
       </div>
+
+      {localApplication && (
+        <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+          <div className="flex items-start gap-2 text-[10px] leading-snug">
+            <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${
+              localApplication.status === 'saved' ? 'bg-emerald-400' : localApplication.status === 'failed' || localApplication.status === 'invalid' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
+            }`} />
+            <div className="min-w-0 text-white/55">
+              <div className="font-medium text-white/70">
+                {localApplication.status === 'queued' ? 'Local AI queued — run Claude Code' :
+                  localApplication.status === 'importing' ? 'Importing Local AI result…' :
+                    localApplication.status === 'saved' ? 'Local AI application saved' :
+                      localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
+              </div>
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open the Local AI job folder and run your Claude Code routine. This card checks for its result automatically.' : '')}</div>
+            </div>
+          </div>
+          {localApplication.id && window.electronAPI?.openLocalApplicationFolder && localApplication.status !== 'saved' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); window.electronAPI.openLocalApplicationFolder({ jobId: localApplication.id }); }}
+              className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+            >
+              Open Local AI Job Folder
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Generate full application (always visible, tailored résumé + cover letter)
           beside Mark Applied — an explicit, separate action recording that the
@@ -598,18 +757,22 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
-          disabled={hasApplicationRun || !!data.locked}
+          disabled={hasApplicationRun || localJobPending || !!data.locked}
           className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
             data.locked
               ? 'bg-white/5 text-white/20 cursor-default'
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
-          title={displayedApplicationRun.state === 'queued'
+          title={localJobPending
+            ? 'A Local AI job is waiting for your Claude Code routine or is being imported.'
+            : displayedApplicationRun.state === 'queued'
             ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
             : 'AI researches the company, then writes a tailored résumé + cover letter and saves both to your Applied Jobs folder'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
-          {displayedApplicationRun.state === 'queued'
+          {localJobPending
+            ? localApplication.status === 'importing' ? 'Importing…' : 'Local AI queued'
+            : displayedApplicationRun.state === 'queued'
             ? `Queued · #${displayedApplicationRun.position}`
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>

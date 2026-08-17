@@ -538,15 +538,18 @@ export default [
     run: () => {
       const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const indexOf = (needle) => source.indexOf(needle);
-      const latchGuard = indexOf('applicationSubmissionRef.current || hasApplicationRun) return;');
-      const latchSet = indexOf('applicationSubmissionRef.current = true;');
-      const acquire = indexOf('lease = await acquireModuleRun({');
-      const currentCanvasRead = indexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
-      const originRead = indexOf('const originHub = getNode(originHubId);');
-      const generateIpc = indexOf('await window.electronAPI.generateApplication({');
-      const saveIpc = indexOf('await window.electronAPI.saveApplication({');
-      const release = indexOf('lease?.release();');
-      const generationScope = source.slice(indexOf('const generateApplication = useCallback'), indexOf('// ── Mark applied'));
+      const generationStart = indexOf('const generateApplication = useCallback');
+      const generationEnd = indexOf('// ── Mark applied');
+      const generationScope = source.slice(generationStart, generationEnd);
+      const generationIndexOf = (needle) => generationStart + generationScope.indexOf(needle);
+      const latchGuard = generationIndexOf('applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;');
+      const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
+      const acquire = generationIndexOf('lease = await acquireModuleRun({');
+      const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
+      const originRead = generationIndexOf('const originHub = getNode(originHubId);');
+      const generateIpc = generationIndexOf('await window.electronAPI.generateApplication({');
+      const saveIpc = generationIndexOf('await window.electronAPI.saveApplication({');
+      const release = generationIndexOf('lease?.release();');
       const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
       const applicationIpcSource = fs.readFileSync(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
       const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
@@ -564,8 +567,8 @@ export default [
       'queued applications must have an application identity and an isolated visible queue position');
       assert(source.includes('snapshot: moduleRunSnapshot') && source.includes('const displayedApplicationRun = queuedApplicationRun')
         && source.includes('const hasApplicationRun = displayedApplicationRun.state !== \'idle\';')
-        && source.includes('applicationSubmissionRef.current || hasApplicationRun')
-        && source.includes('disabled={hasApplicationRun || !!data.locked}'),
+        && source.includes('applicationSubmissionRef.current || hasApplicationRun || localJobPending')
+        && source.includes('disabled={hasApplicationRun || localJobPending || !!data.locked}'),
       'the global queue snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
       assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
         && canvasSource.includes('currentFile, getCurrentFile'),
