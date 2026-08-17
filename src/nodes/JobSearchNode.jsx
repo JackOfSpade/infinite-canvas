@@ -2557,7 +2557,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               // with only one Indeed card visible. Skip/resolve already filters
               // warnings by sourceId, so distinct-source count is the truth.
               blockedCount={new Set((data.scrapeWarnings || []).filter(isJobSourceWarningGating).map(w => w.sourceId)).size}
-              hasIncompleteDescriptions={(data.scrapeWarnings || []).some(w => w?.code === 'incomplete-descriptions')}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

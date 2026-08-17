@@ -261,7 +261,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // replacement size; incremental captcha/Continue responses add.
           setProgress(prev => prev ? {
             ...prev,
-            status: result.warning?.code === 'incomplete-descriptions' ? 'done' : 'error',
+            status: 'error',
             url: result.warning?.url || prev.url,
             warning: result.warning,
             count: nextCount(prev),

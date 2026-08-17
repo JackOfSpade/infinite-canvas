@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
@@ -1567,12 +1567,13 @@ export default [
     name: 'seen-history: gathered jobs are deferred until results are exposed',
     run: () => {
       const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      const filterStart = backend.indexOf('const { jobs: appliedFiltered');
-      const enrichmentStart = backend.indexOf('// Enrich Dice jobs', filterStart);
-      const gatheredDisposition = backend.slice(filterStart, enrichmentStart);
-      assert(gatheredDisposition.includes("skipped: canvasFilePath ? 'deferred until results are visible'")
-        && !gatheredDisposition.includes('await appendJobsHistory('),
-      'gathered-but-unshown jobs must not enter durable seen-history');
+      const evidenceFilterStart = backend.indexOf('const descriptionEvidence = filterJobsByDescriptionEvidence(kept)');
+      const returnStart = backend.indexOf('return { jobs: kept', evidenceFilterStart);
+      const finalDisposition = backend.slice(evidenceFilterStart, returnStart);
+      assert(evidenceFilterStart >= 0
+        && finalDisposition.includes("skipped: canvasFilePath ? 'deferred until results are visible'")
+        && !finalDisposition.includes('await appendJobsHistory('),
+      'low-evidence and gathered-but-unshown jobs must not enter durable seen-history');
 
       const searchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const finishStart = searchRenderer.indexOf('const finishScoringAndSpawn');
@@ -1742,6 +1743,42 @@ export default [
       } finally {
         Object.assign(telemetry, saved);
       }
+      return { ok: true };
+  },
+},
+{
+    name: 'description-evidence filter: brief or empty listings never reach scoring/history',
+    run: () => {
+      const filtered = filterJobsByDescriptionEvidence([
+        {
+          source: 'ziprecruiter', title: 'Senior Manager, Architect',
+          url: 'https://www.ziprecruiter.com/jobs/example-1',
+          snippet: 'A concise but genuine description recovered from the detail page.',
+          descriptionCapture: 'json-ld-job-description',
+        },
+        {
+          source: 'ziprecruiter', title: 'Applications Architect',
+          url: 'https://www.ziprecruiter.com/jobs/example-2',
+          snippet: 'Another terse detail-page job description.',
+          descriptionCapture: 'detail-page-description',
+        },
+        {
+          source: 'ziprecruiter', title: 'No description yet',
+          url: 'https://www.ziprecruiter.com/jobs/example-3',
+          snippet: '',
+        },
+        {
+          source: 'ziprecruiter', title: 'Complete listing',
+          url: 'https://www.ziprecruiter.com/jobs/example-4',
+          snippet: 'Complete employer-supplied job description. '.repeat(20),
+        },
+      ]);
+      assert(filtered.jobs.length === 1
+        && filtered.jobs[0]?.title === 'Complete listing'
+        && filtered.dropped.length === 3
+        && filtered.quality.empty === 1
+        && filtered.quality.short === 2,
+      'brief and empty listings are omitted before scoring/history while complete listings remain eligible');
       return { ok: true };
     },
   },
@@ -2080,7 +2117,6 @@ export default [
       const zipPartial = { sourceId: 'ziprecruiter', code: 'description-detail-miss', severity: 'warn' };
       const zipBlocked = { sourceId: 'ziprecruiter', code: 'cloudflare-hard-block', severity: 'block' };
       const linkedinLimited = { sourceId: 'linkedin', code: 'linkedin-rate-limited', severity: 'throttle' };
-      const incompleteDescriptions = { sourceId: 'indeed', code: 'incomplete-descriptions', severity: 'warn' };
       const ordinaryThrottle = { sourceId: 'indeed', code: 'temporary-throttle', severity: 'throttle' };
 
       assert(!isJobSourceWarningGating(zipPartial), 'a partial ZipRecruiter description warning must not delay scoring');
@@ -2088,7 +2124,6 @@ export default [
       assert(isJobSourceWarningGating(zipBlocked), 'a hard ZipRecruiter block must pause for Resolve/Skip');
       assert(jobSourceWarningAction(zipBlocked) === 'skip', 'a gating source action remains Skip');
       assert(isJobSourceWarningGating(linkedinLimited), 'LinkedIn guest rate-limit remains the explicit throttle exception');
-      assert(isJobSourceWarningGating(incompleteDescriptions), 'residual incomplete descriptions must require an explicit low-evidence scoring choice');
       assert(!isJobSourceWarningGating(ordinaryThrottle), 'ordinary source throttles must not delay scoring');
 
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
@@ -2096,13 +2131,14 @@ export default [
       assert(sourceCard.includes("document.addEventListener('job-source-warning-sync'")
         && sourceCard.includes('(!hasWarn || warningBlocksScoring)')
         && sourceCard.includes('replaceMatchingItems'),
-      'a derived incomplete-description warning keeps an actionable exact-retry control on its source card');
+      'a derived source warning keeps an actionable exact-retry control on its source card');
       const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       const scraper = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(scraper.includes("phase: 'detail-external-page-text'")
         && scraper.includes('never clicks Apply, fills fields, logs in, or')
         && scraper.includes("document.body?.innerText || ''")
-        && jobsBackend.includes('read-only visit to every eligible detail or external application page'),
+        && jobsBackend.includes('filterJobsByDescriptionEvidence')
+        && jobsBackend.includes('not scored or marked seen'),
       'ZipRecruiter external listing URLs are read once for text without any application-form automation');
       assert(hub.includes("hubState === 'sources-ready' || hasGatingWarning")
         && hub.includes("new CustomEvent('job-source-warning-sync'"),
@@ -3138,7 +3174,7 @@ export default [
         telemetry?.windowId ?? null,
         null,
       );
-      assert(report.includes('Field-quality scraper anomalies (retained independently of recent phases)')
+      assert(report.includes('Detail-recovery diagnostics (retained independently of recent phases)')
         && report.includes('First missing JD') && report.includes('Second missing JD'),
       'FULL pipeline diagnostics retain early per-job description misses after later sources advance the phase trail');
       return { ok: true };
@@ -3440,6 +3476,11 @@ export default [
         'only ordinary HTTP(S) detail URLs are eligible for external-page enrichment');
       assert(shouldNavigateForDescription('glassdoor', 'https://example.com/apply'),
         'the ZipRecruiter ownership guard cannot change another source\'s navigation policy');
+      assert(isUnavailableDetailPage({ isNotFound: true })
+        && isUnavailableDetailPage({ workdayPostingAvailable: false })
+        && !isUnavailableDetailPage({ workdayPostingAvailable: true })
+        && !isUnavailableDetailPage({}),
+      'an HTTP-200 Workday bootstrap marked postingAvailable=false is treated as a closed listing, while an ordinary available/unknown page remains eligible for recovery');
       assert(zipRecruiterRetryAfterMs('120') === 60_000
         && zipRecruiterRetryAfterMs('', 0) === 45_000
         && zipRecruiterRetryAfterMs('invalid', 0) === 45_000

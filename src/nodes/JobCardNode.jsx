@@ -32,8 +32,9 @@ const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
  * JobCardNode — a transient, scored job result on the canvas.
  *
  * The workflow is deliberately disposable: search → decide → generate an
- * application (or dismiss the card). There is no status / notes / monitoring CRM
- * here. Whether a job was already *shown* is tracked in a canvas-scoped
+ * application (or dismiss the card). There is no status / monitoring CRM here;
+ * an optional job-specific note is carried only into that application's prompt.
+ * Whether a job was already *shown* is tracked in a canvas-scoped
  * jobs-history CSV sidecar (written at discovery), so dismissing cards never
  * re-surfaces them on the next search.
  *
@@ -55,6 +56,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
   const [applied, setApplied] = useState(false);
   const [markingApplied, setMarkingApplied] = useState(false);
+  // Per-job context, deliberately separate from the originating hub's career
+  // data: a candidate can add a relevant personal project or team-fit detail
+  // without mutating the career corpus used by every other job card.
+  const [additionalNotes, setAdditionalNotes] = useState(data.additionalNotes || '');
   const measuredHeight = useStore(
     useCallback((store) => store.nodeLookup.get(id)?.measured?.height ?? null, [id])
   );
@@ -310,6 +315,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           source: data.source, posted: data.posted, language: data.language,
         },
         careerData,
+        additionalNotes: additionalNotes.trim(),
         reasoning: data.reasoning,
         matchScore: data.matchScore,
         achievements: cachedAchievements,
@@ -410,7 +416,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as
@@ -562,6 +568,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {data.reasoning}
         </div>
       )}
+
+      {/* Job-specific context is persisted on this card, never merged into the
+          source hub's career files. It remains available if this branch is
+          collapsed before the user is ready to generate. */}
+      <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+        <label className="block text-[10px] font-medium uppercase tracking-wider text-white/45" htmlFor={`job-notes-${id}`}>
+          Additional notes for AI <span className="normal-case tracking-normal text-white/25">(optional)</span>
+        </label>
+        <textarea
+          id={`job-notes-${id}`}
+          value={additionalNotes}
+          maxLength={2000}
+          rows={2}
+          placeholder="Anything relevant before generating — e.g. personal C# experience or a shared team interest."
+          onPointerDown={(e) => e.stopPropagation()}
+          onChange={(e) => setAdditionalNotes(e.target.value)}
+          onBlur={() => updateGlobal(id, { additionalNotes: additionalNotes.trim() })}
+          disabled={!!data.locked || hasApplicationRun}
+          className="nodrag nowheel mt-1.5 block w-full resize-y rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-relaxed text-white/75 placeholder:text-white/25 outline-none transition-colors focus:border-blue-400/60 focus:ring-1 focus:ring-blue-400/30 disabled:cursor-default disabled:opacity-50"
+        />
+      </div>
 
       {/* Generate full application (always visible, tailored résumé + cover letter)
           beside Mark Applied — an explicit, separate action recording that the

@@ -576,6 +576,13 @@ export default [
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
         && source.includes('if (!getNode(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
+      assert(source.includes('Additional notes for AI')
+        && source.includes('additionalNotes: additionalNotes.trim()')
+        && source.includes('updateGlobal(id, { additionalNotes: additionalNotes.trim() })')
+        && applicationIpcSource.includes('normalizeApplicationAdditionalNotes')
+        && applicationIpcSource.includes('careerDataWithAdditionalNotes(careerData, additionalNotes)')
+        && applicationIpcSource.includes('additionalNotesChars:'),
+      'job-specific applicant notes must persist on the card, reach generation, stay bounded at IPC, and be diagnosable without logging their text');
       assert(source.includes('discardApplication?.({ workDir: result.workDir })')
         && preloadSource.includes("discardApplication: (args) => ipcRenderer.invoke('discard-application', args)")
         && applicationIpcSource.includes("handleSafe('discard-application'")

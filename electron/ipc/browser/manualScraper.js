@@ -91,9 +91,10 @@ const SOURCE_LABELS = {
 const manualScraperTelemetry = {
   active: null,
   events: [],
-  // Field-quality failures need a retention guarantee independent of normal
+  // Detail-recovery outcomes need a retention guarantee independent of normal
   // scrape progress. A busy later source can otherwise evict an early detail
-  // miss from the 30-event phase ring before the user opens a FULL report.
+  // miss or a provider-confirmed closed listing from the 30-event phase ring
+  // before the user opens a FULL report.
   fieldAnomalies: [],
   paused: false,  // survives page navigations — source of truth is Node.js, not the page
   consoleLogs: [],   // last 60 browser-side console errors/warnings from the stealth page
@@ -151,10 +152,11 @@ export function isIgnorableManualBrowserTelemetry({ url = '', text = '' } = {}) 
 }
 
 // `updateActive: false` records an event into the trail WITHOUT advancing the
-// "current phase". Per-job anomalies (desc-miss / date-miss) are not scrape
-// phases: `active` is a merge that never deletes fields, so folding one in
-// would leave its `key` pinned to every later render — reporting one job's
-// miss as though it belonged to whatever the scraper is doing at report time.
+// "current phase". Per-job outcomes (desc-miss / date-miss / detail-unavailable)
+// are not scrape phases: `active` is a merge that never deletes fields, so
+// folding one in would leave its `key` pinned to every later render — reporting
+// one job's outcome as though it belonged to whatever the scraper is doing at
+// report time.
 // Exported for unit testing.
 export function recordManualScraperTelemetry(event, { updateActive = true } = {}) {
   const entry = {
@@ -163,7 +165,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   };
   manualScraperTelemetry.events.push(entry);
   if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
-  if (['desc-miss', 'date-miss'].includes(entry.phase)) {
+  if (['desc-miss', 'date-miss', 'detail-unavailable'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -577,6 +579,15 @@ export function shouldNavigateForDescription(sourceId, rawUrl) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Decide whether a detail page is conclusively unavailable rather than merely
+ * slow or selector-incompatible. Workday returns HTTP 200 for a closed posting
+ * and exposes that state in its bootstrap object, so status alone is not enough.
+ */
+export function isUnavailableDetailPage({ isNotFound = false, workdayPostingAvailable } = {}) {
+  return Boolean(isNotFound) || workdayPostingAvailable === false;
 }
 
 /** Convert a Retry-After header to a safe, bounded wait for a single retry. */
@@ -1366,6 +1377,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const pageInfo = await fetchPage.evaluate(() => {
             const bodyText = (document.body?.innerText || '').toLowerCase();
             const title    = (document.title || '').toLowerCase();
+            // Workday's external `/apply` endpoint responds with HTTP 200 even
+            // after a posting closes. Its initial bootstrap object carries the
+            // authoritative availability flag before its client app renders.
+            const workdayPostingAvailable = typeof window.workday?.postingAvailable === 'boolean'
+              ? window.workday.postingAvailable
+              : null;
             const isRateLimited =
               title.includes('too many requests') ||
               bodyText.includes('too many requests') ||
@@ -1377,8 +1394,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               bodyText.includes('no longer available') ||
               bodyText.includes('this job has expired') ||
               title.includes('404');
-            return { isNotFound, isRateLimited };
-          }).catch(() => ({ isNotFound: false, isRateLimited: false }));
+            return { isNotFound, isRateLimited, workdayPostingAvailable };
+          }).catch(() => ({ isNotFound: false, isRateLimited: false, workdayPostingAvailable: null }));
 
           if (sourceId === 'ziprecruiter' && (navigationStatus === 429 || pageInfo.isRateLimited)) {
             const retryAfter = navigationResponse?.headers?.()?.['retry-after'];
@@ -1493,7 +1510,20 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             continue;
           }
 
-          if (pageInfo.isNotFound) { enhanced[i] = null; continue; } // expired listing — drop it
+          if (isUnavailableDetailPage(pageInfo)) {
+            const reason = pageInfo.workdayPostingAvailable === false
+              ? 'workday-posting-unavailable'
+              : 'detail-page-not-found';
+            logger.info(`[BrowserScraper] ${overlayBase.srcName} dropped unavailable detail listing "${job.title || job.url || '?'}" (${reason})`);
+            recordManualScraperTelemetry({
+              phase: 'detail-unavailable', srcName: overlayBase.srcName,
+              key: `${(job.title || job.url || '?').slice(0, 65)} | unavailable listing`,
+              reason, status: navigationStatus,
+              expectedUrl: viewUrl.slice(0, 240), finalUrl: fetchPage.url().slice(0, 240),
+            }, { updateActive: false });
+            enhanced[i] = null;
+            continue;
+          }
 
           const isExternalZipDetail = sourceId === 'ziprecruiter' && await fetchPage.evaluate(() => {
             const host = location.hostname.toLowerCase();
@@ -1599,6 +1629,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return { desc, datePosted, baseSalary, company };
             }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null, company: '' }));
             text = ld.desc;
+            if (text) descriptionCapture = 'json-ld-job-description';
             jsonLdDate = ld.datePosted;
             jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
             jsonLdCompany = ld.company;
@@ -1621,11 +1652,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 return tmp.innerText?.trim() || '';
               } catch { return ''; }
             }, cfg.nextDataField).catch(() => '');
+            if (text) descriptionCapture = 'next-data-job-description';
           }
           if (!text && !isExternalZipDetail) {
             text = await fetchPage.evaluate(sel => {
               return document.querySelector(sel)?.innerText?.trim() || '';
             }, cfg.panelSelector).catch(() => '');
+            if (text) descriptionCapture = 'detail-page-description';
           }
           if (!text && !isExternalZipDetail) {
             // Structural fallback: find "Job description" heading and grab next sibling.
@@ -1637,6 +1670,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
               return '';
             }).catch(() => '');
+            if (text) descriptionCapture = 'detail-page-description';
           }
           if (!text && !isExternalZipDetail) {
             // Some detail pages hydrate their visible description shortly after
@@ -1717,6 +1751,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               .catch(() => ({ text: '', source: '' }));
             text = delayed.text;
             if (text) {
+              descriptionCapture = delayed.source === 'json-ld'
+                ? 'json-ld-job-description'
+                : delayed.source === 'next-data'
+                  ? 'next-data-job-description'
+                  : 'detail-page-description';
               recordManualScraperTelemetry({
                 phase: 'detail-description-ready',
                 sourceId,

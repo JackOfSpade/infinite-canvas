@@ -48,7 +48,7 @@ import { getJobsSettings, getAISettings } from './settings.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
-import { jobTitleCompanyKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
+import { jobTitleCompanyKey, sourceJobKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence, describeLocationTreatment } from '../../src/utils/jobLocation.js';
 import { getJobSourceCountryPolicy, summarizeJobSourceCountryPolicies } from '../../src/utils/jobSourceCountryScope.js';
@@ -879,34 +879,26 @@ function linkedInShortDescriptionWarning(jobs) {
   };
 }
 
-function incompleteDescriptionWarning(sourceId, jobs, shortThreshold = 400) {
-  const sourceJobs = (Array.isArray(jobs) ? jobs : []).filter(job => job?.source === sourceId);
-  const quality = summarizeScoringInputQuality(sourceJobs, shortThreshold);
-  const incomplete = quality.empty + quality.short;
-  if (incomplete === 0) return null;
-  const samples = quality.samples.slice(0, 3).map(sample =>
-    `"${sample.title.replace(/\s+/g, ' ').slice(0, 80)}" (${sample.length} chars)`,
-  ).join('; ');
-  const affectedJobs = sourceJobs.filter(job =>
-    String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < shortThreshold
-  );
+/**
+ * Keep only listings with enough employer-supplied text to be worth ranking.
+ *
+ * Brief/blank listings are deliberately omitted rather than scored, displayed,
+ * or passed to the Job Board's seen-history write. A half-published posting can
+ * therefore surface on a later run once its employer finishes it; recording it
+ * as seen now would hide that improved version for the history retention window.
+ */
+export function filterJobsByDescriptionEvidence(jobs, shortThreshold = 400) {
+  const retained = [];
+  const dropped = [];
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const text = String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim();
+    if (text.length >= shortThreshold) retained.push(job);
+    else dropped.push(job);
+  }
   return {
-    code: 'incomplete-descriptions',
-    severity: 'warn',
-    shortLabel: 'Descriptions incomplete',
-    sourceJobCount: sourceJobs.length,
-    url: affectedJobs[0]?.url || 'https://www.indeed.com/',
-    actionLabel: sourceId === 'indeed' ? 'Retry' : undefined,
-    actionTitle: sourceId === 'indeed'
-      ? 'Retry the exact listing pages whose descriptions are still incomplete.'
-      : undefined,
-    resumeState: sourceId === 'indeed'
-      ? { mode: 'retry-descriptions', jobs: affectedJobs }
-      : undefined,
-    evidence: `${incomplete} ${sourceId} job(s) remain below the ${shortThreshold}-character scoring-evidence threshold (${quality.empty} empty, ${quality.short} short) after automatic recovery${samples ? `: ${samples}` : ''}.`,
-    suggestion: sourceId === 'ziprecruiter'
-      ? 'The scraper made a read-only visit to every eligible detail or external application page without clicking forms. Re-run ZipRecruiter later if a page was closed or did not expose description text, or explicitly choose “Score low-evidence results” to keep weaker ranking evidence.'
-      : 'Open/retry the affected listings to recover their descriptions, or explicitly choose “Score low-evidence results” to keep them with clearly weaker ranking evidence.',
+    jobs: retained,
+    dropped,
+    quality: summarizeScoringInputQuality(dropped, shortThreshold),
   };
 }
 
@@ -2634,17 +2626,6 @@ Return a JSON object with four arrays of search query strings:
       scrapeWarnings.push({ sourceId: 'applied-store', url: null, ...appliedStoreErrorWarning(appliedStoreError) });
     }
 
-    // Do NOT write these rows to seen-history yet. At this point they have only
-    // been gathered; description review can still pause the run and scoring can
-    // fail or be cancelled. Marking them seen here made a fresh retry suppress
-    // jobs that had never appeared in results. The Job Board performs the
-    // single authoritative write after it displays cards for the result set.
-    recordHistoryWrite('preScoring', kept, {
-      written: 0,
-      pruned: 0,
-      skipped: canvasFilePath ? 'deferred until results are visible' : 'no-canvas-path',
-    });
-
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
     // only fetch detail pages for jobs that will actually be scored/shown.
     const diceKept = kept.filter(j => j.source === 'dice');
@@ -2925,19 +2906,25 @@ Return a JSON object with four arrays of search query strings:
     // sees the cleaned text and a new source inherits the fix.
     normalizeJobsMarkup(kept);
 
-    // Indeed retries blank detail panes during extraction (including a bounded,
-    // slower residual pass). ZipRecruiter likewise enriches listing-card rows
-    // from detail pages; do not silently rank either source's leftovers alongside
-    // fully evidenced jobs. Return a gating warning so the renderer asks for
-    // explicit consent before spending AI tokens on them.
-    const indeedIncompleteWarning = incompleteDescriptionWarning('indeed', kept);
-    if (indeedIncompleteWarning) {
-      scrapeWarnings.push({ sourceId: 'indeed', ...indeedIncompleteWarning });
+    // Do not score or display blank/list-card-only/abnormally brief listings.
+    // Crucially, this runs before the renderer receives `jobs`, so the Job Board
+    // never writes these rows to durable seen history. They remain eligible to
+    // return when a later scrape sees the employer's completed posting.
+    const descriptionEvidence = filterJobsByDescriptionEvidence(kept);
+    kept = descriptionEvidence.jobs;
+    if (descriptionEvidence.dropped.length > 0) {
+      logger.info(`[Jobs] Ignored ${descriptionEvidence.dropped.length} low-evidence listing(s) (empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not scored or marked seen`);
     }
-    const zipRecruiterIncompleteWarning = incompleteDescriptionWarning('ziprecruiter', kept);
-    if (zipRecruiterIncompleteWarning) {
-      scrapeWarnings.push({ sourceId: 'ziprecruiter', ...zipRecruiterIncompleteWarning });
-    }
+
+    // Do NOT write even the eligible rows to seen-history yet. The Job Board is
+    // the single authoritative writer after it displays cards; leaving the
+    // low-evidence rows out of this telemetry confirms they cannot be hidden by
+    // a future run merely because this scrape encountered them first.
+    recordHistoryWrite('preScoring', kept, {
+      written: 0,
+      pruned: 0,
+      skipped: canvasFilePath ? 'deferred until results are visible' : 'no-canvas-path',
+    });
 
     // Tag non-English listings (e.g. fr.glassdoor.ca / Québec / EU postings). Runs
     // here — after enrichment, on the final kept set — so the language sniff sees
@@ -3103,6 +3090,13 @@ Return a JSON object with four arrays of search query strings:
       historyDropSamples,
       hiddenApplied,
       kept: kept.length,
+      descriptionEvidenceDropped: {
+        total: descriptionEvidence.dropped.length,
+        empty: descriptionEvidence.quality.empty,
+        short: descriptionEvidence.quality.short,
+        bySource: descriptionEvidence.quality.bySource,
+        samples: descriptionEvidence.quality.samples,
+      },
       bySource,
       location: locationTelemetry,
       languages: languageTelemetry,
@@ -4327,13 +4321,15 @@ RULES:
       if (retryRows.length === 0) return { resolved: false, items: [] };
       logger.info(`[Jobs][${nodeId}] Retrying ${retryRows.length} exact Indeed description(s)`);
       const retried = await withSharedProfileLock(() => retryIndeedJobDescriptions(retryRows, signal));
-      const items = Array.isArray(retried.jobs) ? retried.jobs : retryRows;
-      const warning = incompleteDescriptionWarning('indeed', items);
+      const retriedItems = Array.isArray(retried.jobs) ? retried.jobs : retryRows;
+      const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
+      const items = descriptionEvidence.jobs;
       jobsTelemetry.resolves.indeed = {
         ts: Date.now(),
         kind: 'description-retry',
         extracted: items.length,
         kept: items.length,
+        descriptionEvidenceDropped: descriptionEvidence.dropped.length,
         attemptedDescriptions: retried.attempted || 0,
         recoveredDescriptions: retried.recovered || 0,
         remainingDescriptions: retried.remaining || 0,
@@ -4344,9 +4340,11 @@ RULES:
         resolved: true,
         items,
         hiddenApplied: 0,
-        warning,
         replaceMatchingItems: true,
-        removedItemKeys: (Array.isArray(retried.unavailable) ? retried.unavailable : []).map(item => item?.key).filter(Boolean),
+        removedItemKeys: [
+          ...(Array.isArray(retried.unavailable) ? retried.unavailable : []).map(item => item?.key),
+          ...descriptionEvidence.dropped.map(sourceJobKey),
+        ].filter(Boolean),
       };
     }
     const { remainingQueries, startPage = 0 } = resumeState || {};

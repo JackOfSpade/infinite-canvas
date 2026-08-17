@@ -91,6 +91,26 @@ import {
 
 const { shell } = electronPkg;
 
+// Per-card notes are user-authored context for ONE application, not a second
+// résumé source or a prompt-control channel. Keep the same cap as the renderer
+// at the IPC boundary: a renderer can be stale, modified, or invoked directly.
+export function normalizeApplicationAdditionalNotes(value) {
+  return Array.from(String(value || ''), (character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127 ? ' ' : character;
+  })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2000);
+}
+
+function careerDataWithAdditionalNotes(careerData, additionalNotes) {
+  const notes = normalizeApplicationAdditionalNotes(additionalNotes);
+  if (!notes) return String(careerData || '');
+  return `${String(careerData || '')}\n\nAPPLICANT-SUPPLIED, JOB-SPECIFIC NOTES (not employment history; preserve their stated scope and provenance):\n${notes}`;
+}
+
 // A renderer must not be able to substitute arbitrary filesystem paths into
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
@@ -574,7 +594,7 @@ ${rubricText}
 
   return `You are an elite résumé writer using the "Editorial" design system. Produce ONE \`<main class="page">…</main>\` HTML block that fills the design system's EXACT markup, tailored to the TARGET JOB and company research provided at the end.
 
-CAREER DATA (the candidate — every claim must be grounded in this; see TRUTHFULNESS & FRAMING below):
+CAREER DATA (the candidate — every claim must be grounded in this or in clearly scoped applicant-supplied job notes in the per-job prompt; see TRUTHFULNESS & FRAMING below):
 """
 ${careerData}
 """
@@ -583,7 +603,7 @@ MARKUP TO MIRROR (copy these class names and structure exactly; replace only the
 ${getResumeSampleMain()}
 
 TRUTHFULNESS & FRAMING (read carefully — this is the core constraint):
-- Ground every claim in the CAREER DATA. NEVER invent employers, job titles, employment dates, degrees, certifications, or specific metrics/numbers the data doesn't support — with ONE exception: a figure that appears in the ACHIEVEMENT LEDGER above is already verified and computed by code FROM the candidate's own career data, not invented by you, and you SHOULD use it per the RECEIPTS rule below. A recruiter must be able to verify everything against the candidate's real history.
+- Ground every claim in the CAREER DATA or the clearly labeled applicant-supplied notes in the per-job prompt. NEVER invent employers, job titles, employment dates, degrees, certifications, or specific metrics/numbers the data doesn't support — with ONE exception: a figure that appears in the ACHIEVEMENT LEDGER above is already verified and computed by code FROM the candidate's own career data, not invented by you, and you SHOULD use it per the RECEIPTS rule below. A recruiter must be able to verify everything against the candidate's real history.
 - You MAY state a capability that is directly entailed by concrete demonstrated work (shipped production REST APIs → HTTP/JSON and API design; led a 5-person team → team leadership; substantial PostgreSQL work → SQL). Do NOT turn mere technical proximity into experience or proficiency. A named framework alone does not prove use of every subsystem inside it. Any plausible-but-unverified adjacent skill is handled by a separate private review workflow and is expressly excluded from this draft until the candidate verifies it.
 - The ACHIEVEMENT LEDGER, when present, is a FLOOR, not a ceiling. Draw on its strongest items where they fit this job, but you still have the full CAREER DATA above — dig into it yourself for anything the target job emphasizes that the ledger didn't surface.
 - ATTRIBUTION: a ledger item with \`attribution=context\` means the change happened during the candidate's tenure but their personal causal role is uncertain — phrase it AS CONTEXT ("during a period when revenue grew 40%...", "amid a company-wide replatforming that cut latency 60%..."), never as a personal win ("I grew revenue 40%"). \`sole\`/\`led\`/\`contributed\` items may be phrased as a personal accomplishment, scaled to that word.
@@ -1579,7 +1599,7 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
 export function registerJobApplicationHandlers() {
   // Generate the tailored résumé + cover letter HTML documents. Returns temp
   // paths; save-application then copies them to a user-chosen folder.
-  handleSafe('generate-application', async (event, { job, careerData, nodeId, achievements, mineAllowed, reasoning, matchScore, targetPageCount: targetPageCountOverride }, signal) => {
+  handleSafe('generate-application', async (event, { job, careerData, additionalNotes, nodeId, achievements, mineAllowed, reasoning, matchScore, targetPageCount: targetPageCountOverride }, signal) => {
     const company = job?.company || 'this company';
     // A previous implementation only recorded telemetry after every model,
     // render, and artifact-write step had succeeded. That made the most useful
@@ -1607,6 +1627,7 @@ export function registerJobApplicationHandlers() {
       jobContext: {
         scrapedDescriptionChars: String(job?.snippet || '').trim().length,
         scrapedDescriptionAvailable: String(job?.snippet || '').trim().length > 0,
+        additionalNotesChars: normalizeApplicationAdditionalNotes(additionalNotes).length,
         researchAvailable: null,
       },
       taskRoutes: [
@@ -1703,6 +1724,10 @@ export function registerJobApplicationHandlers() {
     if (!careerData || !String(careerData).trim()) {
       throw new Error('No career data available for this hub. Drop your career files onto the job hub first.');
     }
+    // The achievement ledger stays based on the stable career corpus. The
+    // additional notes are candidate-provided, job-specific context and must
+    // not contaminate a reusable, cross-job cache of derived accomplishments.
+    const applicationCareerData = careerDataWithAdditionalNotes(careerData, additionalNotes);
 
     markStage('achievement ledger');
     // 0. Achievement ledger (résumé design doc §3.6/§3.7). Reuse a passed-in
@@ -1785,7 +1810,7 @@ export function registerJobApplicationHandlers() {
         const histogramBefore = loadSkillOpportunityHistogram();
         const analysis = await runApplicationTask(
           'application-skill-opportunity',
-          (meta) => analyzeSkillOpportunities({ careerData, job, research, histogram: histogramBefore }, signal, meta),
+          (meta) => analyzeSkillOpportunities({ careerData: applicationCareerData, job, research, histogram: histogramBefore }, signal, meta),
         );
         if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         // Project the workspace bars without mutating durable demand yet. The
@@ -1818,7 +1843,7 @@ export function registerJobApplicationHandlers() {
     // document, is the letter's evidence base.
     const resumeMainHtml = await runApplicationTask(
       'application-resume',
-      (meta) => generateResumeMain({ careerData, job, research, researchAvailable: companyResearch.available, ledger: ledgerForPrompt, skillInsights }, signal, meta),
+      (meta) => generateResumeMain({ careerData: applicationCareerData, job, research, researchAvailable: companyResearch.available, ledger: ledgerForPrompt, skillInsights }, signal, meta),
     );
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
@@ -1844,7 +1869,7 @@ export function registerJobApplicationHandlers() {
         // was called with — NOT the bare array (see renderResumeWithFit's
         // @param note: it needs the wrapped shape to reproduce the
         // byte-identical cached prefix on a length-revision call).
-        careerData, ledger: ledgerForPrompt, resumeMainHtml, skillInsights,
+        careerData: applicationCareerData, ledger: ledgerForPrompt, resumeMainHtml, skillInsights,
         docId: resumeDocId, targetPageCount,
         // A length revision is a separate content-generation call. Route it
         // through the same outcome wrapper as every other application stage
@@ -1929,20 +1954,20 @@ export function registerJobApplicationHandlers() {
     markStage('cover-letter argument plan');
     try {
       coverLetterPlan = normalizeCoverLetterPlan(await runApplicationTask('application-letter-plan', (meta) => generateLetterPlan({
-        careerData, job, research, researchAvailable: companyResearch.available,
+        careerData: applicationCareerData, job, research, researchAvailable: companyResearch.available,
         evidence: resumeEvidence, needs, attribution, skillInsights, reasoning, matchScore,
       }, signal, meta)), resumeEvidence);
-      planGate = checkPlanGate(coverLetterPlan, resumeEvidence, needs, jobText, researchForChecks, careerData);
+      planGate = checkPlanGate(coverLetterPlan, resumeEvidence, needs, jobText, researchForChecks, applicationCareerData);
       if (planGate.shouldRetry) {
         planRetried = true;
         planRetryReason = planGate.checks.filter(check => !check.passed).map(check => check.detail);
         try {
           const retryPlan = normalizeCoverLetterPlan(await runApplicationTask('application-letter-plan', (meta) => generateLetterPlan({
-            careerData, job, research, researchAvailable: companyResearch.available,
+            careerData: applicationCareerData, job, research, researchAvailable: companyResearch.available,
             evidence: resumeEvidence, needs, attribution, skillInsights, reasoning, matchScore,
             retryViolations: planRetryReason,
           }, signal, meta)), resumeEvidence);
-          const retryGate = checkPlanGate(retryPlan, resumeEvidence, needs, jobText, researchForChecks, careerData);
+          const retryGate = checkPlanGate(retryPlan, resumeEvidence, needs, jobText, researchForChecks, applicationCareerData);
           const selected = selectBetterCoverLetterPlan(coverLetterPlan, planGate, retryPlan, retryGate);
           coverLetterPlan = selected.plan;
           planGate = selected.gate;
@@ -1969,7 +1994,7 @@ export function registerJobApplicationHandlers() {
     const prose = await runApplicationTask('application-cover-letter', async (meta) => {
       const result = planDegraded
         ? await generateDirectLetterProse({
-          careerData, job, research, researchAvailable: companyResearch.available,
+          careerData: applicationCareerData, job, research, researchAvailable: companyResearch.available,
           evidence: resumeEvidence, needs, attribution, skillInsights,
         }, signal, meta)
         : await generateLetterProse({ plan: coverLetterPlan, job }, signal, meta);
@@ -2001,7 +2026,7 @@ export function registerJobApplicationHandlers() {
           resumeEvidence,
           rankedEmployerNeeds: needs,
           companyResearch: researchForChecks,
-          careerDataLogisticsOnly: careerData,
+          careerDataLogisticsOnly: applicationCareerData,
         }
       : { argumentPlan: coverLetterPlan || {} };
     const evaluateGroundingAudit = async () => {
@@ -2039,7 +2064,7 @@ export function registerJobApplicationHandlers() {
         const revised = await runApplicationTask('application-letter-revise', async (meta) => {
           const result = planDegraded
             ? await generateDirectLetterProse({
-              careerData, job, research, researchAvailable: companyResearch.available,
+              careerData: applicationCareerData, job, research, researchAvailable: companyResearch.available,
               evidence: resumeEvidence, needs, attribution, skillInsights,
               paragraphs: coverLetter.paragraphs, violations: observations,
             }, signal, meta)
