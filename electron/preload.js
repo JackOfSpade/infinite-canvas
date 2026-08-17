@@ -61,6 +61,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   generateApplication: (args) => ipcRenderer.invoke('generate-application', args),
+  // Local AI is intentionally a manual, file-based handoff. These handlers
+  // never invoke or automate Claude Code; the user runs the documented local
+  // routine and returns here to validate/import result.json.
+  queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
+  getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
+  openLocalApplicationFolder: (args) => ipcRenderer.invoke('open-local-application-folder', args),
+  importLocalApplication: (args) => ipcRenderer.invoke('import-local-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   discardApplication: (args) => ipcRenderer.invoke('discard-application', args),
   markJobApplied:   (args) => ipcRenderer.invoke('mark-job-applied', args),

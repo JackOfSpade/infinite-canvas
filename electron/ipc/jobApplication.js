@@ -116,6 +116,41 @@ function careerDataWithAdditionalNotes(careerData, additionalNotes) {
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
 
+/**
+ * Register an already-built, app-owned application workspace for the normal
+ * save-application IPC. Local-AI imports use this after *this process* has
+ * validated the model result and built its HTML/PDF files. The renderer never
+ * gets to register paths itself.
+ *
+ * `cleanupOnDiscard:false` is intentionally for durable Local AI job folders:
+ * saving/import cancellation removes only the in-memory capability, preserving
+ * the job input/result audit trail for the user and for a later re-import.
+ */
+export function registerPendingApplicationWorkspace({
+  workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
+  resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
+  attemptId = null, cleanupOnDiscard = true,
+} = {}) {
+  const resolvedWorkDir = path.resolve(String(workDir || ''));
+  const required = [resumeHtmlPath, jobListingPath].map(value => path.resolve(String(value || '')));
+  if (!resolvedWorkDir || required.some(value => !value) || !Number.isInteger(senderId)) {
+    throw new Error('Cannot register an incomplete application workspace.');
+  }
+  const optional = [resumePdfPath, coverLetterPdfPath]
+    .map(value => value ? path.resolve(String(value)) : null);
+  const paths = [...required, ...optional.filter(Boolean)];
+  if (paths.some(value => path.relative(resolvedWorkDir, value).startsWith(`..${path.sep}`)
+    || path.relative(resolvedWorkDir, value) === '..' || path.isAbsolute(path.relative(resolvedWorkDir, value)))) {
+    throw new Error('Application artifact escaped its registered workspace.');
+  }
+  pendingApplicationArtifacts.set(resolvedWorkDir, {
+    attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
+    resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
+    jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
+  });
+  return resolvedWorkDir;
+}
+
 // Resolve a generated workspace only when the caller names an exact record
 // owned by its sender. Exported to keep the capability boundary directly
 // testable without exposing the production Map itself.
@@ -138,6 +173,7 @@ export function resolvePendingApplicationWorkspaceForOwner(workDir, pendingArtif
 async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
   if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
   pendingApplicationArtifacts.delete(resolvedWorkDir);
+  if (pending.cleanupOnDiscard === false) return true;
   try {
     await fs.promises.rm(resolvedWorkDir, { recursive: true, force: true });
   } catch (error) {

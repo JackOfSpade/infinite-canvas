@@ -14,6 +14,7 @@ import job_collection_limits from './tests/job-collection-limits.js';
 import job_search_queries from './tests/job-search-queries.js';
 import electron_regressions from './tests/electron-regressions.js';
 import renderer_content_security from './tests/renderer-content-security.js';
+import local_ai_application from './tests/local-ai-application.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -32,6 +33,7 @@ const tests = [
   ...job_search_queries,
   ...electron_regressions,
   ...renderer_content_security,
+  ...local_ai_application,
 ];
 
 async function run() {

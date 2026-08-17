@@ -10,6 +10,7 @@ import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
+import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
 import { registerAppliedJobsHandlers } from './ipc/appliedJobs.js';
 import { primeClaudeModels } from './ipc/modelResolver.js';
@@ -818,6 +819,7 @@ if (!gotTheLock) {
     registerFilesystemHandlers();
     registerJobsHandlers();
     registerJobApplicationHandlers();
+    registerLocalAiApplicationHandlers();
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerAppliedJobsHandlers();
     registerMarketplaceHandlers();
