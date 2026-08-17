@@ -6,6 +6,7 @@ import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
 import { decodeLocalFileRequestPath } from './localFileProtocol.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
 import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
+import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
@@ -342,6 +343,9 @@ function createWindow(initSpec = { mode: 'auto' }) {
       contextIsolation: true,
     },
   });
+  // Used by the global webContents guard below. Set before loadURL/loadFile so
+  // every top-level navigation of this privileged renderer is checked.
+  win.webContents.__isCanvasRenderer = true;
   if (canvasWindows.size > 0) {
     const [bx, by] = win.getPosition();
     win.setPosition(bx + offset, by + offset);
@@ -468,6 +472,12 @@ function safeMenuSend(win, channel) {
   }
 }
 
+function openExternalSafely(url) {
+  void electronPkg.shell.openExternal(url).catch((error) => {
+    logger.warn(`[Main] Failed to open external URL: ${error?.message || error}`);
+  });
+}
+
 function setupApplicationMenu() {
   const isMac = process.platform === 'darwin';
 
@@ -526,7 +536,7 @@ app.on('web-contents-created', (_, contents) => {
     try {
       const parsedUrl = new URL(details.url);
       if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
-        electronPkg.shell.openExternal(details.url);
+        openExternalSafely(details.url);
       }
     } catch {
       // Ignore invalid URLs
@@ -537,14 +547,20 @@ app.on('web-contents-created', (_, contents) => {
   contents.on('will-attach-webview', (event) => event.preventDefault());
 
   contents.on('will-navigate', (event, navigationUrl) => {
+    // Auth/monitor BrowserWindows need to follow their remote flows. Only the
+    // canvas has the application's preload bridge and therefore needs this
+    // strict top-level navigation allowlist.
+    if (!contents.__isCanvasRenderer) return;
     try {
       const parsedUrl = new URL(navigationUrl);
-      const isAllowedLocalhost = parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '127.0.0.1';
-      if (!parsedUrl.protocol.startsWith('file:') && !isAllowedLocalhost) {
-        event.preventDefault();
-        if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
-          electronPkg.shell.openExternal(navigationUrl);
-        }
+      if (isTrustedCanvasNavigation(navigationUrl, {
+        devServerUrl: process.env.VITE_DEV_SERVER_URL,
+        distDir: path.join(__dirname, '../dist'),
+      })) return;
+
+      event.preventDefault();
+      if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+        openExternalSafely(navigationUrl);
       }
     } catch {
       // Malformed or non-http URL (e.g. about:blank, javascript:) — block navigation

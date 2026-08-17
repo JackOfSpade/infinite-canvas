@@ -20,6 +20,11 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
     Math.max(0, Math.min(initialIndex, total - 1))
   );
   const [loading, setLoading] = useState(true);
+  // The source list can shrink while the lightbox is open. Derive a bounded
+  // render index instead of synchronously resetting state in an effect; that
+  // keeps the frame valid without causing an extra render. PhotoStrip only
+  // mounts this component when the list is non-empty.
+  const currentIndex = Math.max(0, Math.min(index, total - 1));
 
   // Register with the global modal stack (the parent only mounts this while
   // open — see PhotoStrip.jsx's `{lightboxIndex !== null && ...}`). The capture-
@@ -32,29 +37,32 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
   }, []);
 
   const prev = useCallback(() => {
+    if (total === 0) return;
     setLoading(true);
-    setIndex(i => (i - 1 + total) % total);
+    setIndex(i => (Math.max(0, Math.min(i, total - 1)) - 1 + total) % total);
   }, [total]);
 
   const next = useCallback(() => {
+    if (total === 0) return;
     setLoading(true);
-    setIndex(i => (i + 1) % total);
+    setIndex(i => (Math.max(0, Math.min(i, total - 1)) + 1) % total);
   }, [total]);
 
   // Keyboard nav. Capture-phase so ReactFlow's deleteKeyCode (Backspace/Delete)
   // and Cmd+S handlers don't fire while the lightbox is open.
-  useEscapeToClose((e) => { e.preventDefault(); onClose(); }, { capture: true });
+  useEscapeToClose((e) => { e.preventDefault(); onClose(); }, { capture: true, enabled: total > 0 });
   useEffect(() => {
+    if (total <= 1) return undefined;
     const handler = (e) => {
       if (e.key === 'ArrowLeft')       { e.preventDefault(); prev(); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [prev, next]);
+  }, [prev, next, total]);
 
   if (total === 0) return null;
-  const currentPath = imagePaths[index];
+  const currentPath = imagePaths[currentIndex];
   const fileName = currentPath?.split('/').pop() || '';
 
   return createPortal(
@@ -65,7 +73,7 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
     >
       {/* Counter */}
       <div className="absolute top-4 left-4 text-white/80 text-xs font-mono bg-black/50 border border-white/10 px-3 py-1.5 rounded-full pointer-events-none">
-        {index + 1} / {total}
+        {currentIndex + 1} / {total}
       </div>
 
       {/* Close */}
@@ -112,7 +120,7 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
         )}
         <img
           src={toLocalFilePreviewUrl(currentPath, { maxDimension: 2400 })}
-          alt={`Photo ${index + 1} of ${total}`}
+          alt={`Photo ${currentIndex + 1} of ${total}`}
           className={`max-w-[90vw] max-h-[90vh] object-contain rounded ${loading ? 'hidden' : ''}`}
           onLoad={() => setLoading(false)}
           onError={() => setLoading(false)}

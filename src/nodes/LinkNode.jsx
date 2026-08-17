@@ -5,11 +5,9 @@ import { Dialog } from '../components/Dialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
+import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 
 const URL_LIKE = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i;
-
-const ensureProtocol = (raw) =>
-  raw.startsWith('http://') || raw.startsWith('https://') ? raw : `https://${raw}`;
 
 export const LinkNode = React.memo(function LinkNode({ id, data }) {
   const [showDialog, setShowDialog] = useState(null); // 'url' | null
@@ -84,7 +82,8 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
   const openLink = useCallback(() => {
     const target = (data.url || inputRef.current?.innerText || '').trim();
     if (!target) return;
-    const url = ensureProtocol(target);
+    const url = normalizeExternalHttpUrl(target);
+    if (!url) return;
     if (window.electronAPI?.openExternal) window.electronAPI.openExternal(url);
     else window.open(url, '_blank');
   }, [data.url]);

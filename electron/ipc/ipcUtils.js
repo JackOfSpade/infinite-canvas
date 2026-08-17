@@ -110,6 +110,19 @@ export function createSenderAbortController(event, timeoutMs = 0) {
 }
 
 /**
+ * Return the cancellation reason without relying on the error a downstream
+ * operation happened to throw. Fetch and browser libraries often replace an
+ * AbortController's reason with a generic AbortError.
+ */
+function abortErrorMessage(signal, fallbackError) {
+  const reason = signal?.reason;
+  if (reason instanceof Error && reason.message) return reason.message;
+  if (typeof reason === 'string' && reason) return reason;
+  if (fallbackError?.message) return fallbackError.message;
+  return 'Operation cancelled';
+}
+
+/**
  * Wraps an IPC handler with standardized error handling, lifecycle-aware abort signaling,
  * and standard `{ success, data, error }` return payloads.
  *
@@ -131,11 +144,14 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
       
       // Guard: Window may have been closed during await
       if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+      // A cooperative handler may finish just after its cancellation signal
+      // fired. Do not report that detached work as successful.
+      if (signal.aborted) return { success: false, error: abortErrorMessage(signal) };
       
       return { success: true, ...result };
     } catch (e) {
       if (signal.aborted) {
-        return { success: false, error: e?.message === 'Node deleted' ? 'Node deleted' : 'Window closed' };
+        return { success: false, error: abortErrorMessage(signal, e) };
       }
       logger.error(`[${channel}] failed:`, e?.message || String(e));
       return { 

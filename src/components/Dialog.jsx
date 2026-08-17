@@ -41,6 +41,7 @@ export function Dialog({ title, children, onClose }) {
       if (dragListenersRef.current) {
         window.removeEventListener('pointermove', dragListenersRef.current.onMove);
         window.removeEventListener('pointerup', dragListenersRef.current.onUp);
+        window.removeEventListener('pointercancel', dragListenersRef.current.onCancel);
       }
     };
   }, []);
@@ -48,6 +49,11 @@ export function Dialog({ title, children, onClose }) {
   const handleHeaderPointerDown = (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    if (dragListenersRef.current) {
+      window.removeEventListener('pointermove', dragListenersRef.current.onMove);
+      window.removeEventListener('pointerup', dragListenersRef.current.onUp);
+      window.removeEventListener('pointercancel', dragListenersRef.current.onCancel);
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
     const rect = dialogRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -65,12 +71,24 @@ export function Dialog({ title, children, onClose }) {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup',   onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      dragListenersRef.current = null;
+    };
+
+    // Pointer cancellation does not guarantee a following pointerup. Without
+    // this cleanup, the window-level move listener can keep moving the dialog
+    // after an interrupted touch or pen drag.
+    const onCancel = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup',   onUp);
+      window.removeEventListener('pointercancel', onCancel);
       dragListenersRef.current = null;
     };
     
-    dragListenersRef.current = { onMove, onUp };
+    dragListenersRef.current = { onMove, onUp, onCancel };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup',   onUp);
+    window.addEventListener('pointercancel', onCancel);
   };
 
   const dialogStyle = pos

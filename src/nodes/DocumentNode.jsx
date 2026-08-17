@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useReactFlow, NodeResizer } from '@xyflow/react';
 import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
-import { marked } from 'marked';
+import { renderMarkdown } from '../utils/markdownRenderer';
 import { getFileCategoryInfo, THEME_COLORS, toLocalFileUrl } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, docSaveDebounceMs } from '../utils/timings';
@@ -268,39 +268,6 @@ const AudioPlayer = React.memo(function AudioPlayer({ mediaRef, src, themeText, 
 });
 
 // ── Text / Markdown Preview ─────────────────────────
-
-// Sanitizing marked config. The preview renders user-droppable .md files via
-// dangerouslySetInnerHTML, and marked does NOT sanitize — so a file containing
-// `<img onerror=…>`, `<script>`, or a `javascript:` link could run code in the
-// renderer (which can reach the exposed electronAPI). We harden at the source:
-//  • drop raw HTML entirely (GitHub-style safe default for untrusted markdown),
-//  • neutralize link/image hrefs that aren't an allowed scheme.
-// This needs no extra dependency and keeps real markdown (tables, lists, emphasis,
-// http(s)/local-file links and images) rendering unchanged.
-const SAFE_URI_SCHEME = /^(https?:|mailto:|tel:|local-file:|#|\/|\.)/i;
-const safeHref = (href) => {
-  const h = String(href || '').trim();
-  return SAFE_URI_SCHEME.test(h) ? h : '';
-};
-marked.use({
-  breaks: true,
-  gfm: true,
-  renderer: {
-    html() { return ''; },  // never pass raw HTML through
-    link(token) {
-      const href = safeHref(token.href);
-      const text = this.parser.parseInline(token.tokens);
-      if (!href) return text;  // unsafe scheme → render the link text only
-      return `<a href="${href}"${token.title ? ` title="${token.title}"` : ''}>${text}</a>`;
-    },
-    image(token) {
-      const href = safeHref(token.href);
-      if (!href) return token.text || '';
-      return `<img src="${href}" alt="${token.text || ''}"${token.title ? ` title="${token.title}"` : ''}>`;
-    },
-  },
-});
-
 
 // Absolute-positioned save-status dot. Rendered with fixed dimensions in every state
 // so toggling between idle/dirty/saving/saved/error never reflows the editor and the
@@ -599,7 +566,7 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
           onDoubleClick={(e) => { e.stopPropagation(); setIsMdPreviewMode(false); }}
           onWheel={handleWheel}
           title="Double-click to edit"
-          dangerouslySetInnerHTML={{ __html: marked.parse(draftContent) }}
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(draftContent) }}
         />
       ) : (
         <textarea

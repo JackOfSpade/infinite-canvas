@@ -40,7 +40,7 @@ export { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/com
 export { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle } from '../electron/ipc/resumeHtml.js';
 export { APPLICATION_SYNC_PATH, APPLICATION_SYNC_PORT, __normaliseApplicationSyncWorkspaceForTests, __withApplicationSyncWorkspaceLockForTests, applicationSyncConfig, getApplicationSyncTelemetry, inspectApplicationSyncRevision, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../electron/ipc/applicationSync.js';
 export { createApplicationBundle, createZipBuffer, formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from '../electron/ipc/applicationBundle.js';
-export { applicationLocationReviewRequired, buildResumeLengthRevisionPrompt, candidateLocationFromContact, coverLetterCheckSummary, enforceOnePageRevisionStructure, extractResumeEvidence, hasUsableCoverLetterParagraphs, inspectApplicationExport, normalizeCoverLetterPlan, normalizeApplicationAdditionalNotes, renderResumeEvidenceForPrompt, selectBetterCoverLetterPlan, summarizeResumeMarkup, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, decideFitStep, getCompanyResearchContext } from '../electron/ipc/jobApplication.js';
+export { applicationLocationReviewRequired, buildResumeLengthRevisionPrompt, candidateLocationFromContact, coverLetterCheckSummary, enforceOnePageRevisionStructure, extractResumeEvidence, hasUsableCoverLetterParagraphs, inspectApplicationExport, normalizeCoverLetterPlan, normalizeApplicationAdditionalNotes, readEditorialRubric, renderResumeEvidenceForPrompt, selectBetterCoverLetterPlan, summarizeResumeMarkup, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, decideFitStep, getCompanyResearchContext } from '../electron/ipc/jobApplication.js';
 export { replaceApplicationBundleAtomically } from '../electron/ipc/applicationFileTransaction.js';
 export { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
 export { LEDGER_CAP, MINING_TARGET, splitCareerDataByFile, normalizeQuoteText, computeLedger, applyRefuteVerdicts, ledgerById, derivationTooltip, serializeLedgerForPrompt } from '../src/utils/achievementLedger.js';
@@ -51,6 +51,7 @@ export { pickFamilyModel, claudeModelFor, claudeModelMetaFor, modelResolutionSna
 export { fingerprint, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, migrateJobHubPageCeiling, runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeEdgesForSave, sanitizeNodesForSave } from '../src/utils/serializationUtils.js';
 export { calculatePriceDropSuggestion, createdAtMsFromCardId, isPriceDropReminderDue, MS_PER_WEEK, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, priceDropDeadlineReminderDelayMs, priceDropStartingPrice, priceDropReminderDelayMs, priceDropReminderCountThroughMustSell, priceDropMustSellDateMs, priceDropMustSellDayEndMs, resolvePriceDropStartingTier } from '../src/utils/priceDropReminder.js';
 export { matchesQuery } from '../src/utils/searchMatch.js';
+export { cancelTimeout, replaceTimeout } from '../src/utils/latestTimeout.js';
 export { mergeNonRestorableNodeDataFromLive } from '../src/utils/undoNonRestorableState.js';
 export { cloneNode, reassignCanvasDataIDs } from '../src/utils/nodeFactory.js';
 export { distToSegment, pixelEraseStroke, segmentCircleIntersections, strokePoints } from '../src/utils/geometry.js';
@@ -77,6 +78,8 @@ export { createAggregatingProgress } from '../electron/ipc/compProgressAggregato
 export { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 export { clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, findExactFilenameBelow, getMissingPreviewRelinkDiagnostics, rememberMissingPreviewSearchRoot, resolveMissingPreviewPath } from '../electron/ipc/missingPreviewRelink.js';
 export { resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt } from '../electron/ipc/filesystem.js';
+export { abortNodeTasks, handleSafe } from '../electron/ipc/ipcUtils.js';
+export { isTrustedCanvasNavigation } from '../electron/canvasNavigation.js';
 export { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 export { getBrowserPoolQueueState, pauseBrowserPool, queueScrape, readPageContentBounded } from '../electron/ipc/browserPool.js';
 export { getSoftLoginWallMatch, isConfirmedDisconnectedVerdict, selectRestorableStatuses, isTrustedNativeLoginResult } from '../electron/ipc/accounts.js';

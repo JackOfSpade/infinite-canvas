@@ -33,11 +33,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Real deterministic test suite (scripts/test-runner.js): 107 test() cases /
-      # 1603 assert() calls covering extractors, dedup, pricing, anti-bot detection,
-      # rate limiting, settings encryption, LLM routing, canvas geometry, etc.
-      # Electron/electron-store are stubbed via scripts/test-stubs, so this runs in
-      # plain Node with no network access and sets a non-zero exit code on failure.
+      # Deterministic application checks (scripts/test-runner.js), covering
+      # extractors, dedup, pricing, anti-bot detection, settings encryption,
+      # LLM routing, canvas geometry, plus the dual-mode PDF self-suite.
+      # The application checks stub Electron/electron-store and the PDF suite is
+      # in-memory, so neither requires a browser binary or network access.
       - name: Test
         run: npm test
 
@@ -45,4 +45,4 @@ jobs:
       # (Full electron-builder packaging is intentionally skipped — it needs
       # platform codesigning/DMG tooling unrelated to code correctness.)
       - name: Build (compile smoke test)
-        run: npx vite build
+        run: npm run build:compile

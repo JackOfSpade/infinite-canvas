@@ -6,6 +6,7 @@ import { getNodeDims } from '../utils/constants';
 import { panDuration } from '../utils/layoutGeometry';
 import { matchesQuery } from '../utils/searchMatch';
 import { TIMINGS } from '../utils/timings';
+import { cancelTimeout, replaceTimeout } from '../utils/latestTimeout';
 
 /**
  * Canvas search bar with match count indicator and navigation.
@@ -46,7 +47,7 @@ export const SearchBar = React.memo(function SearchBar() {
   // Cleanup autoDiveTimeout on unmount
   useEffect(() => {
     return () => {
-      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
+      cancelTimeout(autoDiveTimeoutRef);
     };
   }, []);
 
@@ -83,6 +84,10 @@ export const SearchBar = React.memo(function SearchBar() {
   };
 
   const navigateBy = useCallback((offset) => {
+    // A previous internal-only result may still be waiting to auto-dive. Once
+    // the user navigates again, that result is stale and must not move them
+    // into a different canvas after this newer selection has been shown.
+    cancelTimeout(autoDiveTimeoutRef);
     if (isAnimating) return;
     const matches = getMatches();
     setMatchCount(matches.length);
@@ -107,13 +112,11 @@ export const SearchBar = React.memo(function SearchBar() {
     // If it's an internal match, auto-dive after a short delay if the user
     // kept focus in the search bar (indicating they want to navigate deeper).
     if (targetInfo.internalOnly && nav?.diveIn) {
-      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
-      autoDiveTimeoutRef.current = setTimeout(() => {
+      replaceTimeout(autoDiveTimeoutRef, () => {
         // inputRef is a stable ref object — read .current inside the callback
         if (inputRef.current === document.activeElement || document.activeElement?.closest('[data-search-bar]')) {
            nav.diveIn(target.id);
         }
-        autoDiveTimeoutRef.current = null;
       }, TIMINGS.SEARCH_AUTODIVE_MS);
     }
   // inputRef is a stable ref object — intentionally omitted from deps
@@ -128,8 +131,7 @@ export const SearchBar = React.memo(function SearchBar() {
   const handlePrev = useCallback(() => navigateBy(-1), [navigateBy]);
 
   const handleClear = () => {
-    if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
-    autoDiveTimeoutRef.current = null;
+    cancelTimeout(autoDiveTimeoutRef);
     setSearchQuery('');
     setMatchCount(0);
     setMatchIndex(0);
@@ -148,7 +150,7 @@ export const SearchBar = React.memo(function SearchBar() {
 
     return () => {
       clearTimeout(timer);
-      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
+      cancelTimeout(autoDiveTimeoutRef);
     };
   }, [searchQuery, getMatches]);
 

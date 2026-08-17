@@ -12,6 +12,8 @@ import resume_download_bundle from './tests/resume-download-bundle.js';
 import cover_letter_harness from './tests/cover-letter-harness.js';
 import job_collection_limits from './tests/job-collection-limits.js';
 import job_search_queries from './tests/job-search-queries.js';
+import electron_regressions from './tests/electron-regressions.js';
+import renderer_content_security from './tests/renderer-content-security.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -28,6 +30,8 @@ const tests = [
   ...cover_letter_harness,
   ...job_collection_limits,
   ...job_search_queries,
+  ...electron_regressions,
+  ...renderer_content_security,
 ];
 
 async function run() {

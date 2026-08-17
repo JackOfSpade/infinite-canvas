@@ -43,14 +43,18 @@ export const app = {
   exit: () => {},
 };
 
+const invokeHandlers = new Map();
+
 export const ipcMain = {
-  handle: () => {},
+  handle: (channel, handler) => { invokeHandlers.set(channel, handler); },
   handleOnce: () => {},
   removeHandler: () => {},
   on: () => {},
   once: () => {},
   removeListener: () => {},
   removeAllListeners: () => {},
+  __getInvokeHandler: (channel) => invokeHandlers.get(channel),
+  __clearInvokeHandlers: () => invokeHandlers.clear(),
 };
 
 export const dialog = {

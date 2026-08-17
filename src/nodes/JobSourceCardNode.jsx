@@ -8,6 +8,7 @@ import { mergeSourceProgress } from '../utils/sourceProgress';
 import { isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
+import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
@@ -144,7 +145,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // treating it as a captcha solve used to close a perfectly good detail
     // page with a misleading zero-result/site-changed diagnostic.
     if (warningAction === 'open-external') {
-      const url = progress?.url;
+      const url = normalizeExternalHttpUrl(progress?.url);
       if (!url) return;
       if (window.electronAPI?.openExternal) {
         await window.electronAPI.openExternal(url);

@@ -143,13 +143,18 @@ export function useCanvasDragAndDrop({
       // from a résumé drop surprised users (a dropped .docx is just a document) and
       // fired the pipeline on accidental drops — so a résumé/PDF/image now drops in
       // as a plain document like any other file.
-      takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(files, position);
       if (!isMountedRef.current) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
+        // File preparation is asynchronous and may legitimately yield no
+        // insertable nodes (for example, an unreadable directory). Snapshot
+        // immediately before the actual mutation so Undo never gets a no-op
+        // entry, and so it still captures edits made while the scan was in
+        // flight.
+        takeSnapshot();
         EventLogger.log(`drop routed type=document files=${files.length}`);
         insertNodes(newItems);
       } else {

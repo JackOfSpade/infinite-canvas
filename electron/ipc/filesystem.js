@@ -298,7 +298,11 @@ function resolvePortablePath(canvasPath, filePath, relativePath) {
   }
   if (relativePath && typeof relativePath === 'string') {
     const candidate = path.resolve(baseDir, relativePath);
-    if (fs.existsSync(candidate)) return candidate;
+    // `relativeFilePath` is persisted in a portable canvas and can therefore
+    // come from an untrusted file. It may name only a descendant of the canvas
+    // directory; accepting ../ escapes here turns a portable-path fallback
+    // into an arbitrary absolute-path substitution.
+    if (isWithinDirectory(baseDir, candidate) && fs.existsSync(candidate)) return candidate;
   }
   return filePath;
 }

@@ -17,6 +17,15 @@ const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/
 // The entire useful event history for an immediate-report workflow is 20–50 lines;
 // even a 1-hour heavy session generates <3,000 lines. 15 MB was 200× too large.
 
+// String#length counts UTF-16 code units, not UTF-8 bytes. Bug reports are
+// exported as UTF-8, so use the same unit for the in-memory ceiling and the
+// downstream file budget. Keep one encoder for the session because logging can
+// happen on hot paths such as ResizeObserver updates.
+const textEncoder = new TextEncoder();
+export function utf8ByteLength(value) {
+  return textEncoder.encode(String(value)).byteLength;
+}
+
 /**
  * Safe object-to-string for logging. Prevents JSON.stringify circular ref crashes.
  */
@@ -100,25 +109,25 @@ class EventLoggerSingleton {
     const entry = `[${timestamp}] ${message}`;
 
     this.logs.push(entry);
-    this.currentBytes += entry.length;
+    this.currentBytes += utf8ByteLength(entry);
 
     // Trim oldest entries if we exceed the memory ceiling
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
-      this.currentBytes -= this.logs.shift().length;
+      this.currentBytes -= utf8ByteLength(this.logs.shift());
     }
   }
 
   /** Overwrite the newest ring entry, keeping the byte accounting honest. */
   _replaceLastEntry(line) {
     const prev = this.logs[this.logs.length - 1];
-    this.currentBytes -= prev.length;
+    this.currentBytes -= utf8ByteLength(prev);
     this.logs[this.logs.length - 1] = line;
-    this.currentBytes += line.length;
+    this.currentBytes += utf8ByteLength(line);
 
     // A coalesced resize line grows as its frame count/span is updated. Keep
     // replacement writes subject to the same ring limit as appended entries.
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
-      this.currentBytes -= this.logs.shift().length;
+      this.currentBytes -= utf8ByteLength(this.logs.shift());
     }
   }
 
@@ -175,7 +184,7 @@ class EventLoggerSingleton {
     return this.logs;
   }
 
-  /** Returns approximate in-memory byte count of the log buffer. */
+  /** Returns the UTF-8 byte count of the log buffer. */
   getByteCount() {
     return this.currentBytes;
   }
@@ -262,12 +271,13 @@ class EventLoggerSingleton {
       this.log(`[Focus] ${kind}${label ? ` "${label.slice(0, 40)}"` : ''}${nodeId ? ` node=${nodeId.slice(0, 8)}` : ''}`);
     });
 
-    // Capture paste events to help debug clipboard-related issues
+    // Capture paste metadata to help debug clipboard-related issues without
+    // retaining pasted content (which may contain passwords, tokens, or other
+    // sensitive user data) in a bug-report timeline.
     window.addEventListener('paste', (e) => {
       const types = e.clipboardData?.types || [];
       const text = e.clipboardData?.getData('text/plain') || '';
-      const summary = text.length > 50 ? text.slice(0, 50) + '...' : text;
-      this.log(`PASTE: types=[${Array.from(types).join(',')}] text="${summary.replace(/\\n/g, '\\\\n')}"`);
+      this.log(`PASTE: types=[${Array.from(types).join(',')}] textLength=${text.length}`);
     });
 
     // Capture settings changes to help diagnose configuration/API key updates

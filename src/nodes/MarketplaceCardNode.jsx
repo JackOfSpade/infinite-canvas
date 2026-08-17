@@ -23,6 +23,7 @@ import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useRenderStorm } from '../hooks/useRenderStorm';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 
 /**
  * MarketplaceCardNode — one persistent canvas node per marketplace the user is
@@ -247,7 +248,7 @@ export const MarketplaceCardNode = React.memo(function MarketplaceCardNode({ id,
   const openInBrowser = useCallback(() => {
     // No listing URL yet → open the marketplace's "create listing" page so the
     // user can post manually. Once they have a URL pasted, open that instead.
-    const target = url || platform?.postUrl;
+    const target = normalizeExternalHttpUrl(url || platform?.postUrl);
     if (!target) return;
     window.electronAPI?.openExternal?.(target);
   }, [url, platform]);

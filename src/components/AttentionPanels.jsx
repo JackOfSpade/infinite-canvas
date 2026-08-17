@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight, AlertTriangle, Info, ExternalLink } from 'lucide-react';
+import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 
 /**
  * AttentionPanels — splits AI-surfaced items into two lanes so the visual
@@ -86,7 +87,10 @@ function AttentionLane({ items, label, icon, accent, defaultOpen = false }) {
               )}
               {item.sourceUrl && (
                 <button
-                  onClick={() => window.electronAPI?.openExternal?.(item.sourceUrl)}
+                  onClick={() => {
+                    const url = normalizeExternalHttpUrl(item.sourceUrl);
+                    if (url) window.electronAPI?.openExternal?.(url);
+                  }}
                   onPointerDown={(e) => e.stopPropagation()}
                   className="nodrag mt-1 flex items-center gap-1 px-1.5 py-0.5 rounded border border-white/15 bg-white/5 hover:bg-white/15 text-white/70 text-[9px] font-medium transition-colors"
                   title={`Open the page this was found on:\n${item.sourceUrl}`}

@@ -169,7 +169,7 @@ function getResumeSampleMain() {
   return _resumeSampleMain;
 }
 
-// The editorial rubric — SKILL.md + readme.md, injected WHOLE into the résumé
+// The editorial rubric — SKILL.md + README.md, injected WHOLE into the résumé
 // and cover-letter cached prefixes (design §4.1). Unlike getResumeSampleMain
 // above, a missing rubric does NOT fail generation: the rubric only makes the
 // output better-edited, it isn't structural (§4.1's stated asymmetry — fail
@@ -177,15 +177,19 @@ function getResumeSampleMain() {
 // Read once and cached (empty string on failure) so repeated calls within a
 // session neither re-hit disk nor destabilize the cached-prefix byte content.
 let _editorialRubric = null;
+/** Read the design-system editorial sources using their Git-tracked casing. */
+export function readEditorialRubric(designSystemDir, readFile = fs.readFileSync) {
+  const skill = readFile(path.join(designSystemDir, 'SKILL.md'), 'utf8');
+  const readme = readFile(path.join(designSystemDir, 'README.md'), 'utf8');
+  return `${skill}\n\n---\n\n${readme}`;
+}
+
 function getEditorialRubric() {
   if (_editorialRubric !== null) return _editorialRubric;
   try {
-    const dir = getDesignSystemDir();
-    const skill = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
-    const readme = fs.readFileSync(path.join(dir, 'readme.md'), 'utf8');
-    _editorialRubric = `${skill}\n\n---\n\n${readme}`;
+    _editorialRubric = readEditorialRubric(getDesignSystemDir());
   } catch (e) {
-    logger.warn(`[JobApplication] Editorial rubric (SKILL.md/readme.md) not found — generating without it: ${e?.message || e}`);
+    logger.warn(`[JobApplication] Editorial rubric (SKILL.md/README.md) not found — generating without it: ${e?.message || e}`);
     _editorialRubric = '';
   }
   return _editorialRubric;

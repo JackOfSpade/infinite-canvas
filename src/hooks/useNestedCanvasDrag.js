@@ -10,6 +10,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
       if (nestedDragListenersRef.current) {
         window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
         window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
+        window.removeEventListener('pointercancel', nestedDragListenersRef.current.onCancel);
       }
     };
   }, []);
@@ -19,6 +20,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
     if (nestedDragListenersRef.current) {
       window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
       window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
+      window.removeEventListener('pointercancel', nestedDragListenersRef.current.onCancel);
     }
 
     nestedDragRef.current = { dragging: false, startX, startY };
@@ -38,6 +40,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
     const onUp = (e) => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
       nestedDragListenersRef.current = null;
       const ref = nestedDragRef.current;
       nestedDragRef.current = null;
@@ -55,9 +58,22 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
       }
     };
 
-    nestedDragListenersRef.current = { onMove, onUp };
+    // A touch/pen gesture can be cancelled by the OS without a pointerup
+    // (window blur, system gesture, device disconnect). Clear the drag cursor
+    // and listeners without creating a node at a stale position.
+    const onCancel = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      nestedDragListenersRef.current = null;
+      nestedDragRef.current = null;
+      cursorsRef.current?.updateNestedDrag(null);
+    };
+
+    nestedDragListenersRef.current = { onMove, onUp, onCancel };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [screenToFlowPosition, takeSnapshot, setNodes, isAnimatingRef, cursorsRef]);
 
   return { onNestedCanvasDragStart };

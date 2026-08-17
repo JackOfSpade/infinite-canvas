@@ -11,6 +11,7 @@ import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
+import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -161,8 +162,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [data.title, data.company, data.location, data.url, data.source, isMountedRef]);
 
   const openJobUrl = useCallback(() => {
-    if (data.url && window.electronAPI?.openExternal) {
-      window.electronAPI.openExternal(data.url);
+    const url = normalizeExternalHttpUrl(data.url);
+    if (url && window.electronAPI?.openExternal) {
+      window.electronAPI.openExternal(url);
     }
   }, [data.url]);
 
