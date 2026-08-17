@@ -55,6 +55,12 @@ const CLAUDE_MODEL_GROUPS = [
   },
 ];
 
+const AI_PROVIDER_OPTIONS = [
+  { key: 'local', label: 'Local AI' },
+  { key: 'gemini', label: 'Gemini API' },
+  { key: 'claude', label: 'Claude API' },
+];
+
 const isMac = (() => {
   const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
   return p.toLowerCase().includes('mac');
@@ -761,21 +767,41 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 <div>
                   <div className="text-white/50 text-[11px] mb-1.5">Primary AI Provider</div>
                   <div className="flex gap-1.5">
-                    {['gemini', 'claude'].map(p => (
+                    {AI_PROVIDER_OPTIONS.map(({ key, label }) => (
                       <button
-                        key={p}
-                        onClick={() => updateAISetting('provider', p)}
-                        className={`flex-1 py-1.5 rounded-lg text-[11px] font-medium transition-all capitalize ${
-                          aiSettings.provider === p
+                        key={key}
+                        onClick={() => updateAISetting('provider', key)}
+                        className={`flex-1 py-1.5 rounded-lg text-[11px] font-medium transition-all whitespace-nowrap ${
+                          aiSettings.provider === key
                             ? 'bg-blue-500/30 border border-blue-500/50 text-blue-300'
                             : 'bg-white/[0.03] border border-white/[0.06] text-white/35 hover:bg-white/[0.07] hover:text-white/60'
                         }`}
                       >
-                        {p}
+                        {label}
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {/* Local AI is deliberately a human-in-the-loop workflow:
+                    the app creates a self-contained generation job, and the
+                    user's local Claude Code routine completes it. Keeping
+                    this separate from API configuration makes the cost and
+                    completion model obvious before a user switches. */}
+                {aiSettings.provider === 'local' && (
+                  <div className="space-y-2.5 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                    <div className="text-white/70 text-[11px] font-medium">Claude Code handoff</div>
+                    <div className="text-white/40 text-[10px] leading-relaxed">
+                      Generate queues a local job containing the same structured request and references used by the app. Run your Claude Code routine when ready; it reads that job, writes the completed result back, and the canvas picks it up automatically.
+                    </div>
+                    <div className="bg-black/25 border border-white/5 rounded-md px-2.5 py-2 text-white/35 text-[9px] leading-relaxed font-mono">
+                      queue job → run local routine → result returns to canvas
+                    </div>
+                    <p className="text-amber-300/65 text-[9px] leading-relaxed">
+                      This mode is manual and asynchronous. It uses no Gemini or Anthropic API key; keep one of the API modes selected when you need immediate in-app generation.
+                    </p>
+                  </div>
+                )}
 
                 {/* Gemini Settings */}
                 {aiSettings.provider === 'gemini' && (

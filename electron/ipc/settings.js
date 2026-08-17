@@ -35,6 +35,17 @@ const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
 // year), so the duplication cost is small next to the cycle it would create.
 const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' });
 const VALID_CLAUDE_FAMILY_TOKENS = new Set(['FABLE', 'OPUS', 'SONNET', 'HAIKU']);
+const VALID_AI_PROVIDERS = new Set(['local', 'gemini', 'claude']);
+
+/**
+ * Keep the provider setting forward-compatible and safe to consume. Older
+ * installs have only `gemini` / `claude`; an edited or otherwise invalid
+ * value must retain the historic Gemini fallback instead of reaching an LLM
+ * dispatch path which cannot serve it.
+ */
+export function normalizeAIProvider(value) {
+  return VALID_AI_PROVIDERS.has(value) ? value : 'gemini';
+}
 
 /**
  * Validate + backfill the persisted `ai.claudeModels` (per-group Claude
@@ -223,7 +234,11 @@ function decryptedStoreSnapshot(s) {
     // getAISettings() — the renderer must never see a missing/invalid
     // per-group token either (a blank/unmatched dropdown in Settings), not
     // just the internal LLM-call path.
-    ai: { ...decryptSectionSecrets(AI_SECRET_KEYS, data.ai), claudeModels: normalizeClaudeModels(data.ai?.claudeModels) },
+    ai: {
+      ...decryptSectionSecrets(AI_SECRET_KEYS, data.ai),
+      provider: normalizeAIProvider(data.ai?.provider),
+      claudeModels: normalizeClaudeModels(data.ai?.claudeModels),
+    },
     jobs: decryptSectionSecrets(JOBS_SECRET_KEYS, data.jobs),
   };
 }
@@ -267,7 +282,13 @@ export function registerSettingsHandlers() {
     for (const [section, value] of Object.entries(updates || {})) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         let merged = mergeSettingsSection(section, s.get(section), value);
-        if (section === 'ai') merged = encryptSectionSecrets(AI_SECRET_KEYS, merged);
+        if (section === 'ai') {
+          // Provider is a small closed enum. Normalize at the persistence
+          // boundary too, rather than merely making renderer snapshots look
+          // valid while a malformed on-disk setting continues to exist.
+          merged.provider = normalizeAIProvider(merged.provider);
+          merged = encryptSectionSecrets(AI_SECRET_KEYS, merged);
+        }
         else if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
         s.set(section, merged);
       } else {
@@ -303,7 +324,11 @@ export function getAISettings() {
   // Every caller (every LLM call in the app) needs a fully-populated,
   // validated claudeModels — see normalizeClaudeModels()'s doc for why a
   // raw/missing/corrupted value can't just pass through here.
-  return { ...ai, claudeModels: normalizeClaudeModels(ai.claudeModels) };
+  return {
+    ...ai,
+    provider: normalizeAIProvider(ai.provider),
+    claudeModels: normalizeClaudeModels(ai.claudeModels),
+  };
 }
 
 /**
