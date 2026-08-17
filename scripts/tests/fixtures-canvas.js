@@ -560,6 +560,9 @@ export default [
         'queued cards must re-read the current canvas path, career data, and achievement cache after owning their FIFO lease');
       assert(source.includes('nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile'),
         'a null latest canvas path must not fall back to a stale closure-captured path while queued');
+      assert(generationScope.includes('queueLocalApplication({')
+        && generationScope.includes('canvasFilePath,'),
+      'a Local AI handoff must receive the post-lease saved canvas path, so its job folder is project-local');
       assert(generateIpc > originRead && saveIpc > generateIpc && release > saveIpc,
         'the lease must cover generation and save, then release only in the terminal cleanup path');
       assert(source.includes("kind: 'application'") && source.includes('onQueued: ({ position })')

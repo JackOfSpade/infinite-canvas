@@ -400,6 +400,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         }
         const queued = await window.electronAPI.queueLocalApplication({
           nodeId: idRef.current,
+          canvasFilePath,
           job: {
             title: data.title, company: data.company, snippet: data.snippet,
             location: data.location, salary: data.salary, url: data.url,
@@ -417,7 +418,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           setLocalApplication(queued.localJob);
           addToast({
             title: 'Local AI Job Ready',
-            description: 'Run your Claude Code Local AI routine, then this card will import the completed application automatically.',
+            description: 'The job is in this project’s Local AI folder. Run your Claude Code routine there; this card will import the completed application automatically.',
             type: 'success',
           });
         }
@@ -737,7 +738,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open the Local AI job folder and run your Claude Code routine. This card checks for its result automatically.' : '')}</div>
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this project’s Local AI job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>
             </div>
           </div>
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && localApplication.status !== 'saved' && (
