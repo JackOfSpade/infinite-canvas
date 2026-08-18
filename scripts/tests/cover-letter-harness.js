@@ -147,7 +147,7 @@ export default [
   {
     name: 'cover letter harness: final résumé evidence extractor preserves real design-system structure',
     run: () => {
-      const source = fs.readFileSync(path.resolve('resume_design_system/resume.html'), 'utf8');
+      const source = fs.readFileSync(path.resolve('Job Application Design System/resume.html'), 'utf8');
       const main = /<main\b[\s\S]*<\/main>/i.exec(source)?.[0] || '';
       const withReceipt = main.replace('<strong>', '<strong data-achievement-id="sample-receipt">');
       const extracted = extractResumeEvidence(withReceipt);
@@ -156,7 +156,7 @@ export default [
         && extracted.identity.contact.length === 5,
       'identity and every nested contact item must come from the résumé header');
       assert(extracted.roles.length === 3 && extracted.bulletTexts.length === 12
-        && extracted.skills.length === 5 && extracted.education.length === 1,
+        && extracted.skills.length === 3 && extracted.education.length === 1,
       'real design-system role, bullet, skill, and education structures must be preserved');
       assert(extracted.bulletTexts.some(text => text.includes('trade-off:'))
         && extracted.achievementIds.includes('sample-receipt'),

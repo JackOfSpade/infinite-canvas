@@ -254,7 +254,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
 // Dual-mode (OCG cream layer) post-process
 // ---------------------------------------------------------------------------
 
-// resume_design_system/build/dual-mode-pdf.js is a UMD module owned by the
+// Job Application Design System/build/dual-mode-pdf.js is a UMD module owned by the
 // design system (read-only from this repo's side, same as the CSS/HTML files
 // — see resumeHtml.js's getDesignSystemDir() doc-comment). It isn't published
 // to npm, so a static ESM `import` can't reach it, and it's resolved through
@@ -267,10 +267,10 @@ export async function renderPdf(html, { signal, document = null } = {}) {
 // and that is exactly what does NOT work in a packaged build. The UMD's Node
 // branch runs `require('pdf-lib')` from ITS OWN location — and the design
 // system ships via electron-builder `extraResources` to
-// `Contents/Resources/resume_design_system/`, a SIBLING of `app.asar`, while
+// `Contents/Resources/Job Application Design System/`, a SIBLING of `app.asar`, while
 // `pdf-lib` lives inside `app.asar/node_modules`. Node's resolver only walks
 // UPWARD through ancestor directories, and `app.asar/node_modules` is never an
-// ancestor of `resume_design_system/build/`, so the inner require throws
+// ancestor of `Job Application Design System/build/`, so the inner require throws
 // MODULE_NOT_FOUND. (Confirmed against a real packaged build: it appears to
 // work from a dev checkout only because the repo's own root node_modules
 // happens to sit in the ancestor chain — a coincidence that vanishes the

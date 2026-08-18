@@ -1,8 +1,11 @@
-# Editorial Resume Design System
+# Job Application Design System
 
 An agent-only design system for generating staff/principal-level
-engineering résumés from structured candidate data + a target
-company / job description. Aesthetic: editorial-modernist,
+engineering résumés — and their paired cover letters — from
+structured candidate data + a target company / job description.
+Both surfaces are in scope and ship from the same tokens, palette,
+ink, and page geometry: a matched pair, not two systems.
+Aesthetic: editorial-modernist,
 developer-literate, quietly confident. Stripe Press book interiors,
 Pentagram partner CVs, the body of `staffeng.com` and `lethain.com`
 — that lineage.
@@ -26,7 +29,6 @@ or both of those.
 > `STYLE.md` is the source of truth for what the system *does*;
 > `SKILL.md` is the source of truth for *how the agent uses it*;
 > this file is the source of truth for *why*.
-
 ---
 
 ## Sources & provenance
@@ -65,21 +67,24 @@ is family-agnostic.
 
 | Path                              | What it is                                                |
 |-----------------------------------|-----------------------------------------------------------|
-| `README.md`                       | This file — philosophy, content rules, caveats.           |
+| `readme.md`                       | This file — philosophy, content rules, caveats.           |
 | `STYLE.md`                        | Every design decision, fully documented. **Read first.**  |
 | `SKILL.md`                        | Agent prompt — pipeline + per-company variant selection.  |
+| `styles.css`                      | Global entry point — re-exports the token closure.        |
 | `colors_and_type.css`             | Design tokens — color, typography, spacing, page geom, variants. |
 | `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
-| `resume.html`                     | The template + a fully-populated sample (open this).      |
+| `resume.html`                     | The résumé template + a fully-populated sample (open this). |
+| `cover-letter.css`                | The letter surface — serif body, date / recipient / close. Load after `resume.css`. |
+| `cover-letter.html`               | The paired cover-letter template + sample.                |
 | `build/dual-mode-pdf.js`          | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
 | `build/vendor/`                   | *(removed — pdf-lib is now loaded from CDN in the browser and the `pdf-lib` npm package in Node).* |
 | `fonts/` (removed)                | Families now load from the Google Fonts CDN — no longer bundled. |
 | `preview/`                        | Design-system reference cards (type, color, spacing, components, variants, anti-patterns). Not used at generation time. |
 
-The system covers exactly one surface — the printable résumé. No
-app UIs, no marketing, no decks. Adding any of those is a *separate*
-design system; the typographic restraint here doesn't generalise
-trivially.
+The system covers exactly two surfaces — the printable résumé and
+its paired cover letter (`STYLE.md §11`). No app UIs, no marketing,
+no decks. Adding any of those is a *separate* design system; the
+typographic restraint here doesn't generalise trivially.
 
 ---
 
@@ -130,6 +135,10 @@ signal (scale, latency, prior approach, why it failed).
 
 ### What to leave out
 
+- The candidate's **location, unless it was explicitly supplied as
+  contact data.** Never infer a city from the job posting, the
+  employer's HQ, a prior office, a school, an area code, or a
+  timezone — omit the field instead (`STYLE.md §9.1`).
 - Adjectives without numbers ("scalable", "robust",
   "world-class").
 - Soft-skill claims that nobody can verify ("strong
@@ -179,20 +188,28 @@ for what's explicitly out of bounds.
 
 ## Variants
 
-Five opt-in variants, all toggled by a data attribute on
-`<main class="page">` (or on `<html>` for global scope). Full
-mechanical details in `STYLE.md §10`; the agent's per-company
-decision rule for which to apply lives in `SKILL.md — §Variant
-selection`. Variants compose freely, except the two `data-print="…"`
-values which are mutually exclusive.
+Four opt-in variant attributes, **all valid only on the root
+`<html>` element** — an attribute on `<main class="page">` or any
+other ancestor is ignored. Full mechanical details in
+`STYLE.md §10`; the agent's per-company decision rule for which to
+apply lives in `SKILL.md — §Variant selection`. Variants compose
+freely, except the two `data-print="…"` values which are mutually
+exclusive.
 
-| Toggle                                 | Effect                                                      |
+| Toggle (on `<html>`)                   | Effect                                                      |
 |----------------------------------------|-------------------------------------------------------------|
-| `data-page="a4"`                       | Recomputes margins for A4 stock and routes the element to the `@page a4` rule via CSS named pages. |
+| `data-page="a4"`                       | Recomputes margins for A4 stock and routes the page to the `@page a4` rule (or `@page a4-compact` when compact is also set) via CSS named pages. |
 | `data-mono`                            | Rebinds `--accent-on` to `--ink-1`. Candidate name renders in ink. |
-| `data-density="compact"`               | Tightens body type, leading, block-spacing, and head/foot margins ~5–25% to claw back 6–9 lines per page. The single lever for "1.1 → 1.0 pages" without rewriting bullets. |
+| `data-density="compact"`               | Tightens body type, leading, block-spacing, and head/foot margins to claw back 6–9 lines per page. The system's one measured-fit fallback — applied only *after* a render shows overflow, never the default. |
 | `data-print="ink-only"`                | Single-state white-paper PDF. Keeps the warm cream on screen, flips to pure white only when printing. Oxblood name preserved. |
 | `data-print="dual-pdf"` *(default)*    | Dual-mode PDF. After post-processing through `build/dual-mode-pdf.js`, the resulting PDF shows cream on screen and prints on white — same single file, different states. |
+
+**Host-driven consumers.** When a host app owns the document shell
+(**Infinite Canvas** is the reference consumer), the generated output
+is exactly a bare `<main class="page">…</main>` with no `data-*`
+variant attributes. The host sets the root attributes, renders
+default density first, and enables `data-density="compact"` only
+after measuring an overflow.
 
 ## PDF generation — the agent pipeline
 
@@ -247,7 +264,8 @@ in `STYLE.md` if you ship it.
 
 ## Caveats
 
-- The system covers exactly one surface — the résumé. Don't
+- The system covers exactly two surfaces — the résumé and its
+  paired cover letter. Don't
   generalise the typographic restraint to apps, marketing, or
   decks; make a separate system for those.
 - The screen preview wraps the page in a warm gradient so the

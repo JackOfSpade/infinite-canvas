@@ -1,11 +1,13 @@
 ---
-name: editorial-resume-design
-description: Use this skill to generate editorial-modernist, developer-literate résumés for staff/principal-level engineers and adjacent senior individual contributors. Input is structured candidate data (plaintext / markdown experience, projects, skills, education, contact info) plus a target company / job description. Output is a print-ready PDF tuned to the recipient.
+name: job-application-design
+description: Use this skill to generate editorial-modernist, developer-literate résumés — and their paired cover letters — for staff/principal-level engineers and adjacent senior individual contributors. Input is structured candidate data (plaintext / markdown experience, projects, skills, education, contact info) plus a target company / job description. Output is a print-ready PDF tuned to the recipient.
 ---
 
-# Editorial Résumé Design System
+# Job Application Design System
 
-A polished, opinionated visual template for senior IC résumés. The
+A polished, opinionated visual template for senior IC résumés and their
+paired cover letters. Both surfaces are in scope and ship from the same
+tokens, palette, and page geometry — a matched pair, not two systems. The
 system is **agent-only**: there is no human-facing UI, no manual
 build step, no interactive editor. An agent reads candidate data +
 a job description, fills the HTML template, generates the PDF, and
@@ -16,10 +18,13 @@ post-processes it into the right print variant for the recipient.
 | Path                          | Role                                                                                |
 |-------------------------------|-------------------------------------------------------------------------------------|
 | `STYLE.md`                    | The full design specification. **Read this first.** Every rule, with rationale.    |
-| `README.md`                   | Philosophy, content rules, system caveats, anti-patterns.                          |
+| `readme.md`                   | Philosophy, content rules, system caveats, anti-patterns.                          |
+| `styles.css`                  | Global entry point — re-exports the token closure.                                 |
 | `colors_and_type.css`         | Design tokens — colour, typography, spacing, page geometry, all variants.          |
 | `resume.css`                  | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
-| `resume.html`                 | The template + a fully-populated realistic sample. Adapt this per candidate.       |
+| `resume.html`                 | The résumé template + a fully-populated realistic sample. Adapt this per candidate. |
+| `cover-letter.css`            | The letter surface (serif body, date / recipient / close). Load after `resume.css`. |
+| `cover-letter.html`           | The paired cover-letter template + sample. Same paper, ink, and geometry.           |
 | `build/dual-mode-pdf.js`      | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
 | `build/vendor/` (removed)     | pdf-lib 1.17.1 now loads from CDN (browser) / the `pdf-lib` npm package (Node) — no longer vendored. |
 | `fonts/` (removed)            | Source Serif 4, Inter, IBM Plex Mono now load from the Google Fonts CDN — no longer bundled. |
@@ -29,13 +34,24 @@ post-processes it into the right print variant for the recipient.
 
 End-to-end, given candidate data + job description:
 
-1. **Parse candidate data.** Extract: name, contact (email; an optional
-   candidate-supplied location; one optional URL — site OR github, not both), 3–6 role entries
+1. **Parse candidate data.** Extract: name, contact (email, one
+   optional URL — site OR github, not both), 3–6 role entries
    with titles + companies + dates + 3–6 bullets each, optional
    "Selected Systems" / "Projects", a skills block, and education.
    Apply the content rules in `STYLE.md §5` aggressively — kill
    adjectives without numbers, demand a scale number or trade-off
    in every bullet.
+
+   **Location is optional and privacy-gated.** Include the
+   candidate's city/region in the contact line **only when it was
+   explicitly supplied as candidate contact data.** Never infer or
+   backfill it from the job posting, the employer's headquarters, a
+   prior role's office, a school, an area code, a timezone, or any
+   other context. If it was not given, omit the
+   `addressLocality` span entirely — a contact line of email · one
+   URL is complete and correct. The same rule applies to the cover
+   letter's letterhead. Per-role `.role-location` values are
+   employment facts and may be used when supplied with the role.
 
 2. **Read the job description.** Identify:
    - Company name and the *kind* of company (see decision table below)
@@ -46,7 +62,7 @@ End-to-end, given candidate data + job description:
 3. **Choose variants** by company / industry signal. The full
    decision rule is `## Variant selection` below — read it before
    filling the template. The chosen variants become attributes on
-   `<main class="page">`.
+   the root `<html>` element, and nowhere else.
 
 4. **Fill `resume.html`** with candidate content following the
    structural conventions in `STYLE.md §4–§7`. Preserve the existing
@@ -61,20 +77,26 @@ End-to-end, given candidate data + job description:
    defines CSS named pages (`letter`, `a4`), so the PDF size matches
    automatically when `data-page="a4"` is set.
 
-   **Page-count handling — the compact-density algorithm.** After
-   the first render, count the pages in the produced PDF:
+   **Page-count handling — the compact-density algorithm.** Default
+   density is what you render first, always. After that first
+   render, count the pages in the produced PDF:
 
    - **Page count == target.** Ship as-is. Don't apply
      `data-density="compact"`.
    - **Page count > target AND overflow looks small** (~1–9 lines,
      or the final page is < 30% full): set
-     `data-density="compact"` on `<html>` and re-render once. This
-     reclaims 6–9 lines per page and usually fits the content.
+     `data-density="compact"` on the root `<html>` element and
+     re-render once. This reclaims 6–9 lines per page and usually
+     fits the content.
    - **Page count > target AND overflow is large** (final page >
      30% full, or > 9 lines): the *content* is too long. Cut
      bullets per the rules in `STYLE.md §5` before re-rendering.
      Compact density alone won't save it, and applying it to a
      content-bloated résumé just compresses bad material.
+
+   `compact` is the system's **one** measured-fit fallback. It is
+   never the default, there is no second tier, and it is not a
+   substitute for editing content — see `## Density ownership`.
 
    Target page count is conventionally 1 for IC roles up to staff
    and 2 for principal+. Don't deviate without a reason in the JD.
@@ -109,17 +131,39 @@ End-to-end, given candidate data + job description:
 
 ## Variant selection
 
-The system ships five variants. They compose freely *except* the
+The system ships four variant attributes (`data-print`, `data-page`,
+`data-mono`, `data-density`), all set on the root `<html>` element.
+They compose freely *except* the
 two `data-print="…"` values, which are mutually exclusive. Defaults
 are calibrated for the system's home territory (senior engineering
 at design-conscious tech companies). For other recipients, override.
 
-**Canonical placement.** Set `data-print="…"` on `<html>`, not on
-`<main class="page">`. The CSS supports both for backward
-compatibility, but `<html>` is the cleaner mental model: "this
-whole document is rendered in dual-pdf / ink-only mode." Other
-variants (`data-page`, `data-mono`, `data-density`) also work on
-`<html>`.
+**Canonical placement — root only.** All four variant attributes
+(`data-print`, `data-page`, `data-mono`, `data-density`) are valid
+**only on the root `<html>` element.** The CSS selectors are all
+anchored with `:root`; an attribute on `<main class="page">`, on
+`<body>`, or on any other ancestor is silently ignored. There is no
+legacy fallback and no mixed placement — one document, one
+configuration.
+
+```html
+<html lang="en" data-print="dual-pdf" data-page="a4">
+  …
+  <main class="page">…</main>
+```
+
+### Embedded / host-driven consumers
+
+When this system is used inside a host application that owns the
+document shell — **Infinite Canvas** is the reference consumer — the
+agent's output is **exactly a bare `<main class="page">…</main>`, with
+no `data-*` variant attributes on it or anywhere inside it.** The host
+owns the root element and sets the variant attributes there. The host
+also owns density: it renders at default density first and enables
+`data-density="compact"` on the root only after it has *measured* an
+overflow. Do not pre-emptively emit a variant attribute, a wrapper
+`<html>`, or a `<style>` block — they will either be stripped or, if
+placed on the page element, do nothing at all.
 
 ### Step 1 — Classify the recipient
 
@@ -133,7 +177,7 @@ worth more than 30 seconds of inference.
 
 | Recipient profile                                                                          | Variants                                                       |
 |--------------------------------------------------------------------------------------------|----------------------------------------------------------------|
-| Design-conscious tech / startup (Anthropic, Stripe, Linear, Figma, Vercel, Notion, Vercel, Render, Modal, Replicate, Cursor, Anduril, infra startups, design-led seed/Series-A) | `data-print="dual-pdf"` *(default)*                            |
+| Design-conscious tech / startup (Anthropic, Stripe, Linear, Figma, Vercel, Notion, Render, Modal, Replicate, Cursor, Anduril, infra startups, design-led seed/Series-A) | `data-print="dual-pdf"` *(default)*                            |
 | Quant-finance / design-conscious finance (Jane Street, Hudson River Trading at IC level)   | `data-print="dual-pdf"` — these firms read carefully; taste reads positively |
 | Big-co tech with Workday-class ATS at the front (Google, Meta, Amazon, Microsoft, Apple, Salesforce, Oracle, Atlassian, Shopify, most public tech) | `data-print="ink-only"`                                        |
 | Traditional enterprise / consulting (IBM, Accenture, Deloitte, Big-4, MBB-tier)            | `data-print="ink-only" data-mono`                              |
@@ -170,13 +214,41 @@ these in order; first match wins:
 
 ### Step 3 — Composable refinements
 
+Both go on the root `<html>` element, alongside `data-print`.
+
 - `data-page="a4"` — pair with any of the above when shipping to
   non-US recipients. Recomputes margins for A4 stock and routes
-  the print to the `@page a4` rule.
+  the print to the `@page a4` rule (or `@page a4-compact` when
+  compact is also set).
 - `data-density="compact"` — apply *only after* a first render
   shows overflow. See §Pipeline step 5 for the operational rule.
   Do **not** apply pre-emptively — the default density is
   calibrated for readability at this fidelity.
+
+## Density ownership
+
+One density variant exists: `data-density="compact"`, on the root
+`<html>` element, and it is a **measured-fit fallback**. The rules,
+in full:
+
+- **Default density is the default.** Render it first, every time.
+  The default-density appearance is the system's calibrated look and
+  must not change to make more content fit.
+- **Compact is applied only after a render has measured an
+  overflow** — never speculatively, never because the input looks
+  long.
+- **There are no other tiers.** No `ultra-compact`, no numeric
+  scale, no per-section density. If compact still overflows, the
+  content is too long: cut a bullet, drop a restating
+  `Selected Systems` entry, trim the skills block.
+- **Compact does not replace content editing.** Typographic
+  compression is not a substitute for cutting weak material, and a
+  content-bloated résumé at compact density is just bad material
+  set smaller.
+- **In host-driven consumers (Infinite Canvas), the host owns
+  this.** The agent emits a bare `<main class="page">`; the app
+  renders default density, measures, and only then sets
+  `data-density="compact"` on the root.
 
 ### Rationales (one sentence each, in case the agent needs to explain its choice)
 
@@ -224,9 +296,74 @@ interview answers: **Problem → Solution → Measurement → Trade-off.**
 That four-beat structure is what the template's typography is built
 to display.
 
+## The Skills block — selection and sizing
+
+**Budget: 3 rows, one line each, 16–20 terms** — that is the ceiling,
+and it is what the shipped `resume.html` sample does (3 rows /
+16 terms: Languages 5, Data & Storage 5, Infrastructure 6). A block
+that grows past 3 rows starts buying page space with the weakest
+content on the page; count the rows before you count anything else.
+
+What goes in it:
+
+- **Only nouns a recruiter can filter on** — languages, databases,
+  named platforms, named infra products. These are what populate the
+  structured skills field (Greenhouse) and skill tags (Ashby), both of
+  which are extracted off the `Skills` section header, and both of
+  which recruiters filter on directly.
+- **Never concepts.** Raft, Paxos, CRDTs, consistent hashing, leader
+  election, gossip, vector clocks, multi-region failover are
+  *architecture decisions*. In a bullet they are evidence; in the
+  skills block they read as padding a staff candidate doesn't need.
+- **Never commodity tooling** (Grafana, Honeycomb, Jira, Postman) and
+  never region lists — `AWS`, not `AWS (us-east, eu-west, ap-northeast)`.
+- **Keep the labelled `dt`/`dd` rows.** Do not collapse to a single
+  unlabelled keyword line: the category labels are part of what the
+  parser's section classifier keys on, and the space saved is a
+  fraction of one line.
+- **Do not delete the section.** Its value is the terms that appear
+  nowhere else — in the shipped sample, **12 of the 16 terms appear
+  only in Skills** (Go, Postgres, Kafka, and Elasticsearch are the
+  four that also appear in a bullet). A backend/data/AI candidate
+  with no Skills section also reads as an omission to a recruiter
+  using it as a stack check.
+
+**Deliberate duplication is correct for the 6–8 must-have terms.**
+Section extraction and full-text search are separate retrieval paths: a
+technology named only mid-bullet reaches full-text search but often not
+the skills tag. Naming Go in a bullet *and* in Skills is not keyword
+stuffing — what is penalised now is hidden text and stuffed sections.
+
+Where the technology already earns its place in a bullet ("built the
+Kafka → Elasticsearch pipeline"), the bullet is the stronger evidence
+and the Skills entry is the index. Write both. Where a technology can
+only be claimed, not demonstrated — Terraform, TypeScript, a warehouse
+the candidate queried — the Skills block is the *only* place it exists,
+and cutting it loses the term outright.
+
+## Do not let "Selected Systems" restate the bullets
+
+The most common space waste in generated output is not the skills block
+— it is a `Selected Systems` section that re-lists metrics already in
+the Experience bullets. It is typically the largest block on the page
+after Experience itself, and in the shipped sample every metric in it
+(1.4M QPS, p99 38 ms, 19 PB, cold-start 380 → 18 ms, 50K docs/sec)
+also appears in a bullet above.
+
+A project entry earns its place only if it carries something the
+bullets do not: a system the candidate built outside the roles listed,
+open-source work, or an architecture whose shape needs a sentence the
+role bullets have no room for. If every metric in the block already
+appears above it, **cut the whole section** — it is the single largest
+free space recovery available, and it costs zero searchable terms.
 ## Negative space — what the system does NOT do
 
 - No icons, no skill bars, no progress dots, no photos
+- No skills block over 3 rows / 20 terms, and no concepts or
+  commodity tooling inside it
+- No candidate location that wasn't explicitly supplied as contact
+  data — never inferred from the job, employer, or school
+- No `Selected Systems` entry whose metrics already appear in a bullet
 - No coloured ranges, no gradients, no rounded cards
 - No emoji
 - No two-column layouts (the date cell is right-aligned within

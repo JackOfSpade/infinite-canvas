@@ -1,8 +1,8 @@
-/* @ds-bundle: {"format":4,"namespace":"EditorialResumeDesignSystem_895a4b","components":[],"sourceHashes":{"build/dual-mode-pdf.js":"1d2037abaecf","build/test.js":"706e82230b48"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/dual-mode-pdf.js":"1d2037abaecf","build/test.js":"706e82230b48"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
-const __ds_ns = (window.EditorialResumeDesignSystem_895a4b = window.EditorialResumeDesignSystem_895a4b || {});
+const __ds_ns = (window.JobApplicationDesignSystem_895a4b = window.JobApplicationDesignSystem_895a4b || {});
 
 const __ds_scope = {};
 

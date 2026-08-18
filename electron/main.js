@@ -844,7 +844,7 @@ if (!gotTheLock) {
     });
 
     // Startup assertion for the résumé design-system coupling surface (design
-    // doc §9). resume_design_system/ is owned by Claude design and replaced
+    // doc §9). Job Application Design System/ is owned by Claude design and replaced
     // wholesale from time to time; this never throws or blocks startup — its
     // only job is to log "a reconnect is needed" instead of letting the app
     // silently generate résumés/cover letters against a stale contract.

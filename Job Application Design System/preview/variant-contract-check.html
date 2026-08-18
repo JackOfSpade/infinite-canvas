@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Variant contract check</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  body{padding:24px;font-family:var(--ff-mono);font-size:11px;background:#fff}
+  table{border-collapse:collapse;margin-bottom:18px}
+  td,th{border:1px solid #ccc;padding:4px 8px;text-align:left;font-size:11px}
+  .pass{color:#0a6b2a}.fail{color:#b00;font-weight:600}
+  iframe{width:340px;height:220px;border:1px solid #ddd}
+</style>
+</head><body>
+<h3 style="font-family:var(--ff-body)">Root-only variant contract — probe</h3>
+<div id="out">running…</div>
+<h3 style="font-family:var(--ff-body)">Print-mode background — probe</h3>
+<div id="out2">running…</div>
+<h3 style="font-family:var(--ff-body)">Stylesheet hygiene</h3>
+<div id="out3">running…</div>
+<script>
+// Probe rig: an isolated iframe per case, so each case gets its own root element.
+const cases = [
+  {name:'default',                     root:'',                                        expectPage:'letter',        expectFs:'10.25pt'},
+  {name:'a4',                          root:'data-page="a4"',                          expectPage:'a4',            expectFs:'10.25pt'},
+  {name:'compact',                     root:'data-density="compact"',                  expectPage:'letter-compact',expectFs:'9.75pt'},
+  {name:'a4 + compact',                root:'data-page="a4" data-density="compact"',   expectPage:'a4-compact',    expectFs:'9.75pt'},
+  {name:'mono',                        root:'data-mono',                               expectPage:'letter',        expectFs:'10.25pt'},
+  {name:'LEGACY main-level a4',        main:'data-page="a4"',                          expectPage:'letter',        expectFs:'10.25pt'},
+  {name:'LEGACY main-level compact',   main:'data-density="compact"',                  expectPage:'letter',        expectFs:'10.25pt'},
+  {name:'LEGACY main-level a4+compact',main:'data-page="a4" data-density="compact"',   expectPage:'letter',        expectFs:'10.25pt'},
+  {name:'LEGACY body-level compact',   body:'data-density="compact"',                  expectPage:'letter',        expectFs:'10.25pt'}
+];
+const rows = [];
+let done = 0;
+function doc(c){
+  return '<!doctype html><html '+(c.root||'')+'><head><meta charset="utf-8">'
+    +'<link rel="stylesheet" href="../colors_and_type.css">'
+    +'<link rel="stylesheet" href="../resume.css"></head>'
+    +'<body '+(c.body||'')+'><main class="page" '+(c.main||'')+'>'
+    +'<h1 class="name">Sample Name</h1><p class="probe">probe</p></main></body></html>';
+}
+cases.forEach((c,i)=>{
+  const f = document.createElement('iframe');
+  f.style.display='none';
+  document.body.appendChild(f);
+  f.onload = ()=>{
+    const d = f.contentDocument, w = f.contentWindow;
+    const page = d.querySelector('.page');
+    const cs = w.getComputedStyle(page);
+    const rootCs = w.getComputedStyle(d.documentElement);
+    const nameCs = w.getComputedStyle(d.querySelector('.name'));
+    const got = {
+      page: cs.page || cs.getPropertyValue('page') || '(unsupported)',
+      fsBody: rootCs.getPropertyValue('--fs-body').trim(),
+      pageW: rootCs.getPropertyValue('--page-w').trim(),
+      marginTop: rootCs.getPropertyValue('--margin-top').trim(),
+      accent: nameCs.color
+    };
+    const okPage = got.page === c.expectPage || got.page === '(unsupported)';
+    const okFs = got.fsBody === c.expectFs;
+    rows[i] = '<tr><td>'+c.name+'</td><td>'+(c.root?'html['+c.root+']':c.main?'main['+c.main+']':c.body?'body['+c.body+']':'—')
+      +'</td><td class="'+(okPage?'pass':'fail')+'">'+got.page+' (want '+c.expectPage+')</td>'
+      +'<td class="'+(okFs?'pass':'fail')+'">'+got.fsBody+' (want '+c.expectFs+')</td>'
+      +'<td>'+got.pageW+'</td><td>'+got.marginTop+'</td><td>'+got.accent+'</td></tr>';
+    if(++done === cases.length){
+      document.getElementById('out').innerHTML =
+        '<table><tr><th>case</th><th>attr placement</th><th>named page</th><th>--fs-body</th><th>--page-w</th><th>--margin-top</th><th>name color</th></tr>'
+        + rows.join('') + '</table>'
+        + '<p>LEGACY rows must all report the DEFAULT values — that is the pass condition.</p>';
+      window.__probe = rows.join('');
+    }
+  };
+  f.srcdoc = doc(c);
+});
+
+/* ---- print-mode probe ----
+   Rewrites every `@media print` conditionText to `all` inside an
+   isolated iframe, so the print cascade is genuinely evaluated by the
+   engine on screen. Then reads the computed background of html/body. */
+const printCases = [
+  {name:'default (no data-print)', root:'',                        expect:'cream'},
+  {name:'ink-only on <html>',      root:'data-print="ink-only"',   expect:'white'},
+  {name:'dual-pdf on <html>',      root:'data-print="dual-pdf"',   expect:'transparent'},
+  {name:'LEGACY ink-only on main', main:'data-print="ink-only"',   expect:'cream'},
+  {name:'LEGACY dual-pdf on main', main:'data-print="dual-pdf"',   expect:'cream'}
+];
+const CREAM='rgb(247, 244, 237)', WHITE='rgb(255, 255, 255)', TRANS='rgba(0, 0, 0, 0)';
+const want = {cream:CREAM, white:WHITE, transparent:TRANS};
+const prows=[]; let pdone=0;
+printCases.forEach((c,i)=>{
+  const f=document.createElement('iframe'); f.style.display='none'; document.body.appendChild(f);
+  f.onload=()=>{
+    const d=f.contentDocument, w=f.contentWindow;
+    let flipped=0;
+    for(const sheet of d.styleSheets){
+      let rules; try{ rules=sheet.cssRules; }catch(e){ continue; }
+      for(const r of rules){
+        if(r.type===CSSRule.MEDIA_RULE && /print/.test(r.conditionText)){ r.media.mediaText='all'; flipped++; }
+      }
+    }
+    const htmlBg=w.getComputedStyle(d.documentElement).backgroundColor;
+    const bodyBg=w.getComputedStyle(d.body).backgroundColor;
+    const tok=w.getComputedStyle(d.documentElement).getPropertyValue('--bg').trim();
+    const ok = htmlBg===want[c.expect] && bodyBg===want[c.expect];
+    prows[i]='<tr><td>'+c.name+'</td><td>'+flipped+'</td><td class="'+(ok?'pass':'fail')+'">'+htmlBg+'</td><td class="'+(ok?'pass':'fail')+'">'+bodyBg+'</td><td>'+tok+'</td><td>'+c.expect+'</td></tr>';
+    if(++pdone===printCases.length){
+      document.getElementById('out2').innerHTML='<table><tr><th>case</th><th>@media print rules flipped</th><th>html bg</th><th>body bg</th><th>--bg token</th><th>expected</th></tr>'+prows.join('')+'</table>';
+    }
+  };
+  f.srcdoc=doc(c);
+});
+
+/* ---- stylesheet hygiene: no legacy :has() / page-level variant branches ---- */
+(function(){
+  Promise.all(['../colors_and_type.css','../resume.css'].map(p=>fetch(p).then(r=>r.text()).then(t=>[p,t])))
+   .then(list=>{
+     const checks=[];
+     for(const [p,raw] of list){
+       // Strip /* … */ comments — the prose in them legitimately *names* the
+       // removed constructs, and we're asserting about selectors, not docs.
+       const t = raw.replace(/\/\*[\s\S]*?\*\//g,'');
+       checks.push([p,':has( branches removed', !/:has\(/.test(t)]);
+       checks.push([p,'no .page[data-… self-selectors', !/\.page\[data-/.test(t)]);
+       checks.push([p,'no unanchored [data-print|page|mono|density] selectors',
+         !/(^|[\s,>])\[data-(print|page|mono|density)/m.test(t)]);
+       checks.push([p,'every variant selector anchored at :root',
+         !/(?<!:root|\])\[data-(print|page|mono|density)/.test(t)]);
+     }
+     document.getElementById('out3').innerHTML='<table><tr><th>file</th><th>check</th><th>result</th></tr>'
+       + checks.map(([p,c,ok])=>'<tr><td>'+p+'</td><td>'+c+'</td><td class="'+(ok?'pass':'fail')+'">'+(ok?'PASS':'FAIL')+'</td></tr>').join('')+'</table>';
+   });
+})();
+</script>
+</body></html>

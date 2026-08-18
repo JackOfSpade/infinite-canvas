@@ -40,7 +40,7 @@ function analysis(role, items) {
   };
 }
 
-// Matches the design system's convention (resume_design_system/resume.html:258-273):
+// Matches the design system's convention (Job Application Design System/resume.html:258-273):
 // a <dl class="skills"> of <dt>/<dd> pairs, each <dd> bare text joined by
 // <span class="sep">.
 function resumeWithSkills(dlInner) {

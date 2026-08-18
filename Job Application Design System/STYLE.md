@@ -1,9 +1,11 @@
-# STYLE.md — Editorial Resume Design System
+# STYLE.md — Job Application Design System
 
-This file documents **every design decision** in the resume template.
-Future AI edits should read this end-to-end before touching `resume.html`
-or `colors_and_type.css`. The goal: consistent output across many
-candidates rendered from JSON, without re-litigating choices.
+This file documents **every design decision** in the system — the
+résumé surface and its paired cover letter (§11). Future AI edits
+should read this end-to-end before touching `resume.html`,
+`cover-letter.html`, or `colors_and_type.css`. The goal: consistent
+output across many candidates rendered from JSON, without
+re-litigating choices.
 
 The voice of this template is **editorial-modernist, developer-literate,
 quietly confident**. Stripe Press book interiors, Pentagram partner CVs,
@@ -169,9 +171,9 @@ the name is the only piece of the document that is unambiguously a
 mark of identity — colouring it lightly says "this person" without
 shouting "look at me".
 
-To go fully monochrome, add `data-mono` to the `<main class="page">`
-element (or to `<html>` for the whole document). The variant
-selector in `colors_and_type.css` rebinds `--accent-on` to
+To go fully monochrome, add `data-mono` to the root `<html>`
+element — the only placement the CSS honours (see §10). The
+variant selector in `colors_and_type.css` rebinds `--accent-on` to
 `--ink-1`. See `preview/variant-monochrome.html`.
 
 **Do not** introduce a second accent. **Do not** apply the accent to
@@ -357,7 +359,32 @@ The `.project` block intentionally does **not** use `.meta-row`:
 project metrics are a mono-set numeric run that wraps poorly inside
 a 1.45 in right column. They stack below the description instead.
 
-### 5.6 Subsection heads
+### 5.6 Skills block — 3 rows, 16–20 terms
+
+The block is a two-column `dl` (`--col-meta-w` label + `1fr` keywords),
+so each `dd` gets ~5.17in of measure. **Budget: 3 rows, one line each,
+16–20 terms.** The shipped `resume.html` sample is exactly that — 3
+rows, 16 terms (Languages 5, Data & Storage 5, Infrastructure 6). Rows
+are the unit to count; a fourth row is already buying page space with
+the weakest content on the page.
+
+Selection rule (the generation-side version lives in `SKILL.md §The
+Skills block`): filterable nouns only — languages, databases, named
+platforms, named infra products. Architecture concepts (Raft, Paxos,
+CRDTs, consistent hashing, leader election, gossip, vector clocks) go in
+bullets, where they are evidence; in this block they are padding.
+Commodity tooling and region lists are out.
+
+**Do not collapse the block to a single unlabelled keyword run.** The
+`dt` labels are load-bearing for parsing, not decoration: résumé
+parsers extract skills into a structured field or tag set keyed off the
+section header and its category rows, and that is a different retrieval
+path from full-text search. Flattening saves a fraction of one line and
+gives up the tag path. **Do not delete the block either** — its content
+is the terms that exist nowhere else on the page (in the shipped
+sample, 12 of the 16).
+
+### 5.7 Subsection heads
 
 For groupings *inside* a section — "Open Source" under Experience,
 "Talks" under Education — use the subsection-head pattern:
@@ -379,11 +406,35 @@ doesn't divide.
 
 | Length goal | What "fits" looks like                              |
 |-------------|-----------------------------------------------------|
-| 1.4 pages   | 3 roles + Selected Systems + Skills + Education; page 2 ends ~40% down. The template **must** look intentional here. |
+| 1.4 pages   | 3 roles + Selected Systems + Skills + Education; page 2 ends ~40% down. The template **must** look intentional here. This is what the shipped `resume.html` sample is calibrated to. |
+| 1.0 page    | Reachable by cutting content, not by tightening type. The cuts, in order of how little they cost: drop `Selected Systems` when it restates bullet metrics (the largest single recovery, and it costs zero searchable terms); collapse the oldest role to a dateline + one summary line; trim the skills block to 3 rows. Past that you are deleting evidence — say so rather than doing it silently. |
 | 2.0 pages   | Same blocks with denser bullets; page 2 ends near the bottom margin. Also intentional. |
+
+Block sizes are not quoted here in pixels on purpose: they depend on
+the renderer, the density variant, and whether the Google Fonts CDN
+served the real families or a fallback. Measure the actual render if
+you need a number, and state the renderer alongside it.
 
 The template **does not** compress content to fit one page. Staff+
 candidates have content. Trying to squeeze it loses signal.
+
+### 6.0 Density ownership
+
+There is exactly **one** density variant, `data-density="compact"`
+(§10.5), and it is a **measured-fit fallback**:
+
+- Default density is the default. It is the calibrated appearance of
+  the system and does not change to make more content fit.
+- Compact is applied only *after* a render has measured an overflow —
+  never speculatively.
+- There is no second tier and no per-section density.
+- Compact is not a replacement for editing content. If it still
+  overflows, cut material.
+- In host-driven consumers (**Infinite Canvas**), the host owns this:
+  the agent emits a bare `<main class="page">…</main>` with no
+  `data-*` variant attributes; the app sets root attributes, renders
+  default density first, and enables compact only on a measured
+  overflow.
 
 ### 6.1 Page-break behaviour
 
@@ -443,7 +494,7 @@ prefix per JSON Resume convention.
 | `basics.name`                            | `.name`                                  |
 | `basics.label`                           | `.tagline`                               |
 | `basics.email`                           | `.contact a[itemprop=email]`             |
-| `basics.location.{city,region}`          | `.contact [itemprop=addressLocality]`    |
+| `basics.location.{city,region}`          | `.contact [itemprop=addressLocality]` — **optional; see the privacy rule below** |
 | `basics.profiles[].url`                  | `.contact a[itemprop=sameAs]` (visible label = host + path, e.g. `github.com/acastellanos`; the `.network` field is metadata only and not rendered) |
 | `basics.url`                             | `.contact a[itemprop=url]`               |
 | `work[].position`                        | `.role-title-line .title`                |
@@ -466,20 +517,80 @@ prefix per JSON Resume convention.
 Date normalisation: incoming `YYYY-MM` → rendered "Mon YYYY"; incoming
 `YYYY` → rendered "YYYY"; null `endDate` → "Present".
 
+### 9.1 Contact privacy — location is opt-in only
+
+`basics.location` is **optional**, and the candidate's city/region may
+be rendered in the contact line (résumé header or cover-letter
+letterhead) **only when it was explicitly supplied as candidate contact
+data.**
+
+**Never infer it.** Not from the job posting or its location, not from
+the employer's headquarters, not from a prior role's office, not from a
+school, not from an area code, a timezone, or a profile URL. If the
+value was not given, omit the `addressLocality` span and its adjacent
+`.sep` entirely — email · one optional URL is a complete, correct
+contact line, and the flex layout closes the gap with no visual
+artefact.
+
+`work[].location` (`.role-location`) is different: it is an employment
+fact about that role and may be rendered when supplied with the role
+entry. It is still never a source for `basics.location`.
+
 ---
 
 ## 10. Variants
 
-The system ships five opt-in variants. All apply via data attribute
-on the `<main class="page">` element (or on `<html>` for global
-scope). All are defined in `colors_and_type.css` under "Variants".
-Variants compose cleanly — `data-page="a4" data-mono
-data-density="compact" data-print="dual-pdf"` is a valid combination.
+The system ships four opt-in variant attributes: `data-print`,
+`data-page`, `data-mono`, `data-density`. All are defined in
+`colors_and_type.css` under "Variants".
 
-**The two `data-print="…"` values are mutually exclusive.** Pick one:
-`ink-only` for a single-state white-paper PDF, or `dual-pdf` for a
-two-state PDF that shows cream on screen and prints white. `dual-pdf`
-is the default in `resume.html`.
+### 10.0 The canonical variant contract — root only
+
+**Every variant attribute is valid only on the root `<html>`
+element.** Every selector in `colors_and_type.css` and the named-page
+rules in `resume.css` are anchored with `:root`, so an attribute on
+`<main class="page">`, on `<body>`, or on any other ancestor has **no
+effect**. There is no legacy fallback, no `.page`-level branch, and no
+`:has()` compatibility rule — they were removed. One document, one
+configuration.
+
+```html
+<html lang="en" data-print="dual-pdf" data-page="a4" data-density="compact">
+  …
+  <main class="page">…</main>
+```
+
+Variants compose cleanly — `data-page="a4" data-mono
+data-density="compact" data-print="dual-pdf"` on the root is a valid
+combination. **The two `data-print="…"` values are mutually
+exclusive.** Pick one: `ink-only` for a single-state white-paper PDF,
+or `dual-pdf` for a two-state PDF that shows cream on screen and
+prints white. `dual-pdf` is the default in `resume.html` and
+`cover-letter.html`.
+
+Why root-only: the tokens are custom properties, so they must be
+redefined where `html` and `body` can read them (the print background
+is painted on `html, body`). Subtree placement used to require mirror
+selectors and a `:has()` branch to patch that up, and permitted
+mixed / nested placements that half-applied a variant. Anchoring at
+`:root` makes each variant one flat rule with no failure mode.
+
+**Regression harness.** `preview/variant-contract-check.html` probes the
+contract in isolated iframes: named page + `--fs-body` / `--page-w` /
+`--margin-top` for all four page-selection states, the print `--bg`
+for `ink-only` / `dual-pdf` (it rewrites `@media print` to `all` so the
+engine actually evaluates the print cascade), and legacy placements on
+`<main class="page">` / `<body>`, which must all report default values.
+It also lints both stylesheets for `:has(`, `.page[data-…]`
+self-selectors, and any variant selector not anchored at `:root`. Open
+it after touching a variant rule.
+
+**Host-driven consumers.** When a host application owns the document
+shell — **Infinite Canvas** is the reference consumer — the generated
+output is exactly a bare `<main class="page">…</main>` with no `data-*`
+variant attributes anywhere inside it. The host sets the root
+attributes, renders default density first, and enables
+`data-density="compact"` only after measuring an overflow.
 
 ### 10.1 A4 paper
 
@@ -487,33 +598,38 @@ is the default in `resume.html`.
 <html data-page="a4">
 ```
 
-Or scoped to a single page element:
-
-```html
-<main class="page" data-page="a4">…
-```
-
 Recomputes `--page-w`, `--page-h`, and the margin tokens so the
 measure stays in editorial range on A4 stock (210 × 297 mm,
 ~16 mm sides, ~18 mm head/foot). The physical paper size is
-selected by CSS named pages declared in `resume.html`:
+selected by CSS named pages declared in `resume.css`:
 
 ```css
-@page letter { size: Letter; margin: 0; }
-@page a4     { size: A4;     margin: 0; }
-.page                       { page: letter; }
-.page[data-page="a4"]       { page: a4;     }
+@page letter         { size: Letter; margin: 0.72in 0; }
+@page a4             { size: A4;     margin: 18mm 0; }
+@page letter-compact { size: Letter; margin: 0.6in 0; }
+@page a4-compact     { size: A4;     margin: 15.24mm 0; }
+
+.page                                              { page: letter; }
+:root[data-page="a4"] .page                        { page: a4; }
+:root[data-density="compact"] .page                { page: letter-compact; }
+:root[data-page="a4"][data-density="compact"] .page { page: a4-compact; }
 ```
 
+Four states, four rules. Specificity orders them: the compact rule
+(0,3,0, declared after the plain letter/a4 rules) wins over `a4`, and
+the two-attribute `a4-compact` rule (0,4,0) wins over both — so
+`<html data-page="a4" data-density="compact">` correctly selects the
+compact A4 page.
+
 Chromium 85+ honours `page: <name>` on an element + a matching
-`@page <name>` rule, so the data attribute fully controls paper
+`@page <name>` rule, so the root attributes fully control paper
 size with no top-level override. Engines without named-page
 support fall through to the default `@page` block (Letter).
 
 ### 10.2 Monochrome (no oxblood accent)
 
 ```html
-<main class="page" data-mono>…
+<html data-mono>
 ```
 
 Rebinds `--accent-on` to `--ink-1`. The candidate name renders in
@@ -524,7 +640,7 @@ colour.
 ### 10.3 Print: ink-only
 
 ```html
-<main class="page" data-print="ink-only">…
+<html data-print="ink-only">
 ```
 
 Flips the warm ground (`--bg`) to pure white **only when printing**.
@@ -552,7 +668,7 @@ as needed.
 ### 10.4 Print: dual-pdf (default for PDF generation)
 
 ```html
-<main class="page" data-print="dual-pdf">…
+<html data-print="dual-pdf">
 ```
 
 The canonical configuration for PDF generation from this design
@@ -642,7 +758,7 @@ Pairs cleanly with `data-page="a4"`, `data-mono`, and
 ### 10.5 Compact density
 
 ```html
-<main class="page" data-density="compact">…
+<html data-density="compact">
 ```
 
 The single lever for "this is 1.1 pages and I want 1.0". Body type
@@ -654,8 +770,10 @@ Deliberately untouched: `--fs-display` (the name), `--col-meta-w`
 (date strings keep the same metrics), `--rule-weight`, accent,
 families. Visual identity unchanged — just tighter.
 
-If compact still overflows, the content is the problem; trim a
-bullet. There is no `data-density="ultra-compact"`.
+It is the system's **one** measured-fit fallback, not the default and
+not a tier in a scale — see §6.0. If compact still overflows, the
+content is the problem; trim a bullet. There is no
+`data-density="ultra-compact"`.
 
 ### 10.6 Running footer
 
@@ -663,7 +781,8 @@ Not a variant per se, but documented here: pages 2+ render a
 mono page indicator (`2 / 3`) in `--ink-quiet` at the bottom-right
 of the page via CSS `@page` margin boxes. Page 1 is suppressed via
 `@page <named>:first` so a one-page resume never shows a counter.
-Works for both `letter` and `a4` named pages.
+All four named pages carry it — `letter`, `a4`, `letter-compact`,
+`a4-compact`.
 
 If the rendering pipeline strips `@page` margin boxes (some legacy
 print engines), the resume still prints — just without the page
@@ -694,9 +813,11 @@ Caveat: `@page` rules can't read CSS custom properties, so the values
 are literal. Compact density is therefore handled with dedicated named
 pages — `letter-compact` (`0.6in 0`) and `a4-compact` (`15.24mm 0`) —
 which mirror the `--margin-top` / `--margin-bot` overrides in the
-`[data-density="compact"]` block. Compact **does** shrink printed
-head/foot margins, matching §10.5. Side margins (the measure) stay on
-`.page` padding and respond to every variant through tokens.
+`:root[data-density="compact"]` block, and are selected by the
+root-anchored `page:` rules in §10.1. Compact **does** shrink printed
+head/foot margins on both paper sizes, matching §10.5. Side margins
+(the measure) stay on `.page` padding and respond to every variant
+through tokens.
 
 ---
 

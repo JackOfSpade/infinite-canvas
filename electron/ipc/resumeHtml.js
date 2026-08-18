@@ -4,7 +4,7 @@
  *
  * HTML-FIRST, NOT PDF-ONLY (§5.1). The browser tab is still the primary,
  * editable screen artifact — the design system's own `@media print` rule
- * (resume_design_system/colors_and_type.css ~:394-409) already flips `--bg`
+ * (Job Application Design System/colors_and_type.css ~:394-409) already flips `--bg`
  * to transparent on print, for free, but Sync (electron/ipc/applicationSync.js,
  * driven from the injected chrome below), not a browser's own print dialog,
  * is the only supported way to turn this HTML into a PDF: it re-renders
@@ -32,7 +32,7 @@
  * free the way it was when it only built HTML strings. That's fine under
  * `scripts/test-runner.js`: `getDesignSystemDir()` never actually needs a real
  * `app` object (it only reads `app.getAppPath`, guarded by `?.`), so it falls
- * through cleanly to `process.cwd()` + 'resume_design_system' under plain
+ * through cleanly to `process.cwd()` + 'Job Application Design System' under plain
  * Node, exactly as it already did when this logic lived in resumePdf.js.
  *
  * The résumé is filled by the model as a `<main class="page">` block (the
@@ -80,32 +80,11 @@ export function decodeTextEscapes(s) {
  * Resolve the canonical variant attributes for a document, so BOTH the résumé
  * and the cover letter share one print variant / paper / mono treatment.
  *
- * Accepts either shape the variant can arrive in, because both are real inputs
- * on different paths:
- *
- *   • the résumé model's raw output — a bare `<main class="page" …>` block,
- *     which is where the model writes its choice (jobApplication.js's generate
- *     path, and buildResumeDocument's own fallback);
- *   • a BUILT document — where the builders below hoist the resolved variant
- *     onto `<html>` and `stripMainVariantAttrs` deliberately erases the copy on
- *     `<main>`, so that a stale local attribute from a length revision can
- *     never override the root.
- *
- * The root must therefore be read FIRST, and not only because of that strip.
- * A built document INLINES the design-system stylesheets, and those document
- * their own variants with literal `<main class="page" data-print="…">` example
- * markup inside CSS COMMENTS — eight of them, ahead of the real résumé. So a
- * scan for the first `<main …>` in a built document does not merely find a
- * stripped tag, it finds a DECOY out of a stylesheet comment and reads that
- * comment's variant. Either way the answer collapses to the `dual-pdf`
- * default, which is how an `ink-only` application, re-read from its own saved
- * Application.html by applicationSync.js, came back as "dual" and had an OCG
- * cream layer prepended behind a page whose CSS had already painted it opaque
- * white: white body copy inside cream page margins, matching neither variant.
- *
- * Whichever tag actually CARRIES a variant is the authority, and `<html>` wins
- * when both do. Do not relax this back to "first `<main>`" — the decoys are
- * design-system-owned text that this module cannot control.
+ * Variants belong exclusively on `<html>`. The design system intentionally
+ * ignores a data-* variant on `<main>`, `<body>`, or any other subtree, and
+ * every app builder strips any such model error before emitting a document.
+ * Reading only the root is also essential because built documents inline
+ * design-system comments that may contain illustrative `<main>` snippets.
  *
  * Print mode follows the design system: the default is `dual-pdf` (warm cream
  * on screen, background transparent on print, cream restored as a view-only
@@ -113,23 +92,19 @@ export function decodeTextEscapes(s) {
  * opts out (flat white for ATS pipelines).
  */
 /**
- * @param {string} sourceHtml  a bare `<main …>` block or a whole document
+ * @param {string} sourceHtml  a whole document whose root may carry variants
  * @param {object} [opts]
  * @param {'compact'|null} [opts.density]  Force `data-density="compact"` on
  *   (or, when explicitly `null`, force it OFF) regardless of what the
- *   model's markup contains. Omit to fall through to whatever the model
- *   wrote (see the data-density block below).
+ *   document root contains. Omit to read the document root.
  */
 export function extractVariantAttrs(sourceHtml, { density } = {}) {
   const html = String(sourceHtml || '');
-  // Only read ONE opening tag. Searching body copy can accidentally select a
-  // variant, and HTML permits single-quoted or unquoted attributes just as
-  // much as the double-quoted examples in the design system.
+  // Read only the root opening tag. Subtree attributes have no visual effect
+  // under the design system's canonical root-only contract.
   const tagFor = (name) => new RegExp(`<${name}\\b[^>]*>`, 'i').exec(html)?.[0] || '';
-  const carriesVariant = (tag) => /\sdata-(?:print|mono|page|density)(?:\s|=|>|\/)/i.test(tag);
   const rootTag = tagFor('html');
-  const mainTag = tagFor('main');
-  const sourceTag = carriesVariant(rootTag) ? rootTag : (carriesVariant(mainTag) ? mainTag : (mainTag || rootTag || html));
+  const sourceTag = rootTag;
   const attrValue = (name) => {
     const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'=]+))`, 'i').exec(sourceTag);
     return match ? (match[1] ?? match[2] ?? match[3] ?? '') : null;
@@ -139,29 +114,8 @@ export function extractVariantAttrs(sourceHtml, { density } = {}) {
   if (/(?:\s|<)data-mono(?:\s|=|>|\/)/i.test(sourceTag)) out.push('data-mono');
   if (String(attrValue('data-page') || '').toLowerCase() === 'a4') out.push('data-page="a4"');
 
-  // data-density — the design system's ONE deterministic page-fit lever
-  // (SKILL.md §5's "compact-density algorithm"; colors_and_type.css ~:300
-  // cascades it into ~10 tokens: body type −5%, tighter leading, spacing
-  // −25%, margins in). THIS FUNCTION REBUILDS THE ATTRIBUTE STRING FROM
-  // SCRATCH — it was previously missing entirely from the recognized-attrs
-  // list above (only data-print/data-mono/data-page were), which meant any
-  // data-density the model happened to emit was silently DROPPED on every
-  // call, with no error and no signal that it had been lost. That made the
-  // one lever a page-count fit loop needs to pull unreachable: nothing
-  // downstream of this function ever saw it, no matter who tried to set it.
-  //
-  // `density` lets the CALLER force the value — this is how jobApplication.js's
-  // fit loop applies compact density after measuring a rendered page count
-  // (a decision the MODEL can't make, since it never sees a page count; per
-  // SKILL.md's own rule, "apply only after a first render shows overflow" /
-  // "do not apply pre-emptively"). An explicit `density` argument always wins
-  // over the model's markup. When omitted, we still recognize a
-  // model-emitted `data-density="compact"` (rather than silently dropping it,
-  // the exact bug this comment documents) — the full SKILL.md text is
-  // injected into the résumé prompt as the editorial rubric
-  // (jobApplication.js's `getEditorialRubric`), so the model has read the
-  // literal `data-density="compact"` example markup and could plausibly copy
-  // it even though it isn't instructed to.
+  // Density is the host's one measured-fit lever. An explicit argument lets
+  // the fit loop force the value after it has measured the default render.
   const resolvedDensity = density !== undefined
     ? density
     : (String(attrValue('data-density') || '').toLowerCase() === 'compact' ? 'compact' : null);
@@ -267,7 +221,7 @@ export function webFontFacesReadyExpression({ details = false } = {}) {
 // ---------------------------------------------------------------------------
 // Design-system coupling surface (migrated from resumePdf.js when the PDF
 // path retired — design doc §9 reconnect-checklist rows 1-2). Read-only
-// access to resume_design_system/; nothing in that folder is ever written.
+// access to Job Application Design System/; nothing in that folder is ever written.
 // ---------------------------------------------------------------------------
 
 // The design-system stylesheets this module inlines at build time. Résumé
@@ -280,7 +234,7 @@ const CSS_FILES = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
 const RESUME_CSS_FILES = CSS_FILES.slice(0, 2);
 
 /**
- * Resolve `resume_design_system/`. In dev this is the repo root; in a packaged
+ * Resolve `Job Application Design System/`. In dev this is the repo root; in a packaged
  * build it must be asarUnpacked (plain `fs.readFileSync` can't read out of an
  * asar) — resolved off process.resourcesPath there. Fails loudly if absent
  * rather than silently emitting an unstyled document — migrated verbatim from
@@ -288,18 +242,18 @@ const RESUME_CSS_FILES = CSS_FILES.slice(0, 2);
  */
 export function getDesignSystemDir() {
   const candidates = [];
-  try { if (app?.getAppPath) candidates.push(path.join(app.getAppPath(), 'resume_design_system')); } catch { /* not in electron */ }
+  try { if (app?.getAppPath) candidates.push(path.join(app.getAppPath(), 'Job Application Design System')); } catch { /* not in electron */ }
   if (process.resourcesPath) {
-    candidates.push(path.join(process.resourcesPath, 'resume_design_system'));
-    candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'resume_design_system'));
+    candidates.push(path.join(process.resourcesPath, 'Job Application Design System'));
+    candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'Job Application Design System'));
   }
-  candidates.push(path.join(process.cwd(), 'resume_design_system'));
+  candidates.push(path.join(process.cwd(), 'Job Application Design System'));
   for (const dir of candidates) {
     if (dir && fs.existsSync(path.join(dir, 'resume.css'))) return dir;
   }
   throw new Error(
     `Résumé design system not found (looked in: ${candidates.join(', ')}). ` +
-    `The 'resume_design_system' folder must ship with the app.`
+    `The 'Job Application Design System' folder must ship with the app.`
   );
 }
 
@@ -501,7 +455,7 @@ const PRINT_VARIANT_INDICATOR = '<span id="ic-print-variant-note" class="ic-prin
 const INJECTED_CHROME_CSS = `
 /* ==========================================================
    Injected chrome (electron/ipc/resumeHtml.js) — NOT part of
-   resume_design_system/. Namespaced ic- throughout. Every rule
+   Job Application Design System/. Namespaced ic- throughout. Every rule
    in this block is inert on print.
    ========================================================== */
 .ic-toolbar {
@@ -631,7 +585,7 @@ const INJECTED_CHROME_CSS = `
    Attributes, not classes — data-achievement-id is written by the model
    (id only) and data-derivation is written by resumeHtml.js's post-process
    (tooltip text only); both survive a design-system swap untouched since
-   nothing here is coupled to a resume_design_system/ class name. */
+   nothing here is coupled to a Job Application Design System/ class name. */
 [data-achievement-id] {
   border-bottom: 1px dotted var(--ink-3, #8C857A);
   cursor: help;
@@ -1209,7 +1163,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
 /**
  * Build the toolbar/banner markup + behavior script injected into `<body>`.
  *
- * Edit mode (§5.5): `resume_design_system/readme.md:15-19` documents the
+ * Edit mode (§5.5): `Job Application Design System/readme.md:15-19` documents the
  * OPPOSITE intent — "No human interactive surface. No editor." That doc is
  * design-owned and must not be edited, so the divergence is recorded HERE
  * instead: once PDF generation retired, the shipped artifact IS the file the
@@ -1811,7 +1765,7 @@ ${paragraphs}
 
 /**
  * Startup assertion for the résumé design-system coupling surface (§9).
- * `resume_design_system/` is owned by Claude design, read-only from this
+ * `Job Application Design System/` is owned by Claude design, read-only from this
  * repo's side, and may be replaced wholesale — reconnection is done manually
  * and deliberately. This function's job is NOT to heal anything; it exists to
  * say "a reconnect is needed" instead of letting the app silently generate

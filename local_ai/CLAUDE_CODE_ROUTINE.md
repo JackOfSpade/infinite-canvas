@@ -35,8 +35,8 @@ switch to Anthropic Console/API credits for this routine.
    selecting; do not search the repository for jobs.
 2. Read only that job's `input.json`, `context/job-listing.md`, and
    `context/career-data.txt`, plus these layout references:
-   `resume_design_system/SKILL.md`, `resume_design_system/STYLE.md`, and
-   `resume_design_system/resume.html`. If the job folder contains the
+   `Job Application Design System/SKILL.md`, `Job Application Design System/STYLE.md`, and
+   `Job Application Design System/resume.html`. If the job folder contains the
    app-generated `fit-feedback.json`, also read that file and the existing
    `result.json`; this is a measured revision request, not a fresh draft. If
    feedback status is `revision-exhausted`, stop without changing any file;
@@ -98,9 +98,10 @@ switch to Anthropic Console/API credits for this routine.
    one page when rendered by Infinite Canvas. Every factual candidate claim
    must be supported by the supplied career data.
 6. Write only the UTF-8 `result.json` in the selected job folder. Do not modify
-   project source, the routine, the input/context files, `fit-feedback.json`,
-   or create HTML/PDF files. Infinite Canvas validates the JSON and builds the
-   final application bundle itself.
+   project source, the routine, any project-memory/knowledge file, the
+   input/context files, `fit-feedback.json`, or create HTML/PDF files. Do not
+   create side-effect notes, changelogs, or memory updates anywhere. Infinite
+   Canvas validates the JSON and builds the final application bundle itself.
 
 7. Keep this SAME Claude Code run active for the measured handoff. After each
    `result.json` write, wait for Infinite Canvas (which must remain open) to
@@ -123,7 +124,10 @@ switch to Anthropic Console/API credits for this routine.
      rewrite: the app emits this only when an overflowing document was left
      unchanged with an explicit `kept_diminishing_returns` decision. If
      `manifest.json` becomes `imported` or the job folder is removed, Infinite
-     Canvas accepted the result; stop.
+     Canvas accepted the result; stop immediately. Do not inspect the imported
+     bundle or any post-import artifacts. Report this as acceptance, not as an
+     app-confirmed final page count unless that final count was actually
+     reported in `fit-feedback.json`.
    - If no matching feedback or import status appears within 45 seconds, stop
      without another rewrite and report that Infinite Canvas did not return a
      measured result while this session was waiting.

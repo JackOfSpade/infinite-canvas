@@ -37,6 +37,10 @@
      For big-co ATS pipelines and conservative industries the
      agent should switch the <html> attribute to
      `data-print="ink-only"` and skip the OCG post-process step.
+
+     All four variant attributes (data-print, data-page, data-mono,
+     data-density) are valid ONLY on the root <html> element. On
+     <main class="page"> or any other ancestor they do nothing.
      See SKILL.md §Variant selection for the per-company decision
      rule and STYLE.md §10 for the full variant specification.
 ============================================================ -->
@@ -255,21 +259,18 @@
     <span class="rule" aria-hidden="true"></span>
   </div>
 
+  <!-- 3 rows, one line each, filterable nouns only — STYLE.md §5.6.
+       Architecture concepts (Raft, CRDTs, consistent hashing) live in the
+       bullets above, where they are evidence rather than a claim. -->
   <dl class="skills">
     <dt>Languages</dt>
     <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
 
-    <dt>Distributed&nbsp;Systems</dt>
-    <dd>Raft<span class="sep">·</span>Paxos<span class="sep">·</span>CRDTs<span class="sep">·</span>consistent hashing<span class="sep">·</span>leader election<span class="sep">·</span>gossip<span class="sep">·</span>multi-region failover<span class="sep">·</span>vector clocks</dd>
-
-    <dt>Data</dt>
-    <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch<span class="sep">·</span>Snowflake</dd>
+    <dt>Data&nbsp;&amp;&nbsp;Storage</dt>
+    <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch</dd>
 
     <dt>Infrastructure</dt>
-    <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS (us-east, eu-west, ap-northeast)<span class="sep">·</span>Cloudflare Workers<span class="sep">·</span>gRPC<span class="sep">·</span>Envoy</dd>
-
-    <dt>Observability</dt>
-    <dd>OpenTelemetry<span class="sep">·</span>Prometheus<span class="sep">·</span>Grafana<span class="sep">·</span>Honeycomb<span class="sep">·</span>structured logging<span class="sep">·</span>SLOs &amp; error budgets</dd>
+    <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS<span class="sep">·</span>gRPC<span class="sep">·</span>Envoy<span class="sep">·</span>OpenTelemetry</dd>
   </dl>
 </section>
 

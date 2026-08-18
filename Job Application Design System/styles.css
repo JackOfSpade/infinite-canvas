@@ -1,6 +1,6 @@
 @charset "utf-8";
 /* ============================================================
-   Editorial Resume Design System — global CSS entry point
+   Job Application Design System — global CSS entry point
    ------------------------------------------------------------
    Consumers link THIS one file. It re-exports the design-token
    closure (colour, typography, spacing, page geometry, all
@@ -17,5 +17,9 @@
    globally, to preserve the system's original behaviour:
      - resume.css        (résumé page chrome + components)
      - cover-letter.css  (letter surface; load after resume.css)
+
+   Variants (data-print / data-page / data-mono / data-density) are
+   valid ONLY on the root <html> element. See the Variants section of
+   colors_and_type.css for the canonical contract.
    ============================================================ */
 @import "colors_and_type.css";

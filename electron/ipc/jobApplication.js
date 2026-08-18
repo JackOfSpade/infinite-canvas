@@ -3,7 +3,7 @@
  *
  * From a scored job card the user can generate a tailored résumé + cover letter
  * as single-file HTML documents, built on the editorial design system in
- * `resume_design_system/`. Flow (generate-application):
+ * `Job Application Design System/`. Flow (generate-application):
  *
  *   0. achievement ledger — a job-independent mining pass (Opus) + deterministic
  *      checks + an independent refute pass (Sonnet), run lazily on the origin
@@ -60,7 +60,7 @@ import {
   LETTER_PLAN_SCHEMA,
   LETTER_GROUNDING_AUDIT_SCHEMA,
 } from './aiSchemas.js';
-import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
+import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, isDualMode, getDesignSystemDir } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { primeClaudeModels } from './modelResolver.js';
 import {
@@ -206,7 +206,7 @@ function getResumeSampleMain() {
   const htmlPath = path.join(getDesignSystemDir(), 'resume.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
   const m = /<main[\s\S]*<\/main>/i.exec(html);
-  if (!m) throw new Error('Could not locate the <main> sample in resume_design_system/resume.html');
+  if (!m) throw new Error('Could not locate the <main> sample in Job Application Design System/resume.html');
   _resumeSampleMain = m[0];
   return _resumeSampleMain;
 }
@@ -274,6 +274,37 @@ const SENIOR_TITLE_RE = /\b(?:principal|director|vice president|vp|head of)\b|\b
  */
 export function targetPageCountForJob(jobTitle) {
   return SENIOR_TITLE_RE.test(String(jobTitle || '')) ? 2 : 1;
+}
+
+const INK_MONO_COMPANIES = /\b(?:ibm|accenture|deloitte|pwc|ey|ernst\s*&?\s*young|kpmg|mckinsey|boston\s+consulting|bain)\b/i;
+const INK_ONLY_COMPANIES = /\b(?:google|meta|amazon|microsoft|apple|salesforce|oracle|atlassian|shopify)\b/i;
+const CONSERVATIVE_RECIPIENT_SIGNALS = /\b(?:regulated|audit|clearance|fedramp|underwriting|actuarial|defen[cs]e|government|public sector|banking)\b/gi;
+const ENTERPRISE_RECIPIENT_SIGNALS = /\b(?:enterprise[- ]scale|governance|compliance|stakeholders?|matrix(?:ed)?\s+organi[sz]ation|global)\b/gi;
+const A4_LOCATION_SIGNALS = /\b(?:canada|united kingdom|england|scotland|wales|ireland|germany|france|spain|italy|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|australia|new zealand|singapore|india|japan|south korea)\b/i;
+
+function matchingSignalCount(pattern, text) {
+  pattern.lastIndex = 0;
+  return [...String(text || '').matchAll(pattern)].length;
+}
+
+/**
+ * Resolve the host-owned document variants from the job record. Models return
+ * bare <main> markup and never control document-shell attributes. Default to
+ * dual-pdf when the recipient cannot be classified confidently.
+ */
+export function applicationVariantAttrsForJob(job = {}) {
+  const company = String(job?.company || '');
+  const recipientText = [company, job?.title, job?.snippet, job?.description]
+    .filter(Boolean)
+    .join('\n');
+  const conservative = INK_MONO_COMPANIES.test(company)
+    || matchingSignalCount(CONSERVATIVE_RECIPIENT_SIGNALS, recipientText) > 0;
+  const enterprise = INK_ONLY_COMPANIES.test(company)
+    || matchingSignalCount(ENTERPRISE_RECIPIENT_SIGNALS, recipientText) >= 5;
+  const attrs = [`data-print="${conservative || enterprise ? 'ink-only' : 'dual-pdf'}"`];
+  if (conservative) attrs.push('data-mono');
+  if (A4_LOCATION_SIGNALS.test(String(job?.location || ''))) attrs.push('data-page="a4"');
+  return attrs.join(' ');
 }
 
 /**
@@ -620,7 +651,7 @@ ${serializeLedgerForPrompt(ledger.ledger, { gaps: ledger.gaps })}
 """`
     : '';
 
-  // The editorial rubric — read at runtime from resume_design_system/, injected
+  // The editorial rubric — read at runtime from Job Application Design System/, injected
   // WHOLE (never parsed by heading — see getEditorialRubric's doc-comment).
   // Empty when the docs are absent; injection is skipped rather than failing.
   const rubricText = getEditorialRubric();
@@ -658,11 +689,7 @@ RULES:
 - Pull the candidate's name, contact line, titles, employers, dates, and bullets from the CAREER DATA. A header location is OPTIONAL: include it only if the CAREER DATA explicitly identifies it as the candidate's own contact location. Never infer a candidate location from an employer, school, job listing, job-board profile, IP, or any contextual clue; omit the location and its separator when it is not explicitly supplied.
 - Wrap scale numbers / metrics quoted directly from the CAREER DATA in plain <strong>. Senior annotations are OPTIONAL and only if the data supports them: \`<span class="scope"><span class="annotation-label"> — </span>…</span>\` and \`<span class="tradeoff"><span class="annotation-label"> · trade-off: </span>…</span>\`. Figures sourced from the ACHIEVEMENT LEDGER instead use the RECEIPTS markup above, not plain <strong>.
 - Section order: Experience, then OPTIONAL "Selected Systems"/projects, Skills, Education. Drop any section the career data can't support (e.g. omit "Selected Systems" for non-engineering candidates).
-- No icons, photos, skill bars, progress dots, summary/objective paragraph, or emoji.
-- VARIANT — set as attributes on the <main> tag:
-  • Design-conscious / startup / craft-oriented company → \`data-print="dual-pdf"\` (the design system default — warm cream on screen, background automatically removed when printed).
-  • Big-company ATS / enterprise / regulated / finance back-office → \`data-print="ink-only"\` (flat white; also add \`data-mono\` for very conservative fields: defense, big-law, traditional banking IT).
-  • Non-US recipient → also add \`data-page="a4"\`.${ledgerSection}${rubricSection}`;
+- No icons, photos, skill bars, progress dots, summary/objective paragraph, emoji, or \`data-*\` variant attributes. The host owns the document shell, paper/print treatment, and measured density; output only the bare \`<main class="page">…</main>\`.${ledgerSection}${rubricSection}`;
 }
 
 /** Fill the design system's résumé markup, tailored to the job + research. */
@@ -1016,11 +1043,9 @@ function throwIfAbortedApp(signal) {
 async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount, job, skillInsights, reviseResume = reviseResumeForLength }, signal) {
   const attempts = [];
   let mainHtml = resumeMainHtml;
-  // The length-revision model may cut copy but must not silently change the
-  // initial document's ATS/ink-only choice or its paper size. Keep the root
-  // variant immutable across retries; buildResumeDocument removes conflicting
-  // model-level copies before rendering.
-  const baseVariantAttrs = extractVariantAttrs(resumeMainHtml, { density: null });
+  // The host chooses root variants once per application. A length-revision
+  // model may cut copy but cannot change paper or print treatment.
+  const baseVariantAttrs = applicationVariantAttrsForJob(job);
   const variantAttrsForDensity = (nextDensity) => nextDensity === 'compact'
     ? `${baseVariantAttrs} data-density="compact"`
     : baseVariantAttrs;
@@ -1981,7 +2006,7 @@ export function registerJobApplicationHandlers() {
     // diverge). Falls back to the original, unfit markup when the loop threw
     // before producing anything at all.
     const finalMainHtml = fitResult?.mainHtml || resumeMainHtml;
-    const variantAttrs = fitResult?.variantAttrs || extractVariantAttrs(resumeMainHtml);
+    const variantAttrs = fitResult?.variantAttrs || applicationVariantAttrsForJob(job);
 
     // 5. The cover letter reasons from the exact final raw résumé markup. A
     // render/PDF failure above is intentionally irrelevant here: its final

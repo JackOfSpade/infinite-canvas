@@ -1,5 +1,6 @@
 import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
+import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
@@ -581,9 +582,9 @@ export default [
 {
     name: 'Résumé compact density reaches printed @page margins',
     run: () => {
-      const css = fs.readFileSync(path.join(process.cwd(), 'resume_design_system', 'resume.css'), 'utf8');
+      const css = fs.readFileSync(path.join(process.cwd(), 'Job Application Design System', 'resume.css'), 'utf8');
       assert(css.includes('@page letter-compact') && css.includes('margin: 0.6in 0;')
-        && css.includes('[data-density="compact"] .page { page: letter-compact; }'),
+        && /:root\[data-density="compact"\]\s+\.page\s*\{\s*page:\s*letter-compact;/.test(css),
       'compact density must select a named Letter page with the advertised 0.6in print margins');
       assert(css.includes('@page a4-compact') && css.includes('page: a4-compact;'),
         'A4 + compact must select its own compact named page instead of falling back to full A4 margins');
@@ -4044,15 +4045,13 @@ export default [
     },
   },
 {
-    name: 'Application: variant attrs mirror résumé',
+    name: 'Application: variants are read from the document root and selected by the host',
     run: () => {
-      assert(extractVariantAttrs('<main class="page" data-print="ink-only" data-mono>') === 'data-print="ink-only" data-mono', 'variant: ink-only + mono');
-      // dual-pdf is the design system default — present even when the model
-      // omits data-print (and when it only sets paper size).
-      assert(extractVariantAttrs('<main class="page" data-page="a4">') === 'data-print="dual-pdf" data-page="a4"', 'variant: a4 defaults to dual-pdf');
-      assert(extractVariantAttrs('<main class="page" data-print="dual-pdf">') === 'data-print="dual-pdf"', 'variant: dual-pdf preserved');
-      assert(extractVariantAttrs('<main class="page">') === 'data-print="dual-pdf"', 'variant: plain → dual-pdf default');
-      assert(extractVariantAttrs("<main class='page' data-print='ink-only' data-page='a4' data-density='compact'>") === 'data-print="ink-only" data-page="a4" data-density="compact"', 'variant: single-quoted model attributes are preserved');
+      assert(extractVariantAttrs('<html data-print="ink-only" data-mono data-page="a4"><body><main class="page"></main></body></html>') === 'data-print="ink-only" data-mono data-page="a4"', 'root variants are preserved');
+      assert(extractVariantAttrs('<main class="page" data-print="ink-only" data-mono data-page="a4"></main>') === 'data-print="dual-pdf"', 'main-level variants are ignored');
+      assert(applicationVariantAttrsForJob({ company: 'Google', location: 'Mountain View, CA' }) === 'data-print="ink-only"', 'big-co host classification selects ink-only');
+      assert(applicationVariantAttrsForJob({ company: 'Accenture', location: 'Toronto, Canada' }) === 'data-print="ink-only" data-mono data-page="a4"', 'conservative non-US host classification composes ink-only, mono, and A4');
+      assert(applicationVariantAttrsForJob({ company: 'Linear', location: 'Remote (US)' }) === 'data-print="dual-pdf"', 'design-conscious recipients retain the dual-pdf default');
       // isDualMode gates the OCG cream post-process.
       assert(isDualMode('data-print="dual-pdf"') === true, 'isDualMode: dual-pdf → true');
       assert(isDualMode('data-print="ink-only" data-mono') === false, 'isDualMode: ink-only → false');
@@ -4074,7 +4073,8 @@ export default [
     name: 'Application: variant attrs are read from a built document’s <html> root, not a <main> decoy',
     run: () => {
       const builtDoc = (attrs) => buildResumeDocument({
-        resumeMainHtml: `<main class="page" ${attrs}><h1 class="name">Jane</h1></main>`,
+        resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Jane</h1></main>',
+        variantAttrs: attrs || 'data-print="dual-pdf"',
         docId: 'variant-roundtrip',
       });
       const resumePanelMain = (doc) => /<section[^>]*data-ic-document-panel="resume"[^>]*>\s*(<main\b[^>]*>)/i.exec(doc)?.[1] || '';
@@ -4092,11 +4092,6 @@ export default [
         // The round trip: what the builder wrote is what a re-read resolves.
         assert(extractVariantAttrs(doc) === expected, `re-reading a built document must yield "${expected}", not the dual-pdf default`);
       }
-      // The decoy is real, not hypothetical: the first <main …> in a built
-      // document is a stylesheet-comment example, never the résumé's own tag.
-      const inkDoc = builtDoc('data-print="ink-only"');
-      assert(/<main\b[^>]*>/i.exec(inkDoc)?.[0] !== resumePanelMain(inkDoc), 'the first <main> in a built document is expected to be a stylesheet-comment decoy');
-
       // The OCG gate — the actual consumer, and the thing that was inverted.
       assert(isDualMode(extractVariantAttrs(builtDoc('data-print="ink-only"'))) === false, 'a saved ink-only application must NOT be re-read as dual (no OCG cream layer)');
       assert(isDualMode(extractVariantAttrs(builtDoc('data-print="dual-pdf"'))) === true, 'a saved dual-pdf application must still be re-read as dual');
@@ -4105,28 +4100,19 @@ export default [
       const coverDoc = buildCoverLetterDocument({ letter: { salutation: 'Dear team,', paragraphs: ['Hi.'] }, variantAttrs: 'data-print="ink-only" data-mono', docId: 'variant-cover' });
       assert(extractVariantAttrs(coverDoc) === 'data-print="ink-only" data-mono', 'cover letter: re-reading a built document must yield its own variant');
 
-      // A bare <main> block (the résumé model's raw output) still wins when no
-      // root carries a variant — the generate path must be unaffected.
-      assert(extractVariantAttrs('<html lang="en"><body><main class="page" data-print="ink-only"></main></body></html>') === 'data-print="ink-only"', 'a variant-less <html> must fall through to <main>');
+      assert(extractVariantAttrs('<html lang="en"><body><main class="page" data-print="ink-only"></main></body></html>') === 'data-print="dual-pdf"', 'a variant-less root ignores a main-level variant');
       return { ok: true };
     },
   },
 {
-    // extractVariantAttrs used to recognize only data-print/data-mono/
-    // data-page and silently DROP data-density — the fit loop's one lever
-    // (jobApplication.js's renderResumeWithFit) was structurally unreachable.
-    name: 'Application: extractVariantAttrs carries data-density (was silently dropped) and the caller can force it',
+    name: 'Application: only root density is read and the host can force it after measurement',
     run: () => {
-      // No density anywhere → absent, not a false "compact".
-      assert(extractVariantAttrs('<main class="page" data-print="ink-only">') === 'data-print="ink-only"', 'no density: attribute absent entirely');
-      // The model emitted it on its own (defensive recognition, not the normal
-      // path — the model is never instructed to set this).
-      assert(extractVariantAttrs('<main class="page" data-density="compact">') === 'data-print="dual-pdf" data-density="compact"', 'density read from the model markup when present');
+      assert(extractVariantAttrs('<html data-print="ink-only"><body><main class="page"></main></body></html>') === 'data-print="ink-only"', 'root without density stays at default density');
+      assert(extractVariantAttrs('<html data-density="compact"><body><main class="page"></main></body></html>') === 'data-print="dual-pdf" data-density="compact"', 'root compact is preserved');
+      assert(extractVariantAttrs('<main class="page" data-density="compact">') === 'data-print="dual-pdf"', 'model-level compact is ignored');
       // The fit loop forcing it ON, regardless of what the markup says.
       assert(extractVariantAttrs('<main class="page">', { density: 'compact' }) === 'data-print="dual-pdf" data-density="compact"', 'caller-forced density: compact wins over absent markup');
-      assert(extractVariantAttrs('<main class="page" data-density="compact">', { density: null }) === 'data-print="dual-pdf"', 'caller-forced density: null wins over a model-emitted compact (fit loop resetting to the un-compact state)');
-      // Composes with the other variants, per SKILL.md's "pairs cleanly with" note.
-      assert(extractVariantAttrs('<main class="page" data-print="ink-only" data-mono data-page="a4">', { density: 'compact' }) === 'data-print="ink-only" data-mono data-page="a4" data-density="compact"', 'density composes with ink-only + mono + a4');
+      assert(extractVariantAttrs('<html data-print="ink-only" data-mono data-page="a4">', { density: 'compact' }) === 'data-print="ink-only" data-mono data-page="a4" data-density="compact"', 'forced density composes with root print, mono, and A4');
       return { ok: true };
     },
   },

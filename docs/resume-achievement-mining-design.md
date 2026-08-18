@@ -418,8 +418,8 @@ The prefix must stay **byte-stable across calls** or the Claude cache marker mis
 - **The ledger**, serialized with **deterministic key ordering**. A `JSON.stringify` over an object
   whose key order varies between calls silently destroys the cache hit. Serialize through an
   explicit field-order helper.
-- **The editorial rubric**, read at runtime from `resume_design_system/SKILL.md` and
-  `resume_design_system/readme.md` and injected **whole**. Do not parse sections by heading —
+- **The editorial rubric**, read at runtime from `Job Application Design System/SKILL.md` and
+  `Job Application Design System/readme.md` and injected **whole**. Do not parse sections by heading —
   heading text is exactly what changes when the design system is replaced. If the files are absent,
   skip the injection rather than failing generation.
 
@@ -521,7 +521,7 @@ then — for the `dual-pdf` variant — still runs the bytes through `build/dual
 `addOcgBackground`, exactly as described below, just loaded differently: not a CJS
 `Function(...)` eval of the Node branch (confirmed broken in a packaged build — `pdf-lib`
 lives in `app.asar/node_modules`, a non-ancestor of the sibling-of-asar
-`resume_design_system/` the UMD would try to `require()` from), but an in-realm eval of the
+`Job Application Design System/` the UMD would try to `require()` from), but an in-realm eval of the
 UMD's *browser* branch with our own already-imported `pdf-lib` injected as `self.PDFLib`. The
 HTML remains primary and editable exactly as this section intended; the PDF is a generated
 companion written next to it, not a replacement for it, and never blocks generation if
@@ -556,7 +556,7 @@ temp dir. For a standalone file:
 
 - **Inline the stylesheets** — read the CSS text at build time and emit one `<style>`. The current
   design contract preserves its Google Fonts `@import`; safe local font URLs remain supported for
-  a future re-vendoring change. Read-only access to `resume_design_system/`; nothing in that folder
+  a future re-vendoring change. Read-only access to `Job Application Design System/`; nothing in that folder
   is modified.
 - **Append an injected chrome block** *after* the design-system CSS, namespaced `ic-` so a wholesale
   design replacement can never collide:
@@ -600,7 +600,7 @@ Mitigation: a print-hidden hint bar plus an Export button that calls `window.pri
 "download edited copy" affordance. There is a mature `contenteditable` pattern in the repo already
 (`src/nodes/TextNode.jsx:151`, `src/utils/nativeTextUndo.js:28`) to model on.
 
-Note `resume_design_system/readme.md:15-19` documents the opposite intent — *"No human interactive
+Note `Job Application Design System/readme.md:15-19` documents the opposite intent — *"No human interactive
 surface. No editor."* That doc is design-owned and must not be edited; record the deliberate
 divergence here instead, so a future instance does not "fix" the editor away.
 
@@ -809,13 +809,13 @@ family tokens rather than "newest Claude model".
 
 ## 9. Design-system boundary
 
-`resume_design_system/` is **owned by Claude design, read-only from this repo's side, and may be
+`Job Application Design System/` is **owned by Claude design, read-only from this repo's side, and may be
 replaced wholesale**. Reconnection after a replacement is done manually and deliberately — the goal
 is *not* self-healing code, it is a small, enumerated, loud-failing coupling surface.
 
 Rules:
 
-- Never write into `resume_design_system/`. All new CSS, markup and script go into
+- Never write into `Job Application Design System/`. All new CSS, markup and script go into
   `electron/ipc/resumeHtml.js`.
 - Namespace everything injected (`ic-`) so a replacement cannot collide.
 - Prefer **attributes over classes** for hooks — `data-derivation` needs no re-wiring on a swap.
@@ -945,4 +945,4 @@ Each phase ships something usable on its own.
   checklist of 30 derived claims contradicts that.
 - **Any status/notes/monitoring on job cards** — cards stay disposable. The applied store records a
   fact, not a pipeline stage.
-- **Editing `resume_design_system/`** — read-only, replaceable, manually reconnected.
+- **Editing `Job Application Design System/`** — read-only, replaceable, manually reconnected.

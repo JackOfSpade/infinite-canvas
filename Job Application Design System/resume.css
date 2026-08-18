@@ -41,11 +41,11 @@
 }
 
 /* -------- print: CSS Paged Media --------
-   Named pages let the data-page attribute fully control paper size.
-   Chromium 85+ honours `page: <name>` on an element + matching
-   `@page <name> { size: ... }` rules — no top-level override needed.
-   The margin tokens inside .page are recomputed by the data-page
-   variant block in colors_and_type.css.
+   Named pages let the root-level data-page / data-density attributes
+   fully control paper size. Chromium 85+ honours `page: <name>` on an
+   element + matching `@page <name> { size: ... }` rules — no top-level
+   override needed. The margin tokens inside .page are recomputed by
+   the variant blocks in colors_and_type.css.
 
    Running footer:
    The @bottom-right margin box prints the page number on every
@@ -88,7 +88,7 @@
 /* -------- compact density: tightened printed vertical margins --------
    Compact shrinks head/foot from 0.72in → 0.6in (Letter) and
    18mm → 15.24mm (A4), matching the --margin-top/--margin-bot
-   overrides in the [data-density="compact"] block. Named pages are
+   overrides in the :root[data-density="compact"] block. Named pages are
    required because @page margins cannot read custom properties. */
 @page letter-compact {
   size: Letter;
@@ -123,24 +123,22 @@
   size: Letter;
   margin: 0.72in 0;
 }
-.page              { page: letter; }
-/* a4 applies whether the attribute sits on the .page element itself or
-   on any ancestor (e.g. <html data-page="a4">); the descendant selector
-   already covers the :root case, so no separate :root rule is needed. */
-.page[data-page="a4"],
-[data-page="a4"] .page { page: a4; }
-/* Compact density selects the tightened named pages. Both variants may
-   sit on <html> or on .page itself, so every placement combination is
-   enumerated. Declared after the plain letter/a4 rules so compact wins. */
-.page[data-density="compact"],
-[data-density="compact"] .page { page: letter-compact; }
-.page[data-page="a4"][data-density="compact"],
-[data-page="a4"] .page[data-density="compact"],
-[data-density="compact"] .page[data-page="a4"],
-[data-page="a4"][data-density="compact"] .page,
-[data-page="a4"] [data-density="compact"] .page,
-[data-density="compact"] [data-page="a4"] .page { page: a4-compact; }
+/* -------- named-page selection --------
+   Variant attributes are valid ONLY on the root <html> element (see
+   the Variants section of colors_and_type.css), so each rule is a
+   single `:root[…] .page` descendant selector. Four states, four
+   rules — no enumeration of nested / page-level placements, and no
+   `.page[data-…]` self-selectors. Specificity does the ordering:
+   compact (0,3,0, declared later) beats plain letter/a4, and the
+   two-attribute a4-compact rule (0,4,0) beats both. */
+.page                                              { page: letter; }
+:root[data-page="a4"] .page                        { page: a4; }
+:root[data-density="compact"] .page                { page: letter-compact; }
+:root[data-page="a4"][data-density="compact"] .page { page: a4-compact; }
 @media print {
+  /* --bg is redefined on :root by the data-print variants, so html reads
+     it directly and body inherits: white for ink-only, transparent for
+     dual-pdf. No mirror selectors needed. */
   html, body { background: var(--bg); }
   body { padding: 0; }
   .page {

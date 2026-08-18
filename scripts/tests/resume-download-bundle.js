@@ -236,6 +236,7 @@ export default [
       const doc = buildResumeDocument({
         docId: 'bundle-variant-test',
         resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Maya</h1></main>',
+        variantAttrs: 'data-print="ink-only"',
         coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
         downloadBundle: {
           company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role',
@@ -257,6 +258,7 @@ export default [
       const dualDoc = buildResumeDocument({
         docId: 'bundle-variant-dual-test',
         resumeMainHtml: '<main class="page" data-print="dual-pdf"><h1 class="name">Maya</h1></main>',
+        variantAttrs: 'data-print="dual-pdf"',
         coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
       });
       const dualDom = new JSDOM(dualDoc, { runScripts: 'dangerously', url: 'https://application-variant-dual.local/' });

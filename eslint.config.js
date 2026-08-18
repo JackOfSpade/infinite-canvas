@@ -8,8 +8,8 @@ export default defineConfig([
   globalIgnores([
     'dist', 'dist-electron',
     'release',                            // electron-builder output (gitignored) — never lint built app copies
-    'resume_design_system/build/vendor',  // third-party (pdf-lib.min.js)
-    'resume_design_system/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited
+    'Job Application Design System/build/vendor',  // third-party (pdf-lib.min.js)
+    'Job Application Design System/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited
   ]),
   {
     files: ['**/*.{js,jsx}'],
@@ -44,7 +44,7 @@ export default defineConfig([
   {
     // The resume PDF build engine + its self-test are plain CommonJS Node scripts
     // (require/module.exports/Buffer/process), not browser ESM. Lint them as such.
-    files: ['resume_design_system/build/**/*.js'],
+    files: ['Job Application Design System/build/**/*.js'],
     languageOptions: {
       sourceType: 'commonjs',
       globals: {

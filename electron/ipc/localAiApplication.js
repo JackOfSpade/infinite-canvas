@@ -14,9 +14,9 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
 import { formatOriginalJobListingMarkdown } from './applicationBundle.js';
-import { buildCoverLetterDocument, buildResumeDocument, extractVariantAttrs } from './resumeHtml.js';
+import { buildCoverLetterDocument, buildResumeDocument } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
-import { normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, targetPageCountForJob } from './jobApplication.js';
+import { applicationVariantAttrsForJob, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
@@ -70,7 +70,7 @@ function localAiProjectRoot(canvasFilePath = '') {
     let candidate = path.resolve(seed);
     for (let depth = 0; depth < 8; depth += 1) {
       if (fs.existsSync(path.join(candidate, 'package.json'))
-        && fs.existsSync(path.join(candidate, 'resume_design_system'))) return candidate;
+        && fs.existsSync(path.join(candidate, 'Job Application Design System'))) return candidate;
       const parent = path.dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
@@ -331,10 +331,10 @@ function assertLocalAiQualityReviewConsistency(result, priorFeedback) {
 // truncate bullets mechanically: a Local AI revision can rank them against the
 // target job far better than source-order deletion can. The app writes trusted
 // fit feedback and waits for that revision instead.
-async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetPageCount, signal }) {
+async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetPageCount, job, signal }) {
   const attempts = [];
   let mainHtml = resumeMainHtml;
-  const baseVariantAttrs = extractVariantAttrs(resumeMainHtml, { density: null });
+  const baseVariantAttrs = applicationVariantAttrsForJob(job);
   // Layout density is app-owned. A model never has a measured page count at
   // draft time, so ignore any `data-density` it supplied and establish the
   // default-density baseline first. Only this loop may enable compact after
@@ -579,7 +579,7 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
     ? input.targetPageCount
     : targetPageCountForJob(input.job?.title);
   const resumeFit = await renderLocalResumeWithFit({
-    resumeMainHtml: result.resumeMainHtml, ledger, docId, targetPageCount, signal,
+    resumeMainHtml: result.resumeMainHtml, ledger, docId, targetPageCount, job: input.job, signal,
   });
   const coverLetterFit = await renderLocalCoverLetter({
     letter: result.coverLetter, variantAttrs: resumeFit.variantAttrs, docId: `${docId}-cover`, signal,

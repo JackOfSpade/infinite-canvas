@@ -1,6 +1,6 @@
 @charset "utf-8";
 /* ============================================================
-   Editorial Resume Design System — design tokens
+   Job Application Design System — design tokens
    ----------------------------------------------------------
    Type:    Source Serif 4 (display)  ·  Inter (body)  ·  IBM Plex
             Mono (technologies). All three load from the Google Fonts
@@ -64,8 +64,8 @@
   /* ---------- Color · accent ---------- */
   /* Default usage: candidate name ONLY. The single override point
      is --accent-on. Set it to var(--ink-1) for a pure-monochrome
-     variant — either at :root, or scoped to a .page node:
-        <main class="page" style="--accent-on: var(--ink-1)">…
+     variant — via the root-level `data-mono` attribute (see
+     Variants below), which is the only supported way to switch it.
      Do NOT introduce a second accent token. */
   --accent:      #7A1F2B;   /* oxblood — quiet, ink-like      */
   --accent-on:   var(--accent);
@@ -234,12 +234,21 @@ code, kbd, samp {
 ul { margin: 0; padding: 0; list-style: none; }
 
 /* ============================================================
-   Variants
+   Variants — the canonical variant contract
    ----------------------------------------------------------
-   Opt-in alternate configurations. Apply by setting a data
-   attribute on the .page element (or on :root for the whole
-   document). Each variant is a closed override block — adding
-   a third should follow the same shape.
+   Four opt-in attributes: data-print, data-page, data-mono,
+   data-density.
+
+   THEY ARE VALID ONLY ON THE ROOT <html> ELEMENT. Every selector
+   below is anchored with `:root`, so an attribute on
+   <main class="page">, on <body>, or on any other ancestor has NO
+   effect. This is deliberate: one document = one configuration,
+   selectors stay flat, and no mixed / nested placement can produce
+   a half-applied variant. Consumers of this system emit a bare
+   <main class="page">…</main> and let the host set root attributes.
+
+   Each variant is a closed override block — a new one follows the
+   same shape (`:root[data-…]`).
    ============================================================ */
 
 /* ---------- A4 paper ----------
@@ -248,13 +257,13 @@ ul { margin: 0; padding: 0; list-style: none; }
    breaking Butterick's editorial sweet spot. Recompute the margins
    so the content width is preserved at ~6.94in.
 
-   Apply with:  <main class="page" data-page="a4">…
-   or globally: <html data-page="a4">
+   Apply with:  <html data-page="a4">   (root only)
 
    The physical paper size is selected by CSS named pages declared
-   in `resume.html` (`@page a4 { size: A4 }` + `page: a4` on the
-   element). No separate top-level override is required. */
-[data-page="a4"] {
+   in `resume.css` (`@page a4 { size: A4 }` + a root-scoped
+   `page: a4` rule on `.page`). No separate top-level override is
+   required. */
+:root[data-page="a4"] {
   --page-w:      210mm;   /* @kind spacing */  /* 8.27in */
   --page-h:      297mm;   /* @kind spacing */  /* 11.69in */
   --margin-top:   18mm;   /* @kind spacing */  /* ~0.71in — preserves vertical rhythm */
@@ -267,9 +276,8 @@ ul { margin: 0; padding: 0; list-style: none; }
    --ink-1. Useful for B&W laser pipelines or when the recipient
    org has a documented aversion to colour on résumés.
 
-   Apply with:  <main class="page" data-mono>…
-   or globally: <html data-mono>                                 */
-[data-mono] {
+   Apply with:  <html data-mono>   (root only)                    */
+:root[data-mono] {
   --accent-on: var(--ink-1);
 }
 
@@ -291,13 +299,15 @@ ul { margin: 0; padding: 0; list-style: none; }
    - --col-meta-w — date strings keep the same metrics
    - --rule-weight, accent, families — visual identity unchanged
 
-   Apply with:  <main class="page" data-density="compact">…
-   or globally: <html data-density="compact">
+   Apply with:  <html data-density="compact">   (root only)
 
-   Pairs cleanly with `data-page="a4"` and `data-mono`. Do not
-   nest density variants — there is one. If "compact" still
-   overflows, the content is the problem; trim a bullet.       */
-[data-density="compact"] {
+   This is a FALLBACK, not the default and not a tier in a scale:
+   there is exactly one density variant, applied only after a
+   render has measured an overflow. Pairs cleanly with
+   `data-page="a4"` and `data-mono`. If "compact" still overflows,
+   the content is the problem; trim a bullet — do not add another
+   density level or compress type further.                     */
+:root[data-density="compact"] {
   --fs-body:      9.75pt;  /* @kind font */
   --fs-small:     9pt;     /* @kind font */
   --fs-caption:   8.5pt;   /* @kind font */
@@ -327,33 +337,23 @@ ul { margin: 0; padding: 0; list-style: none; }
    over warm cream the visual contrast is slightly higher than over
    white, so we compensate).
 
-   Apply with:  <main class="page" data-print="ink-only">…
-   or globally: <html data-print="ink-only">
+   Apply with:  <html data-print="ink-only">   (root only)
 
    Pairs cleanly with `data-page="a4"`, `data-mono`, and
    `data-density="compact"`. If you also set `data-mono`, the printed
    page is plain ink-on-white — equivalent to a traditional B&W
    résumé without rewriting any content.                            */
 @media print {
-  [data-print="ink-only"] {
+  /* Because the token is redefined on :root, `html` reads the white
+     value directly and `body` inherits it, so the print rule in
+     resume.css (`html, body { background: var(--bg) }`) paints the
+     whole sheet white with no mirror selectors. The old `:has()` and
+     `.page`-level compatibility branches existed only to patch up
+     subtree-scoped placements; root-only placement removes the need. */
+  :root[data-print="ink-only"] {
     --bg:        #FFFFFF;
     --bg-rule:   rgba(26, 24, 21, 0.16);
   }
-  /* The print-mode rule in resume.css paints html + body from
-     `var(--bg)`. Because `--bg` is a CSS custom property, it resolves
-     against the *element it's read on* — putting `data-print="ink-only"`
-     on `<main class="page">` overrides --bg on that subtree only, NOT
-     on html/body. Without the mirror below, html/body would keep the
-     warm cream and a résumé shorter than one full page would show a
-     band of cream below the white card.
-
-     `:has()` lets us flip the sheet background whenever ANY page on the
-     document opts into ink-only — so the attribute works whether it
-     lives on <html>, <body>, or an individual <main class="page">. */
-  html:has([data-print="ink-only"]),
-  html:has([data-print="ink-only"]) body,
-  html[data-print="ink-only"],
-  html[data-print="ink-only"] body { background: #FFFFFF; }
 }
 
 /* ---------- Print: dual-pdf  (default for PDF generation) ----------
@@ -382,8 +382,7 @@ ul { margin: 0; padding: 0; list-style: none; }
    appears very slightly heavier than the default 10% — an acceptable
    trade for printability.
 
-   Apply with:  <main class="page" data-print="dual-pdf">…
-   or globally: <html data-print="dual-pdf">
+   Apply with:  <html data-print="dual-pdf">   (root only)
 
    This is the DEFAULT in resume.html. To opt out (e.g. you want a
    one-state cream-baked PDF for a context where the recipient will
@@ -392,18 +391,13 @@ ul { margin: 0; padding: 0; list-style: none; }
    Pairs cleanly with `data-page="a4"`, `data-mono`, and
    `data-density="compact"`.                                          */
 @media print {
-  [data-print="dual-pdf"] {
+  /* Root-only, same as ink-only: `html` reads --bg directly and `body`
+     inherits, so `html, body { background: var(--bg) }` in resume.css
+     emits a page content stream with NO background fill — exactly what
+     the OCG post-processor needs in order to layer cream as the
+     bottom-most drawn element. No mirror or `:has()` branch required. */
+  :root[data-print="dual-pdf"] {
     --bg:        transparent;
     --bg-rule:   rgba(26, 24, 21, 0.16);
   }
-  /* Same html/body mirror trick as ink-only, but flipping to
-     transparent instead of white. With nothing drawn for the
-     background, a headless-Chrome "print to PDF" emits a page
-     content stream with no background fill — exactly what the OCG
-     post-processor needs in order to layer cream as the bottom-most
-     drawn element. */
-  html:has([data-print="dual-pdf"]),
-  html:has([data-print="dual-pdf"]) body,
-  html[data-print="dual-pdf"],
-  html[data-print="dual-pdf"] body { background: transparent; }
 }

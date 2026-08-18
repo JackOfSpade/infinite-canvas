@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- @dsCard group="Colors" name="Variant · Monochrome" subtitle="data-mono toggle: name renders in ink, not oxblood" viewport="760x280" -->
+<!-- @dsCard group="Colors" name="Variant · Monochrome" subtitle="root data-mono toggle: name renders in ink, not oxblood" viewport="760x280" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
@@ -15,7 +15,9 @@
     margin: 0;
   }
   .pair .default .name { color: var(--accent); }
-  .pair .mono { /* monochrome variant — applied scoped via data-mono */ }
+  /* Side-by-side demo only. data-mono is valid solely on the root <html>
+     element, so this card paints the mono half directly rather than
+     scoping the attribute to a subtree. */
   .pair .mono .name { color: var(--ink-1); }
   .label {
     font-family: var(--ff-mono);
@@ -38,10 +40,10 @@
     <p class="rule">Candidate name renders in <code>--accent</code> (oxblood). One restrained moment of warmth — the only colour on the page.</p>
   </div>
 
-  <div class="mono" data-mono>
+  <div class="mono">
     <p class="label">data-mono</p>
     <p class="name">Anya R. Castellanos</p>
-    <p class="rule">Add <code>data-mono</code> to <code>&lt;main class="page"&gt;</code>. <code>--accent-on</code> rebinds to <code>--ink-1</code>. Everything else identical.</p>
+    <p class="rule">Add <code>data-mono</code> to the root <code>&lt;html&gt;</code> element — the only placement the CSS honours. <code>--accent-on</code> rebinds to <code>--ink-1</code>. Everything else identical.</p>
   </div>
 </div>
 

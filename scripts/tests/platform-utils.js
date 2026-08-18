@@ -1760,8 +1760,8 @@ export default [
       assert(safe.includes('https://example.test/a') && safe.includes('#fragment'),
         'inliner preserves external and fragment URLs');
       const packageConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
-      const resource = packageConfig?.build?.extraResources?.find(entry => entry?.from === 'resume_design_system');
-      assert(resource?.to === 'resume_design_system',
+      const resource = packageConfig?.build?.extraResources?.find(entry => entry?.from === 'Job Application Design System');
+      assert(resource?.to === 'Job Application Design System',
         'electron-builder copies the design system to the runtime resource path getDesignSystemDir resolves');
       const errorFor = (css) => {
         try { inlineDesignCssUrls(css, cssPath, dir); } catch (error) { return String(error?.message || error); }
@@ -1864,7 +1864,7 @@ export default [
     // resolution from a development checkout.
     name: 'dual-mode-pdf.js loader: evaluated with an injected self.PDFLib (the packaged-build-safe path getDualModePdf() uses, not require())',
     run: async () => {
-      const modulePath = path.resolve('resume_design_system/build/dual-mode-pdf.js');
+      const modulePath = path.resolve('Job Application Design System/build/dual-mode-pdf.js');
       const moduleSrc = fs.readFileSync(modulePath, 'utf8');
       const root = { PDFLib };
       const DualModePdf = new Function('self', `${moduleSrc}\n;return self.DualModePdf;`)(root);

@@ -66,7 +66,7 @@ Five structural causes:
    verbatim — while the load-bearing content is one free-text array.
 5. **Zero post-generation validation.** The résumé gets render → page-count → compact → one revision
    → ship. The letter gets nothing, despite being rendered through the same `renderPdf` that returns
-   `pageCount` (`electron/ipc/resumeRender.js:228`) and despite `resume_design_system/STYLE.md` §11.4
+   `pageCount` (`electron/ipc/resumeRender.js:228`) and despite `Job Application Design System/STYLE.md` §11.4
    making one page a hard content rule. A two-page letter ships silently today.
 
 ---
@@ -231,7 +231,7 @@ failure must not block the letter — take `fitResult.mainHtml` and proceed.
 ### 4.3 Letterhead identity comes from the résumé
 
 `name`, `tagline`, and `contact` are currently re-derived from career data by the letter call, so the
-two documents in a "matched pair" (`resume_design_system/STYLE.md` §11) can silently disagree. Lift
+two documents in a "matched pair" (`Job Application Design System/STYLE.md` §11) can silently disagree. Lift
 them from `evidence.identity` instead.
 
 `candidateLocationFromContact` (~line 927) then feeds the location-review flag from the same string the
@@ -456,7 +456,7 @@ with the field values pasted in.
 ### 6.4 Where the rubric lives
 
 `getEditorialRubric()` (~line 142) reads **`SKILL.md` + `readme.md`** from
-`resume_design_system/` — **not `STYLE.md`**. Writing this standard into `STYLE.md` §11 would never
+`Job Application Design System/` — **not `STYLE.md`**. Writing this standard into `STYLE.md` §11 would never
 reach the prompt. If the standard belongs in the design system, it goes in `SKILL.md`; otherwise keep
 it in code. Either is acceptable — just do not put it somewhere that silently never loads.
 
@@ -572,7 +572,7 @@ for the suites — see any existing suite's import line).
 
 ### 10.1 Unit tests (no LLM)
 
-- **Extractor** against real `resume_design_system/resume.html` markup: role/bullet/skill counts,
+- **Extractor** against real `Job Application Design System/resume.html` markup: role/bullet/skill counts,
   annotation spans retained, `data-achievement-id` collection, identity fields.
 - **Extractor decoy guard:** feed it a *built* document and assert it is not silently parsing the
   commented `<main data-print=…>` examples (§4.1).
