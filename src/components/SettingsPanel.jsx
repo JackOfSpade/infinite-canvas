@@ -792,10 +792,13 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                   <div className="space-y-2.5 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/70 text-[11px] font-medium">Claude Code handoff</div>
                     <div className="text-white/40 text-[10px] leading-relaxed">
-                      Generate queues a local job containing the same structured request and references used by the app. Run your Claude Code routine when ready; it reads that job, writes the completed result back, and the canvas picks it up automatically.
+                      Generate writes a self-contained job beside the saved canvas under .local-ai/jobs. Run local_ai/CLAUDE_CODE_ROUTINE.md with your subscription-authenticated Claude Code session; the canvas validates and imports its result automatically.
                     </div>
                     <div className="bg-black/25 border border-white/5 rounded-md px-2.5 py-2 text-white/35 text-[9px] leading-relaxed font-mono">
-                      queue job → run local routine → result returns to canvas
+                      Edit INPUT_JOBS_ROOT and OUTPUT_BUNDLE_ROOT in the routine. Output is relative to the saved canvas folder.
+                    </div>
+                    <div className="text-white/30 text-[9px] leading-relaxed">
+                      Completed jobs are removed after their final bundle is saved. Unfinished jobs are retained for up to 30 days, with a 20-job limit per canvas.
                     </div>
                     <p className="text-amber-300/65 text-[9px] leading-relaxed">
                       This mode is manual and asynchronous. It uses no Gemini or Anthropic API key; keep one of the API modes selected when you need immediate in-app generation.

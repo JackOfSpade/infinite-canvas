@@ -147,9 +147,12 @@ function historyDropEvidenceLines(samples, totalDropped, indent = '') {
  * abort signal cut off before they were ever scored. A bare "Scored N jobs"
  * log line hides both.
  */
-export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath) {
+export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = []) {
   let t;
   try { t = getJobsTelemetry(); } catch { return ''; }
+  // Local AI card state is renderer-owned and can be diagnostically useful
+  // even before the job-search telemetry store has recorded a pipeline run.
+  if (!t) t = {};
   let browserScrape = null;
   try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
   let hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
@@ -190,14 +193,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
-  if (!t || (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs)) return '';
+  const visibleLocalApplications = Array.isArray(localApplications)
+    ? localApplications.filter(item => item?.localApplication?.id)
+    : [];
+  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
     deletedNoun: 'hub',
   });
   if (scope.foreign) {
-    if (!scopedApplication && !applicationSync) return `\n## Job Search Pipeline\n${scope.note}`;
+    if (!scopedApplication && !applicationSync && visibleLocalApplications.length === 0) return `\n## Job Search Pipeline\n${scope.note}`;
     // A local application generation/Sync must remain reportable even when a
     // different window owns the process-global last jobs run. Drop only that
     // foreign funnel rather than returning before the local sections render.
@@ -221,6 +227,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
+  if (visibleLocalApplications.length) {
+    lines.push('\n### Local AI Job State (live card snapshot)');
+    for (const item of visibleLocalApplications.slice(0, 20)) {
+      const local = item.localApplication;
+      const title = item.title || '(untitled)';
+      const company = item.company || '(no company)';
+      const message = String(local.message || '').replace(/\s+/g, ' ').replace(/`/g, "'").slice(0, 500);
+      lines.push(`- ${title} @ ${company}${item.nodeId ? ` · node ${item.nodeId}` : ''} · job \`${local.id}\` · status: **${local.status || 'unknown'}**${message ? ` — ${message}` : ''}`);
+    }
+    if (visibleLocalApplications.length > 20) lines.push(`- _${visibleLocalApplications.length - 20} additional Local AI card state(s) omitted._`);
+  }
   // Populated by the saved-snapshot quality pass and reused by the LinkedIn
   // residual verdict. Keeping both checks on the same normalized strings avoids
   // declaring completion from process telemetry while the actual scoring input
@@ -1905,6 +1922,31 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
     if (applicationScope?.note) lines.push(applicationScope.note.trimEnd());
     lines.push(`- Job: ${a.jobTitle || '(untitled)'} @ ${a.company || '(no company)'}${a.nodeId ? ` · node ${a.nodeId}` : ''}`);
+    if (a.source === 'local-ai') {
+      lines.push(`- Route: Local AI manual handoff${a.localAi?.jobId ? ` · job \`${a.localAi.jobId}\`` : ''}`);
+      const handoffHistory = Array.isArray(a.localAi?.handoffHistory) ? a.localAi.handoffHistory : [];
+      if (handoffHistory.length) {
+        lines.push('- Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review):');
+        for (const event of handoffHistory.slice(-12)) {
+          const resume = event?.resume || {};
+          const cover = event?.coverLetter || {};
+          const attempts = Array.isArray(resume.attempts) && resume.attempts.length
+            ? ` · résumé attempts ${resume.attempts.map(attempt => `#${attempt?.attempt ?? '?'}${attempt?.density === 'compact' ? '[compact]' : ''}=${attempt?.error ? 'error' : `${attempt?.pageCount ?? '?'}p`}`).join(', ')}`
+            : '';
+          const round = Number.isFinite(event?.revisionRound) ? ` · revision ${event.revisionRound}` : '';
+          const resultHash = event?.resultSha256 ? ` · result ${String(event.resultSha256).slice(0, 16)}` : '';
+          const resumePages = resume.pageCount != null ? ` · résumé ${resume.pageCount}/${resume.targetPageCount ?? '?'}p` : '';
+          const coverPages = cover.pageCount != null ? ` · cover ${cover.pageCount}/${cover.targetPageCount ?? '?'}p` : '';
+          const detail = event?.detail ? ` — ${String(event.detail).replace(/\s+/g, ' ').slice(0, 320)}` : '';
+          lines.push(`  - ${event?.at || '?'} · ${event?.type || 'unknown'}${round}${resultHash}${resumePages}${coverPages}${attempts}${detail}`);
+          const qualityReview = event?.qualityReview;
+          if (qualityReview?.resume || qualityReview?.coverLetter) {
+            const formatReview = (label, review) => `${label} ${review?.decision || 'unknown'}${review?.rationale ? ` — ${String(review.rationale).replace(/\s+/g, ' ').slice(0, 320)}` : ''}`;
+            lines.push(`    - AI-authored quality review: ${formatReview('résumé', qualityReview.resume)}; ${formatReview('cover letter', qualityReview.coverLetter)}`);
+          }
+        }
+      }
+    }
     // A generation failure commonly happens before any document markup exists
     // (for example, a provider quota error during company research). Render the
     // lifecycle first so FULL reports name the exact attempted job/task/stage
@@ -1987,23 +2029,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // export still fits — never what actually ships. Label it as such: the
       // shipped baseline (candidates start hidden) can legitimately be fewer
       // pages, since a hidden skill takes zero layout space.
-      lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${r.revisionApplied ? ' · 1 length-revision call' : ''}`);
+      const resumeRevisionLabel = r.revisionApplied
+        ? ` · ${r.revisionAttempts ?? 1} length-revision call(s)`
+        : '';
+      lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${resumeRevisionLabel}`);
       if (attemptsStr) lines.push(`  - attempts: ${attemptsStr}`);
       if (r.revisionDiagnostics?.input && r.revisionDiagnostics?.output) {
         const before = r.revisionDiagnostics.input;
         const after = r.revisionDiagnostics.output;
         lines.push(`  - length revision: ${before.chars ?? '?'}→${after.chars ?? '?'} chars · bullets ${before.bullets ?? '?'}→${after.bullets ?? '?'} · role summaries ${before.roleSummaries ?? '?'}→${after.roleSummaries ?? '?'} · skill rows ${before.skillRows ?? '?'}→${after.skillRows ?? '?'} · hash ${before.hash || '?'}→${after.hash || '?'}`);
-        // The editor's own output vs. the post-clamp document. Identical
-        // hashes mean the model honoured the cut and enforcement was a no-op;
-        // a difference is the clamp truncating work the model kept. Without
-        // this split, "2 bullets per role" cannot be attributed to either.
+        // No source-order structural clamp runs after a revision: the model
+        // retains the evidence it ranked highest for this specific job.
         const editor = r.revisionDiagnostics.editorOutput;
         if (editor) {
-          lines.push(editor.hash === after.hash
-            ? `    - structural clamp: no-op (editor already met the one-page contract at ${editor.bullets ?? '?'} bullet(s) / ${editor.roleSummaries ?? '?'} summary(ies))`
-            : `    - structural clamp: APPLIED — editor returned ${editor.chars ?? '?'} chars · bullets ${editor.bullets ?? '?'} · role summaries ${editor.roleSummaries ?? '?'} · skill rows ${editor.skillRows ?? '?'} (hash ${editor.hash || '?'}), clamp cut it to the values above`);
+          lines.push(`    - AI editor output: ${editor.chars ?? '?'} chars · bullets ${editor.bullets ?? '?'} · role summaries ${editor.roleSummaries ?? '?'} · skill rows ${editor.skillRows ?? '?'} · hash ${editor.hash || '?'}`);
         }
       }
+      if (Array.isArray(r.revisionHistory) && r.revisionHistory.length > 1) {
+        lines.push(`  - revision history: ${r.revisionHistory.map(item => `#${item.attempt ?? '?'} ${item.input?.hash || '?'}→${item.output?.hash || '?'}`).join(' · ')}`);
+      }
+      if (r.revisionError) lines.push(`  - revision stopped: ${String(r.revisionError).replace(/\s+/g, ' ').slice(0, 400)}`);
       if (r.error) lines.push(`  - ⚠️ ${r.error}`);
       // The single most important line in this section: without it, "no PDF
       // because fonts never loaded" renders identically to "no PDF because
@@ -2022,6 +2067,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // never completed (see the error line below), not that the number was
       // skipped to save time.
       lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · web fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      if (r.coverLetterPageCount != null || r.coverLetterPdfProduced != null || r.coverLetterPdfError) {
+        lines.push(`- Cover-letter final render: ${r.coverLetterPageCount != null ? `${r.coverLetterPageCount}p` : 'not measured'}${r.coverLetterPdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF'}${r.coverLetterFontsLoaded === false ? ' · web fonts failed to load' : ''}${r.coverLetterPdfError ? ` · ⚠️ ${String(r.coverLetterPdfError).replace(/`/g, "'").slice(0, 300)}` : ''}`);
+      }
       if (r.locationReviewRequired) {
         lines.push(`  - ⚠️ Work-location confirmation required before Sync: candidate \`${String(r.candidateLocation || 'unknown').replace(/`/g, "'")}\` → job \`${String(r.jobLocation || 'unknown').replace(/`/g, "'")}\``);
       }
@@ -2067,7 +2115,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (cl.needsAvailable != null || Array.isArray(cl.checks)) {
       const checks = Array.isArray(cl.checks) ? cl.checks : [];
       const unmet = checks.filter(check => check?.passed === false);
-      lines.push(`- Cover-letter harness: needs ${cl.needsAvailable ? 'available' : 'unavailable'} (${cl.needsCount ?? 0}) · top need ${cl.topNeedArgued ? 'argued' : 'not argued'} · ${cl.mappingCount ?? 0} mapping(s) · plan ${cl.planRetried ? 'retried once' : 'not retried'}${cl.planDegraded ? ' · direct-prose degrade used' : ''} · prose ${cl.revised ? 'revised once' : 'not revised'} · page count ${cl.pageCount ?? 'not measured'}`);
+      const proseRevisionLabel = cl.revised
+        ? `revised ${cl.revisionAttempts ?? 1} time(s)`
+        : 'not revised';
+      lines.push(`- Cover-letter harness: needs ${cl.needsAvailable ? 'available' : 'unavailable'} (${cl.needsCount ?? 0}) · top need ${cl.topNeedArgued ? 'argued' : 'not argued'} · ${cl.mappingCount ?? 0} mapping(s) · plan ${cl.planRetried ? 'retried once' : 'not retried'}${cl.planDegraded ? ' · direct-prose degrade used' : ''} · prose ${proseRevisionLabel} · page count ${cl.pageCount ?? 'not measured'}`);
+      if (Array.isArray(cl.revisionHistory) && cl.revisionHistory.length) {
+        lines.push(`  - prose revision history: ${cl.revisionHistory.map(item => `#${item.attempt ?? '?'} ${item.beforeChars ?? '?'}→${item.afterChars ?? '?'} chars · ${item.observationCount ?? '?'} observation(s) · ${item.beforeSha256 || '?'}→${item.afterSha256 || '?'}`).join(' · ')}`);
+      }
+      if (cl.revisionError) lines.push(`  - prose revision stopped: ${String(cl.revisionError).replace(/\s+/g, ' ').slice(0, 400)}`);
       const hasDescription = a.jobContext?.scrapedDescriptionAvailable === true;
       const hasResearch = a.jobContext?.researchAvailable === true;
       const needsSource = hasDescription && hasResearch

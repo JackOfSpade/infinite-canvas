@@ -250,7 +250,7 @@ function needsPortfolioQuality(needs, check) {
   return (check?.passed ? 100000 : 0) + performanceCount * 100 + list.length;
 }
 
-/** Keeps the best bounded needs pass deterministically when the retry also fails. */
+/** Keeps the best completed needs pass while the convergence loop continues. */
 export function selectBetterLetterNeeds(firstNeeds, firstCheck, retryNeeds, retryCheck) {
   return needsPortfolioQuality(retryNeeds, retryCheck) > needsPortfolioQuality(firstNeeds, firstCheck)
     ? { needs: retryNeeds, check: retryCheck, selected: 'retry' }

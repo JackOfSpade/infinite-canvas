@@ -305,7 +305,7 @@ function buildAIConfigSnapshot() {
   const geminiKey = ai.geminiApiKey;
   const claudeKey = ai.anthropicApiKey;
   const provider = ai.provider || 'gemini';
-  const activeKey = provider === 'claude' ? claudeKey : geminiKey;
+  const activeKey = provider === 'claude' ? claudeKey : provider === 'gemini' ? geminiKey : null;
   const keyPrefix = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
 
   // resolveServiceAccountPath checks the user-configured path first, then
@@ -317,9 +317,11 @@ function buildAIConfigSnapshot() {
 
   // Gemini works with either a UI key OR a resolvable service-account.json;
   // Claude needs the UI key.
-  const effectivelyConfigured = provider === 'claude'
-    ? !!claudeKey
-    : (!!geminiKey || !!resolvedSAPath);
+  const effectivelyConfigured = provider === 'local'
+    ? true
+    : provider === 'claude'
+      ? !!claudeKey
+      : (!!geminiKey || !!resolvedSAPath);
 
   // For Gemini, the runtime picks AI Studio when a key is set, Vertex when
   // a service-account is resolvable, and has no usable credential otherwise. Surfacing the
@@ -327,7 +329,9 @@ function buildAIConfigSnapshot() {
   // "billing depleted on Vertex" vs "rate-limited on AI Studio" report is
   // immediately disambiguated.
   let activeEndpoint;
-  if (provider === 'claude') {
+  if (provider === 'local') {
+    activeEndpoint = 'Claude Code manual local handoff (no API credential)';
+  } else if (provider === 'claude') {
     activeEndpoint = claudeKey ? 'Anthropic API' : '(no key)';
   } else if (geminiKey) {
     activeEndpoint = 'Gemini API (AI Studio — generativelanguage.googleapis.com)';
@@ -361,9 +365,11 @@ function buildAIConfigSnapshot() {
 
   return {
     provider,
-    modelSelection: provider === 'gemini'
-      ? 'auto per-task preference + Gemini capability-ladder fallbacks (pro→flash→lite)'
-      : 'auto within the user-picked per-group Claude family (see llm.js TASK_GROUPS / Settings → AI)',
+    modelSelection: provider === 'local'
+      ? 'manual Claude Code handoff for Application Generate; API-only tasks are intentionally unavailable'
+      : provider === 'gemini'
+        ? 'auto per-task preference + Gemini capability-ladder fallbacks (pro→flash→lite)'
+        : 'auto within the user-picked per-group Claude family (see llm.js TASK_GROUPS / Settings → AI)',
     // Present regardless of the active provider (a no-op display when
     // provider === 'gemini') — these picks persist independently, so the
     // report should never leave the reader guessing what Claude WOULD serve.
@@ -1670,10 +1676,22 @@ ${(aiConfig.geminiWarnings || []).length > 0
   // funnel whose originating node isn't here (the main-process telemetry is
   // shared across all open windows/canvases, so it may be another canvas's run).
   const currentNodeIds = new Set((nodes || []).map(n => n?.id).filter(Boolean));
+  // Local AI status is persisted on job cards rather than the main-process
+  // telemetry singleton. Include it in HANDOFF/FULL so a validation rejection
+  // after a Claude Code rewrite is not mistaken for a missed file poll.
+  const localApplications = (nodes || []).flatMap((node) => {
+    const localApplication = node?.type === 'jobcard' ? node?.data?.localApplication : null;
+    return localApplication?.id ? [{
+      nodeId: node.id,
+      title: node?.data?.title || '',
+      company: node?.data?.company || '',
+      localApplication,
+    }] : [];
+  });
 
   const canvasFilePath = frontEndState?.currentFile || frontEndState?.settings?.lastOpenedWorkspace || null;
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications); }
   catch { /* never break the report on diagnostic failure */ }
 
   let marketplacePipelineMarkdown = '';

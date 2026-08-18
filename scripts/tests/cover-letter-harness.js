@@ -379,7 +379,7 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: plan gate retries once conceptually and envelope remains builder-compatible',
+    name: 'cover letter harness: plan candidate selection preserves the strongest pass and envelope remains builder-compatible',
     run: () => {
       const valid = checkPlanGate(groundedPlan, evidence, needs, 'The role must manage incident escalation.', '');
       assert(!valid.shouldRetry, 'a grounded non-stated mapping must clear the plan gate');
@@ -470,13 +470,13 @@ export default [
       const retryPlan = { ...groundedPlan, mappings: [{ evidence: 'unrelated evidence', resumeStatus: 'stated' }] };
       const firstGate = checkPlanGate(firstPlan, evidence, needs, 'The role must manage incident escalation.', '');
       const retryGate = checkPlanGate(retryPlan, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(firstGate.shouldRetry && retryGate.shouldRetry, 'the selection exercise must represent two failed gate attempts');
+      assert(firstGate.shouldRetry && retryGate.shouldRetry, 'the selection exercise must represent two failed gate candidates');
       const selected = selectBetterCoverLetterPlan(
         firstPlan, firstGate,
         retryPlan, retryGate,
       );
       assert(selected.plan === firstPlan && selected.gate === firstGate && selected.selected === 'first',
-        'a second failed plan gate must deterministically ship the better first attempt rather than throw');
+        'a failed plan candidate must preserve the stronger completed plan while convergence continues');
       const envelope = authorCoverLetterEnvelope({ job: { company: 'Acme', title: 'Incident Lead' }, evidence, today: 'August 14, 2026' });
       assert(envelope.recipient === 'Hiring Team\nAcme' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields must be code-authored');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Sincerely,', 'code-authored closing omits an implied target title');

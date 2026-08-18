@@ -562,7 +562,11 @@ export default [
         'a null latest canvas path must not fall back to a stale closure-captured path while queued');
       assert(generationScope.includes('queueLocalApplication({')
         && generationScope.includes('canvasFilePath,'),
-      'a Local AI handoff must receive the post-lease saved canvas path, so its job folder is project-local');
+      'a Local AI handoff must receive the post-lease saved canvas path, so its job folder is canvas-local');
+      assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
+        && source.includes('importLocalApplication({ jobId, canvasFilePath: queuedCanvasFilePath || canvasFilePath })')
+        && source.includes('openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath })'),
+      'poll, import, and open operations must keep using the canvas path that owns the queued job');
       assert(generateIpc > originRead && saveIpc > generateIpc && release > saveIpc,
         'the lease must cover generation and save, then release only in the terminal cleanup path');
       assert(source.includes("kind: 'application'") && source.includes('onQueued: ({ position })')

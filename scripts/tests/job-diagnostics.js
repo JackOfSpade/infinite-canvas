@@ -1,6 +1,7 @@
 import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
+import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 
 export default [
@@ -362,6 +363,23 @@ export default [
           && filtered.filteredLogs.some(line => /generate-application/.test(line))
           && filtered.sectionExclusions.has('nodeInternals'),
         'APPLICATION filter selects application lifecycle logs (with causal context) while omitting heavy canvas diagnostics');
+        const handoff = applyBugReportCode([
+          '[LocalAI] Résumé PDF render failed',
+          '[Canvas] keyboard shortcut',
+          '[Canvas] layout settled',
+          '[Canvas] draw finished',
+          '[Canvas] selection changed',
+          '[get-local-application-status] failed: ENOENT',
+          '[Canvas] keyboard shortcut',
+          '[Canvas] layout settled',
+          '[Canvas] draw finished',
+          '[Canvas] node moved',
+        ], {}, 'HANDOFF');
+        assert(handoff.filteredLogs.some(line => /LocalAI/.test(line))
+          && handoff.filteredLogs.some(line => /get-local-application-status/.test(line))
+          && !handoff.filteredLogs.some(line => /node moved/.test(line))
+          && handoff.sectionExclusions.has('nodeInternals'),
+        'HANDOFF filter isolates the Local AI result/feedback/import trail while keeping the app-authored pipeline snapshot');
       } finally {
         recordApplicationTelemetry(prior);
       }
@@ -413,6 +431,68 @@ export default [
     },
   },
 {
+    name: 'Local AI application diagnostics retain the measured handoff trace',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'local-ai-handoff-report-test', nodeId: 'local-ai-handoff-card', windowId: 901,
+          source: 'local-ai', jobTitle: 'Backend Engineer', company: 'Acme', status: 'completed',
+          localAi: {
+            jobId: '123e4567-e89b-42d3-a456-426614174000',
+            handoffHistory: [{
+              at: '2026-08-18T05:16:00.000Z', type: 'fit-revision-requested', resultSha256: '0123456789abcdef', revisionRound: 2,
+              resume: { pageCount: 2, targetPageCount: 1, attempts: [{ attempt: 1, density: 'default', pageCount: 2 }, { attempt: 2, density: 'compact', pageCount: 2 }] },
+              coverLetter: { pageCount: 1, targetPageCount: 1 },
+              qualityReview: {
+                resume: { decision: 'changed_materially', rationale: 'Removed redundant evidence and retained the job-specific backend proof.' },
+                coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material argument improvement remained after comparison.' },
+              },
+              detail: 'résumé is 2 pages (target: 1).',
+            }],
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Check the Local AI handoff.',
+          nodes: [{ id: 'local-ai-handoff-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }, 901).markdown;
+        assert(report.includes('Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review):')
+          && report.includes('fit-revision-requested · revision 2 · result 0123456789abcdef')
+          && report.includes('résumé attempts #1=2p, #2[compact]=2p')
+          && report.includes('AI-authored quality review: résumé changed_materially')
+          && report.includes('cover letter kept_diminishing_returns'),
+        'FULL reports retain the exact app-measured Local AI result/version/page sequence and AI-authored quality disposition needed to audit a claimed revision loop');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { handoffTrace: true };
+    },
+  },
+{
+    name: 'Local AI handoff diagnostics surface the persisted card validation failure',
+    run: () => {
+      const report = generateMarkdown({
+        description: 'The revised Local AI result was not imported.',
+        nodes: [{
+          id: 'local-ai-invalid-card', type: 'jobcard', data: {
+            title: 'Senior Backend Engineer', company: 'Acme',
+            localApplication: {
+              id: '123e4567-e89b-42d3-a456-426614174000', status: 'invalid',
+              message: 'Local AI qualityReview.resume.rationale cannot use page fit as its only quality reason.',
+            },
+          },
+        }],
+        edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+      }).markdown;
+      assert(report.includes('### Local AI Job State (live card snapshot)')
+        && report.includes('status: **invalid**')
+        && report.includes('qualityReview.resume.rationale cannot use page fit'),
+      'FULL/HANDOFF diagnostics expose the persisted Local AI validation error instead of only the prior measured feedback');
+      return { localAiInvalidState: true };
+    },
+  },
+{
     name: 'Application Sync telemetry is integrity-rich and scoped to the saved canvas',
     run: () => {
       const prior = getApplicationSyncTelemetry();
@@ -451,6 +531,10 @@ export default [
         pageCount: 2, targetPageCount: 1, compactApplied: true,
       });
       assert(prompt.includes('cut at least 12 line(s)')
+        && prompt.includes('Measured revision 1')
+        && prompt.includes('There is no fixed revision limit')
+        && prompt.includes('byte-for-byte unchanged')
+        && prompt.includes('as the diminishing-returns signal')
         && prompt.includes('explicitly supersedes the initial-draft bullet count')
         && prompt.includes('reduce every role to 1-2 strongest bullets')
         && prompt.includes('MUST contain fewer content blocks')
@@ -827,10 +911,8 @@ export default [
         assert(report.includes('Résumé role block (first of 3 `<article class="role">`')
           && report.includes('<p class="role-dates">Oct 2024 – Present'),
           'Report must render a whole role block so the shipped Experience structure is visible');
-        // "6 bullets" alone cannot say whether the editor complied or the
-        // clamp truncated it; the editor snapshot is what separates them.
-        assert(report.includes('structural clamp: APPLIED — editor returned 5600 chars · bullets 8'),
-          'Report must attribute the one-page cut to the editor or to the structural clamp');
+        assert(report.includes('AI editor output: 5600 chars · bullets 8'),
+          'Report must expose the AI editor output without a source-order structural clamp');
         assert(report.includes('1 refute-weakened item(s) withheld from application prompts'),
           'Report must say when a cached achievement remains auditable but is intentionally unavailable to résumé/letter generation');
         // The fit-loop measures the worst case (all candidate skills shown);
@@ -4073,38 +4155,50 @@ export default [
     run: () => {
       // Fits already → ship, no compact ever applied pre-emptively (SKILL.md:
       // "do not apply pre-emptively").
-      const fits = decideFitStep({ pageCount: 1, target: 1, compactTried: false, revisionTried: false });
+      const fits = decideFitStep({ pageCount: 1, target: 1, compactTried: false });
       assert(fits.action === 'ship', 'fits target → ship');
-      const underTarget = decideFitStep({ pageCount: 1, target: 2, compactTried: false, revisionTried: false });
+      const underTarget = decideFitStep({ pageCount: 1, target: 2, compactTried: false });
       assert(underTarget.action === 'ship', 'under target → ship (never pads to fill the target)');
 
       // Over target, nothing tried yet → the FREE lever first, never straight to an LLM call.
-      const first = decideFitStep({ pageCount: 2, target: 1, compactTried: false, revisionTried: false });
+      const first = decideFitStep({ pageCount: 2, target: 1, compactTried: false });
       assert(first.action === 'compact', 'over target, compact not yet tried → compact (free, no LLM)');
 
       // Page count cannot tell whether a 2-page/1-page-target result is a
       // one-line or almost-full-page overflow, but 3 pages against a 1-page
       // target is conclusively large. That case must not waste a compact pass.
-      const clearlyLarge = decideFitStep({ pageCount: 3, target: 1, compactTried: false, revisionTried: false });
+      const clearlyLarge = decideFitStep({ pageCount: 3, target: 1, compactTried: false });
       assert(clearlyLarge.action === 'revise', 'more than one full page beyond target → revise content before compact');
 
+      const compactAfterLargeRevision = decideFitStep({ pageCount: 3, target: 1, compactTried: false, revisionAttempts: 1 });
+      assert(compactAfterLargeRevision.action === 'compact', 'after the first large-overflow revision, try the free compact render before spending a second AI call');
+
       // Over target, compact already tried → the one paid revision call.
-      const second = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionTried: false });
+      const second = decideFitStep({ pageCount: 2, target: 1, compactTried: true });
       assert(second.action === 'revise', 'still over after compact → revise (one LLM call)');
 
-      // Over target, BOTH levers exhausted → ship best-effort, never loop.
-      const exhausted = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionTried: true });
-      assert(exhausted.action === 'ship', 'both levers exhausted → ship best-effort, no third attempt');
+      const continuedAfterMany = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionAttempts: 10_000 });
+      assert(continuedAfterMany.action === 'revise', 'an attempt count never terminates the convergence loop');
+
+      const convergence = createApplicationConvergenceTracker('draft-a');
+      assert(convergence.assess('draft-b').accept && convergence.assess('draft-c').accept,
+        'the shared convergence tracker accepts every novel candidate without a fixed limit');
+      const unchanged = convergence.assess('draft-c');
+      assert(!unchanged.accept && unchanged.diminishingReturns && /unchanged/.test(unchanged.reason),
+        'returning the current document is the shared explicit diminishing-returns signal');
+      const cycling = createApplicationConvergenceTracker('draft-a');
+      assert(cycling.assess('draft-b').accept && !cycling.assess('draft-a').accept,
+        'returning a previously measured version stops a non-improving cycle');
 
       // A page count measured against fallback typefaces (fonts didn't load)
       // must never drive a fit decision — could compact a résumé that already
       // fits, or worse, spend an LLM call cutting real content over a phantom
       // overflow. Ships regardless of how far "over" the fallback count looks,
       // and regardless of what's already been tried.
-      const noFonts = decideFitStep({ pageCount: 5, target: 1, compactTried: false, revisionTried: false, fontsLoaded: false });
+      const noFonts = decideFitStep({ pageCount: 5, target: 1, compactTried: false, fontsLoaded: false });
       assert(noFonts.action === 'ship', 'fonts not loaded → ship without acting on a page count that isn\'t trustworthy');
       // fontsLoaded defaults to true (the common case) when the caller omits it.
-      const defaultsTrue = decideFitStep({ pageCount: 2, target: 1, compactTried: false, revisionTried: false });
+      const defaultsTrue = decideFitStep({ pageCount: 2, target: 1, compactTried: false });
       assert(defaultsTrue.action === 'compact', 'fontsLoaded omitted defaults to true — normal fit logic still runs');
 
       // Every decision carries a human-readable reason (bug-report / log line).

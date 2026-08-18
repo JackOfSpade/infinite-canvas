@@ -651,6 +651,7 @@ export default [
       // without mutating global settings.
       const geminiSettings = { provider: 'gemini', anthropicApiKey: 'x' };
       const claudeSettings = { provider: 'claude', anthropicApiKey: 'x' };
+      const localSettings = { provider: 'local' };
 
       // Jack reversed the earlier "application-generation always runs on
       // Claude" decision — EVERY known task (including the former pin set)
@@ -658,6 +659,8 @@ export default [
       for (const task of [...getKnownTaskIds(), 'default']) {
         assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick (no more Claude pin)`);
         assert(providerForTask(task, claudeSettings) === 'claude', `'${task}' follows the Claude Settings pick`);
+        assert(providerForTask(task, localSettings) === 'local', `'${task}' never silently falls back to Gemini when Local AI is selected`);
+        assert(modelForTask(task, localSettings) === 'claude-code-local', `'${task}' exposes the Local AI handoff rather than a remote-model id`);
       }
       const geminiQualityTasks = [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',

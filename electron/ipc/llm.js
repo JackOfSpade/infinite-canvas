@@ -397,6 +397,10 @@ function claudeFamilyForTask(task, settings) {
 
 function pickModel(provider, task, settings) {
   const t = resolveTask(task);
+  // Local AI is a human-in-the-loop Claude Code handoff, not a network model
+  // endpoint. Keep a readable pseudo-model for diagnostics rather than
+  // pretending a Gemini fallback will serve the request.
+  if (provider === 'local') return 'claude-code-local';
   if (provider === 'claude') return claudeModelFor(claudeFamilyForTask(t, settings), settings?.anthropicApiKey);
   return TASK_MODELS[t].gemini || TASK_MODELS['default'].gemini;
 }
@@ -415,7 +419,14 @@ function pickModel(provider, task, settings) {
  * PURE — no throw, no network.
  */
 export function providerForTask(task, settings = getAISettings()) {
+  if (settings?.provider === 'local') return 'local';
   return settings?.provider === 'claude' ? 'claude' : 'gemini';
+}
+
+function assertApiProvider(provider) {
+  if (provider === 'local') {
+    throw new Error('Local AI is a manual Claude Code handoff. It currently supports Application Generate only; choose Gemini API or Claude API for this task.');
+  }
 }
 
 /**
@@ -500,6 +511,7 @@ export async function checkPromptFits(prompt, opts = {}) {
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  assertApiProvider(provider);
   const model = pickModel(provider, task, settings);
   const { cap: requestedOutput } = pickMaxTokens(task, hints, provider, model);
 
@@ -616,6 +628,7 @@ export async function callLLMText(prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
@@ -704,6 +717,7 @@ export async function callLLMRaw(prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
@@ -731,6 +745,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
@@ -773,6 +788,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints }, provider, model);
   // Preflight the text prompt + one document allowance (the file's own tokens —

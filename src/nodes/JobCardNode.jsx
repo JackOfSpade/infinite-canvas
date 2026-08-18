@@ -148,7 +148,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
-  const localJobPending = !!localApplication && !['saved', 'invalid', 'failed'].includes(localApplication.status);
+  const localJobPending = !!localApplication && !['saved', 'invalid', 'failed', 'revision-exhausted'].includes(localApplication.status);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(data.salary, data.location),
     [data.salary, data.location]
@@ -217,6 +217,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // The renderer never receives a raw arbitrary path to save.
   const importCompletedLocalApplication = useCallback(async (jobId) => {
     if (!jobId || !window.electronAPI?.importLocalApplication || !window.electronAPI?.saveApplication) return;
+    // The queued job remains owned by the canvas location that created it.
+    // Preserve that path across app restarts and Save As operations so polling
+    // cannot accidentally jump to another canvas's .local-ai folder.
+    const queuedCanvasFilePath = localApplication?.canvasFilePath || null;
     const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
     if (!canvasFilePath) {
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' } : current);
@@ -224,9 +228,59 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Claude Code result…' } : current);
     try {
-      const imported = await window.electronAPI.importLocalApplication({ jobId });
+      const imported = await window.electronAPI.importLocalApplication({ jobId, canvasFilePath: queuedCanvasFilePath || canvasFilePath });
       if (!imported?.success || !imported.localApplication) throw new Error(imported?.error || 'Could not import the Local AI result.');
       const local = imported.localApplication;
+      if (local.status === 'revision-required') {
+        if (isMountedRef.current) {
+          setLocalApplication((current) => current?.id === jobId ? {
+            ...current, ...local.localJob,
+            status: 'revision-required',
+            message: local.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.',
+          } : current);
+          addToast({
+            title: 'Local AI Document Revision Needed',
+            description: 'No bundle was saved. Reopen the Local AI job and revise result.json using the app’s measured fit feedback.',
+            type: 'error',
+          });
+        }
+        return;
+      }
+      if (local.status === 'render-retry-required') {
+        if (isMountedRef.current) {
+          setLocalApplication((current) => current?.id === jobId ? {
+            ...current, ...local.localJob,
+            status: 'render-retry-required',
+            message: local.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.',
+          } : current);
+          addToast({
+            title: 'Local AI Layout Check Unavailable',
+            description: 'No bundle was saved and no AI revision was requested. Retry when PDF rendering and web fonts are available.',
+            type: 'error',
+          });
+        }
+        return;
+      }
+      if (local.status === 'revision-exhausted') {
+        if (isMountedRef.current) {
+          setLocalApplication((current) => current?.id === jobId ? {
+            ...current, ...local.localJob,
+            status: 'revision-exhausted',
+            message: local.fitMessage || 'The overflowing document remained unchanged after an explicit diminishing-returns review. No bundle was saved.',
+          } : current);
+          addToast({
+            title: 'Local AI Diminishing Returns Reached',
+            description: 'No bundle was saved. The overflowing document was unchanged and its quality review found no remaining material improvement.',
+            type: 'error',
+          });
+        }
+        return;
+      }
+      const missingArtifacts = Array.isArray(local.missingArtifacts) ? local.missingArtifacts : [];
+      const resumeFit = local.resumeFit || null;
+      const resumeOverflow = Number.isFinite(resumeFit?.pageCount)
+        && Number.isFinite(resumeFit?.targetPageCount)
+        && resumeFit.pageCount > resumeFit.targetPageCount;
       const saved = await window.electronAPI.saveApplication({
         resumeHtmlPath: local.resumeHtmlPath,
         resumePdfPath: local.resumePdfPath,
@@ -242,25 +296,45 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
       if (isMountedRef.current) {
         lastSavedFolderRef.current = saved.dir || null;
-        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'saved', message: `Saved to ${saved.dir}` } : current);
-        addToast({ title: 'Local AI Application Saved', description: `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.`, type: 'success' });
+        setLocalApplication((current) => current?.id === jobId ? {
+          ...current,
+          status: 'saved',
+          message: missingArtifacts.length
+            ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
+            : resumeOverflow
+              ? `Saved to ${saved.dir}, but the résumé is ${resumeFit.pageCount} pages against its ${resumeFit.targetPageCount}-page layout target.`
+            : `Saved to ${saved.dir}`,
+          missingArtifacts,
+          intermediateCleaned: !missingArtifacts.length,
+        } : current);
+        addToast({
+          title: missingArtifacts.length ? 'Local AI Bundle Saved with Missing PDFs' : resumeOverflow ? 'Local AI Application Saved with Length Warning' : 'Local AI Application Saved',
+          description: missingArtifacts.length
+            ? `Saved editable HTML and listing to ${saved.dir}; ${missingArtifacts.join(' and ')} were unavailable. Use Repair bundle to retry.`
+            : resumeOverflow
+              ? `Saved the bundle to ${saved.dir}, but the résumé remained ${resumeFit.pageCount} pages after the layout-fit safeguards (target: ${resumeFit.targetPageCount}).`
+            : `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.`,
+          type: missingArtifacts.length || resumeOverflow ? 'error' : 'success',
+        });
       }
     } catch (error) {
       if (!isMountedRef.current) return;
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
-  }, [nav, data.title, data.location, addToast, isMountedRef]);
+  }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, isMountedRef]);
 
   // Claude Code writes result.json manually/asynchronously. Polling only reads
   // that app-owned job; the import happens once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
-    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'invalid', 'failed', 'importing'].includes(localApplication.status)) return undefined;
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'invalid', 'failed', 'importing', 'render-retry-required', 'revision-exhausted'].includes(localApplication.status)) return undefined;
+    const canvasFilePath = localApplication?.canvasFilePath
+      || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;
     const check = async () => {
       try {
-        const result = await window.electronAPI.getLocalApplicationStatus({ jobId });
+        const result = await window.electronAPI.getLocalApplicationStatus({ jobId, canvasFilePath });
         if (cancelled || !isMountedRef.current) return;
         if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
         const next = result.localJob;
@@ -283,7 +357,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     check();
     const interval = window.setInterval(check, 2500);
     return () => { cancelled = true; window.clearInterval(interval); };
-  }, [localApplication?.id, localApplication?.status, importCompletedLocalApplication, isMountedRef]);
+  }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
   // Reads the merged career data from the ORIGIN Job Search Module — the
@@ -418,7 +492,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           setLocalApplication(queued.localJob);
           addToast({
             title: 'Local AI Job Ready',
-            description: 'The job is in this project’s Local AI folder. Run your Claude Code routine there; this card will import the completed application automatically.',
+            description: 'The job is beside this canvas under .local-ai/jobs. Run your Claude Code routine there; this card will import the completed application automatically.',
             type: 'success',
           });
         }
@@ -729,7 +803,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
           <div className="flex items-start gap-2 text-[10px] leading-snug">
             <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${
-              localApplication.status === 'saved' ? 'bg-emerald-400' : localApplication.status === 'failed' || localApplication.status === 'invalid' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
+              localApplication.status === 'saved' ? 'bg-emerald-400' : ['failed', 'invalid', 'revision-exhausted'].includes(localApplication.status) ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
@@ -738,15 +812,47 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this project’s Local AI job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>
             </div>
           </div>
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && localApplication.status !== 'saved' && (
             <button
-              onClick={(e) => { e.stopPropagation(); window.electronAPI.openLocalApplicationFolder({ jobId: localApplication.id }); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                const canvasFilePath = localApplication.canvasFilePath
+                  || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
+                window.electronAPI.openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath });
+              }}
               className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
             >
               Open Local AI Job Folder
+            </button>
+          )}
+          {localApplication.status === 'saved' && !localApplication.intermediateCleaned && (
+            <button
+              onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
+              className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              title="Rebuild the final bundle from this Local AI result, including any missing PDFs."
+            >
+              Repair bundle
+            </button>
+          )}
+          {localApplication.status === 'render-retry-required' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
+              className="mt-2 ml-1.5 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              title="Render and measure both PDFs again without asking the AI to rewrite them."
+            >
+              Retry layout check
+            </button>
+          )}
+          {localApplication.status === 'invalid' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
+              className="mt-2 ml-1.5 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
+              title="Revalidate and import this Local AI result after correcting its reported issue."
+            >
+              Retry import
             </button>
           )}
         </div>

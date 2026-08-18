@@ -29,8 +29,8 @@ post-processes it into the right print variant for the recipient.
 
 End-to-end, given candidate data + job description:
 
-1. **Parse candidate data.** Extract: name, contact (email, location,
-   one optional URL — site OR github, not both), 3–6 role entries
+1. **Parse candidate data.** Extract: name, contact (email; an optional
+   candidate-supplied location; one optional URL — site OR github, not both), 3–6 role entries
    with titles + companies + dates + 3–6 bullets each, optional
    "Selected Systems" / "Projects", a skills block, and education.
    Apply the content rules in `STYLE.md §5` aggressively — kill

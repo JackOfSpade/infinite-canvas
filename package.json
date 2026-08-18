@@ -37,6 +37,10 @@
       {
         "from": "resume_design_system",
         "to": "resume_design_system"
+      },
+      {
+        "from": "local_ai",
+        "to": "local_ai"
       }
     ]
   },

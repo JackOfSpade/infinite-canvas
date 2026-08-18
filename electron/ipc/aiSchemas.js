@@ -462,7 +462,7 @@ export const LETTER_PLAN_SCHEMA = {
 // Independent final-pass audit for cover-letter prose.  The writer receives
 // only the argument plan, so every concrete factual claim in its output must
 // be traceable to that same plan.  Keeping the audit response to exact quoted
-// spans makes a failed check useful both to the bounded revision call and to
+// spans makes a failed check useful both to the convergent revision call and to
 // the saved workspace's human-review notice.
 export const LETTER_GROUNDING_AUDIT_SCHEMA = {
   type: 'object',

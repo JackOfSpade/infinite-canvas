@@ -258,6 +258,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  HANDOFF: {
+    label: 'Local AI Handoff',
+    description: 'Local AI / Claude Code application handoff audit — app-authored result-hash and page-measurement trace, result.json / fit-feedback lifecycle, import, render, and final-save events. Use when Claude Code reports an iteration that the app did not appear to observe, a result is imported too early, or a measured revision loop is disputed. Included automatically in FULL.',
+    logFilter: line =>
+      /\[LocalAI\]|get-local-application-status|queue-local-application|import-local-application|fit-feedback|result\.json|JobApplication.*(?:Saved|import)|ApplicationSync|save-application/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   AUTH: {
     label: 'Login/Auth Windows',
     description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, and account-related main-process logs. Use for Google/Indeed/marketplace login loops or “browser may not be secure” errors.',
