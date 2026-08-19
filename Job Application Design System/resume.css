@@ -5,8 +5,10 @@
    Pair with `colors_and_type.css` (tokens + element defaults).
    This file covers everything specific to the résumé surface:
    page chrome (screen preview + paged media), the header, section
-   heads, the meta-row utility, role / project / skills / education
-   blocks, bullets, inline separators and annotations.
+   heads, the meta-row utility, role / project / skills blocks,
+   bullets, inline separators and annotations. Education is not a
+   section in this system: the highest completed degree and its
+   institution ride in the header subtitle (STYLE.md §5.8).
 
    Semantic markup maps 1:1 to JSON Resume v1.0.0 + the following
    namespaced custom fields:
@@ -157,7 +159,37 @@
 }
 
 /* =========================================================
-   Header — name, tagline, contact line. All body text;
+   Trailing flow edge — no phantom margin at the foot
+   ---------------------------------------------------------
+   `p { margin: 0 0 var(--s-4) }` leaves an 8pt bottom margin on
+   the document's very last paragraph. That margin is part of the
+   flow, so on a page filled to the bottom margin the last LINE
+   stops 8pt short of it while the first line starts 0.3pt below
+   the top margin (§4.4) — the equal-ink guarantee would be off by
+   8pt in exactly the filled-page case it exists for. Zero the
+   trailing margin along the final last-child chain only.
+
+   The second selector covers the final block being a grid (the
+   résumé ends on the Skills `dl`, the letter on .letter-close): a
+   grid row's height counts its items' margins, so the row's OTHER
+   item would re-introduce the gap. Only the last row is touched —
+   earlier
+   rows keep their spacing, and a multi-paragraph final block
+   (the letter's .letter-close) keeps its internal rhythm because
+   the chain stops at its last child. */
+.page > :last-child,
+.page > :last-child > :last-child,
+.page > :last-child > :last-child > :last-child,
+.page > :last-child > :last-child > :last-child > :last-child { margin-bottom: 0; }
+.page > :last-child > :last-child > * { margin-bottom: 0; }
+/* Then mirror the top's optical trim: pull the final block's box up by
+   the last line's half-leading so ink-to-margin reads 0.3pt at BOTH
+   ends on a filled page. Applied once, on the outermost final block, so
+   it can't compound down the chain above. */
+.page > :last-child { margin-bottom: calc(-1 * var(--optical-tail-trim)); }
+
+/* =========================================================
+   Header — name, subtitle, contact line. All body text;
    never use document <header> for parser-critical info.
    =========================================================*/
 .resume-header {
@@ -179,16 +211,44 @@
   font-size: clamp(calc(var(--fs-display) - 4pt), 4.2vw + 6pt, var(--fs-display));
   text-wrap: balance;
 }
+/* Optical edge alignment — see --optical-lead-trim in colors_and_type.css.
+   Pulls the display line's leading overshoot out of the top margin so the
+   first glyph's ink sits the same distance from the paper edge as a flush
+   last line's ink sits from the bottom edge (~0.3pt each). Scoped to the
+   page's first block, so a .name used anywhere else is untouched. Applies
+   on screen and in print, and only to page 1 in a multi-page flow. */
+.page > :first-child > .name:first-child { margin-top: calc(-1 * var(--optical-lead-trim)); }
 @media print {
   /* Print uses the token directly — deterministic, fixed-paper output. */
   .name { font-size: var(--fs-display); }
 }
+/* Subtitle: [current professional role] · [highest completed degree],
+   [institution] — the system's one permanent home for education
+   (STYLE.md §5.8). One line, one treatment: the role and the credential
+   are set identically, so the line reads as a single run and stays
+   balanced whether it carries both halves or the role alone.
+   `text-wrap: pretty` handles the rare long-institution wrap.
+
+   NOTE the class name: `.subtitle-role`, never `.role`. `.role` is the
+   Experience block component (below); reusing it here would put this
+   inline span inside the role block's margin, break, and last-child
+   rules, and any consumer restyling `.role` per §5.2 would silently
+   restyle the header. */
 .tagline {
   font-size: var(--fs-h3);
   font-weight: var(--fw-regular);
   color: var(--ink-meta);
   margin: 0 0 var(--s-5);
   letter-spacing: var(--tr-tight);
+  text-wrap: pretty;
+}
+.tagline .subtitle-role, .tagline .credential {
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
 }
 .contact {
   font-size: var(--fs-small);
@@ -241,7 +301,7 @@
 
 /* Subsection head — quieter, second-tier divider for groupings
    *inside* a section ("Open Source" under Experience, "Talks"
-   under Education). Italic sans, no uppercase, no tracked +0.14em.
+   under Selected Systems). Italic sans, no uppercase, no tracked +0.14em.
    --vr-1 above keeps it on the baseline grid one line-box below
    the previous block. Render with:
      <div class="subsection-head">
@@ -386,26 +446,32 @@
 .role-header + .highlights > li:first-child { break-before: avoid; }
 
 /* -------- inline annotations on a bullet --------
-   Annotation labels ("—", "· trade-off:") are written in the
+   Annotation labels ("·", "· trade-off:") are written in the
    HTML as <span class="annotation-label"> rather than injected
    via CSS `content`. That keeps presentation out of the content
    layer: labels can be localised, omitted, restyled, or linted
    from the markup, and copy-paste round-trips correctly (CSS
    `content` is dropped on copy in many browsers).
-   The annotation classes only style the *text*; the label sits
-   beside the text as a sibling span. */
-.scope, .tradeoff {
-  font-size: var(--fs-caption);
-  color: var(--ink-meta);     /* same as dates / locations — staff-level
-                                 thinking should register on a skim,
-                                 not retreat into footnote grey. */
-  letter-spacing: var(--tr-tight);
-}
-.tradeoff { font-style: italic; }
-.annotation-label {
-  color: var(--ink-fade);
-  font-style: normal;         /* override italic on .tradeoff-label */
-  font-weight: var(--fw-regular);
+
+   TYPOGRAPHY: these spans are PURELY SEMANTIC — they carry no
+   visual treatment of their own. A .scope / .tradeoff run can
+   land mid-bullet, and any size / colour / style / tracking
+   change there makes one sentence visibly switch type partway
+   through, which breaks reading flow. So all three classes
+   inherit the owning bullet's typography outright: the bullet
+   reads as one continuous run, and the annotation's job (label
+   text + JSON field mapping + lintability) is done by the markup,
+   not by a caption size or an italic. Do NOT reintroduce
+   font-size, font-style, font-family, color or letter-spacing
+   here — see STYLE.md §5.4 and build/annotation-typography-test.js. */
+.scope, .tradeoff, .annotation-label {
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
 }
 
 /* =========================================================
@@ -461,13 +527,17 @@
 }
 
 /* =========================================================
-   Education
-   Single line per entry; composes with .meta-row.
+   .nowrap — the parse-safe way to keep a value and its unit
+   together ("38 ms", "2.1 s → 340 ms", "Data & Storage").
+   ---------------------------------------------------------
+   Renders identically to `&nbsp;` — same glyph, same advance, same
+   unbreakable pair — but leaves an ORDINARY space in the text layer.
+   A non-breaking space extracts as U+00A0, and parser patterns that
+   expect "38 ms" with an ASCII space silently miss the figure. Zero
+   visual cost, one less way to lose a number (STYLE.md §8.1).
+   Use this instead of `&nbsp;` in every candidate-facing string.
    =========================================================*/
-.edu-line { break-inside: avoid; }
-.edu-line + .edu-line { margin-top: var(--s-3); }
-.edu-school { font-weight: var(--fw-semibold); }
-.edu-meta   { font-size: var(--fs-small); color: var(--ink-meta); white-space: nowrap; }
+.nowrap { white-space: nowrap; }
 
 /* =========================================================
    Numerals — proportional (font default), NOT tabular.
@@ -479,6 +549,6 @@
    monospaced digits, so nothing visual is lost. Keep this
    `normal`; do not reintroduce tabular-nums. See STYLE.md §2.4 + §8.
    =========================================================*/
-.tnum, .role-dates, .project-metrics, .edu-meta {
+.tnum, .role-dates, .project-metrics {
   font-variant-numeric: normal;
 }

@@ -75,9 +75,9 @@ output context restricts font availability.
 | `--fs-h1`      | 18pt    | 600    | 1.20        | -0.005em | (reserved — document title) |
 | `--fs-h2`      |  9pt    | 500    | 1.20        | 0.14em uppercase | section headers (Experience, Skills…) |
 | `--fs-h3`      | 11pt    | 600    | 1.35        | -0.005em | role title, company, project name |
-| `--fs-body`    | 10.25pt | 400    | 1.45        |  0       | bullets, paragraphs, tagline tail |
+| `--fs-body`    | 10.25pt | 400    | 1.45        |  0       | bullets, paragraphs |
 | `--fs-small`   | 9.5pt   | 400    | 1.35        |  0       | dates, locations, role meta |
-| `--fs-caption` | 8.75pt  | 400    | 1.35        | -0.005em | scope chip, trade-off note |
+| `--fs-caption` | 8.75pt  | 400    | 1.35        | -0.005em | block-level captions (reserved) — **never** the inline `.scope` / `.tradeoff` spans |
 | `--fs-mono`    | 9pt     | 400    | 1.35        | -0.005em | technologies, project metrics |
 
 The body sits at **10.25pt**, deliberately between the 10pt many
@@ -96,8 +96,10 @@ sweet spot.
 - `h3` is **always** the role-title line and the project-name line.
   Bold (600). Never coloured.
 - Section name text is fixed and conventional: "Experience" /
-  "Work Experience", "Selected Systems" or "Projects", "Skills",
-  "Education". **Never** "My Journey", "Adventures", or similar.
+  "Work Experience", "Selected Systems" or "Projects", "Skills".
+  **Never** "My Journey", "Adventures", or similar. There is **no
+  Education section** — the degree lives in the header subtitle
+  (§5.8).
 
 ### 2.4 Numerals
 
@@ -135,9 +137,9 @@ rule).
 |---------------|-----------|--------------------------------------------------|
 | `--bg`        | `#F7F4ED` | Warm off-white ground. ~4% warm tint, not paper. |
 | `--ink-1`     | `#1A1815` | Primary text. Deep warm near-black, never `#000`.|
-| `--ink-2`     | `#54504A` | Secondary — dates, locations, role summary, **scope &amp; trade-off annotations**, project-metrics line. |
+| `--ink-2`     | `#54504A` | Secondary — dates, locations, role summary, project-metrics line. |
 | `--ink-3`     | `#8C857A` | Tertiary — bullet glyphs, the most subdued metadata. |
-| `--ink-4`     | `#B6AFA2` | Quaternary — separators (`·`), title-line glyphs, the `—`/`trade-off:` lead-ins. |
+| `--ink-4`     | `#B6AFA2` | Quaternary — separators (`·`) between sibling inline items, title-line glyphs. (Not the `·`/`· trade-off:` annotation lead-ins — those inherit the bullet's ink.) |
 | `--bg-rule`   | 10% ink   | Hairline rule under section headers, link baselines. |
 | `--accent`    | `#7A1F2B` | Oxblood. Used only on the candidate name.        |
 | `--accent-on` | (alias)   | Indirection token. Default = `--accent`. Override to `--ink-1` for the monochrome variant. |
@@ -157,11 +159,13 @@ Use the positional names when the *position* in the scale is what's
 being expressed (e.g. a 50% mix between `--ink-2` and `--ink-3`).
 Use the semantic names everywhere else.
 
-**Scope &amp; trade-off annotations are deliberately at `--ink-2`,
-not `--ink-3`.** The staff-level thinking on display ("why this
-decision, what we gave up") needs to register on a skim, not
-retreat into footnote grey. The same call holds for the
-project-metrics line.
+**Scope &amp; trade-off annotations take no ink of their own.**
+They sit inside a bullet, mid-sentence, so they inherit the
+bullet's `--ink-body` along with the rest of its typography
+(§5.4). The staff-level thinking on display ("why this decision,
+what we gave up") is body copy, not metadata. The
+project-metrics line is different — it is a block on its own
+line, so it keeps `--ink-2`.
 
 ### 3.2 Accent rules
 
@@ -198,10 +202,10 @@ Two scales coexist, on purpose.
 | Token | Value | Used between                                  |
 |-------|-------|-----------------------------------------------|
 | `--s-1` |  2pt | nudges; metric line ↔ project name           |
-| `--s-2` |  4pt | name ↔ tagline                                |
+| `--s-2` |  4pt | name ↔ subtitle                               |
 | `--s-3` |  6pt | bullet ↔ bullet                               |
 | `--s-4` |  8pt | role-meta ↔ first bullet                      |
-| `--s-5` | 12pt | tagline ↔ contact line; project ↔ project     |
+| `--s-5` | 12pt | subtitle ↔ contact line; project ↔ project    |
 | `--s-6` | 16pt | section header ↔ section body                 |
 | `--s-7` | 20pt | (reserved)                                    |
 | `--s-8` | 24pt | role ↔ role within a section                  |
@@ -252,6 +256,51 @@ breathing room (typically because digits are involved), add the
   the primary text column. **This is visual right-alignment via
   flex/grid, not a true second column** — Workday and similar parsers
   read the bullet text as a single unbroken column.
+
+**Optical edge alignment.** The 0.72 in margins are box margins, and a
+box margin is not what the eye measures — it measures ink. The display
+line box carries half-leading plus the ascender-to-ink gap above the
+first glyph, so the first glyph's ink used to start ~3.7 pt below the
+top margin, while a last line sitting flush on the bottom margin ends
+only ~0.3 pt above it. On a filled page the top read airier than the
+bottom by ~3.4 pt. Two trims fix this, and both are token-driven:
+
+| Token | Value | Applied to | Removes |
+|---|---|---|---|
+| `--optical-lead-trim` | 0.123 em of the display size | negative `margin-top` on `.page > :first-child > .name` | the display line's half-leading + ascender gap above the first glyph |
+| `--optical-tail-trim` | 1 pt (0.4 pt compact) | negative `margin-bottom` on `.page > :last-child` | the closing line's half-leading below its ink |
+
+The lead trim is em-based so it tracks `--fs-display` and the screen
+clamp; it is scoped to `.page > :first-child`, so a `.name` used
+elsewhere is unaffected, and in a multi-page flow it applies to page 1
+only (pages 2+ break mid-content, where the first line's leading is
+content-dependent and unequalisable). The tail trim is absolute pt: the
+closing line has no viewport clamp, and the value must not drift with
+whichever block it lands on. One tail value cannot be exact for both
+documents — the résumé closes on a grid row whose larger left column
+sets the row height, the letter on a single small line — so the token is
+their midpoint.
+
+Before the tail trim can bite, the phantom trailing margin has to go:
+`p { margin: 0 0 var(--s-4) }` leaves 8 pt below the document's last
+paragraph, and that margin is part of the flow, so on a filled page the
+last line would stop 8 pt short of the bottom margin. `resume.css`
+zeroes bottom margins along the final last-child chain (plus the final
+`.meta-row`'s other grid item, whose margin would otherwise set the row
+height). Earlier rows and multi-paragraph closing blocks — the letter's
+`.letter-close` — keep their internal rhythm.
+
+**Measured result** (`preview/variant-contract-check.html`, all four
+paper/density variants, both documents): top inset 0.29–0.30 pt,
+bottom-to-flow-end −0.09–0.62 pt, left and right 0.00 pt. Every pair
+agrees inside 0.5 pt — one hairline rule, the threshold at which a
+difference could begin to register at all.
+
+**Sides** are plain symmetry: `--margin-side` is the same left and
+right, text is set flush left with a ragged right, and the ink extents
+measure 0.00 pt against both content edges with no element overhanging.
+The right-aligned meta column is visual alignment inside the same
+measure, not a second margin.
 ---
 
 ## 5. Layout rules
@@ -273,7 +322,7 @@ when the resume is parsed back into the database.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Title · Company                            Mar 2022 – Present │  ← role-header
-│  Storage platform — tech lead, team of 8…    Brooklyn, NY      │  ← role-meta
+│  Storage platform · tech lead, team of 8…    Brooklyn, NY      │  ← role-meta
 │                                                                │
 │  • Bullet copy that wraps to one and a half lines and          │
 │    survives at body size without crowding…                     │
@@ -290,7 +339,8 @@ location are optional but recommended.
   `.highlights li::before` pseudo-element — not typed into the
   bullet text. The CSS hardcodes this; do not override it. The
   glyphs `·` (separator inside the contact line and metrics),
-  `–` (en dash, date ranges), `—` (em dash, prose), and `→` (state
+  `–` (en dash, **date and numeric ranges only**, never sentence
+  punctuation), and `→` (state
   change inside a bullet's prose, e.g. `380 ms → 18 ms`) are the
   complete typographic vocabulary. **Never** an arrow as a bullet
   marker. **Never** an emoji.
@@ -302,29 +352,95 @@ location are optional but recommended.
 - Acceptable bullet length: 1.0 – 2.0 wrapped lines. Avoid the
   3-line bullet — it reads as a paragraph.
 
+### 5.3.1 Dash punctuation (the one hard rule of copy)
+
+A dash may live **inside a word or a value**. A dash may never
+**connect ideas**. What it governs, strictly, is the two artifacts an
+employer receives: the résumé (bullets, role summaries, project
+descriptions, annotations) and every sentence of the cover letter.
+This documentation, the preview cards' commentary, and code comments
+are not sent to anyone, so the rule is not enforced there; following
+it anyway is welcome, and never a defect.
+
+**Allowed**
+
+| Case | Example |
+|---|---|
+| Hyphenated compound | `app-side`, `one-page`, `end-to-end`, `11-month`, `read/write` |
+| Technical name whose hyphen is part of the term | `consistent-hash`, `snapshot-restore`, `us-east-2`, `cross-channel` |
+| Email address, URL, slug | `anya@castellanos.dev`, `linkedin.com/in/anya-castellanos` |
+| Date range, en dash | `Mar 2022 – Present`, `2019 – 2022` |
+| Numeric range, en dash | `3–5 engineers`, `1.0–2.0 lines` |
+
+**Forbidden**
+
+- Em dash (`—`) joining clauses, introducing an explanation, or
+  hanging an afterthought off the end of a sentence.
+- Em dash pairs used as parentheses around an aside.
+- En dash (`–`) used as sentence punctuation rather than as a range.
+- Hyphen-minus (`-`) standing in for an em dash or a parenthetical
+  connector.
+
+**Reject, then rewrite**
+
+| Reject | Write instead |
+|---|---|
+| "Led the migration — reducing p99 latency by 40%." | "Led the migration, reducing p99 latency by 40%." |
+| "Improved the system — and reduced operating cost." | "Improved the system and reduced operating cost." |
+| "I am interested in this role – it aligns with my experience." | "I am interested in this role because it aligns with my experience." |
+| "The project succeeded - despite the initial constraints." | "The project succeeded despite the initial constraints." |
+
+The repair kit, in order of preference: a comma, a semicolon, a colon
+before a genuine explanation, a conjunction (`and`, `because`, `so`,
+`while`), parentheses for a true aside, or two sentences. A dash that
+resists all six was joining two ideas that should not have shared a
+sentence.
+
+Where the joined material is *structural* rather than prose (a role
+summary's label and value, an annotation lead-in), the system's
+separator is the mid dot: `Storage platform · tech lead, team of 8`.
+That is why `.scope` leads with ` · ` and not ` — ` (§5.4).
+
+**Audit before shipping.** Grep the filled document for `\u2014` (em
+dash) and for a spaced hyphen (` - `): both should return zero hits.
+Grep for `\u2013` (en dash) and confirm every hit sits between two
+dates or two numbers.
+
 ### 5.4 Scope &amp; trade-off annotations
 
 Two inline annotations exist:
 
 - `<span class="scope">…</span>` — secondary scope metric ("8
-  engineers, 11-month project"). Renders prefixed with " — " in
-  `--ink-meta`.
+  engineers, 11-month project"). Renders prefixed with " · ". The
+  lead-in is the mid dot, never an em dash: an em dash here reads
+  as an afterthought clause and is forbidden by §5.3.1.
 - `<span class="tradeoff">…</span>` — decision / alternative /
-  constraint statement. Renders prefixed with " · trade-off: " in
-  italic `--ink-meta`.
+  constraint statement. Renders prefixed with " · trade-off: ".
 
-Both annotations sit at `--ink-meta`, the same level as dates and
-locations — deliberately. The scope number and the trade-off are the
-staff-level thinking on display, so they need to register on a skim,
-not retreat into footnote grey. They remain inline (never on their
-own line) so the bullet and its reasoning stay visually coupled.
+**Both classes are semantic only: they carry no visual treatment.**
+`.scope`, `.tradeoff`, and `.annotation-label` inherit the owning
+bullet's font family, size, style, weight, line-height, tracking,
+and colour. An annotation can begin mid-bullet, and a caption size,
+an italic, or a lighter grey there makes one sentence visibly switch
+type partway through — the bullet stops reading as a single run. The
+visible `·` and `· trade-off:` labels stay, set exactly like the
+prose around them. They remain inline (never on their own line) so
+the bullet and its reasoning stay visually coupled.
+
+Do not reintroduce `font-size`, `font-style`, `font-family`, `color`,
+or `letter-spacing` on these classes — no smaller, lighter, italic,
+serif, or mono treatment inside a bullet.
+`build/annotation-typography-test.js` (and its browser companion,
+`build/annotation-typography-test.html`) fail the build if any of
+them come back. `<strong>` inside a bullet is unaffected: genuine
+metrics still go to SemiBold (§2.2).
 
 **Label markup.** The prefix label is a real inline span, not
 CSS-injected content. The full markup is:
 
 ```html
 <span class="scope">
-  <span class="annotation-label"> — </span>8 engineers, 11-month project…
+  <span class="annotation-label"> · </span>8 engineers, 11-month project…
 </span>
 <span class="tradeoff">
   <span class="annotation-label"> · trade-off: </span>CRDT vs. Raft…
@@ -348,7 +464,6 @@ edu line all compose with it:
 ```html
 <div class="role-header meta-row">…</div>
 <div class="role-meta meta-row">…</div>
-<div class="edu-line meta-row">…</div>
 ```
 
 Add `.meta-row` to any future block that needs the same alignment
@@ -387,7 +502,7 @@ sample, 12 of the 16).
 ### 5.7 Subsection heads
 
 For groupings *inside* a section — "Open Source" under Experience,
-"Talks" under Education — use the subsection-head pattern:
+"Talks" under Selected Systems — use the subsection-head pattern:
 
 ```html
 <div class="subsection-head">
@@ -400,20 +515,93 @@ It renders as italic 9.5 pt at `--ink-meta` with the same hairline
 rule. Quieter than `.section-head`, on purpose: it groups, it
 doesn't divide.
 
+**Write its bullets self-identifying.** A subsection carries no company
+and no dates, so a parser that segments Experience by employer files
+these bullets under the role above. Naming the subject in the bullet
+itself (`Maintainer of shardmap, …`, `Committer on arrow-rs, …`) makes
+the line true either way. Copy discipline, no visual cost — see §8.1.
+
+### 5.8 Header subtitle — the one home for education
+
+The line under the name is the résumé's subtitle, and it carries
+exactly one content pattern:
+
+```
+[current professional role] · [highest completed degree], [institution]
+```
+
+```html
+<p class="tagline">
+  <span class="subtitle-role" itemprop="jobTitle">Staff Engineer</span>
+  <span class="sep" aria-hidden="true">·</span>
+  <span class="credential">B.S. Computer Science, Carnegie Mellon University</span>
+</p>
+```
+
+**There is no Education section in this system.** No heading, no
+rule, no bottom row, no early-career exception, no toggle, no
+variant — one permanent placement, so a résumé never has two
+credible homes for the same fact. A staff-level reader wants the
+degree as provenance, not as a block competing with the work.
+
+Rules:
+
+- **Role first, credential second**, joined by the system's mid dot
+  (`.sep`) — never a dash (§5.3.1). Degree and institution are
+  separated by a comma, in that order.
+- **No degree documented ⇒ render the role alone.** Drop the
+  separator and the `.credential` span; change nothing else. That is
+  the only other valid shape of this line.
+- **Both halves are plain text inside `<main>`**, in the normal flow,
+  so every ATS reads them as ordinary line content. Nothing about the
+  credential is an image, a pseudo-element, or chrome.
+- **One treatment across the whole line.** `.subtitle-role` and
+  `.credential` inherit the subtitle's family, size, style, weight,
+  tracking, and ink — same principle as the inline bullet annotations
+  (§5.4). The line must read as a single run, not as a label plus a
+  footnote.
+- **The span is `.subtitle-role`, never `.role`.** `.role` is the
+  Experience block component (§5.2); naming the subtitle span `.role`
+  puts header text inside that block's margin, break, and `:last-child`
+  rules, and makes every consumer's `.role { … }` restyle the header.
+  No `.tagline` descendant may reuse a block-component class name.
+- **Never a specialisation or marketing tagline.** "Python backend,
+  data integration &amp; full-stack delivery", "distributed systems
+  &amp; storage infrastructure", "driving growth through data" — all
+  forbidden. The subtitle states what the candidate *is* and what
+  they *completed*; the bullets carry the specialisation as evidence.
+- **One line.** Keep it under ~70 characters so it sets on one line
+  at 11pt inside the type area; abbreviate the degree (`B.S.`,
+  `M.S.`, `Ph.D.`) rather than the institution. `text-wrap: pretty`
+  handles the rare unavoidable wrap.
+- Certifications, coursework, bootcamps, honours, GPA, and graduation
+  dates do **not** appear anywhere. "Highest completed degree" means
+  completed; an in-progress degree is not rendered.
+- **Known parse cost, accepted:** strictly section-segmenting ATS
+  stacks map education from a *heading* and will file this line as part
+  of the title instead. Full-text parsers find it wherever it sits, and
+  application forms collect education separately — see §8.1.
+
 ---
 
 ## 6. Density rules
 
 | Length goal | What "fits" looks like                              |
 |-------------|-----------------------------------------------------|
-| 1.4 pages   | 3 roles + Selected Systems + Skills + Education; page 2 ends ~40% down. The template **must** look intentional here. This is what the shipped `resume.html` sample is calibrated to. |
+| 1.4 pages   | 3 roles + Selected Systems + Skills, with the oldest role collapsed and 4–5 bullets on the current one; page 2 ends ~40% down. Intentional, and the easiest shape to hit from a trim. |
 | 1.0 page    | Reachable by cutting content, not by tightening type. The cuts, in order of how little they cost: drop `Selected Systems` when it restates bullet metrics (the largest single recovery, and it costs zero searchable terms); collapse the oldest role to a dateline + one summary line; trim the skills block to 3 rows. Past that you are deleting evidence — say so rather than doing it silently. |
-| 2.0 pages   | Same blocks with denser bullets; page 2 ends near the bottom margin. Also intentional. |
+| 2.0 pages   | Same blocks with denser bullets, or a subsection head (§5.7) added under Experience; page 2 ends near the bottom margin. Also intentional — **this is what the shipped `resume.html` sample is calibrated to** (measured 1.91 type areas in Chrome with the CDN families: page 2 ends ~91% down, leaving room for a role block to shift on a break without spilling to a third sheet). |
 
 Block sizes are not quoted here in pixels on purpose: they depend on
 the renderer, the density variant, and whether the Google Fonts CDN
 served the real families or a fallback. Measure the actual render if
 you need a number, and state the renderer alongside it.
+
+**Anything between these shapes is a defect, not a length.** A résumé
+at 2.05 pages that drops three lines onto a third sheet, or a letter at
+1.02 pages that pushes only its signature over, reads as a mistake at a
+glance. Land on a listed shape by cutting copy — or, for a small
+overflow, by the measured `data-density="compact"` path in §6.0.
 
 The template **does not** compress content to fit one page. Staff+
 candidates have content. Trying to squeeze it loses signal.
@@ -455,8 +643,9 @@ bullet, reorder a role's highlights), not CSS hacks.
 
 There is none. The template does not import an icon font, does not
 ship SVG icons, and does not use Unicode glyphs as icons. Bullet
-points, section dividers, separators (`·`), and en/em dashes are the
-entire visual vocabulary.
+points, section dividers, separators (`·`), the en dash in ranges, and
+`→` are the entire visual vocabulary. The em dash is not part of it
+(§5.3.1).
 
 If a future variant needs a single mark — e.g. a small monogram —
 it must be ink, embedded as text, and placed in body flow.
@@ -473,13 +662,89 @@ it must be ink, embedded as text, and placed in body flow.
   numbers render but not extract (see §2.4). The round-trip is only
   "verified" if every `$`, `%`, and date survives the paste. Grep the
   pasted text for the figures you expect; do not eyeball it.
-- The header (name / tagline / contact) lives inside `<main>`, not
-  the page's chrome — parsers that drop chrome will still see contact info.
+- The header (name / subtitle / contact) lives inside `<main>`, not
+  the page's chrome — parsers that drop chrome will still see contact info,
+  and the subtitle's degree + institution (§5.8) with it.
 - Semantic landmarks: `<main>`, `<header>`, `<section aria-labelledby>`,
   `<article>`, `<time datetime>`. Roles are `EmployeeRole`
   microdata; the person is `Person` microdata.
 - Where the rendering engine supports it, emit PDF/UA-1 with tagged
   content for EU EAA compliance.
+
+### 8.1 Parse-safety contract
+
+Everything in this section is **free**: it costs the design nothing
+visually. That is the filter. The system does *not* trade away its
+typography for parser convenience — no Arial, no white background, no
+left-aligned dates, no keyword block, no duplicated hidden text (which
+reads as keyword stuffing and gets a document rejected outright). What
+follows is only the set where the parse-friendly choice and the
+beautiful choice are the same choice.
+
+**Hard hazards — never present in a shipped document.** These are
+checked mechanically by `build/ats-parse-test.js`, which fails the
+build:
+
+| Hazard | Why it breaks parsing |
+|--------|-----------------------|
+| `<table>` anywhere | Cell-by-cell reading order; a two-column table interleaves unrelated lines. |
+| `<img>` / `<svg>` / `<canvas>` carrying text | Renders, extracts as nothing. |
+| `position: absolute` / `fixed` on content | Visual order stops matching source order, and extraction follows source. |
+| `column-count` / `column-width` | Real columns interleave on parse (§5.1). |
+| Hidden or 0px text (`visibility: hidden`, `opacity: 0`, `font-size: 0`) | Reads as keyword stuffing, not as content. |
+| `font-variant-numeric: tabular-nums` / `"tnum"` | Every digit drops out of the PDF text layer (§2.4). This one is catastrophic and invisible. |
+| CSS `content` carrying meaning | Dropped on copy in many engines. Decorative only — the bullet glyph is the sole sanctioned use (§5.4). |
+| Contact details outside `<main>` | Parsers that discard chrome discard the way to reach the candidate. |
+| `&nbsp;` in candidate copy | Extracts as U+00A0; `"38 ms"` stops matching a pattern that expects an ASCII space. Use `.nowrap` (below). |
+
+**The `.nowrap` utility.** Keeping a value with its unit is
+typographically necessary (`38 ms` must never break across lines), and
+`&nbsp;` is the reflex. Use `class="nowrap"` instead:
+
+```html
+<strong class="nowrap">p99 38 ms</strong>
+<span class="nowrap">19 PB</span>
+<dt class="nowrap">Data &amp; Storage</dt>
+```
+
+Identical rendering — same glyph, same advance, same unbreakable pair —
+and an ordinary space in the text layer.
+
+**Typography that stays, and what it costs.** These extract as
+non-ASCII and are kept anyway, because the alternatives are uglier and
+the cost is bounded:
+
+- `→` for a state change (`2.1 s → 340 ms`). Both figures still extract
+  as digits; only the relationship between them is a symbol.
+- `−` (true minus) in a delta (`−74% ingest cost`), `≤` for a bound.
+  A pattern looking for `-74%` will miss it, so **never let a symbol be
+  the only carrier of a claim**: if the direction of a number matters to
+  a screener, say it in words in the same line (`ingest cost down 74%`).
+  That is a copy rule, not a design change.
+- `·` mid dots as separators. They extract as themselves, which is
+  correct — they are punctuation, not content.
+
+**Section-segmenting parsers — two known, accepted costs.**
+
+1. **The degree lives in the header subtitle (§5.8), not in an
+   Education section.** Full-text parsers (modern Workday, Greenhouse,
+   HireAbility) find `B.S.` / `University` wherever they sit. Older
+   strictly section-segmenting stacks map education *from a heading*,
+   and will file the degree as part of the title line or skip it.
+   Accepted: the placement is a permanent design decision, application
+   forms collect education separately, and the alternative is a section
+   the system deliberately does not have.
+2. **Subsection heads (§5.7) carry no company or dates**, so a parser
+   that segments strictly by employer attributes their bullets to the
+   role above. Mitigate in copy, at no visual cost: every bullet under
+   a subsection names its own subject (`Maintainer of shardmap, …`,
+   `Committer on arrow-rs, …`), so the line is correct no matter which
+   employer it is filed under.
+
+**Free wins outside the markup.** Name the delivered file
+`Firstname-Lastname-Resume.pdf` (parsers and recruiters both read the
+filename), keep section labels conventional (§2.3), and render one
+PDF, not a scan or an image export.
 
 ---
 
@@ -492,8 +757,9 @@ prefix per JSON Resume convention.
 | JSON path                                | HTML target                              |
 |------------------------------------------|------------------------------------------|
 | `basics.name`                            | `.name`                                  |
-| `basics.label`                           | `.tagline`                               |
+| `basics.label` (current role only)       | `.tagline .subtitle-role`                |
 | `basics.email`                           | `.contact a[itemprop=email]`             |
+| `basics.phone`                           | `.contact a[itemprop=telephone]` — rendered `(NNN) NNN-NNNN`, wrapped in `<a href="tel:+1…">` |
 | `basics.location.{city,region}`          | `.contact [itemprop=addressLocality]` — **optional; see the privacy rule below** |
 | `basics.profiles[].url`                  | `.contact a[itemprop=sameAs]` (visible label = host + path, e.g. `github.com/acastellanos`; the `.network` field is metadata only and not rendered) |
 | `basics.url`                             | `.contact a[itemprop=url]`               |
@@ -510,9 +776,7 @@ prefix per JSON Resume convention.
 | `projects[].x_metrics[]`                 | `.project-metrics` (joined with ` · `)   |
 | `skills[].name`                          | `.skills dt`                             |
 | `skills[].keywords[]`                    | `.skills dd` (joined with ` · `)         |
-| `education[].institution`                | `.edu-school`                            |
-| `education[].{studyType, area}`          | `.edu-degree`                            |
-| `education[].endDate`, `.location`       | `.edu-meta`                              |
+| `education[0].{studyType, area}` + `.institution` | `.tagline .credential` — rendered `"<degree>, <institution>"`. Highest completed degree only; **no Education section exists** (§5.8). Omit the span entirely when no degree is documented. |
 
 Date normalisation: incoming `YYYY-MM` → rendered "Mon YYYY"; incoming
 `YYYY` → rendered "YYYY"; null `endDate` → "Present".
@@ -528,9 +792,9 @@ data.**
 the employer's headquarters, not from a prior role's office, not from a
 school, not from an area code, a timezone, or a profile URL. If the
 value was not given, omit the `addressLocality` span and its adjacent
-`.sep` entirely — email · one optional URL is a complete, correct
-contact line, and the flex layout closes the gap with no visual
-artefact.
+`.sep` entirely — email · phone is a complete, correct contact line
+(and the shape both shipped samples use), and the flex layout closes
+the gap with no visual artefact.
 
 `work[].location` (`.role-location`) is different: it is an employment
 fact about that role and may be rendered when supplied with the role
@@ -850,14 +1114,19 @@ Letterhead   ── identical component to the résumé header
 ─── hairline rule (.letterhead-rule) ───
 Date         ── right-aligned, --ink-meta, proportional figures.
              Rhymes with the résumé's right-aligned date column.
-Recipient    ── <address>; org name carries the only --ink-body weight.
+             **Pegged to the render month, never authored** (§11.6).
+Recipient    ── <address>: addressee (.recipient-name — a named person
+             when you have one, else "Hiring Team"), then company,
+             then the role being applied for (.recipient-line ×2).
+             The addressee line carries the only --ink-body weight;
+             the two lines under it are --ink-meta.
 Salutation   ── "Dear …,"
 Body         ── 3–4 paragraphs, Source Serif 4. Specifics over
              adjectives, same as the bullets: a number per claim
              where one exists. <strong> (SemiBold, never 700) on
              only the one or two headline figures.
-Close        ── valediction + signature + role line, wrapped in
-             .letter-close.
+Close        ── valediction + signature (the name, nothing else),
+             wrapped in .letter-close.
 ```
 
 ### 11.3 Accent &amp; the close
@@ -871,6 +1140,11 @@ and "used in exactly one place" is the rule that keeps it confident
 rather than decorative. Do not colour the body, the recipient, or the
 signature.
 
+**The close is the valediction and the name, full stop.** No role
+caption, no "candidate" line, no credential under the signature: the
+letterhead subtitle (§5.8) already carries role and degree, and a
+second title line at the foot turns a letter into a business card.
+
 `.letter-close` carries `break-inside: avoid` so the valediction and
 signature never split across a page break — the structural cure for the
 "*Sincerely,* on page 1, name orphaned on page 2" failure. A well-formed
@@ -882,11 +1156,74 @@ for any letter that runs long.
 - Length is **one page**. A cover letter that spills to two pages is
   too long; cut a paragraph, not the margins.
 - Numbers carry the signal here exactly as in the résumé bullets. The
-  shipped Maya Chen figures are **sample data** (like the résumé's
-  Anya Castellanos numbers) — replace them with the candidate's real
-  metrics before sending.
+  shipped Anya Castellanos / Vireo Data figures are **sample data**
+  (the same numbers as the résumé bullets, by design) — replace them
+  with the candidate's real metrics before sending.
 - No icons, no colour blocks, no second accent, no closing P.S. The
-  typographic vocabulary is the résumé's: `·`, `–`, `—`.
+  typographic vocabulary is the résumé's: `·`, `–` (ranges only), `→`.
+- **No dash connects clauses in the letter's sentences.** Long-form
+  prose is where em dashes creep in hardest, and where they read most
+  strongly as machine-written. §5.3.1 applies to every sentence here;
+  the repair is a comma, a conjunction, or two sentences.
+
+### 11.5 Short letters — `data-letter="centered"`
+
+```html
+<html lang="en" data-letter="centered">
+```
+
+Equal top/bottom margins hold only when the block reaches the bottom
+margin (§4.4). A letter that runs **≲⅔ of the type area** leaves all
+its slack at the foot and reads as though it slid off the top of the
+sheet. For correspondence, the editorial answer is to hang the short
+letter optically centred in the type area.
+
+| | |
+|---|---|
+| Scope | **Cover letter only.** The rule lives in `cover-letter.css`, which the résumé does not load — the scoping is structural, not conventional. A résumé is read top-down as a data grid and is *never* centred. |
+| Contract | Root-only and opt-in, same as the other four variants. |
+| When to set | Only after measuring the rendered letter at ≲⅔ of the type-area height — the same measure-then-set discipline as `data-density="compact"` (§6.0). |
+| Mechanism | `align-content: safe center` on `.page` — **not** flex. Switching `.page` to a flex container disables margin collapsing, which the optical trims (§4.4) live in; measured, it grew a full letter's page box by ~9 pt, enough to tip a one-page letter onto a second sheet. `align-content` centres block children inside a definite height and leaves the formatting context — and every other measurement — untouched. `safe` leaves negative free space alone, so a letter that fills or overflows the page is left exactly as it was and can never be pushed off the top edge. Degradation is graceful at every length: the shorter the letter, the more it centres. |
+| Print | Print drops the screen page box (`min-height: auto`; vertical margins move to `@page`), leaving no definite height to centre in. The print branch restores one as `--page-h − --margin-top − --margin-bot`; because the margin tokens track the values `@page` uses, that single `calc` covers letter, a4, letter-compact and a4-compact. |
+| Ink balance | The optical lead trim (§4.4) still applies inside the letterhead, so a centred letter keeps equal ink-to-edge distances at top and bottom as well as equal slack. |
+
+---
+
+### 11.6 The letter date is pegged to generation time
+
+The date is the one field in either document that goes stale on its
+own, so it is **never authored**. `cover-letter.html` ships the
+element empty and fills it from the system clock at render time:
+
+```html
+<p class="letter-date"><time id="letter-date" datetime=""></time></p>
+<script>
+  (function () {
+    var el = document.getElementById('letter-date'), d = new Date();
+    el.setAttribute('datetime', d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
+    el.textContent = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  })();
+</script>
+```
+
+- **Month and year only** ("August 2026"), matching the résumé's date
+  column. A day-precise date dates the letter to the hour and invites
+  a stale mismatch with the send.
+- **Both halves are set**: the visible text and the machine-readable
+  `datetime` (`YYYY-MM`), so the markup stays semantic.
+- **The script sits next to the element**, runs synchronously before
+  paint, and is the only script in either document. No flash, no
+  layout shift, nothing to load. The PDF pipeline (Chrome / Puppeteer)
+  executes it before printing, so the produced PDF carries the render
+  month.
+- **The source element is empty on purpose.** A typed fallback month
+  is exactly the hard-coding this replaces: it would print silently
+  and wrongly in the one case the fallback exists for. An agent
+  filling this template for a non-JS pipeline substitutes the month
+  itself, at fill time.
+- The résumé carries no document date at all — its dates are
+  employment facts, and `Present` on the current role is what makes it
+  self-updating.
 
 ---
 

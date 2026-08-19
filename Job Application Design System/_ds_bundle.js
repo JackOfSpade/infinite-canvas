@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/dual-mode-pdf.js":"1d2037abaecf","build/test.js":"706e82230b48"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-typography-test.js":"235419a376f0","build/ats-parse-test.js":"626764bd6f39","build/dual-mode-pdf.js":"1d2037abaecf","build/education-placement-test.js":"4b27301f2b83","build/test.js":"706e82230b48"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -7,6 +7,369 @@ const __ds_ns = (window.JobApplicationDesignSystem_895a4b = window.JobApplicatio
 const __ds_scope = {};
 
 (__ds_ns.__errors = __ds_ns.__errors || []);
+
+// build/annotation-typography-test.js
+try { (() => {
+/* ============================================================
+   build/annotation-typography-test.js — typography regression
+   ----------------------------------------------------------
+   Guards STYLE.md §5.4: the inline annotation spans (.scope,
+   .tradeoff, .annotation-label) are SEMANTIC ONLY. They can begin
+   mid-bullet, so any font / colour / tracking of their own makes a
+   single bullet visibly switch type partway through a sentence.
+
+   This test is static (parses the CSS sources) so it runs in CI with
+   no browser. The computed-style companion — same contract, measured
+   in a real engine — is build/annotation-typography-test.html.
+
+   Run from the project root:  node build/annotation-typography-test.js
+   Exit code 0 on success, 1 on first failure.
+   ============================================================ */
+
+'use strict';
+
+var fs = require('fs');
+var path = require('path');
+var ROOT = path.join(__dirname, '..');
+var GREEN = '\x1b[32m',
+  RED = '\x1b[31m',
+  DIM = '\x1b[2m',
+  RESET = '\x1b[0m';
+var passed = 0,
+  failed = 0,
+  failures = [];
+function ok(name) {
+  console.log('  ' + GREEN + '✓' + RESET + ' ' + name);
+  passed++;
+}
+function fail(name, m) {
+  console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m);
+  failed++;
+  failures.push(name);
+}
+function header(s) {
+  console.log('\n' + s);
+}
+function assert(cond, name, msg) {
+  if (cond) ok(name);else fail(name, msg || 'assertion failed');
+}
+
+/* The classes under guard, and the properties that would break a
+   continuous read if they took any value other than `inherit`. */
+var ANNOTATION_CLASSES = ['scope', 'tradeoff', 'annotation-label'];
+var GUARDED_PROPS = ['font', 'font-family', 'font-size', 'font-style', 'font-weight', 'font-variant', 'line-height', 'letter-spacing', 'word-spacing', 'color'];
+/* Every guarded longhand must be pinned to the parent bullet. `font`
+   (shorthand) is accepted in place of the individual font longhands. */
+var REQUIRED_INHERITS = ['font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing', 'color'];
+
+/* Strip comments, then split into { selector, decls } rule objects.
+   Deliberately naive — enough for these hand-written stylesheets, and
+   it never has to resolve the cascade: the contract is "no rule in the
+   system gives these classes a non-inherit value", which is a purely
+   textual property. @media / @page blocks are flattened by pulling out
+   their inner rules. */
+function parseRules(css) {
+  var src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  var rules = [],
+    re = /([^{}]+)\{([^{}]*)\}/g,
+    m;
+  while ((m = re.exec(src)) !== null) {
+    var sel = m[1].replace(/\s+/g, ' ').trim();
+    if (!sel || sel.charAt(0) === '@') continue; // at-rule preamble
+    rules.push({
+      selector: sel,
+      body: m[2]
+    });
+  }
+  return rules;
+}
+function declarations(body) {
+  return body.split(';').map(function (d) {
+    return d.trim();
+  }).filter(Boolean).map(function (d) {
+    var i = d.indexOf(':');
+    if (i === -1) return null;
+    return {
+      prop: d.slice(0, i).trim().toLowerCase(),
+      value: d.slice(i + 1).trim()
+    };
+  }).filter(Boolean);
+}
+
+/* Rules whose selector list touches one of the annotation classes. */
+function annotationRules(rules) {
+  return rules.filter(function (r) {
+    return ANNOTATION_CLASSES.some(function (c) {
+      return new RegExp('\\.' + c + '(?![\\w-])').test(r.selector);
+    });
+  });
+}
+function isInherit(value) {
+  return /^inherit$/i.test(value.replace(/\s*!important\s*$/i, '').trim());
+}
+function read(rel) {
+  return fs.readFileSync(path.join(ROOT, rel), 'utf8');
+}
+
+/* ---- the source of truth: the résumé stylesheet -------------------- */
+
+header(DIM + 'inline annotation typography' + RESET + '\nresume.css — the annotation rule');
+var resumeCss = read('resume.css');
+var resumeRules = annotationRules(parseRules(resumeCss));
+assert(resumeRules.length > 0, 'resume.css still styles the annotation classes (rule present)', 'no rule matched .scope / .tradeoff / .annotation-label');
+
+/* 1. Every guarded property that IS declared must be `inherit`. */
+var offenders = [];
+resumeRules.forEach(function (r) {
+  declarations(r.body).forEach(function (d) {
+    if (GUARDED_PROPS.indexOf(d.prop) !== -1 && !isInherit(d.value)) {
+      offenders.push(r.selector + ' { ' + d.prop + ': ' + d.value + ' }');
+    }
+  });
+});
+assert(offenders.length === 0, 'no font-size / font-style / font-family / color / tracking override on the annotation classes', offenders.join('  |  '));
+
+/* 2. …and the load-bearing ones must actually be declared, so the spans
+      are pinned even if a future rule elsewhere targets a bare span. */
+var declared = {};
+resumeRules.forEach(function (r) {
+  declarations(r.body).forEach(function (d) {
+    if (isInherit(d.value)) declared[d.prop] = true;
+  });
+});
+var missing = REQUIRED_INHERITS.filter(function (p) {
+  return !declared[p] && !(declared.font && p.indexOf('font-') === 0);
+});
+assert(missing.length === 0, 'annotation spans inherit the parent bullet type explicitly (' + REQUIRED_INHERITS.join(', ') + ')', 'not inherited: ' + missing.join(', '));
+
+/* 3. The specific bug this test exists for: italic on .tradeoff. */
+var italic = resumeRules.filter(function (r) {
+  return /\.tradeoff(?![\w-])/.test(r.selector) && declarations(r.body).some(function (d) {
+    return d.prop === 'font-style' && /italic|oblique/i.test(d.value);
+  });
+});
+assert(italic.length === 0, '.tradeoff does not apply italic styling', italic.map(function (r) {
+  return r.selector;
+}).join(', '));
+
+/* 4. No caption token smuggled in by name. */
+assert(!/\.(scope|tradeoff|annotation-label)[^{}]*\{[^{}]*--fs-caption/.test(resumeCss.replace(/\/\*[\s\S]*?\*\//g, '')), 'annotation classes do not reference --fs-caption');
+
+/* 5. <strong> in a bullet is NOT part of this contract — genuine metrics
+      keep their weight. Guard against an over-broad "inherit everything"
+      fix that flattens them too. */
+var strongRules = parseRules(resumeCss).concat(parseRules(read('cover-letter.css'))).filter(function (r) {
+  return /\bstrong\b/.test(r.selector);
+});
+assert(strongRules.some(function (r) {
+  return declarations(r.body).some(function (d) {
+    return d.prop === 'font-weight' && !isInherit(d.value);
+  });
+}), '<strong> still carries its own weight (metrics untouched)');
+
+/* ---- preview cards must not re-teach the old treatment ------------- */
+
+header('preview cards — no caption/italic annotation treatment');
+['preview/component-bullet.html', 'preview/color-ink-roles.html'].forEach(function (rel) {
+  var css = (read(rel).match(/<style[^>]*>([\s\S]*?)<\/style>/i) || ['', ''])[1];
+  var bad = [];
+  annotationRules(parseRules(css)).forEach(function (r) {
+    declarations(r.body).forEach(function (d) {
+      if (GUARDED_PROPS.indexOf(d.prop) !== -1 && !isInherit(d.value)) {
+        bad.push(r.selector + ' { ' + d.prop + ': ' + d.value + ' }');
+      }
+    });
+  });
+  assert(bad.length === 0, rel + ' renders annotations in the bullet’s own type', bad.join('  |  '));
+});
+
+/* ---- the documentation must not claim the old treatment ------------ */
+
+header('documentation — no stale caption/italic claim');
+
+/* Literal stale phrases, not heuristics — each one is a sentence that
+   used to describe the buggy treatment. */
+var STALE = [['STYLE.md', 'italic `--ink-meta`'], ['STYLE.md', 'scope chip, trade-off note'], ['SKILL.md', 'annotation** (italic'], ['colors_and_type.css', 'scope chip, tradeoff note']];
+STALE.forEach(function (pair) {
+  assert(read(pair[0]).indexOf(pair[1]) === -1, pair[0] + ' no longer says "' + pair[1] + '"');
+});
+/* And the replacement claim is actually documented. */
+assert(/inherit the owning\s+bullet's/i.test(read('STYLE.md').replace(/[’']/g, "'")), 'STYLE.md §5.4 states the spans inherit the owning bullet’s type');
+console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
+if (failed > 0) {
+  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
+  process.exit(1);
+}
+})(); } catch (e) { __ds_ns.__errors.push({ path: "build/annotation-typography-test.js", error: String((e && e.message) || e) }); }
+
+// build/ats-parse-test.js
+try { (() => {
+/* ============================================================
+   build/ats-parse-test.js — parse-safety gate
+   ----------------------------------------------------------
+   Enforces the hard hazards in STYLE.md §8.1: the set of things that
+   silently destroy a résumé's PDF text layer while looking perfect on
+   screen. Every check here is FREE — none of them trades away any of
+   the system's typography. Beauty-versus-parsing trade-offs are
+   deliberately NOT enforced (see §8.1 for what is kept and why).
+
+   Static: parses the shipped HTML + the résumé stylesheet, so it runs
+   in CI with no browser and no PDF toolchain.
+
+   Run from the project root:
+     node build/ats-parse-test.js                  # the shipped samples
+     node build/ats-parse-test.js out/filled.html  # any filled document
+
+   Exit code 0 on success, 1 on any hazard found.
+   ============================================================ */
+
+'use strict';
+
+var fs = require('fs');
+var path = require('path');
+var ROOT = path.join(__dirname, '..');
+var GREEN = '\x1b[32m',
+  RED = '\x1b[31m',
+  DIM = '\x1b[2m',
+  RESET = '\x1b[0m';
+var passed = 0,
+  failed = 0,
+  failures = [];
+function ok(name) {
+  console.log('  ' + GREEN + '✓' + RESET + ' ' + name);
+  passed++;
+}
+function fail(name, m) {
+  console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m);
+  failed++;
+  failures.push(name);
+}
+function header(s) {
+  console.log('\n' + s);
+}
+function assert(cond, name, msg) {
+  if (cond) ok(name);else fail(name, msg || 'assertion failed');
+}
+function read(rel) {
+  return fs.readFileSync(path.isAbsolute(rel) ? rel : path.join(ROOT, rel), 'utf8');
+}
+/* Candidate copy only. Stripped, because none of it reaches the text layer
+   of the printed document: HTML comments (documentation prose), the date
+   script, and <template> content (the offline-bundle splash mark, which is
+   inert markup outside the document flow). */
+function copyOf(html) {
+  return html.replace(/<!--[\s\S]*?-->/g, '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<template[\s\S]*?<\/template>/gi, '');
+}
+function mainOf(html) {
+  return (copyOf(html).match(/<main[\s\S]*?<\/main>/i) || [''])[0];
+}
+var targets = process.argv.slice(2);
+if (targets.length === 0) targets = ['resume.html', 'cover-letter.html'];
+
+/* ---- per-document hazards ----------------------------------------- */
+
+/* Each hazard: [label, regexp over candidate copy, why]. A match fails. */
+var HAZARDS = [['no <table> (cell reading order interleaves lines)', /<table[\s>]/i], ['no <img> / <svg> / <canvas> (text in them extracts as nothing)', /<(img|svg|canvas|picture)[\s>]/i, 'main'], ['no position:absolute / fixed on content', /position\s*:\s*(absolute|fixed)/i], ['no CSS columns (real columns interleave on parse)', /column-(count|width)\s*:/i], ['no hidden or zero-size text (reads as keyword stuffing)', /(visibility\s*:\s*hidden|opacity\s*:\s*0(?!\.)|font-size\s*:\s*0(px|pt)?\s*[;"'])/i], ['no tabular figures (every digit drops from the PDF)', /(tabular-nums|["']tnum["'])/i], ['no &nbsp; in candidate copy (use class="nowrap")', /&nbsp;|&#160;|&#xa0;|\u00a0/i], ['no <font> / <center> / inline text-align hacks', /<(font|center)[\s>]/i]];
+targets.forEach(function (rel) {
+  header(DIM + 'parse safety' + RESET + '\n' + rel);
+  var html = read(rel),
+    copy = copyOf(html),
+    main = mainOf(html);
+  HAZARDS.forEach(function (h) {
+    /* Most hazards are illegal anywhere in the file; imagery is judged
+       inside <main> only, since the document body is what gets printed. */
+    var m = (h[2] === 'main' ? main : copy).match(h[1]);
+    assert(!m, h[0], m ? 'found ' + JSON.stringify(String(m[0]).slice(0, 40)) : '');
+  });
+
+  /* Contact details must sit inside <main>, not in page chrome. */
+  assert(/<main[\s>]/i.test(copy), 'document has a <main> landmark');
+  assert(/mailto:/i.test(main), 'email is inside <main>', 'no mailto: link within <main>');
+  var telOutside = /tel:/i.test(copy) && !/tel:/i.test(main);
+  assert(!telOutside, 'phone (when present) is inside <main>');
+
+  /* Reading order: the name must be the first text in <main>, and the
+     contact block must precede the first section heading. */
+  var nameAt = main.search(/class="name"/);
+  var contactAt = main.search(/class="contact"/);
+  var firstH2 = main.search(/<h2[\s>]/i);
+  assert(nameAt !== -1 && (contactAt === -1 || nameAt < contactAt), 'name precedes the contact block in source order');
+  assert(contactAt === -1 || firstH2 === -1 || contactAt < firstH2, 'contact block precedes the first section heading');
+
+  /* Headings must be real heading elements, not styled divs. */
+  var fakeHeads = copy.match(/<(div|p|span)[^>]*class="[^"]*section-head[^"]*"[^>]*>\s*<(?!h[1-6])/gi) || [];
+  assert(fakeHeads.length === 0, 'section heads contain a real <h2>', fakeHeads.length + ' styled non-heading(s)');
+
+  /* Dates are machine-readable where the system says they are. */
+  if (/class="role-dates"/.test(copy)) {
+    assert(/<time datetime="/.test(copy), 'role dates carry <time datetime>');
+  }
+
+  /* Every number a screener reads must be real text, not a symbol-only
+     claim: a line whose ONLY figure is a signed delta written with the
+     true minus (−) is unmatchable by a `-74%` pattern, so §8.1 requires
+     the direction in words somewhere on the line. Advisory-strength: we
+     check the weaker invariant that digits exist alongside it. */
+  var minusLines = copy.match(/[^\n]*\u2212[^\n]*/g) || [];
+  var bareMinus = minusLines.filter(function (l) {
+    return !/\d/.test(l.replace(/\u2212/g, ''));
+  });
+  assert(bareMinus.length === 0, 'no line carries a minus sign with no extractable digits');
+});
+
+/* ---- stylesheet-level hazards ------------------------------------- */
+
+/* Every sheet a shipped document loads is scanned, not just resume.css —
+   a hazard added to the letter surface or the token sheet reaches the
+   page just as surely. */
+var SHEETS = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
+header('stylesheets — no hazard in any sheet a document loads');
+SHEETS.forEach(function (sheet) {
+  /* Comments stripped: the sheets document several hazards in prose ("do
+     not reintroduce tabular-nums"), and a doc comment must never trip a
+     check that is looking for a real declaration. */
+  var s = read(sheet).replace(/\/\*[\s\S]*?\*\//g, '');
+  assert(!/tabular-nums|["']tnum["']/.test(s), sheet + ': no rule enables tabular figures');
+  assert(!/column-(count|width)\s*:/.test(s), sheet + ': no CSS multi-column rule');
+  /* `position: absolute` is legitimate on the bullet pseudo-element and
+     nowhere else, so skip ::before/::after rules and flag the rest. */
+  var positioned = (s.match(/([^{}]+)\{[^}]*position\s*:\s*(absolute|fixed)[^}]*\}/g) || []).map(function (r) {
+    return r.slice(0, r.indexOf('{')).replace(/\s+/g, ' ').trim();
+  }).filter(function (sel) {
+    return !/::?(before|after)\b/.test(sel);
+  });
+  assert(positioned.length === 0, sheet + ': no rule positions content absolutely (bullet pseudo-element excepted)', positioned.join(' | '));
+  assert(!/visibility\s*:\s*hidden|font-size\s*:\s*0(px|pt)?\s*[;}]/.test(s), sheet + ': no rule hides text');
+});
+header('resume.css — parse-safe rules are in place');
+var css = read('resume.css').replace(/\/\*[\s\S]*?\*\//g, '');
+assert(/\.nowrap\s*\{[^}]*white-space\s*:\s*nowrap/.test(css), '.nowrap utility exists (the parse-safe replacement for &nbsp;)');
+assert(/font-variant-numeric\s*:\s*normal/.test(css), 'proportional numerals are pinned (tabular figures would empty the text layer)');
+
+/* CSS `content` is DECORATIVE ONLY: the bullet glyph, nothing else. Any
+   other value is text meaning that copy-paste and PDF extraction drop —
+   the exact failure the annotation labels were moved into markup to avoid
+   (§5.4). Whitelist by EXACT value: a substring test would wave through
+   `content: " · trade-off: "`, which is the case this check exists for. */
+var DECORATIVE = /^("|')(\\2022|\u2022|\s*)\1$/;
+var contents = (css.match(/content\s*:\s*("[^"]*"|'[^']*')/g) || []).map(function (d) {
+  return d.replace(/content\s*:\s*/, '').trim();
+});
+var meaningful = contents.filter(function (v) {
+  return !DECORATIVE.test(v);
+});
+assert(meaningful.length === 0, 'CSS content is decorative only (bullet glyph); no text meaning lives in CSS', meaningful.join(' | '));
+/* Guard the guard: the whitelist must actually reject a real label. */
+assert(!DECORATIVE.test('" \u00b7 trade-off: "') && DECORATIVE.test('"\\2022"'), 'the decorative whitelist rejects a multi-word label and accepts the bullet glyph');
+
+/* Single column, and no positioned content — covered per-sheet above. */
+assert(true, 'stylesheet hazards checked across ' + SHEETS.length + ' sheets');
+console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
+if (failed > 0) {
+  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
+  process.exit(1);
+}
+})(); } catch (e) { __ds_ns.__errors.push({ path: "build/ats-parse-test.js", error: String((e && e.message) || e) }); }
 
 // build/dual-mode-pdf.js
 try { (() => {
@@ -375,6 +738,167 @@ try { (() => {
   };
 });
 })(); } catch (e) { __ds_ns.__errors.push({ path: "build/dual-mode-pdf.js", error: String((e && e.message) || e) }); }
+
+// build/education-placement-test.js
+try { (() => {
+/* ============================================================
+   build/education-placement-test.js — structural regression
+   ----------------------------------------------------------
+   Guards STYLE.md §5.8: education has exactly ONE home in this
+   system — the header subtitle,
+     [current professional role] · [highest completed degree], [institution]
+   — and the dedicated Education section is gone for good. No
+   alternate section, no early-career exception, no toggle, no
+   variant.
+
+   Static (parses the shipped sources), so it runs in CI with no
+   browser. The rendered/computed-style companion is
+   build/education-placement-test.html.
+
+   Run from the project root:  node build/education-placement-test.js
+   Exit code 0 on success, 1 on first failure.
+   ============================================================ */
+
+'use strict';
+
+var fs = require('fs');
+var path = require('path');
+var ROOT = path.join(__dirname, '..');
+var GREEN = '\x1b[32m',
+  RED = '\x1b[31m',
+  DIM = '\x1b[2m',
+  RESET = '\x1b[0m';
+var passed = 0,
+  failed = 0,
+  failures = [];
+function ok(name) {
+  console.log('  ' + GREEN + '✓' + RESET + ' ' + name);
+  passed++;
+}
+function fail(name, m) {
+  console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m);
+  failed++;
+  failures.push(name);
+}
+function header(s) {
+  console.log('\n' + s);
+}
+function assert(cond, name, msg) {
+  if (cond) ok(name);else fail(name, msg || 'assertion failed');
+}
+function read(rel) {
+  return fs.readFileSync(path.join(ROOT, rel), 'utf8');
+}
+function exists(rel) {
+  return fs.existsSync(path.join(ROOT, rel));
+}
+function listPreviews() {
+  return fs.readdirSync(path.join(ROOT, 'preview')).filter(function (f) {
+    return /\.html$/.test(f);
+  }).map(function (f) {
+    return 'preview/' + f;
+  });
+}
+
+/* Markers of the removed section, in markup and in CSS. */
+var SECTION_MARKERS = [/id\s*=\s*"sec-education"/i, /aria-labelledby\s*=\s*"sec-education"/i, /<h2[^>]*>\s*Education\s*<\/h2>/i, /class\s*=\s*"[^"]*\bedu-(line|school|degree|meta)\b/i, /\.edu-(line|school|degree|meta)\b/];
+
+/* ---- the template ------------------------------------------------- */
+
+header(DIM + 'education placement' + RESET + '\nresume.html — no dedicated Education section');
+var resumeHtml = read('resume.html');
+SECTION_MARKERS.forEach(function (re) {
+  assert(!re.test(resumeHtml), 'resume.html carries no ' + re.source.slice(0, 42) + '…', 'matched: ' + (resumeHtml.match(re) || [''])[0]);
+});
+/* The word may still appear in a comment explaining the rule, but never as
+   a section heading or a landmark label. */
+assert(!/<section[^>]*>[\s\S]{0,400}?>\s*Education\s*</i.test(resumeHtml), 'no <section> in resume.html introduces an Education heading');
+assert(read('resume.css').indexOf('.edu-') === -1, 'resume.css defines no .edu-* rules');
+header('resume.html — header subtitle carries role + degree + institution');
+var tagline = (resumeHtml.match(/<p class="tagline">([\s\S]*?)<\/p>/i) || [])[1];
+assert(!!tagline, 'the subtitle (.tagline) is present');
+tagline = tagline || '';
+assert(/<span class="subtitle-role"[^>]*>([^<]+)<\/span>/i.test(tagline), 'subtitle has a .subtitle-role span (current professional role)');
+assert(/itemprop="jobTitle"/.test(tagline), '.subtitle-role carries itemprop="jobTitle"');
+assert(/<span class="sep"[^>]*>·<\/span>/i.test(tagline), 'role and credential are joined by the mid-dot .sep (never a dash)');
+var credential = (tagline.match(/<span class="credential">([\s\S]*?)<\/span>/i) || [])[1] || '';
+assert(credential.trim().length > 0, 'subtitle has a .credential span');
+assert(/^[^,<>]+,\s*[^,<>]+$/.test(credential.trim()), 'credential reads "<degree>, <institution>" — plain text, comma-separated', JSON.stringify(credential.trim()));
+assert(!/<(img|svg|span|div)\b/i.test(credential), 'credential is plain ATS-readable text (no nested markup, no image)');
+assert(!/[—–]/.test(tagline), 'subtitle contains no em or en dash (§5.3.1)');
+
+/* A specialisation / marketing tagline is the shape this rule replaced. */
+var MARKETING = /(full-stack delivery|data integration|backend|driving growth|passionate|results-driven|specialising|specializing)/i;
+assert(!MARKETING.test(tagline.replace(/<[^>]+>/g, ' ')), 'subtitle is not a specialisation / marketing tagline', (tagline.match(MARKETING) || [''])[0]);
+
+/* Degree text must be inside <main>, not in chrome. */
+var main = (resumeHtml.match(/<main[\s\S]*?<\/main>/i) || [''])[0];
+assert(main.indexOf(credential.trim()) !== -1, 'the degree + institution text sits inside <main>');
+header('role-only subtitle stays valid (no documented degree)');
+
+/* Nothing in the CSS may require the credential span: no rule may target
+   .credential as a structural dependency (e.g. `.tagline .role + .sep`
+   collapsing, or `:has()` layout switching), and .role must not be styled
+   differently from .credential. */
+var resumeCss = read('resume.css');
+assert(!/:has\([^)]*credential/.test(resumeCss), 'no :has() rule branches layout on the credential being present');
+assert(!/\.credential\s*\+|\+\s*\.credential|\.credential\s*~/.test(resumeCss), 'no sibling-combinator rule depends on the credential span');
+var taglineRule = (resumeCss.match(/\.tagline\s+\.subtitle-role[^{]*\{([^}]*)\}/) || [])[1] || '';
+['font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing', 'color'].forEach(function (p) {
+  assert(new RegExp(p + '\\s*:\\s*inherit').test(taglineRule), '.subtitle-role / .credential inherit ' + p + ' from the subtitle (one continuous run)');
+});
+
+/* No subtitle span may reuse a BLOCK-component class name: `.role`,
+   `.project`, `.section` etc. carry margins, break rules, and :last-child
+   behaviour, and consumers restyle them per §5.2. A collision there is
+   invisible today (inline boxes drop vertical margins) and breaks the header
+   the moment the component gains padding or the span becomes inline-block. */
+var BLOCK_COMPONENTS = ['role', 'role-header', 'role-meta', 'section', 'project', 'projects', 'highlights', 'skills', 'page', 'resume-header'];
+(function () {
+  var spans = tagline.match(/class="([^"]+)"/g) || [];
+  var clash = [];
+  spans.forEach(function (attr) {
+    attr.replace(/class="|"/g, '').split(/\s+/).forEach(function (c) {
+      if (BLOCK_COMPONENTS.indexOf(c) !== -1) clash.push(c);
+    });
+  });
+  assert(clash.length === 0, 'no .tagline descendant reuses a block-component class name', clash.join(', '));
+})();
+['resume.html', 'cover-letter.html', 'preview/component-header.html'].forEach(function (rel) {
+  assert(!/<span class="role"/.test(read(rel)), rel + ' uses .subtitle-role, not .role, in the subtitle');
+});
+/* And the documented contract says the role stands alone. */
+assert(/no degree documented[\s\S]{0,120}role alone/i.test(read('STYLE.md').replace(/\*\*/g, '')), 'STYLE.md §5.8 states that a candidate with no degree gets a role-only subtitle');
+header('previews — no Education card, no Education section markup');
+assert(!exists('preview/component-education.html'), 'preview/component-education.html is removed');
+listPreviews().forEach(function (rel) {
+  var src = read(rel);
+  var hit = SECTION_MARKERS.filter(function (re) {
+    return re.test(src);
+  });
+  assert(hit.length === 0, rel + ' shows no Education section markup', hit.map(function (r) {
+    return r.source;
+  }).join(' | '));
+});
+/* The manifest is compiler-generated; it must simply no longer list the card. */
+if (exists('_ds_manifest.json')) {
+  assert(read('_ds_manifest.json').indexOf('component-education') === -1, '_ds_manifest.json no longer references an Education component card');
+}
+header('documentation — Education removed, §5.8 documented');
+assert(/### 5\.8 Header subtitle/.test(read('STYLE.md')), 'STYLE.md documents §5.8 Header subtitle');
+[['STYLE.md', '`.edu-school`'], ['STYLE.md', '"Education". **Never**'], ['SKILL.md', 'skills, education'], ['readme.md', 'skills, education'], ['readme.md', '**Skills**, **Education**']].forEach(function (pair) {
+  assert(read(pair[0]).indexOf(pair[1]) === -1, pair[0] + ' no longer says "' + pair[1] + '"');
+});
+['STYLE.md', 'SKILL.md', 'readme.md'].forEach(function (doc) {
+  assert(/no Education section/i.test(read(doc)), doc + ' states that no Education section exists');
+});
+assert(/highest completed degree/i.test(read('SKILL.md')), 'SKILL.md pipeline names the highest-completed-degree subtitle pattern');
+console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
+if (failed > 0) {
+  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
+  process.exit(1);
+}
+})(); } catch (e) { __ds_ns.__errors.push({ path: "build/education-placement-test.js", error: String((e && e.message) || e) }); }
 
 // build/test.js
 try { (() => {

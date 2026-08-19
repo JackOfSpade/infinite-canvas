@@ -1,23 +1,31 @@
 <!doctype html>
-<!-- @dsCard group="Components" name="Component · Resume Header" subtitle="Name (display, accent) · tagline · contact line" viewport="700x220" -->
+<!-- @dsCard group="Components" name="Component · Resume Header" subtitle="Name (display, accent) · subtitle: role + degree, institution · contact line" viewport="700x320" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
 <style>
   .name { font-family: var(--ff-display); font-weight: 600; font-size: 26pt; line-height: 1.05; letter-spacing: -0.012em; color: var(--accent); margin: 0 0 4px; }
-  .tag  { font-size: 11pt; color: var(--ink-2); margin: 0 0 12px; letter-spacing: -0.005em; }
+  .tag  { font-size: 11pt; color: var(--ink-2); margin: 0 0 12px; letter-spacing: -0.005em; text-wrap: pretty; }
+  /* One treatment across the whole subtitle — role and credential are set
+     identically, so the line reads as a single run (STYLE.md §5.8). */
+  .tag .subtitle-role, .tag .credential { font: inherit; color: inherit; letter-spacing: inherit; }
+  .tag .sep { color: var(--ink-4); margin: 0 0.35em; }
+  .variant { margin-top: 22px; padding-top: 16px; border-top: 0.5pt solid rgba(26,24,21,0.10); }
+  .variant .lbl { font-family: var(--ff-mono); font-size: 7.5pt; color: var(--ink-4); letter-spacing: 0.06em; text-transform: uppercase; display: block; margin-bottom: 8px; }
   .contact { font-size: 9.5pt; color: var(--ink-1); display: flex; flex-wrap: wrap; gap: 0 12px; row-gap: 4px; }
   .contact .sep { color: var(--ink-4); }
   .contact a { color: inherit; text-decoration: none; border-bottom: 0.5pt solid rgba(26,24,21,0.18); }
 </style>
 </head><body>
 <h1 class="name">Anya R. Castellanos</h1>
-<p class="tag">Staff Engineer · distributed systems &amp; storage infrastructure</p>
+<p class="tag"><span class="subtitle-role">Staff Engineer</span><span class="sep">·</span><span class="credential">B.S. Computer Science, Carnegie Mellon University</span></p>
 <p class="contact">
   <a href="#">anya@castellanos.dev</a><span class="sep">·</span>
-  <span>Brooklyn, NY</span><span class="sep">·</span>
-  <a href="#">github.com/acastellanos</a><span class="sep">·</span>
-  <a href="#">linkedin.com/in/anyacastellanos</a><span class="sep">·</span>
-  <a href="#">castellanos.dev</a>
+  <a href="#">(718) 555-0142</a>
 </p>
+<div class="variant">
+  <span class="lbl">no documented degree — role only, nothing else changes</span>
+  <h1 class="name">Dara Okonkwo</h1>
+  <p class="tag"><span class="subtitle-role">Principal Engineer</span></p>
+</div>
 </body></html>

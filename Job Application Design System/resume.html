@@ -4,11 +4,9 @@
 <meta charset="utf-8">
 <title>Anya R. Castellanos · Staff Engineer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-
-<!-- Design tokens (typography, color, spacing) -->
+<!-- Design tokens (typography, colour, spacing, variants) -->
 <link rel="stylesheet" href="colors_and_type.css">
-
-<!-- Components: page chrome, sections, roles, bullets, etc. -->
+<!-- Components: page chrome, header, sections, roles, bullets, projects, skills -->
 <link rel="stylesheet" href="resume.css">
 </head>
 
@@ -22,61 +20,68 @@
 
 <body>
 <!-- ============================================================
-     PDF generation
+     REFERENCE SAMPLE — every component of the system, once.
      ----------------------------------------------------------
-     `data-print="dual-pdf"` on <html> (above) makes the printed
-     page background TRANSPARENT — a headless-Chrome "print to
-     PDF" emits a file with no baked-in background. That file is
-     then post-processed by `build/dual-mode-pdf.js` (require it;
-     call `addOcgBackground(bytes)`) which adds a view-only
-     Optional Content Group containing the warm cream. The result
-     is one PDF that shows cream on screen and prints on white
-     paper, with the oxblood candidate name preserved in both
-     states.
+     Header subtitle (§5.8) · role blocks with both inline annotations
+     (§5.4) · subsection head (§5.7) · Selected Systems with a metrics
+     line (§5.5) · 3-row skills block (§5.6) · inline <code> · both
+     separator gaps (§4.3) · .nowrap value/unit pairs (§8.1) · running
+     footer on pages 2+ (§10.6). Paired with `cover-letter.html`:
+     same candidate, same letterhead, same paper.
 
-     For big-co ATS pipelines and conservative industries the
-     agent should switch the <html> attribute to
-     `data-print="ink-only"` and skip the OCG post-process step.
+     There is no Education section anywhere in this system. The highest
+     completed degree rides in the header subtitle (§5.8).
 
-     All four variant attributes (data-print, data-page, data-mono,
-     data-density) are valid ONLY on the root <html> element. On
-     <main class="page"> or any other ancestor they do nothing.
-     See SKILL.md §Variant selection for the per-company decision
-     rule and STYLE.md §10 for the full variant specification.
+     PRINT / PDF
+     `data-print="dual-pdf"` makes the printed page background
+     transparent; `build/dual-mode-pdf.js` then adds a view-only
+     Optional Content Group holding the warm cream, so one PDF reads
+     cream on screen and prints clean on white. For big-co ATS
+     pipelines and conservative industries switch to
+     `data-print="ink-only"` and skip the post-process.
+
+     All variant attributes (data-print, data-page, data-mono,
+     data-density) are valid ONLY on the root <html> element.
+     SKILL.md §Variant selection decides per company; STYLE.md §10
+     specifies them.
 ============================================================ -->
 <main class="page" role="document"
       itemscope itemtype="https://schema.org/Person">
 
-<!-- ============= Header (basics) ============= -->
+<!-- ============= Header ============= -->
 <header class="resume-header">
   <h1 class="name" itemprop="name">Anya R. Castellanos</h1>
-  <p class="tagline" itemprop="jobTitle">
-    Staff Engineer · distributed systems &amp; storage infrastructure
+  <!-- Subtitle (§5.8): [current professional role] · [highest completed
+       degree], [institution]. Plain text inside <main>, so every parser
+       reads the degree as ordinary line content. No documented degree ⇒
+       drop the .sep and .credential and leave the role alone; that is the
+       only other valid shape. Never a specialisation tagline. The span is
+       .subtitle-role, never .role (that class is the Experience block). -->
+  <p class="tagline">
+    <span class="subtitle-role" itemprop="jobTitle">Staff Engineer</span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="credential">B.S. Computer Science, Carnegie Mellon University</span>
   </p>
+  <!-- Contact: email and phone. Complete on its own (§9.1); a supplied
+       location and one canonical URL are optional additions, never
+       inferred. -->
   <p class="contact" role="group" aria-label="Contact">
     <a href="mailto:anya@castellanos.dev" itemprop="email">anya@castellanos.dev</a>
     <span class="sep" aria-hidden="true">·</span>
-    <span itemprop="address" itemscope itemtype="https://schema.org/PostalAddress">
-      <span itemprop="addressLocality">Brooklyn, NY</span>
-    </span>
-    <span class="sep" aria-hidden="true">·</span>
-    <a href="https://github.com/acastellanos" itemprop="sameAs">github.com/acastellanos</a>
-    <span class="sep" aria-hidden="true">·</span>
-    <a href="https://linkedin.com/in/anyacastellanos" itemprop="sameAs">linkedin.com/in/anyacastellanos</a>
-    <span class="sep" aria-hidden="true">·</span>
-    <a href="https://castellanos.dev" itemprop="url">castellanos.dev</a>
+    <a href="tel:+17185550142" itemprop="telephone">(718) 555-0142</a>
   </p>
 </header>
 
-<!-- ============= Experience (work) ============= -->
+<!-- ============= Experience ============= -->
 <section class="section" aria-labelledby="sec-experience">
   <div class="section-head">
     <h2 id="sec-experience">Experience</h2>
     <span class="rule" aria-hidden="true"></span>
   </div>
 
-  <!-- Role 1 — Staff @ Tessera (current, 4y) -->
-  <article class="role">
+  <!-- Role 1 — current. Carries <strong> metrics and both annotations,
+       never more than one annotation per bullet (§5.4). -->
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
     <div class="role-header meta-row">
       <p class="role-title-line">
         <span class="title">Staff Engineer</span>
@@ -86,7 +91,7 @@
       <p class="role-dates"><time datetime="2022-03">Mar 2022</time> – <time>Present</time></p>
     </div>
     <div class="role-meta meta-row">
-      <p class="role-summary">Storage platform — tech lead, team of 8; query, ingest, replication.</p>
+      <p class="role-summary">Storage platform <span class="sep" aria-hidden="true">·</span> tech lead, team of 8; query, ingest, replication.</p>
       <p class="role-location">Brooklyn, NY</p>
     </div>
     <ul class="highlights">
@@ -97,42 +102,40 @@
       </li>
       <li>
         Designed the sharding strategy for the timeseries write path, sustaining
-        <strong>1.4M QPS</strong> at <strong>p99 38&nbsp;ms</strong> across a 19&nbsp;PB
-        dataset; replaced the prior consistent-hash scheme after it misbalanced under
-        tenant skew.
-        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>accepted +20&nbsp;ms tail latency for 4× write capacity and
-        bounded hot-shard recovery time.</span>
+        <strong>1.4M QPS</strong> at <strong class="nowrap">p99 38 ms</strong> across a
+        <span class="nowrap">19 PB</span> dataset; replaced the prior consistent-hash
+        scheme after it misbalanced under tenant skew.
+        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>accepted
+        <span class="nowrap">+20 ms</span> tail latency for 4× write capacity and bounded
+        hot-shard recovery time.</span>
       </li>
       <li>
         Led the query layer rewrite from a Postgres-backed CTE engine to a custom
         vectorized executor; cut p99 query latency
-        <strong>2.1&nbsp;s → 340&nbsp;ms</strong> at constant cost-per-query.
-        <span class="scope"><span class="annotation-label"> — </span>8 engineers, 11-month project, no read-path regressions in
-        cutover</span>
+        <strong class="nowrap">2.1 s → 340 ms</strong> at constant cost-per-query.
+        <span class="scope"><span class="annotation-label"> · </span>8 engineers, 11-month
+        project, no read-path regressions in cutover</span>
       </li>
       <li>
         Owned the multi-region replication design: 3-region active/active with bounded
-        staleness ≤ 200 ms; chose CRDT-based metadata sync over Raft after benchmarking
-        showed Raft leader-election added ~4 s of unavailability per quorum loss.
-        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>CRDT vs. Raft — picked eventual convergence for metadata
-        because operator pain on Raft quorum loss outweighed the consistency benefit at
-        our read/write ratio.</span>
+        staleness under <span class="nowrap">200 ms</span>; chose CRDT-based metadata sync
+        over Raft after benchmarking showed Raft leader-election added roughly four seconds
+        of unavailability per quorum loss.
+        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>picked
+        CRDT eventual convergence over Raft for metadata because operator pain on quorum
+        loss outweighed the consistency benefit at our read/write ratio.</span>
       </li>
       <li>
-        Built an internal review agent that summarizes PR diffs against
-        the platform contract and flags shared-service ownership conflicts at review time;
-        cross-team review cycle dropped from <strong>3.2 → 0.7 days</strong> median,
+        Built an internal review agent that summarizes PR diffs against the platform
+        contract and flags shared-service ownership conflicts at review time; cross-team
+        review cycle dropped from <strong class="nowrap">3.2 → 0.7 days</strong> median,
         adopted by 4 sibling platform teams.
-      </li>
-      <li>
-        Mentored three senior engineers into staff-track scope; two were promoted within
-        the engagement. Authored the team's career-ladder examples doc, since adopted org-wide.
       </li>
     </ul>
   </article>
 
-  <!-- Role 2 — Senior @ Helix (3y) -->
-  <article class="role">
+  <!-- Role 2 — a scope annotation and inline <code> terms. -->
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
     <div class="role-header meta-row">
       <p class="role-title-line">
         <span class="title">Senior Software Engineer</span>
@@ -142,39 +145,40 @@
       <p class="role-dates"><time datetime="2019-02">Feb 2019</time> – <time datetime="2022-02">Feb 2022</time></p>
     </div>
     <div class="role-meta meta-row">
-      <p class="role-summary">Edge Compute — tech lead, team of 12; runtime &amp; control plane.</p>
+      <p class="role-summary">Edge Compute <span class="sep" aria-hidden="true">·</span> tech lead, team of 12; runtime &amp; control plane.</p>
       <p class="role-location">Remote (US)</p>
     </div>
     <ul class="highlights">
       <li>
         Drove the cold-start program for the V8 isolate runtime: boot time
-        <strong>380&nbsp;ms → 18&nbsp;ms p95</strong> across the fleet. Snapshot
-        creation runs via <code>v8::SnapshotCreator</code>; restore is a
-        single <code>mmap</code> + relocation pass. The design (joint with the
-        runtime team) is now in use across three product lines.
+        <strong class="nowrap">380 ms → 18 ms p95</strong> across the fleet. Snapshot
+        creation runs via <code>v8::SnapshotCreator</code>; restore is a single
+        <code>mmap</code> plus relocation pass. The design, joint with the runtime team, is
+        now in use across three product lines.
       </li>
       <li>
-        Designed and shipped the autoscaler rewrite for the regional control plane;
-        replaced the single-leader scheduler with a sharded scheduler keyed by
-        <code>(tenant, region)</code>, lifting the per-region ceiling from 8K to
+        Shipped the autoscaler rewrite for the regional control plane, replacing the
+        single-leader scheduler with a sharded scheduler keyed by
+        <code>(tenant, region)</code> and lifting the per-region ceiling from 8K to
         <strong>110K concurrent functions</strong>.
-        <span class="scope"><span class="annotation-label"> — </span>control plane serving ~1.1M tenants</span>
+        <span class="scope"><span class="annotation-label"> · </span>control plane serving
+        roughly 1.1M tenants</span>
       </li>
       <li>
-        Wrote the post-incident retrospective for the 2020 us-east-2 control-plane
-        outage; the published findings became the basis for the company-wide
+        Wrote the post-incident retrospective for the 2020 us-east-2 control-plane outage;
+        the published findings became the basis for the company-wide
         &ldquo;blast radius&rdquo; review now mandatory for new tier-1 services.
       </li>
       <li>
-        Established the SLO program for Edge Compute. Defined the availability and
-        latency SLOs the org still operates on, including the error-budget policy that
-        gates feature work.
+        Established the SLO program for Edge Compute, defining the availability and latency
+        SLOs the org still operates on, including the error-budget policy that gates
+        feature work.
       </li>
     </ul>
   </article>
 
-  <!-- Role 3 — earlier (2y) -->
-  <article class="role">
+  <!-- Role 3 — earlier, deliberately shorter: two bullets, no annotations. -->
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
     <div class="role-header meta-row">
       <p class="role-title-line">
         <span class="title">Software Engineer</span>
@@ -184,28 +188,53 @@
       <p class="role-dates"><time datetime="2017-06">Jun 2017</time> – <time datetime="2019-02">Feb 2019</time></p>
     </div>
     <div class="role-meta meta-row">
-      <p class="role-summary">Search &amp; ingestion — IC on a 6-person team.</p>
+      <p class="role-summary">Search &amp; ingestion <span class="sep" aria-hidden="true">·</span> IC on a 6-person team.</p>
       <p class="role-location">San Francisco, CA</p>
     </div>
     <ul class="highlights">
       <li>
         Built the document indexing pipeline (Kafka → custom enrichment service →
-        Elasticsearch) sustaining <strong>50K docs/sec</strong>, ~3× the Logstash-based
-        predecessor at a quarter of the compute footprint. Replay tooling is a
-        single-binary <code>cardinal-replay</code> that re-reads from a
+        Elasticsearch) sustaining <strong class="nowrap">50K docs/sec</strong>, about three
+        times the Logstash-based predecessor at a quarter of the compute footprint. Replay
+        tooling is a single-binary <code>cardinal-replay</code> that re-reads from a
         committed Kafka offset and shadows the live writer.
       </li>
       <li>
         Led the cutover of the auth service from monolith to a standalone Go service
-        handling <strong>22K req/s</strong> at p99 9 ms; zero downtime, traffic-shifted
-        over 72 hours behind a feature flag.
+        handling <strong class="nowrap">22K req/s</strong> at
+        <span class="nowrap">p99 9 ms</span>; zero downtime, traffic-shifted over 72 hours
+        behind a feature flag.
       </li>
     </ul>
   </article>
 
+  <!-- Subsection head (§5.7): a second-tier grouping inside a section.
+       It carries no company and no dates, so each bullet names its own
+       subject — the line stays true whichever role a parser files it
+       under (§8.1). -->
+  <div class="subsection-head">
+    <h3>Open Source</h3>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+  <ul class="highlights">
+    <li>
+      Maintainer of <code>shardmap</code>, the bounded-load consistent-hashing library
+      extracted from the Tessera write path; <strong>2.4K</strong> dependent repositories
+      and a published compatibility contract across three major versions.
+    </li>
+    <li>
+      Committer on <code>arrow-rs</code>, working on the columnar spill path that
+      vectorized executors fall back to under memory pressure.
+    </li>
+  </ul>
+
 </section>
 
-<!-- ============= Selected Systems (projects) ============= -->
+<!-- ============= Selected Systems =============
+     Each metrics line states facts the bullets do not already carry
+     (shape and surface, not repeated numbers), and spells out the
+     direction of a delta in words so no claim rests on a symbol alone
+     (§8.1). Digit-heavy runs use the loose separator gap. -->
 <section class="section" aria-labelledby="sec-systems">
   <div class="section-head">
     <h2 id="sec-systems">Selected Systems</h2>
@@ -217,11 +246,11 @@
       <p>
         <span class="project-name">Tessera Timeseries Write Path</span>
         <span class="sep" aria-hidden="true">·</span>
-        <span class="project-desc">sharded ingest tier with CRDT-replicated metadata
-        across three regions; custom vectorized executor on the read side.</span>
+        <span class="project-desc">sharded ingest tier with CRDT-replicated metadata across
+        three regions; custom vectorized executor on the read side.</span>
       </p>
       <span class="project-metrics">
-        1.4M QPS<span class="sep sep-loose" aria-hidden="true">·</span>p99 38 ms<span class="sep sep-loose" aria-hidden="true">·</span>19 PB<span class="sep sep-loose" aria-hidden="true">·</span>3 regions
+        3 regions active/active<span class="sep sep-loose" aria-hidden="true">·</span>staleness under 200 ms<span class="sep sep-loose" aria-hidden="true">·</span>14 service contracts
       </span>
     </article>
 
@@ -230,23 +259,10 @@
         <span class="project-name">Helix Edge V8 Snapshot-Restore</span>
         <span class="sep" aria-hidden="true">·</span>
         <span class="project-desc">deduplicated heap-snapshot service feeding warm
-        isolates; reduced cold-start blast radius from per-request to per-deploy.</span>
+        isolates; moved cold-start blast radius from per-request to per-deploy.</span>
       </p>
       <span class="project-metrics">
-        cold-start 380 → 18 ms p95<span class="sep sep-loose" aria-hidden="true">·</span>−73% snapshot egress<span class="sep sep-loose" aria-hidden="true">·</span>3 product lines
-      </span>
-    </article>
-
-    <article class="project">
-      <p>
-        <span class="project-name">Cardinal Ingestion Pipeline</span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span class="project-desc">Kafka-fed enrichment + ES sink replacing a
-        Logstash topology; back-pressure and replay built into the enrichment
-        protocol.</span>
-      </p>
-      <span class="project-metrics">
-        50K docs/sec<span class="sep sep-loose" aria-hidden="true">·</span>−74% ingest cost<span class="sep sep-loose" aria-hidden="true">·</span>p99 enrichment 12 ms
+        snapshot egress down 73%<span class="sep sep-loose" aria-hidden="true">·</span>9 regions<span class="sep sep-loose" aria-hidden="true">·</span>3 product lines
       </span>
     </article>
   </div>
@@ -259,14 +275,14 @@
     <span class="rule" aria-hidden="true"></span>
   </div>
 
-  <!-- 3 rows, one line each, filterable nouns only — STYLE.md §5.6.
-       Architecture concepts (Raft, CRDTs, consistent hashing) live in the
-       bullets above, where they are evidence rather than a claim. -->
+  <!-- 3 rows, one line each, filterable nouns only (§5.6). Architecture
+       concepts (Raft, CRDTs, consistent hashing) live in the bullets
+       above, where they are evidence rather than a claim. -->
   <dl class="skills">
     <dt>Languages</dt>
     <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
 
-    <dt>Data&nbsp;&amp;&nbsp;Storage</dt>
+    <dt class="nowrap">Data &amp; Storage</dt>
     <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch</dd>
 
     <dt>Infrastructure</dt>
@@ -274,26 +290,7 @@
   </dl>
 </section>
 
-<!-- ============= Education ============= -->
-<section class="section" aria-labelledby="sec-education">
-  <div class="section-head">
-    <h2 id="sec-education">Education</h2>
-    <span class="rule" aria-hidden="true"></span>
-  </div>
-
-  <div class="edu-line meta-row">
-    <p>
-      <span class="edu-school">Carnegie Mellon University</span>
-      <span class="sep" aria-hidden="true">·</span>
-      <span class="edu-degree">B.S. Computer Science</span>
-    </p>
-    <p class="edu-meta">2017 · Pittsburgh, PA</p>
-  </div>
-</section>
-
 </main>
-
-
 
 </body>
 </html>

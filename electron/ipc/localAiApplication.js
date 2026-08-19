@@ -14,9 +14,9 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
 import { formatOriginalJobListingMarkdown } from './applicationBundle.js';
-import { buildCoverLetterDocument, buildResumeDocument } from './resumeHtml.js';
+import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, isShortCoverLetterLayout, withCenteredLetterVariant } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
-import { applicationVariantAttrsForJob, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, targetPageCountForJob } from './jobApplication.js';
+import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
@@ -32,6 +32,7 @@ const MAX_RESULT_BYTES = 1_000_000;
 const LOCAL_AI_STALE_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_LOCAL_AI_UNFINISHED_JOBS = 20;
 const LOCAL_AI_FIT_FEEDBACK_FILE = 'fit-feedback.json';
+const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 const MAX_LOCAL_AI_HANDOFF_EVENTS = 12;
 
 function cleanText(value, max = 20_000) {
@@ -94,6 +95,50 @@ function localJobsRoot(canvasRoot) {
   return path.join(canvasRoot, '.local-ai', 'jobs');
 }
 
+// The private job folder is removed as soon as a completed application is
+// saved. Keep this compact, app-authored receipt beside it so the same Claude
+// Code session can observe the terminal import and its final measurements.
+// It intentionally contains no candidate or document content.
+function localAiHandoffReceiptsRoot(canvasRoot) {
+  return path.join(canvasRoot, '.local-ai', LOCAL_AI_HANDOFF_RECEIPTS_DIR);
+}
+
+async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
+  const receiptsRoot = localAiHandoffReceiptsRoot(canvasRoot);
+  await fs.promises.mkdir(receiptsRoot, { recursive: true, mode: 0o700 });
+  const realRoot = await fs.promises.realpath(receiptsRoot);
+  if (realRoot !== receiptsRoot || !isWithinDirectory(canvasRoot, realRoot)) {
+    throw new Error('Local AI handoff receipts must remain inside the canvas folder.');
+  }
+  return realRoot;
+}
+
+async function writeLocalAiTerminalReceipt({ canvasRoot, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount }) {
+  const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
+  const receipt = {
+    version: 1,
+    jobId,
+    status: 'imported',
+    resultSha256: contentHash(resultRaw),
+    importedAt: new Date().toISOString(),
+    resume: {
+      pageCount: Number.isFinite(resumeFit?.pageCount) ? resumeFit.pageCount : null,
+      targetPageCount: Number.isFinite(targetPageCount) ? targetPageCount : null,
+      attempts: Array.isArray(resumeFit?.attempts) ? resumeFit.attempts.map(attempt => ({
+        density: attempt?.density === 'compact' ? 'compact' : 'default',
+        pageCount: Number.isFinite(attempt?.pageCount) ? attempt.pageCount : null,
+      })).slice(0, 4) : [],
+    },
+    coverLetter: {
+      pageCount: Number.isFinite(coverLetterFit?.pageCount) ? coverLetterFit.pageCount : null,
+      targetPageCount: 1,
+    },
+    message: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
+  };
+  await atomicJson(path.join(receiptsRoot, `${jobId}.json`), receipt);
+  return receipt;
+}
+
 // The job folder intentionally holds private career context while Claude Code
 // works. A completed application is promoted into its final bundle and then
 // removed by save-application; this guard is for abandoned/manual jobs only.
@@ -111,6 +156,20 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
     throw new Error('The canvas .local-ai/jobs folder must not be a symbolic link or leave the canvas folder.');
   }
   const cutoff = Date.now() - LOCAL_AI_STALE_JOB_RETENTION_MS;
+  // Terminal receipts have no candidate content and exist solely to bridge the
+  // Claude Code polling race after a successful save. Expire them with the
+  // same retention window as abandoned jobs.
+  const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
+  const receiptEntries = await fs.promises.readdir(receiptsRoot, { withFileTypes: true });
+  await Promise.all(receiptEntries
+    .filter(entry => entry.isFile() && entry.name.endsWith('.json') && JOB_ID_RE.test(entry.name.slice(0, -5)))
+    .map(async (entry) => {
+      const receiptPath = path.join(receiptsRoot, entry.name);
+      const stat = await fs.promises.lstat(receiptPath).catch(() => null);
+      if (stat?.isFile() && !stat.isSymbolicLink() && stat.mtimeMs < cutoff) {
+        await fs.promises.unlink(receiptPath).catch(() => {});
+      }
+    }));
   let retained = 0;
   for (const entry of entries) {
     if (!entry.isDirectory() || !JOB_ID_RE.test(entry.name)) continue;
@@ -292,9 +351,12 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot) {
   }
   if (typeof raw.outputBundleRoot !== 'string') throw new Error('Local AI result must include outputBundleRoot.');
   const output = resolveLocalOutputBundleRoot(raw.outputBundleRoot, projectRoot);
+  const resumeMainHtml = assertRetainedResumeRoleBullets(sanitizeResumeMainHtml(raw.resumeMainHtml));
+  const coverLetter = sanitizeCoverLetter(raw.coverLetter);
+  assertCandidateDashPunctuation({ resumeMainHtml, coverLetter });
   return {
-    resumeMainHtml: sanitizeResumeMainHtml(raw.resumeMainHtml),
-    coverLetter: sanitizeCoverLetter(raw.coverLetter),
+    resumeMainHtml,
+    coverLetter,
     qualityReview: sanitizeQualityReview(raw.qualityReview),
     outputBundleRoot: output.relative,
     outputBundleRootPath: output.resolved,
@@ -389,17 +451,43 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
   try {
     const rendered = await renderPdf(buildCoverLetterDocument({ letter, variantAttrs, docId }), { signal });
     const fontsLoaded = rendered.fontsLoaded !== false;
+    const pageCount = Number.isFinite(rendered.pageCount) ? rendered.pageCount : null;
+    // Keep the baseline unless a second, centred render is also verified. The
+    // design system permits this cover-only variant only after a measured
+    // short-letter result, and never for a multi-page letter.
+    if (fontsLoaded && pageCount === 1 && isShortCoverLetterLayout(rendered.layout)) {
+      try {
+        const centered = await renderPdf(buildCoverLetterDocument({
+          letter,
+          variantAttrs: withCenteredLetterVariant(variantAttrs, true),
+          docId,
+        }), { signal });
+        if (centered.fontsLoaded !== false && centered.pageCount === 1) {
+          return {
+            bytes: centered.bytes,
+            pageCount: centered.pageCount,
+            fontsLoaded: true,
+            renderError: null,
+            centered: true,
+          };
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        logger.warn(`[LocalAI] Could not apply short-letter centring — keeping the verified baseline: ${error?.message || error}`);
+      }
+    }
     return {
       bytes: fontsLoaded ? rendered.bytes : null,
-      pageCount: Number.isFinite(rendered.pageCount) ? rendered.pageCount : null,
+      pageCount,
       fontsLoaded,
       renderError: fontsLoaded ? null : 'Web fonts were unavailable while rendering the cover-letter PDF.',
+      centered: false,
     };
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
     const renderError = error?.message || String(error);
     logger.warn(`[LocalAI] Cover-letter PDF render failed: ${renderError}`);
-    return { bytes: null, pageCount: null, fontsLoaded: null, renderError };
+    return { bytes: null, pageCount: null, fontsLoaded: null, renderError, centered: false };
   }
 }
 
@@ -687,7 +775,7 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
   // Resume.pdf, while Application.html remains the combined editable workspace.
   // Printing the tabbed workspace makes PDF production depend on injected tab
   // controls that are irrelevant to the document itself.
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobMarkdown: formatOriginalJobListingMarkdown(input.job) } });
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, coverLetterCentered: coverLetterFit.centered, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobMarkdown: formatOriginalJobListingMarkdown(input.job) } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
   if (!resumePdf) {
@@ -718,6 +806,16 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
     coverLetterFit: coverLetterHandoffFit, qualityReview: result.qualityReview,
     detail: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
   }));
+  try {
+    await writeLocalAiTerminalReceipt({
+      canvasRoot: canvas.canvasRoot, jobId, resultRaw, resumeFit,
+      coverLetterFit, targetPageCount,
+    });
+  } catch (error) {
+    // The receipt improves Claude Code's terminal audit, but a filesystem
+    // failure here must not strand an otherwise verified application import.
+    logger.warn(`[LocalAI] Could not write terminal handoff receipt: ${error?.message || error}`);
+  }
   recordApplicationTelemetry({
     source: 'local-ai', status: 'completed', phase: 'imported', attemptId: `local-${jobId}`,
     jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',

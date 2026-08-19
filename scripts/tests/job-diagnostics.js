@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
@@ -577,6 +577,34 @@ export default [
       assert(/role-meta/.test(enforceOnePageRevisionStructure(twoCell, 1)),
         'a populated two-cell meta row must survive the one-page cut');
       return { before, after, folded: folded.length };
+  },
+},
+{
+    name: 'Résumé retained roles always carry factual bullet evidence',
+    run: () => {
+      const summaryOnly = `<main class="page"><article class="role"><div class="role-header"><span class="title">Software Engineer</span><span class="company">FliteX</span></div><div class="role-meta"><p class="role-summary">Built shortest-path tooling and FAA data-sync automation.</p></div></article><article class="role"><span class="title">Data Engineer</span><span class="company">Horizon</span><ul class="highlights"><li>Built Python ETL pipelines.</li></ul></article></main>`;
+      const missing = retainedResumeRolesWithoutBullets(summaryOnly);
+      let rejected = false;
+      try { assertRetainedResumeRoleBullets(summaryOnly); } catch { rejected = true; }
+      assert(missing.length === 1 && missing[0].company === 'FliteX',
+        'a summary-only retained role must be detected before it can ship');
+      assert(rejected,
+        'a summary-only role must be rejected so unpolished career notes can never be copied into a bullet');
+
+      const headerOnly = `<main class="page"><article class="role"><span class="title">Intern</span><span class="company">No Evidence Inc.</span></article></main>`;
+      assert(retainedResumeRolesWithoutBullets(headerOnly).length === 1,
+        'a header-only role must remain detectable for the hard validation gate');
+      let removalRejected = false;
+      try { assertRetainedResumeRoleIdentity(summaryOnly, headerOnly); } catch { removalRejected = true; }
+      assert(removalRejected,
+        'a revision cannot satisfy the bullet rule by removing a documented role');
+
+      const prompt = buildResumeRoleEvidenceRevisionPrompt({ mainHtml: summaryOnly });
+      assert(prompt.includes('Never copy a raw role-summary or career-data note verbatim')
+        && prompt.includes('For every invalid role, write one concise, polished employer-facing bullet supported by that data')
+        && prompt.includes('Do NOT remove, merge, rename, or otherwise omit any role'),
+      'the repair editor must polish career notes with source-backed prose while retaining every role');
+      return { detected: missing.length, rejected: true, removalRejected: true, repairPrompted: true };
     },
   },
 {
@@ -593,6 +621,19 @@ export default [
       assert(/\.meta-row\s*>\s*:only-child\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/.test(css),
         'a single-cell meta row must span both columns so it aligns to the content edge');
       return { letterCompact: true, a4Compact: true, onlyChildSpan: true };
+  },
+},
+{
+    name: 'Résumé inline annotations preserve the owning bullet typography',
+    run: () => {
+      const css = fs.readFileSync(path.join(process.cwd(), 'Job Application Design System', 'resume.css'), 'utf8');
+      const annotationRule = /\.scope, \.tradeoff, \.annotation-label\s*\{([\s\S]*?)\}/.exec(css)?.[1] || '';
+      assert(['font-family', 'font-size', 'font-style', 'font-weight', 'line-height', 'letter-spacing', 'color']
+        .every(property => new RegExp(`${property}\\s*:\\s*inherit`).test(annotationRule)),
+      'scope and trade-off spans must remain typographically continuous with their bullet');
+      assert(!/\.tradeoff\s*\{\s*font-style:\s*italic/.test(css),
+        'a trade-off continuation must not switch a bullet to italic mid-sentence');
+      return { annotationTypography: 'inherited' };
     },
   },
 {
@@ -4253,6 +4294,27 @@ export default [
       assert(bare.includes('Dear Hiring Team,') && bare.includes('Sincerely,'), 'cover: missing salutation/closing fallback');
       assert(!bare.includes('letter-recipient') && !bare.includes('signature-title'), 'cover: optional blocks must be omitted when empty');
       assert(bare.includes('<p class="signature"'), 'cover: signature (name) always present');
+
+      // The new short-letter treatment is root-only on a standalone cover,
+      // but Application.html carries both documents under one root. Its cover
+      // panel is marked and the injected tab logic toggles the root attribute
+      // only while that panel is active, so the résumé can never be centred.
+      const centeredStandalone = buildCoverLetterDocument({
+        letter: { name: 'X', paragraphs: ['Short note.'] },
+        variantAttrs: 'data-print="dual-pdf" data-letter="centered"',
+      });
+      assert(/<html\b[^>]*data-letter="centered"[^>]*>/.test(centeredStandalone), 'cover: centred treatment must remain root-scoped');
+      const centeredWorkspace = buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Résumé</h1></main>',
+        variantAttrs: 'data-print="dual-pdf"',
+        coverLetter: { name: 'X', paragraphs: ['Short note.'] },
+        coverLetterCentered: true,
+      });
+      const workspaceRoot = /<html\b[^>]*>/.exec(centeredWorkspace)?.[0] || '';
+      assert(!workspaceRoot.includes('data-letter'), 'workspace: cover-only treatment must not be pinned on the shared root');
+      assert(centeredWorkspace.includes('<main data-ic-letter-centered class="page"'), 'workspace: centred cover panel must retain its host marker');
+      assert(centeredWorkspace.includes("setAttribute('data-letter', 'centered')"), 'workspace: cover tab must apply the root-only treatment');
+      assert(centeredWorkspace.includes("removeAttribute('data-letter')"), 'workspace: résumé tab must remove the cover-only treatment');
       return { ok: true };
     },
   }

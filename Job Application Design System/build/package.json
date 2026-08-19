@@ -1,3 +1,10 @@
 {
-  "type": "commonjs"
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test.js && node annotation-typography-test.js && node education-placement-test.js && node ats-parse-test.js",
+    "test:parse": "node ats-parse-test.js",
+    "test:pdf": "node test.js",
+    "test:typography": "node annotation-typography-test.js",
+    "test:education": "node education-placement-test.js"
+  }
 }

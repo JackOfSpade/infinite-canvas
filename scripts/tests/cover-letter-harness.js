@@ -149,20 +149,23 @@ export default [
     run: () => {
       const source = fs.readFileSync(path.resolve('Job Application Design System/resume.html'), 'utf8');
       const main = /<main\b[\s\S]*<\/main>/i.exec(source)?.[0] || '';
-      const withReceipt = main.replace('<strong>', '<strong data-achievement-id="sample-receipt">');
+      const withReceipt = main
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/<strong\b/, '<strong data-achievement-id="sample-receipt"');
       const extracted = extractResumeEvidence(withReceipt);
       assert(extracted.identity.name === 'Anya R. Castellanos'
-        && extracted.identity.tagline.includes('distributed systems')
-        && extracted.identity.contact.length === 5,
+        && extracted.identity.tagline.includes('Staff Engineer')
+        && extracted.identity.tagline.includes('B.S. Computer Science')
+        && extracted.identity.contact.length === 2,
       'identity and every nested contact item must come from the résumé header');
-      assert(extracted.roles.length === 3 && extracted.bulletTexts.length === 12
+      assert(extracted.roles.length === 3 && extracted.bulletTexts.length >= 10
         && extracted.skills.length === 3 && extracted.education.length === 1,
-      'real design-system role, bullet, skill, and education structures must be preserved');
+      'real design-system role, bullet, skill, and header-credential structures must be preserved');
       assert(extracted.bulletTexts.some(text => text.includes('trade-off:'))
         && extracted.achievementIds.includes('sample-receipt'),
       'annotation text and receipt ids must survive evidence extraction');
-      assert(extracted.education[0].includes('2017 · Pittsburgh, PA'),
-        'nested education metadata must not be truncated at the first inner paragraph');
+      assert(extracted.education[0].includes('B.S. Computer Science, Carnegie Mellon University'),
+        'the header credential must remain available as structured degree evidence');
       const prompt = renderResumeEvidenceForPrompt(extracted);
       assert(prompt.includes('Anya R. Castellanos') && prompt.includes('achievement ids: sample-receipt')
         && !/<(?:main|article|strong)\b/i.test(prompt),

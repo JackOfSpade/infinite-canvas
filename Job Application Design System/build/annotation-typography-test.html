@@ -1,0 +1,94 @@
+<!doctype html>
+<!--
+  annotation-typography-test.html — computed-style companion to
+  build/annotation-typography-test.js. Loads the real stylesheets and
+  measures a rendered bullet: every inline annotation span must resolve
+  to exactly the owning <li>'s typography, so the bullet reads as one
+  continuous run (STYLE.md §5.4). Open in any browser; results print to
+  the page and the console.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>inline annotations — typography self-test</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  body { background:#1a1815; color:#e8e3d8; padding:24px; }
+  #out, #summary { font-family: ui-monospace, Menlo, monospace; font-size:13px; line-height:1.5; }
+  .pass { color:#7CCB8E; } .fail { color:#FF8A80; } .hdr { color:#B6AFA2; margin-top:14px; }
+  #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
+  #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
+  #fixture { background: var(--bg); color: var(--ink-body); padding:18px 22px; margin-bottom:18px; max-width:620px; }
+</style>
+</head>
+<body>
+<!-- Fixture: the real résumé markup for a bullet carrying both annotations. -->
+<div id="fixture">
+  <ul class="highlights">
+    <li id="b-scope">Rebuilt the timeseries write path around a learned shard router.<span class="scope"><span class="annotation-label"> · </span>8 engineers, 11-month project</span></li>
+    <li id="b-tradeoff">Chose CRDT metadata sync over Raft; operator pain on quorum loss outweighed the consistency benefit at <strong>1.4M QPS</strong>.<span class="tradeoff"><span class="annotation-label"> · trade-off: </span>accepted +20 ms tail latency for 4× write capacity.</span></li>
+  </ul>
+</div>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script>
+const out = document.getElementById('out'), sumEl = document.getElementById('summary');
+let passed = 0, failed = 0; const failures = [];
+function line(t, cls){ const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = t; out.appendChild(d); }
+function ok(n){ line('  ✓ ' + n, 'pass'); console.log('PASS: ' + n); passed++; }
+function fail(n, m){ line('  ✗ ' + n + ' — ' + m, 'fail'); console.error('FAIL: ' + n + ' — ' + m); failed++; failures.push(n); }
+function header(s){ line(s, 'hdr'); }
+function assert(cond, n, m){ cond ? ok(n) : fail(n, m || 'assertion failed'); }
+
+/* The properties a mid-sentence transition would show up in. */
+const PROPS = ['fontFamily','fontSize','fontStyle','fontWeight','fontVariantNumeric','lineHeight','letterSpacing','color','textTransform'];
+function styleOf(el){ const cs = getComputedStyle(el); const o = {}; for (const p of PROPS) o[p] = cs[p]; return o; }
+function diff(a, b){ return PROPS.filter(p => a[p] !== b[p]).map(p => p + ': ' + a[p] + ' ≠ ' + b[p]); }
+
+function run(){
+  const cases = [
+    ['.scope', document.getElementById('b-scope'), '#b-scope .scope'],
+    ['.tradeoff', document.getElementById('b-tradeoff'), '#b-tradeoff .tradeoff']
+  ];
+
+  header('Annotation spans inherit the owning bullet’s type');
+  for (const [label, li, sel] of cases) {
+    const span = document.querySelector(sel);
+    const d = diff(styleOf(span), styleOf(li));
+    assert(d.length === 0, label + ' matches its bullet on ' + PROPS.length + ' type properties', d.join(' | '));
+  }
+
+  header('Annotation labels (the visible “·” / “· trade-off:”) match too');
+  for (const [label, li, sel] of cases) {
+    const lbl = document.querySelector(sel + ' .annotation-label');
+    const d = diff(styleOf(lbl), styleOf(li));
+    assert(d.length === 0, label + ' > .annotation-label matches its bullet', d.join(' | '));
+  }
+
+  header('The specific regression: no italic on .tradeoff');
+  const tr = document.querySelector('#b-tradeoff .tradeoff');
+  assert(getComputedStyle(tr).fontStyle === 'normal', '.tradeoff computes font-style: normal',
+    'got ' + getComputedStyle(tr).fontStyle);
+  assert(getComputedStyle(document.querySelector('#b-tradeoff .annotation-label')).fontStyle === 'normal',
+    '.annotation-label computes font-style: normal');
+
+  header('Sanity: the bullet itself is still body type, and <strong> is untouched');
+  const liCs = getComputedStyle(document.getElementById('b-tradeoff'));
+  assert(/Inter/.test(liCs.fontFamily), 'bullet is set in Inter (résumé body family)', liCs.fontFamily);
+  const strong = document.querySelector('#b-tradeoff strong');
+  assert(Number(getComputedStyle(strong).fontWeight) >= 600, '<strong> metric still renders at SemiBold+',
+    getComputedStyle(strong).fontWeight);
+  /* Single continuous run: one flat font-size across every text node. */
+  const sizes = new Set([...document.querySelectorAll('#b-tradeoff, #b-tradeoff span')]
+    .map(el => getComputedStyle(el).fontSize));
+  assert(sizes.size === 1, 'exactly one font-size across the whole bullet', [...sizes].join(', '));
+
+  sumEl.textContent = passed + ' passed, ' + failed + ' failed';
+  sumEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log('SUMMARY: ' + passed + ' passed, ' + failed + ' failed' + (failures.length ? ' | failures: ' + failures.join(', ') : ''));
+}
+document.fonts.ready.then(run).catch(e => { sumEl.textContent = 'RUNNER CRASHED: ' + e.message; sumEl.className = 'bad'; });
+</script>
+</body>
+</html>

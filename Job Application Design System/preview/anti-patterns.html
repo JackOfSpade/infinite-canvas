@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- @dsCard group="Brand" name="Anti-Patterns" subtitle="Out-of-bounds visuals — what the system explicitly forbids" viewport="880x760" -->
+<!-- @dsCard group="Brand" name="Anti-Patterns" subtitle="Out-of-bounds visuals and punctuation · what the system forbids" viewport="880x1180" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
@@ -91,6 +91,13 @@
 
   /* 8. centered name */
   .demo-centered { text-align: center; font-family: var(--ff-display); font-size: 18pt; font-weight: 600; color: var(--accent); }
+  /* 9. dash punctuation */
+  .anti.wide { grid-column: 1 / -1; }
+  .dash-pairs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 22px; font-size: 9pt; line-height: 1.5; }
+  .dash-pairs .h { font-family: var(--ff-body); font-size: 8pt; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
+  .dash-pairs .bad { color: var(--accent); }
+  .dash-pairs .good { color: var(--ink-1); }
+  .keep { font-family: var(--ff-mono); font-size: 8.5pt; color: var(--ink-2); }
 </style>
 </head><body>
 <p class="card-label">Anti-Patterns · Out of Bounds</p>
@@ -195,6 +202,22 @@
       "Designed scalable, high-performance, world-class sharding for a massive timeseries workload using cutting-edge approaches."
     </div>
     <p class="why">Zero verifiable signal. Replace every adjective with a number, a decision, or a trade-off — or cut the bullet.</p>
+  </div>
+
+  <div class="anti wide">
+    <span class="mark">no</span>
+    <h3>Dashes that join ideas</h3>
+    <div class="demo">
+      <div class="dash-pairs">
+        <span class="h">reject</span><span class="h">write instead</span>
+        <span class="bad">"Led the migration — reducing p99 latency by 40%."</span><span class="good">"Led the migration, reducing p99 latency by 40%."</span>
+        <span class="bad">"Improved the system — and reduced operating cost."</span><span class="good">"Improved the system and reduced operating cost."</span>
+        <span class="bad">"I am interested in this role – it aligns with my experience."</span><span class="good">"I am interested in this role because it aligns with my experience."</span>
+        <span class="bad">"The project succeeded - despite the initial constraints."</span><span class="good">"The project succeeded despite the initial constraints."</span>
+      </div>
+      <p class="keep" style="margin:10px 0 0">still allowed: end-to-end · consistent-hash · 11-month · anya@castellanos.dev · Mar 2022 – Present · 3–5 engineers</p>
+    </div>
+    <p class="why">The rule covers the sent artifacts only: the résumé and the cover letter. A dash may live inside a word or a value, never between ideas. The joining dash is the loudest tell of machine-written copy, and it lets two ideas share a sentence without deciding how they relate. Use a comma, a semicolon, a colon, a conjunction, parentheses, or two sentences. See <code>STYLE.md §5.3.1</code>.</p>
   </div>
 
 </div>

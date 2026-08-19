@@ -1,0 +1,138 @@
+<!doctype html>
+<!--
+  education-placement-test.html — rendered companion to
+  build/education-placement-test.js. Loads the real stylesheets, mounts
+  the shipped résumé in an iframe, and measures the two valid subtitle
+  shapes (STYLE.md §5.8):
+    role · degree, institution     — the default
+    role                           — no documented degree
+  Asserts the removed Education section is absent from the rendered
+  document, the credential is extractable text inside <main>, and the
+  subtitle reads as one continuous type run. Open in any browser.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>education placement — self-test</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  body { background:#1a1815; color:#e8e3d8; padding:24px; }
+  #out, #summary { font-family: ui-monospace, Menlo, monospace; font-size:13px; line-height:1.5; }
+  .pass { color:#7CCB8E; } .fail { color:#FF8A80; } .hdr { color:#B6AFA2; margin-top:14px; }
+  #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
+  #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
+  #fixtures { background: var(--bg); color: var(--ink-body); padding:18px 22px; margin-bottom:16px; max-width:640px; }
+  #frame { width:0; height:0; border:0; position:absolute; visibility:hidden; }
+</style>
+</head>
+<body>
+<!-- Fixtures: both valid shapes of the subtitle, real markup. -->
+<div id="fixtures">
+  <header class="resume-header" id="h-full">
+    <h1 class="name">Anya R. Castellanos</h1>
+    <p class="tagline"><span class="subtitle-role" itemprop="jobTitle">Staff Engineer</span> <span class="sep" aria-hidden="true">·</span> <span class="credential">B.S. Computer Science, Carnegie Mellon University</span></p>
+  </header>
+  <header class="resume-header" id="h-role">
+    <h1 class="name">Dara Okonkwo</h1>
+    <p class="tagline"><span class="subtitle-role" itemprop="jobTitle">Principal Engineer</span></p>
+  </header>
+</div>
+<iframe id="frame" src="../resume.html" title="shipped résumé"></iframe>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script>
+const out = document.getElementById('out'), sumEl = document.getElementById('summary');
+let passed = 0, failed = 0; const failures = [];
+function line(t, cls){ const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = t; out.appendChild(d); }
+function ok(n){ line('  ✓ ' + n, 'pass'); console.log('PASS: ' + n); passed++; }
+function fail(n, m){ line('  ✗ ' + n + ' — ' + m, 'fail'); console.error('FAIL: ' + n + ' — ' + m); failed++; failures.push(n); }
+function header(s){ line(s, 'hdr'); }
+function assert(c, n, m){ c ? ok(n) : fail(n, m || 'assertion failed'); }
+
+const PROPS = ['fontFamily','fontSize','fontStyle','fontWeight','lineHeight','letterSpacing','color'];
+const styleOf = el => { const cs = getComputedStyle(el); const o = {}; for (const p of PROPS) o[p] = cs[p]; return o; };
+const diff = (a, b) => PROPS.filter(p => a[p] !== b[p]).map(p => p + ': ' + a[p] + ' ≠ ' + b[p]);
+
+function run(doc){
+  header('Subtitle — role · degree, institution');
+  const full = document.getElementById('h-full');
+  const tag = full.querySelector('.tagline');
+  const role = tag.querySelector('.subtitle-role'), cred = tag.querySelector('.credential');
+  assert(!!role && !!cred, 'both .subtitle-role and .credential render');
+  assert(/^Staff Engineer\s·\sB\.S\. Computer Science, Carnegie Mellon University$/.test(tag.textContent.replace(/\s+/g,' ').trim()),
+    'subtitle text reads "role · degree, institution"', JSON.stringify(tag.textContent.trim()));
+  for (const [label, el] of [['.subtitle-role', role], ['.credential', cred]]) {
+    const d = diff(styleOf(el), styleOf(tag));
+    assert(d.length === 0, label + ' matches the subtitle on all ' + PROPS.length + ' type properties', d.join(' | '));
+  }
+  /* .sep is the separator COMPONENT: deliberately --ink-fade everywhere in the
+     system (§3.1), so it matches on type but not on colour. */
+  const sepProps = PROPS.filter(p => p !== 'color');
+  const sepCs = styleOf(tag.querySelector('.sep')), tagCs = styleOf(tag);
+  assert(sepProps.every(p => sepCs[p] === tagCs[p]),
+    '.sep matches the subtitle on type (colour is its own token by design)',
+    sepProps.filter(p => sepCs[p] !== tagCs[p]).join(' | '));
+  assert(new Set([...tag.querySelectorAll('span')].map(el => getComputedStyle(el).fontSize)).size === 1,
+    'exactly one font-size across the subtitle');
+  assert(tag.getClientRects().length === 1, 'subtitle sets on a single line at the sample length',
+    tag.getClientRects().length + ' line boxes');
+
+  header('Subtitle — role only (no documented degree)');
+  const roleOnly = document.getElementById('h-role').querySelector('.tagline');
+  assert(roleOnly.textContent.trim() === 'Principal Engineer', 'role-only subtitle renders just the role');
+  assert(!roleOnly.querySelector('.credential') && !roleOnly.querySelector('.sep'),
+    'no orphan separator or empty credential span');
+  const a = styleOf(roleOnly), b = styleOf(tag);
+  assert(diff(a, b).length === 0, 'role-only subtitle is set identically to the full one', diff(a, b).join(' | '));
+  assert(Math.abs(roleOnly.getBoundingClientRect().height - tag.getBoundingClientRect().height) < 1.5,
+    'role-only subtitle occupies the same line height (layout unchanged)');
+  assert(getComputedStyle(roleOnly).marginBottom === getComputedStyle(tag).marginBottom,
+    'subtitle ↔ contact spacing is identical in both shapes');
+
+  header('Subtitle spans do not collide with block components');
+  /* Computed check, not textual: the subtitle span must pick up no block
+     margin from a component rule of the same name. */
+  for (const el of [role, cred, document.querySelector('#h-role .subtitle-role')]) {
+    const cs = getComputedStyle(el);
+    assert(cs.marginBottom === '0px' && cs.marginTop === '0px',
+      (el.className || 'span') + ' carries no block margin', cs.marginTop + ' / ' + cs.marginBottom);
+  }
+  assert(doc.querySelectorAll('.role').length === doc.querySelectorAll('article.role').length,
+    'every .role in the shipped résumé is a real role block (header text is not counted)',
+    doc.querySelectorAll('.role').length + ' vs ' + doc.querySelectorAll('article.role').length);
+
+  header('Shipped résumé — no Education section, credential inside <main>');
+  const main = doc.querySelector('main.page');
+  assert(!!main, 'résumé <main class="page"> loaded');
+  assert(doc.querySelectorAll('[id="sec-education"], .edu-line, .edu-school, .edu-degree, .edu-meta').length === 0,
+    'no Education landmark or .edu-* element in the rendered document');
+  assert([...doc.querySelectorAll('h2')].every(h => !/education/i.test(h.textContent)),
+    'no section heading reads "Education"', [...doc.querySelectorAll('h2')].map(h => h.textContent.trim()).join(' · '));
+  const headings = [...doc.querySelectorAll('h2')].map(h => h.textContent.trim());
+  assert(headings.join(' · ') === 'Experience · Selected Systems · Skills',
+    'sections are exactly Experience · Selected Systems · Skills', headings.join(' · '));
+  const shipped = doc.querySelector('.tagline');
+  assert(!!shipped && !!shipped.querySelector('.credential'), 'shipped subtitle carries the credential');
+  assert(main.textContent.includes(shipped.querySelector('.credential').textContent.trim()),
+    'degree + institution text is extractable from inside <main> (ATS-readable)');
+  assert(!/[—–]/.test(shipped.textContent), 'shipped subtitle uses no em or en dash');
+  /* Single-column flow is untouched by the removal. Measure against the real
+     content box: clientWidth still includes the page's side padding. */
+  const mcs = getComputedStyle(main);
+  const contentW = main.clientWidth - parseFloat(mcs.paddingLeft) - parseFloat(mcs.paddingRight);
+  assert([...main.children].every(el => el.getBoundingClientRect().width > contentW * 0.98),
+    'every top-level block still spans the full content width (single column)',
+    'content box ' + Math.round(contentW) + 'px vs ' +
+      [...main.children].map(el => Math.round(el.getBoundingClientRect().width)).join(', '));
+
+  sumEl.textContent = passed + ' passed, ' + failed + ' failed';
+  sumEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log('SUMMARY: ' + passed + ' passed, ' + failed + ' failed' + (failures.length ? ' | failures: ' + failures.join(', ') : ''));
+}
+
+const frame = document.getElementById('frame');
+frame.addEventListener('load', () => document.fonts.ready.then(() => run(frame.contentDocument)));
+</script>
+</body>
+</html>

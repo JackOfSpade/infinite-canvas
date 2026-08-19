@@ -3,6 +3,7 @@
  * `resumeHtml.js` builds. Two exports:
  *
  *   renderPdf(html, { signal })  — hidden BrowserWindow → PDF bytes + page count
+ *                                 + measured page-text extent
  *   applyDualPdf(bytes)          — OCG cream-layer post-process (dual-pdf variant only)
  *
  * jobApplication.js is the only caller — it drives the render → page-count →
@@ -102,7 +103,7 @@ function withTimeout(promise, ms, label, signal) {
  * combined application workspace. The generated tabs are switched inside the
  * isolated render window before font readiness/printing is measured. Omit for
  * a standalone résumé or cover-letter document.
- * @returns {Promise<{bytes: Uint8Array, pageCount: number}>}
+ * @returns {Promise<{bytes: Uint8Array, pageCount: number, layout: {contentHeightPx: number, typeAreaHeightPx: number}|null}>}
  */
 export async function renderPdf(html, { signal, document = null } = {}) {
   throwIfAborted(signal);
@@ -211,6 +212,45 @@ export async function renderPdf(html, { signal, document = null } = {}) {
       : [];
     throwIfAborted(signal);
 
+    // STYLE.md §11.5 makes short-letter centring a measure-then-set decision.
+    // Measure only text inside the printable page, using line rectangles rather
+    // than element boxes so collapsed margins and the optical edge trims do not
+    // distort the result. This is intentionally collected before printToPDF:
+    // the cover's screen page has the same token-driven type area, while print
+    // drops its screen box and cannot report the available slack directly.
+    const layout = await withTimeout(
+      wc.executeJavaScript(`(function () {
+        try {
+          var page = document.querySelector('main.page');
+          if (!page) return null;
+          var pageRect = page.getBoundingClientRect();
+          var pageStyle = getComputedStyle(page);
+          var typeAreaHeight = pageRect.height - parseFloat(pageStyle.paddingTop || '0') - parseFloat(pageStyle.paddingBottom || '0');
+          var top = Infinity;
+          var bottom = -Infinity;
+          var walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT, {
+            acceptNode: function (node) { return String(node.nodeValue || '').trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; }
+          });
+          var node;
+          while ((node = walker.nextNode())) {
+            var range = document.createRange();
+            range.selectNodeContents(node);
+            Array.prototype.forEach.call(range.getClientRects(), function (rect) {
+              if (!rect.height) return;
+              top = Math.min(top, rect.top);
+              bottom = Math.max(bottom, rect.bottom);
+            });
+          }
+          if (!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(typeAreaHeight) || typeAreaHeight <= 0) return null;
+          return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight };
+        } catch (_) { return null; }
+      })()`),
+      RENDER_TIMEOUT_MS,
+      'renderPdf: measure page text',
+      signal,
+    );
+    throwIfAborted(signal);
+
     // printBackground + preferCSSPageSize are both REQUIRED (SKILL.md §5,
     // step 5): printBackground so the dual-pdf variant's background rule (and
     // any accent fills) actually render into the content stream at all;
@@ -237,7 +277,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
         + `Page count ${pageCount} was measured against fallback typefaces and does NOT reflect the real document — the fit loop will not act on it.`,
       );
     }
-    return { bytes: pdfBuffer, pageCount, fontsLoaded };
+    return { bytes: pdfBuffer, pageCount, fontsLoaded, layout };
   } finally {
     signal?.removeEventListener('abort', onAbort);
     // A leaked hidden BrowserWindow keeps the whole Electron process alive

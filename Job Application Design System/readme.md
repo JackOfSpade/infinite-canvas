@@ -72,7 +72,7 @@ is family-agnostic.
 | `SKILL.md`                        | Agent prompt — pipeline + per-company variant selection.  |
 | `styles.css`                      | Global entry point — re-exports the token closure.        |
 | `colors_and_type.css`             | Design tokens — color, typography, spacing, page geom, variants. |
-| `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
+| `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills. |
 | `resume.html`                     | The résumé template + a fully-populated sample (open this). |
 | `cover-letter.css`                | The letter surface — serif body, date / recipient / close. Load after `resume.css`. |
 | `cover-letter.html`               | The paired cover-letter template + sample.                |
@@ -96,16 +96,37 @@ elide the subject ("Designed the sharding strategy…", not
 convention and parses cleanly; switching to "I" or "you" breaks
 both.
 
+### Where education goes
+
+There is **no Education section**. The degree rides in the header
+subtitle, directly under the name:
+
+> **Anya R. Castellanos**
+> Staff Engineer · B.S. Computer Science, Carnegie Mellon University
+
+The pattern is `[current professional role] · [highest completed
+degree], [institution]`, as plain text inside `<main>` so every ATS
+reads it. If the candidate has no documented degree, the subtitle is
+the role alone — there is no alternate layout, no early-career
+exception, and no toggle. The subtitle is never a specialisation
+tagline ("Python backend, data integration & full-stack delivery"):
+specialisation belongs in the bullets, where it comes with evidence.
+Mechanics in `STYLE.md §5.8`.
+
 ### Casing & punctuation
 
 - Section names are conventional and Title Cased: **Experience**,
-  **Selected Systems**, **Skills**, **Education**. Never
+  **Selected Systems**, **Skills**. Never
   capitalised "EXPERIENCE" in the source — the small-caps look is
   applied via CSS `text-transform: uppercase`.
 - Sentence case in bullets. Capitalise proper nouns, products,
   protocols, services (Kafka, Postgres, gRPC, V8).
-- Oxford comma. Em-dash for ranges in prose (`380 ms → 18 ms`),
-  en-dash for date ranges (`Mar 2022 – Present`).
+- Oxford comma. En dash for date and numeric ranges only
+  (`Mar 2022 – Present`, `3–5 engineers`); `→` for a state change
+  inside a bullet (`380 ms → 18 ms`).
+- **No dash joins ideas.** See *Dash punctuation* below — it is the
+  rule most often broken by generated copy, and the one that most
+  reliably makes a résumé read as machine-written.
 - Numerals: digits for everything quantitative. **Always** include
   the unit (`38 ms`, not `38`). Figures are proportional, not tabular —
   tabular figures (`tnum`) break PDF text extraction, so they are
@@ -114,6 +135,51 @@ both.
 - Tech terms are inline `<code>` only when the term is something
   you'd type, not when it's a product name. `kubectl apply` → code;
   Kubernetes → not code.
+
+### Dash punctuation
+
+A dash may live **inside a word or a value**. It may never **connect
+ideas**. The rule covers every piece of candidate copy: résumé
+bullets, role summaries, project descriptions, annotations, and every
+sentence of the cover letter. Mechanical detail and the audit step are
+in `STYLE.md §5.3.1`.
+
+**Allowed**
+
+- Hyphenated compounds: `app-side`, `one-page`, `end-to-end`,
+  `11-month`
+- Technical names that carry the hyphen: `consistent-hash`,
+  `snapshot-restore`, `us-east-2`
+- Email addresses, URLs, slugs: `anya@castellanos.dev`,
+  `linkedin.com/in/anya-castellanos`
+- Date and numeric ranges, en dash: `Mar 2022 – Present`,
+  `3–5 engineers`
+
+**Forbidden**
+
+- Em dash joining clauses, introducing an explanation, or hanging an
+  afterthought off a sentence, including em dash pairs used as
+  parentheses
+- En dash used as sentence punctuation rather than as a range
+- Hyphen-minus standing in for an em dash or a parenthetical connector
+
+**Reject, then rewrite**
+
+| Reject | Write instead |
+|---|---|
+| "Led the migration — reducing p99 latency by 40%." | "Led the migration, reducing p99 latency by 40%." |
+| "Improved the system — and reduced operating cost." | "Improved the system and reduced operating cost." |
+| "I am interested in this role – it aligns with my experience." | "I am interested in this role because it aligns with my experience." |
+| "The project succeeded - despite the initial constraints." | "The project succeeded despite the initial constraints." |
+
+Why the rule is this strict: the joining dash is the single loudest
+tell of generated prose, and it is also lazy. It lets two ideas share
+a sentence without deciding how they relate. A comma, a semicolon, a
+colon, a conjunction, parentheses, or a full stop each state the
+relationship. Where the material being joined is *structural* rather
+than prose (a role summary's label and value, an annotation lead-in),
+the system's separator is the mid dot: `Storage platform · tech lead,
+team of 8`.
 
 ### Tone
 
@@ -138,7 +204,10 @@ signal (scale, latency, prior approach, why it failed).
 - The candidate's **location, unless it was explicitly supplied as
   contact data.** Never infer a city from the job posting, the
   employer's HQ, a prior office, a school, an area code, or a
-  timezone — omit the field instead (`STYLE.md §9.1`).
+  timezone — omit the field instead (`STYLE.md §9.1`). The shipped
+  samples run a two-item contact line, **email · phone**, which is
+  complete on its own; location and one canonical URL are optional
+  additions, not expected fields.
 - Adjectives without numbers ("scalable", "robust",
   "world-class").
 - Soft-skill claims that nobody can verify ("strong
@@ -164,6 +233,16 @@ signal (scale, latency, prior approach, why it failed).
 > dropped from **3.2 → 0.7 days** median, adopted by 4 sibling teams.
 
 > ✘ Leveraged AI to improve developer experience and productivity.
+
+> ✔ Cut cold-start time from **380 ms to 18 ms p95** by snapshotting
+> the isolate heap, then trading 40 MB of resident memory per node for
+> the win.
+
+> ✘ Cut cold-start time from **380 ms to 18 ms p95** — snapshotting
+> the isolate heap — and traded memory for the win.
+
+The second version says the same thing with the dashes doing the
+thinking. Both dashes are forbidden (`STYLE.md §5.3.1`).
 
 ---
 

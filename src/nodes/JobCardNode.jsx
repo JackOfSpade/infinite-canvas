@@ -328,7 +328,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // that app-owned job; the import happens once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
-    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'invalid', 'failed', 'importing', 'render-retry-required', 'revision-exhausted'].includes(localApplication.status)) return undefined;
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'failed', 'importing', 'render-retry-required', 'revision-exhausted'].includes(localApplication.status)) return undefined;
     const canvasFilePath = localApplication?.canvasFilePath
       || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;

@@ -1,6 +1,6 @@
 ---
 name: job-application-design
-description: Use this skill to generate editorial-modernist, developer-literate résumés — and their paired cover letters — for staff/principal-level engineers and adjacent senior individual contributors. Input is structured candidate data (plaintext / markdown experience, projects, skills, education, contact info) plus a target company / job description. Output is a print-ready PDF tuned to the recipient.
+description: Use this skill to generate editorial-modernist, developer-literate résumés — and their paired cover letters — for staff/principal-level engineers and adjacent senior individual contributors. Input is structured candidate data (plaintext / markdown experience, projects, skills, highest completed degree, contact info) plus a target company / job description. Output is a print-ready PDF tuned to the recipient.
 ---
 
 # Job Application Design System
@@ -21,11 +21,15 @@ post-processes it into the right print variant for the recipient.
 | `readme.md`                   | Philosophy, content rules, system caveats, anti-patterns.                          |
 | `styles.css`                  | Global entry point — re-exports the token closure.                                 |
 | `colors_and_type.css`         | Design tokens — colour, typography, spacing, page geometry, all variants.          |
-| `resume.css`                  | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
+| `resume.css`                  | Components — page chrome, header, sections, roles, bullets, projects, skills. |
 | `resume.html`                 | The résumé template + a fully-populated realistic sample. Adapt this per candidate. |
 | `cover-letter.css`            | The letter surface (serif body, date / recipient / close). Load after `resume.css`. |
 | `cover-letter.html`           | The paired cover-letter template + sample. Same paper, ink, and geometry.           |
 | `build/dual-mode-pdf.js`      | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
+| `build/test.js` · `build/browser-test.html` | Self-test for the dual-mode PDF module (Node / browser). |
+| `build/annotation-typography-test.js` | Typography regression: the inline `.scope` / `.tradeoff` / `.annotation-label` spans must inherit the owning bullet's type, and `.tradeoff` must not be italic (STYLE.md §5.4). Static; no browser needed. |
+| `build/ats-parse-test.js`     | Parse-safety gate (STYLE.md §8.1): fails on tables, imagery in `<main>`, absolute positioning, CSS columns, hidden text, tabular figures, `&nbsp;` in copy, contact outside `<main>`, and reading-order inversions. Takes file paths; defaults to the shipped samples. |
+| `build/annotation-typography-test.html` | Computed-style companion to the above — measures a rendered bullet in a real engine. |
 | `build/vendor/` (removed)     | pdf-lib 1.17.1 now loads from CDN (browser) / the `pdf-lib` npm package (Node) — no longer vendored. |
 | `fonts/` (removed)            | Source Serif 4, Inter, IBM Plex Mono now load from the Google Fonts CDN — no longer bundled. |
 | `preview/`                    | Standalone preview cards for each design subsystem. Reference material only.       |
@@ -34,10 +38,13 @@ post-processes it into the right print variant for the recipient.
 
 End-to-end, given candidate data + job description:
 
-1. **Parse candidate data.** Extract: name, contact (email, one
-   optional URL — site OR github, not both), 3–6 role entries
+1. **Parse candidate data.** Extract: name, contact (email and
+   phone; optionally a supplied location and at most one canonical
+   URL, site OR github, never both), 3–6 role entries
    with titles + companies + dates + 3–6 bullets each, optional
-   "Selected Systems" / "Projects", a skills block, and education.
+   "Selected Systems" / "Projects", a skills block, and the highest
+   **completed** degree + institution (they go in the header
+   subtitle — there is no Education section; `STYLE.md §5.8`).
    Apply the content rules in `STYLE.md §5` aggressively — kill
    adjectives without numbers, demand a scale number or trade-off
    in every bullet.
@@ -70,6 +77,41 @@ End-to-end, given candidate data + job description:
    `.scope` cell for role ownership, `.tradeoff` for trade-off
    annotations on staff-level bullets, `<strong>` for scale numbers
    inside bullets.
+
+   **The header subtitle** is `[current professional role] ·
+   [highest completed degree], [institution]` — e.g. `Staff Engineer
+   · B.S. Computer Science, Carnegie Mellon University`. Role in
+   `.tagline .subtitle-role` (never `.role` — that class is the
+   Experience block component), credential in `.tagline .credential`,
+   joined by the mid-dot `.sep`. **No documented degree ⇒ render the role
+   alone** and delete the separator and `.credential` span; never add
+   an Education section, and never write a specialisation tagline
+   ("Python backend, data integration &amp; full-stack delivery") in
+   its place. Full rule: `STYLE.md §5.8`.
+
+   **Then run the dash gate.** Every string written in this step is
+   subject to `## Dash punctuation` below: no em dash anywhere, no en
+   dash outside a date or numeric range, no spaced hyphen. Run the
+   three greps in that section against the filled HTML (and against
+   the filled `cover-letter.html`) before continuing to step 5. A
+   joining dash is the loudest tell of machine-written copy, and it
+   survives into the PDF where nothing downstream will catch it.
+
+   **The letter date is never typed in.** `cover-letter.html` fills it
+   from the system clock at render time (month + year, plus the
+   `datetime` attribute) — see `STYLE.md §11.6`. Leave that element
+   and its inline script alone; if your pipeline renders without
+   JavaScript, substitute the current month yourself at fill time.
+
+   **Then run the parse gate.** `STYLE.md §8.1` lists the hazards that
+   silently destroy a PDF's text layer. Run
+   `node build/ats-parse-test.js` against the filled documents (it takes
+   file paths as arguments, and defaults to the shipped samples) before
+   step 5. It fails on tables, images, absolutely-positioned content,
+   CSS columns, hidden text, `tabular-nums`, CSS `content` carrying
+   meaning, contact details outside `<main>`, and `&nbsp;` in candidate
+   copy — use `class="nowrap"` for value/unit pairs instead. None of
+   these have a visual cost; all of them cost numbers in the parse.
 
 5. **Generate the source PDF.** From the filled HTML, render to
    PDF via Puppeteer / Playwright / equivalent. Required flags:
@@ -278,13 +320,16 @@ Hard rules for every bullet:
 
 - **At least one specific number** (scale, latency, throughput,
   team size, revenue impact, $ saved). Numbers go in `<strong>`.
-- **Or one trade-off annotation** (italic, prefixed with " ·
-  trade-off:"). At most one per bullet; staff-level differentiator.
+- **Or one trade-off annotation** (prefixed with " ·
+  trade-off:", set in the bullet's own type — never italic or
+  caption-sized). At most one per bullet; staff-level differentiator.
 - **No bare adjectives.** "Optimised", "improved", "led" without
   measured outcomes are wasted lines. Cut them.
 - **1.0–2.0 wrapped lines per bullet.** Three-line bullets read
   as paragraphs and break the rhythm of the section.
 - **3–6 bullets per role.** Fewer reads thin; more reads as a list.
+- **No dash may join ideas.** See `## Dash punctuation` below. This
+  is a hard gate, checked before the PDF is rendered.
 
 Verbs to prefer: *designed, shipped, owned, drove, killed, replaced,
 rewrote, migrated, decommissioned, halved, tripled, tenfold-d*.
@@ -295,6 +340,57 @@ The bullet vocabulary should read like distilled system-design
 interview answers: **Problem → Solution → Measurement → Trade-off.**
 That four-beat structure is what the template's typography is built
 to display.
+
+## Dash punctuation (hard gate)
+
+A dash may live **inside a word or a value**. It may never **connect
+ideas**. This applies to every string the agent writes into the
+template: bullets, role summaries, project descriptions, annotations,
+and every sentence of the cover letter. The full rule with rationale
+is `STYLE.md §5.3.1`.
+
+**Keep** hyphenated compounds (`app-side`, `one-page`, `end-to-end`,
+`11-month`), technical names that carry the hyphen (`consistent-hash`,
+`us-east-2`), email addresses and URLs, and en dashes inside date or
+numeric ranges (`Mar 2022 – Present`, `3–5 engineers`).
+
+**Never emit**
+
+- An em dash (`—`) anywhere in candidate copy: not joining clauses,
+  not introducing an explanation, not trailing an afterthought, not as
+  a pair of parentheses around an aside.
+- An en dash (`–`) as sentence punctuation. Ranges only.
+- A hyphen-minus (`-`) standing in for either of the above.
+
+**Rewrite pattern.** Reject the left column, emit the right:
+
+| Reject | Emit |
+|---|---|
+| "Led the migration — reducing p99 latency by 40%." | "Led the migration, reducing p99 latency by 40%." |
+| "Improved the system — and reduced operating cost." | "Improved the system and reduced operating cost." |
+| "I am interested in this role – it aligns with my experience." | "I am interested in this role because it aligns with my experience." |
+| "The project succeeded - despite the initial constraints." | "The project succeeded despite the initial constraints." |
+
+Repair kit, in order: comma, semicolon, colon before a real
+explanation, conjunction (`and`, `because`, `so`, `while`),
+parentheses for a true aside, two sentences. Do not swap one dash for
+another.
+
+For *structural* label-and-value pairs (a role summary, an annotation
+lead-in) the system's separator is the mid dot, not a dash:
+`Storage platform · tech lead, team of 8`. The `.scope` annotation
+lead-in is ` · `; the `.tradeoff` lead-in is ` · trade-off: `.
+
+**Check before rendering** (pipeline step 4, non-negotiable):
+
+```sh
+grep -n '\xe2\x80\x94' filled.html    # em dash        → must be empty
+grep -nE ' - | -$' filled.html        # spaced hyphen  → must be empty
+grep -n '\xe2\x80\x93' filled.html    # en dash        → every hit is a range
+```
+
+If the first two return anything, fix the copy and re-check. Do not
+render a PDF from a document that fails this gate.
 
 ## The Skills block — selection and sizing
 
@@ -366,10 +462,17 @@ free space recovery available, and it costs zero searchable terms.
 - No `Selected Systems` entry whose metrics already appear in a bullet
 - No coloured ranges, no gradients, no rounded cards
 - No emoji
+- No em dash anywhere in candidate copy, and no en dash outside a
+  date or numeric range (see `## Dash punctuation`)
 - No two-column layouts (the date cell is right-aligned within
   the same flex row — it is not a parsed second column)
 - No "summary" or "objective" paragraph at the top
-- No tagline under the name beyond a single role descriptor
+- No Education section, in any form — the degree and institution
+  ride in the header subtitle (`STYLE.md §5.8`), and a candidate with
+  no documented degree gets a role-only subtitle, not a fallback
+  layout
+- No specialisation / marketing tagline under the name — the subtitle
+  is role + degree + institution, or role alone
 - No links to publications, talks, or media beyond a single
   optional canonical URL in the contact line
 

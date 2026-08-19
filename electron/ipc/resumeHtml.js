@@ -153,6 +153,91 @@ export function isDualMode(variantAttrs) {
 }
 
 /**
+ * Add the design system's cover-letter-only short-letter treatment to a set
+ * of resolved root attributes. This deliberately lives apart from
+ * extractVariantAttrs(): print/paper/mono/density are a matched-pair contract,
+ * while data-letter is valid only for a standalone cover-letter surface.
+ */
+export function withCenteredLetterVariant(variantAttrs, centered = false) {
+  const base = String(variantAttrs || '')
+    .replace(/\s*data-letter\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/ig, '')
+    .trim();
+  return centered ? `${base}${base ? ' ' : ''}data-letter="centered"` : base;
+}
+
+/**
+ * Whether a renderer's text-ink measurement meets the design system's
+ * short-letter threshold (STYLE.md §11.5). Page count remains a separate
+ * caller check: centring is strictly a one-page cover-letter treatment.
+ */
+export function isShortCoverLetterLayout(layout) {
+  const contentHeight = Number(layout?.contentHeightPx);
+  const typeAreaHeight = Number(layout?.typeAreaHeightPx);
+  return Number.isFinite(contentHeight)
+    && Number.isFinite(typeAreaHeight)
+    && contentHeight > 0
+    && typeAreaHeight > 0
+    && contentHeight <= typeAreaHeight * (2 / 3);
+}
+
+// Candidate copy may use hyphens within a word/value and en dashes in date or
+// numeric ranges. It must never use a dash as prose punctuation: that is a
+// design-system hard gate (SKILL.md "Dash punctuation"), enforced here for
+// both API and Local AI document builders.
+function candidateText(value) {
+  return String(value || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&(?:mdash|#8212|#x2014);/gi, '—')
+    .replace(/&(?:ndash|#8211|#x2013);/gi, '–')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function enDashIsRange(text, index) {
+  const before = text.slice(Math.max(0, index - 32), index);
+  const after = text.slice(index + 1, index + 34);
+  // A date range may name the month on both sides ("May 2023 – June 2026"),
+  // not only use a bare year or "Present" as the right endpoint.
+  const month = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+  return /\d\s*$/.test(before)
+    && new RegExp(`^\\s*(?:\\d|present\\b|${month}\\.?\\s+\\d{4}\\b)`, 'i').test(after);
+}
+
+function assertDashPunctuation(text, surface) {
+  if (text.includes('—')) {
+    throw new Error(`${surface} contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.`);
+  }
+  if (/\s-\s/.test(text)) {
+    throw new Error(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
+  }
+  for (let index = text.indexOf('–'); index !== -1; index = text.indexOf('–', index + 1)) {
+    if (!enDashIsRange(text, index)) {
+      throw new Error(`${surface} contains an en dash outside a date or numeric range.`);
+    }
+  }
+}
+
+/** Enforce the design system's candidate-copy dash gate before document build. */
+export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null } = {}) {
+  const resume = candidateText(resumeMainHtml);
+  if (resume) assertDashPunctuation(resume, 'Résumé copy');
+  if (coverLetter && typeof coverLetter === 'object') {
+    const cover = candidateText([
+      coverLetter.name,
+      ...(Array.isArray(coverLetter.contact) ? coverLetter.contact : []),
+      coverLetter.salutation,
+      coverLetter.recipient,
+      ...(Array.isArray(coverLetter.paragraphs) ? coverLetter.paragraphs : []),
+      coverLetter.closing,
+      coverLetter.signatureTitle,
+    ].filter(Boolean).join('\n'));
+    if (cover) assertDashPunctuation(cover, 'Cover-letter copy');
+  }
+}
+
+/**
  * Return the browser-side font-readiness predicate shared by the editable
  * workspace and Electron's hidden PDF renderer.
  *
@@ -171,7 +256,7 @@ export function isDualMode(variantAttrs) {
  */
 export function webFontFacesReadyExpression({ details = false } = {}) {
   const result = details
-    ? "{ loaded: missingFaces.length === 0, missingFaces: missingFaces.map(function (face) { return (face.unexpected ? 'unexpected ' : '') + face.family + ' ' + face.weight; }) }"
+    ? "{ loaded: missingFaces.length === 0, missingFaces: missingFaces.map(function (face) { return (face.unexpected ? 'unexpected ' : '') + face.family + ' ' + face.weight; }), requiredFaces: required.filter(function (face) { return !face.unexpected; }).map(function (face) { return face.weight + ' 12px \\\"' + face.family + '\\\"'; }) }"
     : 'missingFaces.length === 0';
   return String.raw`(function () {
     try {
@@ -1283,6 +1368,16 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     stopEditing();
     activeDocument = kind;
     main = kind === 'cover' ? coverMain : resumeMain;
+    // data-letter is root-only in the design system, but Application.html
+    // contains both surfaces and therefore also inlines cover-letter.css.
+    // Toggle the root attribute only while its marked cover panel is active so
+    // it can never centre the résumé (including a PDF render that switches
+    // tabs programmatically).
+    if (kind === 'cover' && coverMain && coverMain.hasAttribute('data-ic-letter-centered')) {
+      document.documentElement.setAttribute('data-letter', 'centered');
+    } else {
+      document.documentElement.removeAttribute('data-letter');
+    }
     Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel]')).forEach(function (panel) {
       panel.hidden = panel.getAttribute('data-ic-document-panel') !== kind;
     });
@@ -1537,10 +1632,33 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   // ---- Web-font availability detection (§5.3) ----
   try {
     var check = function () {
-      if (!(${webFontFacesReadyExpression()}) && fontWarning) fontWarning.hidden = false;
+      var readiness = ${webFontFacesReadyExpression({ details: true })};
+      // A CSS @import can add FontFace records after the first fulfilled
+      // document.fonts.ready promise. Always clear a speculative warning once
+      // the requested document faces have settled, rather than leaving a stale
+      // banner after Chrome served them from cache.
+      if (fontWarning) fontWarning.hidden = !!readiness.loaded;
+      return readiness;
     };
-    if (window.document.fonts && document.fonts.ready && document.fonts.ready.then) document.fonts.ready.then(check).catch(check);
-    else check();
+    var loadRequiredDocumentFaces = function () {
+      var initial = ${webFontFacesReadyExpression({ details: true })};
+      var requiredFaces = Array.isArray(initial.requiredFaces) ? initial.requiredFaces : [];
+      var loads = document.fonts && document.fonts.load
+        ? Promise.all(requiredFaces.map(function (descriptor) {
+          return document.fonts.load(descriptor, 'A').catch(function () { return []; });
+        }))
+        : Promise.resolve();
+      return loads.then(function () {
+        return document.fonts && document.fonts.ready ? document.fonts.ready : null;
+      }).then(check).catch(check);
+    };
+    if (window.document.fonts && document.fonts.ready && document.fonts.ready.then) {
+      // Run now, after window load, and whenever Chrome finishes a later font
+      // batch. This covers cached Google Fonts as well as slow networks.
+      loadRequiredDocumentFaces();
+      window.addEventListener('load', loadRequiredDocumentFaces, { once: true });
+      if (document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', check);
+    } else check();
   } catch (e) { /* font-loading API unsupported — this is an enhancement, degrade quietly */ }
 })();
 </script>`;
@@ -1591,7 +1709,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter, coverLetterCentered = false } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: if the model wrapped its answer in a full document or fences,
   // extract just the <main> block.
@@ -1603,6 +1721,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   // HTML whitespace instead of printing verbatim (real newlines are untouched).
   main = decodeTextEscapes(main);
   main = stripMainVariantAttrs(main);
+  assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter });
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
   const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance });
@@ -1619,9 +1738,12 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   // final literal <main> in the generated cover HTML.
   const coverStart = suppliedCoverText.toLowerCase().lastIndexOf('<main');
   const coverEnd = coverStart >= 0 ? suppliedCoverText.toLowerCase().indexOf('</main>', coverStart) : -1;
-  const coverMain = coverStart >= 0 && coverEnd >= 0
+  let coverMain = coverStart >= 0 && coverEnd >= 0
     ? suppliedCoverText.slice(coverStart, coverEnd + '</main>'.length)
     : '<main class="page" role="document"><p>Cover letter was unavailable when this application was generated.</p></main>';
+  if (coverLetterCentered) {
+    coverMain = coverMain.replace(/<main\b/i, '<main data-ic-letter-centered');
+  }
   const css = inlineStylesheets(CSS_FILES);
   const chrome = buildInjectedChrome({ docId, kind: 'resume', workspace: true, downloadBundle });
 
@@ -1674,6 +1796,7 @@ ${chrome}
  * @param {string} [args.docId]         stable id for this document, namespaces localStorage autosave (§5.5)
  */
 export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId } = {}) {
+  assertCandidateDashPunctuation({ coverLetter: letter });
   // Every field is decodeTextEscapes()'d before escaping so a literal "\n"/"\t"
   // the model emitted renders as real whitespace, not verbatim text.
   const name     = escapeHtml(decodeTextEscapes(letter.name || ''));

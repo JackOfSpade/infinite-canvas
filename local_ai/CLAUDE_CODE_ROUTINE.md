@@ -61,16 +61,37 @@ switch to Anthropic Console/API credits for this routine.
    Continue while the critique identifies a concrete defect or a specific,
    material improvement in job-specific evidence. Stop when the best remaining
    change is merely stylistic or lower-value than the evidence it would
-   displace: that is the diminishing-returns condition. Do not emit drafts or
-   commentary. A one-page measurement alone is never a reason to skip this
+   displace: that is the diminishing-returns condition. Do not write or
+   narrate intermediate drafts, and do not reveal private chain-of-thought or
+   intermediate drafts, during this loop. After a terminal condition (import
+   accepted, revision-exhausted, or the no-feedback timeout in step 7) is
+   reached, provide only the concise required quality-and-handoff audit
+   described there. A one-page measurement alone is never a reason to skip this
    quality loop; whether to draft another version depends on the critique. The
    measurement only confirms that the chosen draft satisfies the layout
    constraint. On a first pass, do not pre-emptively delete high-value evidence
    or force compact density merely to guess at a page count; Infinite Canvas
-   renders and measures it afterwards. Do not emit `data-density` on either
-   `<html>` or `<main>`: density is an app-owned measured-layout decision. The
-   app always measures default density first and applies compact only after
-   that measurement overflows.
+   renders and measures it afterwards:
+   - The agent must not emit `data-print`, `data-page`, `data-mono`,
+     `data-density`, or `data-letter` anywhere in generated résumé markup,
+     including `<html>`, `<body>`, `<main>`, or descendants.
+   - For Infinite Canvas, emit exactly one bare `<main class="page">...</main>`
+     using existing design-system component classes.
+   - Every documented work-experience role must appear in the résumé and must
+     contain at least one non-empty `<li>` inside `<ul class="highlights">`.
+     Never remove, merge, or leave a summary-only/header-only role during a
+     fit revision. Career data is source material, not résumé copy: never paste
+     a raw note or role summary verbatim. Rewrite supported facts as concise,
+     polished employer-facing prose, correcting spelling and grammar without
+     changing the factual meaning.
+   - Infinite Canvas owns all root document variants: print mode, paper size,
+     monochrome, density, and the cover-letter-only centred treatment. It
+     measures a one-page cover letter and sets `data-letter="centered"` only
+     when the design system’s short-letter threshold is met.
+   - The app always renders default density first and may add the single
+     `data-density="compact"` fallback only after a measured overflow.
+   - This host-specific rule overrides the standalone variant-selection
+     guidance in the design-system references.
    On a `fit-feedback.json` revision, reassess BOTH documents against every
    measured target. A document that already fits still receives the private
    quality check above. Compare it with the strongest concrete improvement
@@ -107,7 +128,9 @@ switch to Anthropic Console/API credits for this routine.
    `result.json` write, wait for Infinite Canvas (which must remain open) to
    render it. For up to 45 seconds, check the selected job no more than once
    every 3 seconds; you may read only its app-generated `fit-feedback.json`,
-   `manifest.json`, and current `result.json` during this wait.
+   `manifest.json`, and current `result.json` during this wait. You may also
+   read only the app-generated terminal receipt at
+   `<INPUT_JOBS_ROOT>/../handoff-receipts/<job-id>.json`.
    - If matching `fit-feedback.json` has `status: "revision-required"`, use
      its measured feedback immediately in this same session, revise the
      affected document(s), overwrite only `result.json`, and wait again.
@@ -120,6 +143,12 @@ switch to Anthropic Console/API credits for this routine.
    - Continue through every measured revision requested by the app in this same
      Claude Code session. There is no fixed round limit. These layout-feedback
      rounds are separate from your private drafting critique.
+   - Before treating `manifest.json` status `imported` or job-folder removal as
+     terminal, read the matching terminal receipt if it is available. If it
+     says `imported`, Infinite Canvas accepted the result: stop immediately and
+     report its final résumé and cover-letter page counts as app-measured
+     values. If no matching receipt is readable, report acceptance but do not
+     claim a final page count.
    - If matching feedback says `revision-exhausted`, stop without another
      rewrite: the app emits this only when an overflowing document was left
      unchanged with an explicit `kept_diminishing_returns` decision. If

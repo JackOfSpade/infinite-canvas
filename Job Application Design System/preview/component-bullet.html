@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- @dsCard group="Components" name="Component · Bullet" subtitle="Bullet with inline scope and trade-off annotations" viewport="700x240" -->
+<!-- @dsCard group="Components" name="Component · Bullet" subtitle="Inline scope / trade-off annotations inherit the bullet's type — one continuous run" viewport="700x240" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
@@ -9,16 +9,16 @@
   .bullets li::before { content: "•"; position: absolute; left: 0; color: var(--ink-3); }
   .bullets li:last-child { margin-bottom: 0; }
   .bullets strong { font-weight: 600; }
-  .scope { font-size: 8.75pt; color: var(--ink-2); letter-spacing: -0.005em; }
-  .scope::before { content: " — "; color: var(--ink-4); }
-  .tradeoff { font-size: 8.75pt; color: var(--ink-2); font-style: italic; letter-spacing: -0.005em; }
-  .tradeoff::before { content: " · trade-off: "; color: var(--ink-4); font-style: normal; }
+  /* Semantic only: no visual treatment. An annotation can start mid-bullet,
+     so it inherits the bullet's type outright — no caption size, no italic,
+     no metadata grey. Labels are real spans, as in the résumé markup. */
+  .scope, .tradeoff, .annotation-label { font-family: inherit; font-size: inherit; font-style: inherit; font-weight: inherit; line-height: inherit; letter-spacing: inherit; color: inherit; }
   .tag { font-family: var(--ff-mono); font-size: 7.5pt; color: var(--ink-4); letter-spacing: 0.06em; text-transform: uppercase; margin-left: 6px; }
 </style>
 </head><body>
 <ul class="bullets">
-  <li>Plain bullet — <strong>1.4M QPS</strong> at p99 <strong>38 ms</strong> across 19 PB. <span class="tag">plain</span></li>
-  <li>With scope chip — owned the multi-region replication design.<span class="scope">8 engineers, 11-month project</span> <span class="tag">x_scope</span></li>
-  <li>With trade-off — chose CRDT metadata sync over Raft.<span class="tradeoff">eventual convergence in exchange for fewer quorum-loss outages.</span> <span class="tag">x_tradeoff</span></li>
+  <li>Plain bullet: <strong>1.4M QPS</strong> at p99 <strong>38 ms</strong> across 19 PB. <span class="tag">plain</span></li>
+  <li>With scope: owned the multi-region replication design.<span class="scope"><span class="annotation-label"> · </span>8 engineers, 11-month project</span> <span class="tag">x_scope</span></li>
+  <li>With trade-off: chose CRDT metadata sync over Raft.<span class="tradeoff"><span class="annotation-label"> · trade-off: </span>eventual convergence in exchange for fewer quorum-loss outages.</span> <span class="tag">x_tradeoff</span></li>
 </ul>
 </body></html>

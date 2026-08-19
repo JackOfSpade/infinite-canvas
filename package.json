@@ -12,7 +12,7 @@
     "build": "npm run build:compile && electron-builder",
     "lint": "eslint .",
     "test:unit": "node --import ./scripts/test-stubs/register.mjs scripts/test-runner.js",
-    "test:resume-pdf": "node 'Job Application Design System/build/test.js'",
+    "test:resume-pdf": "npm --prefix 'Job Application Design System/build' test",
     "test": "npm run test:unit && npm run test:resume-pdf",
     "test:e2e": "npm run build:compile && node scripts/electron-smoke.js",
     "test:job-apis": "node --import ./scripts/test-stubs/register.mjs scripts/run-api-tests.js",

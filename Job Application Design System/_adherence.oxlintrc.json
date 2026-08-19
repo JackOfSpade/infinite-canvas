@@ -89,6 +89,8 @@
       "--margin-bot",
       "--margin-side",
       "--margin-top",
+      "--optical-lead-trim",
+      "--optical-tail-trim",
       "--page-h",
       "--page-w",
       "--rule-weight",
@@ -174,6 +176,8 @@
       "--margin-bot": "spacing",
       "--margin-side": "spacing",
       "--rule-weight": "spacing",
+      "--optical-lead-trim": "spacing",
+      "--optical-tail-trim": "spacing",
       "--col-meta-w": "spacing",
       "--col-gap": "spacing"
     },

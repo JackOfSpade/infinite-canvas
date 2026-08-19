@@ -82,7 +82,10 @@
   --fs-h3:       11pt;      /* @kind font */  /* role title / company */
   --fs-body:     10.25pt;   /* @kind font */  /* bullets, paragraphs */
   --fs-small:     9.5pt;    /* @kind font */  /* meta (dates, location) */
-  --fs-caption:   8.75pt;   /* @kind font */  /* scope chip, tradeoff note */
+  --fs-caption:   8.75pt;   /* @kind font */  /* block-level captions only —
+                                                 NOT the inline .scope /
+                                                 .tradeoff spans, which inherit
+                                                 their bullet's type */
   --fs-mono:      9pt;      /* @kind font */  /* inline technologies */
 
   /* ---------- Type · weight ---------- */
@@ -149,6 +152,29 @@
   --margin-bot:    0.72in; /* @kind spacing */
   --margin-side:   0.78in; /* @kind spacing */
   --rule-weight:   0.5pt;  /* @kind spacing */
+
+  /* Optical edge alignment. The display line box carries half-leading +
+     the ascender-to-ink gap above the first glyph, so ink used to start
+     ~3.7pt below the top margin while a flush last line ends only ~0.3pt
+     above the bottom margin — the top read airier than the bottom on a
+     full page. This trim removes that overshoot on the first block only.
+     Expressed in em: it resolves against the display font-size, so it
+     tracks --fs-display and the screen clamp automatically. Applied in
+     resume.css (.page > :first-child > .name). */
+  --optical-lead-trim: 0.123em;
+
+  /* The mirror at the foot: the last line's half-leading sits below its
+     ink, so a flush final line ends ~1–1.6pt above the bottom margin
+     against the top's 0.3pt. Absolute pt, not em — unlike the display
+     line the closing line has no viewport clamp, and the value must not
+     drift with whichever block it lands on. One value cannot be exact
+     for both documents (the résumé ends on a grid row whose larger left
+     column sets the row height; the letter ends on a single small line),
+     so this is the midpoint: it lands both within ~0.3pt — under the
+     0.5pt hairline, i.e. below perceptibility. Overridden for compact,
+     whose tighter leading leaves almost nothing to trim. Applied in
+     resume.css on the trailing flow edge. */
+  --optical-tail-trim: 1pt; /* @kind spacing */
 
   /* ---------- Layout columns (single primary column) ---------- */
   --col-meta-w:   1.45in;   /* @kind spacing */  /* right-aligned date/location column
@@ -310,7 +336,7 @@ ul { margin: 0; padding: 0; list-style: none; }
 :root[data-density="compact"] {
   --fs-body:      9.75pt;  /* @kind font */
   --fs-small:     9pt;     /* @kind font */
-  --fs-caption:   8.5pt;   /* @kind font */
+  --fs-caption:   8.5pt;   /* @kind font */  /* block-level captions only */
   --fs-mono:      8.5pt;   /* @kind font */
   --lh-body:      1.35;    /* @kind font */
   --lh-snug:      1.25;    /* @kind font */
@@ -321,6 +347,10 @@ ul { margin: 0; padding: 0; list-style: none; }
 
   --margin-top:  0.6in;  /* @kind spacing */
   --margin-bot:  0.6in;  /* @kind spacing */
+
+  /* Compact's tighter leading leaves ~0.3–0.8pt below the closing
+     line's ink instead of ~1–1.6pt, so the tail trim shrinks with it. */
+  --optical-tail-trim: 0.4pt; /* @kind spacing */
 }
 
 /* ---------- Print: ink-only ----------

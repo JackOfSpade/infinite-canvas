@@ -1,121 +1,139 @@
 <!doctype html>
-<!-- @dsCard group="Brand" name="Cover Letter" subtitle="Maya R. Chen → EXACT Sports — letter paired with the résumé" viewport="816x1056" -->
+<!-- @dsCard group="Brand" name="Cover Letter" subtitle="Anya R. Castellanos → Vireo Data · letter paired with the résumé" viewport="816x1056" -->
 <html lang="en" data-print="dual-pdf">
 <head>
 <meta charset="utf-8">
-<title>Maya R. Chen · Cover Letter</title>
+<title>Anya R. Castellanos · Cover Letter</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-
-<!-- Design tokens (typography, color, spacing) -->
+<!-- Design tokens (typography, colour, spacing, variants) -->
 <link rel="stylesheet" href="colors_and_type.css">
 <!-- Shared page chrome + letterhead component + meta-row + sep -->
 <link rel="stylesheet" href="resume.css">
-<!-- Letter-specific surface (serif body, date/recipient, close) -->
+<!-- Letter surface: serif body, date / recipient / close -->
 <link rel="stylesheet" href="cover-letter.css">
 </head>
 
 <template id="__bundler_thumbnail">
   <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
     <rect width="100" height="100" fill="#F7F4ED"></rect>
-    <text x="50" y="60" font-family="Georgia, serif" font-size="42" font-weight="600"
-          fill="#7A1F2B" text-anchor="middle">MC</text>
+    <text x="50" y="60" font-family="Georgia, serif" font-size="40" font-weight="600"
+          fill="#7A1F2B" text-anchor="middle">AC</text>
   </svg>
 </template>
 
 <body>
 <!-- ============================================================
-     Cover letter — same design system as the résumé.
-     `data-print="dual-pdf"` on <html> makes the printed background
-     transparent for the OCG cream post-process; identical to the
-     résumé so a single pipeline produces a matched pair. Switch to
-     `data-print="ink-only"` for conservative / big-co ATS rooms.
-     Variant attributes are valid only on the root <html> element.
+     REFERENCE SAMPLE — the letter half of the pair.
+     ----------------------------------------------------------
+     Same design system, same candidate, same paper as `resume.html`:
+     a matched pair, not a second design. The letterhead is the résumé
+     header component verbatim, including the §5.8 subtitle. Only the
+     body changes voice — Source Serif 4 at reading size, the system's
+     one long-form prose surface (§11.1).
+
+     `data-print="dual-pdf"` matches the résumé so one pipeline
+     produces both documents; switch to `data-print="ink-only"` for
+     conservative / big-co ATS rooms. Variant attributes are valid only
+     on the root <html> element.
+
+     Letter-only: `data-letter="centered"` hangs a SHORT letter (≲⅔ of
+     the type area) optically centred rather than leaving all its slack
+     at the foot. Set it only after measuring; this sample fills the
+     page, so it is left unset (§11.5). Never valid on the résumé.
 ============================================================ -->
 <main class="page" role="document"
       itemscope itemtype="https://schema.org/Person">
 
   <!-- ===== Letterhead — identical component to the résumé header ===== -->
   <header class="resume-header letter-letterhead">
-    <h1 class="name" itemprop="name">Maya R. Chen</h1>
-    <p class="tagline" itemprop="jobTitle">
-      Brand &amp; growth marketing · consumer engagement &amp; revenue
+    <h1 class="name" itemprop="name">Anya R. Castellanos</h1>
+    <p class="tagline">
+      <span class="subtitle-role" itemprop="jobTitle">Staff Engineer</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span class="credential">B.S. Computer Science, Carnegie Mellon University</span>
     </p>
     <p class="contact" role="group" aria-label="Contact">
-      <a href="mailto:maya@mayachen.co" itemprop="email">maya@mayachen.co</a>
+      <a href="mailto:anya@castellanos.dev" itemprop="email">anya@castellanos.dev</a>
       <span class="sep" aria-hidden="true">·</span>
-      <span itemprop="address" itemscope itemtype="https://schema.org/PostalAddress">
-        <span itemprop="addressLocality">Chicago, IL</span>
-      </span>
-      <span class="sep" aria-hidden="true">·</span>
-      <a href="https://linkedin.com/in/mayarchen" itemprop="sameAs">linkedin.com/in/mayarchen</a>
-      <span class="sep" aria-hidden="true">·</span>
-      <a href="tel:+13125550148">(312) 555-0148</a>
+      <a href="tel:+17185550142" itemprop="telephone">(718) 555-0142</a>
     </p>
   </header>
 
   <hr class="letterhead-rule" aria-hidden="true">
 
-  <!-- ===== Date + recipient ===== -->
+  <!-- ===== Date + recipient =====
+       The date is pegged to the render month, never typed in (§11.6):
+       the adjacent script fills both the visible text and the
+       machine-readable `datetime` from the system clock, so a template
+       filled today and printed next month is never stale. The element
+       stays empty in source — an authored month is the hard-coding this
+       replaces.
+
+       Recipient: addressee (a named person when you have one, else
+       "Hiring Team"), then the company, then the role applied for. -->
   <div class="letter-meta">
-    <p class="letter-date"><time datetime="2026-05">May 2026</time></p>
+    <p class="letter-date"><time id="letter-date" datetime=""></time></p>
+    <script>
+      (function () {
+        var el = document.getElementById('letter-date'), d = new Date();
+        el.setAttribute('datetime', d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
+        el.textContent = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      })();
+    </script>
     <address class="letter-recipient">
       <span class="recipient-name">Hiring Team</span>
-      <span class="recipient-line">EXACT Sports</span>
-      <span class="recipient-line">Director of Marketing &amp; Growth</span>
+      <span class="recipient-line">Vireo Data</span>
+      <span class="recipient-line">Principal Engineer, Storage Platform</span>
     </address>
   </div>
 
-  <!-- ===== Body ===== -->
+  <!-- ===== Body — four paragraphs, a number per claim, <strong> twice ===== -->
   <div class="letter-body">
-    <p class="salutation">Dear EXACT Sports Hiring Team,</p>
+    <p class="salutation">Dear Vireo Data Hiring Team,</p>
 
     <p>
-      I'm writing to apply for the Director of Marketing &amp; Growth role. EXACT
-      Sports builds tools that help athletes understand and extend their own
-      potential — behavioral assessments, sport-psychology coaching, and now
-      EXACT Rankings — and that mission maps cleanly onto what I do for a living:
-      turn consumer insight into campaigns that attract, engage, convert, and
-      keep an audience. I've spent six years building marketing engines for
-      consumer brands, and I'd like to build yours.
+      I'm writing to apply for the Principal Engineer role on the storage platform.
+      Vireo is doing the thing I find most interesting in this field: making a
+      multi-tenant analytical store behave predictably for customers whose workloads
+      have nothing in common with each other. That is the problem I have spent the last
+      four years inside of, and I would like to work on it at your scale.
     </p>
 
     <p>
-      At Calloway &amp; Reed I led brand strategy and multichannel execution for
-      the flagship Hearthstone Kitchen line, owning a $40M annual budget. A
-      national brand refresh I directed lifted household penetration six points
-      and moved aided awareness nine points inside eight months; a seasonal
-      limited-edition campaign I built end-to-end generated
-      <strong>$4.2M in incremental revenue</strong> in its first year. The work
-      I'm proudest of started in the data — Nielsen and Circana POS, panel
-      results, campaign analytics — and ended in a brief a creative team could
-      act on. That's the same path EXACT Rankings will travel: assessment data
-      on one end, something an athlete actually does on the other.
+      At Tessera Labs I am the technical lead for the storage platform across three
+      sub-teams. I designed the sharding strategy for our timeseries write path, which
+      now sustains <strong>1.4M QPS</strong> at p99 38 ms over a 19 PB dataset, and I
+      own the published service contracts for the fourteen components other teams build
+      against. The part of that work I would bring to Vireo is not the number; it is
+      the habit of writing the trade-off down. We chose CRDT metadata sync over Raft
+      because losing a quorum cost our operators four seconds of unavailability every
+      time, and accepting eventual convergence was cheaper than paying that on call.
     </p>
 
     <p>
-      Earlier, at Tillman &amp; Fosse, I owned the seasonal campaign calendar and
-      ran a cross-channel holiday program — direct mail, in-store, email, paid
-      social — that drove <strong>18% year-over-year revenue</strong>, plus a
-      double-points loyalty event that lifted member spend 12% on the quarter.
-      Across both roles I've run the full growth stack — lifecycle, performance,
-      email, paid social — and managed the agencies, budgets, and
-      cross-functional teams that keep it all shipping on time and on number.
+      Before Tessera I led the cold-start program for Helix Cloud's isolate runtime,
+      taking boot time from 380 ms to <strong>18 ms at p95</strong> across the fleet,
+      and rewrote the regional autoscaler to lift a per-region ceiling from 8K to 110K
+      concurrent functions. I tend to work at the seam between a runtime and the
+      control plane that schedules it, and I leave a review forum, an SLO, or an
+      error-budget policy behind me so the improvement survives.
     </p>
 
     <p>
-      What draws me to EXACT is the stage you're at: a clear mission, real
-      momentum, and room for someone to bring sharper structure and steadier
-      growth to the marketing engine. I'd relish the chance to test ideas
-      quickly, own the result, and help more athletes find their
-      &ldquo;Go&nbsp;Mental!&rdquo; edge. I'd welcome the chance to talk.
+      What draws me to Vireo specifically is the stage: the storage engine is proven,
+      the multi-tenancy story is still being written, and there is room for someone to
+      own consistency, isolation, and cost per tenant as one problem instead of three.
+      I would welcome the chance to talk about where that work stands today.
     </p>
   </div>
 
-  <!-- ===== Close — break-inside:avoid keeps these together ===== -->
+  <!-- ===== Close — valediction + name, nothing else (§11.3).
+       break-inside: avoid keeps the two together; the role is already in
+       the letterhead subtitle, and a caption here would read as a
+       business card rather than a letter. ===== -->
   <div class="letter-close">
     <p class="valediction">Sincerely,</p>
-    <p class="signature" itemprop="name">Maya R. Chen</p>
-    <p class="signature-title">Director of Marketing &amp; Growth · candidate</p>
+    <p class="signature" itemprop="name">Anya R. Castellanos</p>
   </div>
 
 </main>

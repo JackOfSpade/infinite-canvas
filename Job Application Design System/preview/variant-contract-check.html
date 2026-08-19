@@ -17,6 +17,10 @@
 <div id="out2">running…</div>
 <h3 style="font-family:var(--ff-body)">Stylesheet hygiene</h3>
 <div id="out3">running…</div>
+<h3 style="font-family:var(--ff-body)">Optical edge alignment — ink inset, all four edges</h3>
+<div id="out4">running…</div>
+<h3 style="font-family:var(--ff-body)">Short-letter centring — data-letter="centered"</h3>
+<div id="out5">running…</div>
 <script>
 // Probe rig: an isolated iframe per case, so each case gets its own root element.
 const cases = [
@@ -129,6 +133,165 @@ printCases.forEach((c,i)=>{
      document.getElementById('out3').innerHTML='<table><tr><th>file</th><th>check</th><th>result</th></tr>'
        + checks.map(([p,c,ok])=>'<tr><td>'+p+'</td><td>'+c+'</td><td class="'+(ok?'pass':'fail')+'">'+(ok?'PASS':'FAIL')+'</td></tr>').join('')+'</table>';
    });
+})();
+
+/* -------- optical edge alignment --------
+   A box margin is not what the eye measures. Four assertions per case:
+     top    — first glyph's ink below the top content edge
+     bottom — last glyph's ink above the END OF THE FLOW (the final block's
+              box bottom, which is what lands on the bottom margin when the
+              page fills), so this is the filled-page distance
+     left / right — ink extents against the side content edges
+   Tolerance 0.5pt — the system's hairline rule weight, i.e. the point at
+   which a difference could begin to register at all. Residuals come from
+   per-string descenders, side bearings, and the two documents' different
+   closing blocks (see --optical-tail-trim). */
+(function(){
+  const ctx=document.createElement('canvas').getContext('2d');
+  const pt=x=>Math.round(x*72/96*100)/100;
+  const docs=['../resume.html','../cover-letter.html'];
+  const vars=[['letter',''],['letter','compact'],['a4',''],['a4','compact']];
+  const rows=[];let left=docs.length*vars.length;
+  function ink(el,which){
+    const r=document.createRange();r.selectNodeContents(el);
+    const rects=[...r.getClientRects()].filter(x=>x.height>0);if(!rects.length)return null;
+    const rect=which==='first'?rects[0]:rects[rects.length-1];
+    const w=el.ownerDocument.defaultView,s=w.getComputedStyle(el);
+    ctx.font=s.fontStyle+' '+s.fontWeight+' '+s.fontSize+' '+s.fontFamily;
+    const m=ctx.measureText(el.textContent.trim()||'Hxg');
+    const baseline=rect.top+(rect.height-(m.fontBoundingBoxAscent+m.fontBoundingBoxDescent))/2+m.fontBoundingBoxAscent;
+    return {inkTop:baseline-m.actualBoundingBoxAscent,inkBottom:baseline+m.actualBoundingBoxDescent,rectBottom:rect.bottom};
+  }
+  function textEls(root){
+    const o=[],d=root.ownerDocument;
+    const tw=d.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:n=>n.nodeValue.trim()?1:2});
+    let n;while(n=tw.nextNode())o.push(n.parentElement);return o;
+  }
+  function hEx(p,w){
+    // widest ink extents across every line, plus any box that breaks the side edge
+    const d=p.ownerDocument,cs=w.getComputedStyle(p),pr=p.getBoundingClientRect();
+    const cL=pr.left+parseFloat(cs.paddingLeft),cR=pr.right-parseFloat(cs.paddingRight);
+    let minL=Infinity,maxR=-Infinity,over=0;
+    const tw=d.createTreeWalker(p,NodeFilter.SHOW_TEXT,{acceptNode:n=>n.nodeValue.trim()?1:2});
+    let n;while(n=tw.nextNode()){const r=d.createRange();r.selectNodeContents(n);
+      for(const q of r.getClientRects()){if(q.width<=0)continue;minL=Math.min(minL,q.left);maxR=Math.max(maxR,q.right);}}
+    for(const el of p.querySelectorAll('*')){const q=el.getBoundingClientRect();if(!q.width)continue;
+      over=Math.max(over,cL-q.left,q.right-cR);}
+    return {l:minL-cL,r:cR-maxR,over};
+  }
+  function flush(){
+    if(--left)return;
+    rows.sort((a,b)=>(a[0]+a[1]).localeCompare(b[0]+b[1]));
+    document.getElementById('out4').innerHTML='<table><tr><th>document</th><th>variant</th><th>top</th>'
+      +'<th>bottom (flow end)</th><th>left</th><th>right</th><th>result</th></tr>'+rows.map(r=>'<tr><td>'+r[0]
+      +'</td><td>'+r[1]+'</td><td>'+r[2]+'pt</td><td>'+r[3]+'pt</td><td>'+r[4]+'pt</td><td>'+r[5]+'pt</td>'
+      +'<td class="'+(r[6]?'pass':'fail')+'">'+(r[6]?'PASS':'FAIL')+'</td></tr>').join('')+'</table>'
+      +'<p style="font-family:var(--ff-mono);font-size:8.5pt">top vs bottom must match within 0.5pt (one hairline), left vs right within 0.25pt. '
+      +'Bottom is measured to the end of the flow \u2014 the edge that meets the bottom margin on a filled page.</p>';
+  }
+  docs.forEach(src=>vars.forEach(([pg,den])=>{
+    const f=document.createElement('iframe');
+    f.style.cssText='width:900px;height:1400px;position:absolute;left:-99999px;top:0';
+    f.src=src;
+    f.onload=async()=>{
+      try{
+        const d=f.contentDocument,w=f.contentWindow;
+        d.documentElement.setAttribute('data-page',pg);
+        if(den)d.documentElement.setAttribute('data-density',den);
+        // Measure only once the webfonts are in. Fallback-serif metrics give
+        // a wrong ascent, which shifts the top inset by up to ~0.8pt and
+        // false-FAILs the check on a cold load.
+        await d.fonts.ready;
+        const p=d.querySelector('.page'),cs=w.getComputedStyle(p),pr=p.getBoundingClientRect();
+        const cT=pr.top+parseFloat(cs.paddingTop),els=textEls(p);
+        const fi=ink(els[0],'first');
+        // Bottom-most INK in the final block, not the DOM-last element: the
+        // résumé ends on the Skills grid, whose left column can sit lower
+        // than the right-hand cell, and the letter on a multi-line close.
+        const lastBlock=p.lastElementChild;
+        let inkBottom=-Infinity;
+        for(const el of textEls(lastBlock).concat([lastBlock]))
+          {const q=ink(el,'last');if(q)inkBottom=Math.max(inkBottom,q.inkBottom);}
+        // Flow end = the final block's box bottom PLUS its bottom margin: the
+        // margin is part of the flow, so that sum is what meets the bottom
+        // margin once the page fills (and it is where the tail trim shows up).
+        const flowEnd=lastBlock.getBoundingClientRect().bottom
+          +parseFloat(w.getComputedStyle(lastBlock).marginBottom);
+        const hx=hEx(p,w);
+        const top=pt(fi.inkTop-cT),bot=pt(flowEnd-inkBottom),l=pt(hx.l),r=pt(hx.r);
+        const ok=Math.abs(top-bot)<=0.5&&Math.abs(l-r)<=0.25&&hx.over<=0.5;
+        rows.push([src.replace('../',''),pg+(den?' / '+den:''),top,bot,l,r,ok]);
+      }catch(e){rows.push([src,pg+' '+den,'—','—','—','—',false]);}
+      f.remove();flush();
+    };
+    document.body.appendChild(f);
+  }));
+})();
+
+/* -------- short-letter centring --------
+   data-letter="centered" must (a) split the leftover space evenly when the
+   letter is short, (b) do nothing at all when the letter fills the page —
+   `align-content: safe center` leaves negative free space alone, so a full
+   letter can never be pushed off the top edge, and the formatting context
+   is unchanged so the page box does not grow — and (c) never apply to the
+   résumé, which does not load cover-letter.css. Ink is measured, not boxes:
+   the optical trims (§4.4) live in collapsed margins, so box edges would
+   report differences the eye never sees. */
+(function(){
+  const pt=x=>Math.round(x*72/96*100)/100;
+  const rows=[];
+  const f=document.createElement('iframe');
+  f.style.cssText='width:900px;height:1400px;position:absolute;left:-99999px;top:0';
+  f.src='../cover-letter.html';
+  f.onload=async()=>{
+    const d=f.contentDocument,w=f.contentWindow;
+    await d.fonts.ready;
+    const p=d.querySelector('.page');
+    const slack=()=>{
+      const cs=w.getComputedStyle(p),r=p.getBoundingClientRect();
+      const cT=r.top+parseFloat(cs.paddingTop),cB=r.bottom-parseFloat(cs.paddingBottom);
+      let top=Infinity,bot=-Infinity;
+      const tw=d.createTreeWalker(p,NodeFilter.SHOW_TEXT,{acceptNode:n=>n.nodeValue.trim()?1:2});
+      let n;while(n=tw.nextNode()){const rg=d.createRange();rg.selectNodeContents(n);
+        for(const q of rg.getClientRects()){if(!q.height)continue;top=Math.min(top,q.top);bot=Math.max(bot,q.bottom);}}
+      return [pt(top-cT),pt(cB-bot),pt(r.height)];
+    };
+    const set=v=>v?d.documentElement.setAttribute('data-letter',v):d.documentElement.removeAttribute('data-letter');
+    // full letter: centring must be a no-op
+    const fullOff=slack();set('centered');const fullOn=slack();set(null);
+    rows.push(['full letter (must be a no-op)','top '+fullOff[0]+'pt / bottom '+fullOff[1]+'pt / page '+fullOff[2]+'pt',
+      'top '+fullOn[0]+'pt / bottom '+fullOn[1]+'pt / page '+fullOn[2]+'pt',
+      fullOff[0]===fullOn[0]&&fullOff[1]===fullOn[1]&&fullOff[2]===fullOn[2]]);
+    // short letter (three body paragraphs suppressed): slack must split evenly
+    const hide=[...p.querySelectorAll('.letter-body p')].slice(1,4);
+    hide.forEach(e=>e.style.display='none');
+    const shortOff=slack();set('centered');const shortOn=slack();set(null);
+    hide.forEach(e=>e.style.display='');
+    // Ink balance, not line-box balance: the display line's box overhangs its
+    // ink by ~8.4pt at the top (the lead trim's doing), so compare ink.
+    const inkAdj=8.43-0.28;
+    rows.push(['short letter (must centre)','top '+shortOff[0]+'pt / bottom '+shortOff[1]+'pt',
+      'top '+shortOn[0]+'pt / bottom '+shortOn[1]+'pt',
+      Math.abs((shortOn[0]+inkAdj)-shortOn[1])<=1&&shortOn[0]>shortOff[0]+10]);
+    // the résumé must not respond to the attribute at all
+    const g=document.createElement('iframe');
+    g.style.cssText=f.style.cssText;g.src='../resume.html';
+    g.onload=async()=>{
+      const rd=g.contentDocument,rw=g.contentWindow;await rd.fonts.ready;
+      const rp=rd.querySelector('.page');
+      const ac=()=>rw.getComputedStyle(rp).alignContent;
+      const before=ac();rd.documentElement.setAttribute('data-letter','centered');
+      const after=ac();rd.documentElement.removeAttribute('data-letter');
+      rows.push(['résumé (must ignore)','align-content: '+before,'align-content: '+after,
+        before===after&&after==='normal']);
+      document.getElementById('out5').innerHTML='<table><tr><th>case</th><th>default</th>'
+        +'<th>data-letter="centered"</th><th>result</th></tr>'+rows.map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]
+        +'</td><td>'+r[2]+'</td><td class="'+(r[3]?'pass':'fail')+'">'+(r[3]?'PASS':'FAIL')+'</td></tr>').join('')+'</table>';
+      f.remove();g.remove();
+    };
+    document.body.appendChild(g);
+  };
+  document.body.appendChild(f);
 })();
 </script>
 </body></html>

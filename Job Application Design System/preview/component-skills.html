@@ -12,12 +12,14 @@
   dl.skills dt { font-size: var(--fs-small); color: var(--ink-meta); font-weight: var(--fw-medium); letter-spacing: var(--tr-tight); }
   dl.skills dd { margin: 0; font-family: var(--ff-body); font-size: var(--fs-small); color: var(--ink-body); line-height: var(--lh-snug); }
   dl.skills dd .sep { color: var(--ink-fade); margin: 0 var(--sep-gap-tight); }
+  /* .nowrap utility, as in resume.css — parse-safe replacement for &nbsp;. */
+  .nowrap { white-space: nowrap; }
 </style>
 </head><body>
 <dl class="skills">
   <dt>Languages</dt>
   <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
-  <dt>Data&nbsp;&amp;&nbsp;Storage</dt>
+  <dt class="nowrap">Data &amp; Storage</dt>
   <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch</dd>
   <dt>Infrastructure</dt>
   <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS<span class="sep">·</span>gRPC<span class="sep">·</span>Envoy<span class="sep">·</span>OpenTelemetry</dd>

@@ -1839,6 +1839,8 @@ export default [
         `all loaded faces pass the DOM-driven predicate: ${JSON.stringify(full.result)}`);
       assert(JSON.stringify(full.checked.sort()) === JSON.stringify(expected.sort()),
         `only exact used faces are probed, including hidden cover text: ${JSON.stringify(full.checked)}`);
+      assert(JSON.stringify(full.result.requiredFaces.sort()) === JSON.stringify(expected.sort()),
+        `the editable workspace can explicitly load only the exact used faces: ${JSON.stringify(full.result.requiredFaces)}`);
       assert(!full.checked.includes('400 12px "Source Serif 4"') && !full.checked.includes('500 12px "Inter"') && !full.checked.includes('400 12px "IBM Plex Mono"'),
         'unused display 400, body 500, and mono 400 are not false-negative probes');
       const failed = probe(html, ['600 12px "Inter"']);
@@ -1854,6 +1856,9 @@ export default [
       assert(renderSource.includes('document.fonts.load(descriptor, \'A\')')
         && renderSource.includes('display:none content'),
       'hidden Electron renderer explicitly loads bundled faces before all-panel readiness validation');
+      assert(resumeDoc.includes('loadRequiredDocumentFaces')
+        && resumeDoc.includes('document.fonts.addEventListener(\'loadingdone\', check)'),
+      'editable workspace explicitly requests the document\'s required faces and clears a stale warning after a later font batch');
       return { ok: true };
     },
   },

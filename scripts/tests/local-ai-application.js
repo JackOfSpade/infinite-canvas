@@ -38,6 +38,8 @@ export default [
         && localSource.includes('documentSha256')
         && localSource.includes('there is no fixed revision limit')
         && localSource.includes('handoffHistory')
+        && localSource.includes('handoff-receipts')
+        && localSource.includes('writeLocalAiTerminalReceipt')
         && localSource.includes('result-imported')
         && localSource.includes('For a cover letter that already fits, improve it')
         && localSource.includes('missingArtifacts.length === 0'),
@@ -59,9 +61,10 @@ export default [
         && routineSource.includes('page fit as a constraint')
         && routineSource.includes('SAME Claude Code run active') && routineSource.includes('45 seconds')
         && routineSource.includes('There is no fixed round limit')
-        && routineSource.includes('density is an app-owned measured-layout decision')
+        && routineSource.includes('Infinite Canvas owns all root document variants')
+        && routineSource.includes('handoff-receipts/<job-id>.json')
         && routineSource.includes('Never claim that the app "confirmed" bullet line counts'),
-      'the Local AI routine can select a measured revision job, protect optional contact location from inference, distinguish measurements from diagnosis, and quality-check both documents until diminishing returns');
+      'the Local AI routine can select a measured revision job, protect optional contact location from inference, distinguish measurements from diagnosis, observe final imported measurements after staging cleanup, and quality-check both documents until diminishing returns');
       return { standalonePdfPath: true, fitRevision: true };
     },
   },
@@ -146,11 +149,37 @@ export default [
         qualityReview: draftedQualityReview(),
       }, id, path.join(os.tmpdir(), 'local-ai-project'));
       assert(good.coverLetter.paragraphs.length === 1, 'valid structured output is normalized');
+      let summaryOnlyRejected = false;
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Software Engineer</span><span class="company">FliteX</span><p class="role-summary">Built flight-routing automation.</p></article></main>',
+          coverLetter: normalizedCoverLetter(), qualityReview: draftedQualityReview(),
+        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      } catch { summaryOnlyRejected = true; }
+      assert(summaryOnlyRejected,
+        'the Local AI import path must reject a summary-only role instead of copying raw notes into a bullet');
       let rejected = false;
       try {
         validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><script>alert(1)</script></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
       } catch { rejected = true; }
       assert(rejected, 'scripts in a Local AI result cannot enter the built application workspace');
+      let emDashRejected = false;
+      try {
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><section class="section">Led the migration — reducing latency.</section></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      } catch { emDashRejected = true; }
+      assert(emDashRejected, 'an em dash in candidate copy cannot enter a Local AI application');
+      let rangeAccepted = true;
+      try {
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><section class="section">Led a 3–5 engineer team from Mar 2022 – Present.</section></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      } catch { rangeAccepted = false; }
+      assert(rangeAccepted, 'date and numeric en-dash ranges remain valid candidate copy');
+      let monthToMonthDateRangeAccepted = true;
+      try {
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><section class="section">Software Engineer, May 2023 – June 2026.</section></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      } catch { monthToMonthDateRangeAccepted = false; }
+      assert(monthToMonthDateRangeAccepted, 'month-to-month date ranges remain valid candidate copy');
       let missingReviewRejected = false;
       try {
         validateLocalApplicationResult({
@@ -184,7 +213,7 @@ export default [
       }, id, path.join(os.tmpdir(), 'local-ai-project'));
       assert(structuralOverflowReview.qualityReview.resume.decision === 'drafted',
         'a concrete structural rationale remains valid when it truthfully mentions the measured overflow that prompted the revision');
-      return { rejected, missingReviewRejected, fitOnlyRationaleRejected, structuralOverflowAccepted: true };
+      return { rejected, emDashRejected, rangeAccepted, monthToMonthDateRangeAccepted, missingReviewRejected, fitOnlyRationaleRejected, structuralOverflowAccepted: true, summaryOnlyRejected: true };
     },
   },
   {
@@ -203,6 +232,16 @@ export default [
       await fs.promises.rm(project.root, { recursive: true, force: true });
       await fs.promises.rm(otherProject.root, { recursive: true, force: true });
       return { status: status.status };
+    },
+  },
+  {
+    name: 'Local AI application: corrected invalid results remain eligible for automatic status recovery',
+    run: async () => {
+      const source = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const pollingGuard = source.match(/if \(!jobId \|\| !window\.electronAPI\?\.getLocalApplicationStatus \|\| \[([^\]]+)\]\.includes\(localApplication\.status\)\) return undefined;/);
+      assert(pollingGuard && !/['"]invalid['"]/.test(pollingGuard[1]),
+        'invalid results remain eligible for status polling after Claude Code corrects result.json');
+      return { invalidRecoveryPolling: true };
     },
   },
   {
