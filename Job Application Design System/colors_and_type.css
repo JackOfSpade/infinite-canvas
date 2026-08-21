@@ -39,7 +39,10 @@
      drift, the on-screen design colour and the printed-PDF
      background colour will mismatch. Better: pass `--bg`'s actual
      value into `addOcgBackground({ cream: '#F7F4ED' })` at the
-     call site so the CSS token stays authoritative. */
+     call site so the CSS token stays authoritative.
+     GUARDED: `build/token-sync-test.js` parses this declaration and
+     fails if the module default, `build/test.js`'s expectation, or
+     STYLE.md §3.1's colour table drifts from it. */
   --bg:          #F7F4ED;
   --bg-rule:    rgba(26, 24, 21, 0.10); /* hairline rule color */
 
@@ -77,7 +80,7 @@
 
   /* ---------- Type · scale (pt for print fidelity) ---------- */
   --fs-display:  28pt;      /* @kind font */  /* candidate name */
-  --fs-h1:       18pt;      /* @kind font */  /* document title (rarely used) */
+  --fs-h1:       18pt;      /* @kind font */  /* (RESERVED — no component uses it; a document title if a future variant adds one) */
   --fs-h2:        9pt;      /* @kind font */  /* section header (uppercase) */
   --fs-h3:       11pt;      /* @kind font */  /* role title / company */
   --fs-body:     10.25pt;   /* @kind font */  /* bullets, paragraphs */
@@ -96,12 +99,31 @@
   --fw-medium:   500; /* @kind font */
   --fw-semibold: 600; /* @kind font */
 
-  /* ---------- Type · leading ---------- */
+  /* ---------- Type · leading ----------
+     Three values ship and each has a caller: display for the name,
+     snug for the Skills keyword run, body for everything else.
+     (--lh-tight and --lh-loose were removed — nothing referenced
+     them, and an unused leading token invites a component to reach
+     for a fourth value the density variant then fails to track.) */
   --lh-display:  1.05; /* @kind font */
-  --lh-tight:    1.20; /* @kind font */
   --lh-snug:     1.35; /* @kind font */
   --lh-body:     1.45; /* @kind font */
-  --lh-loose:    1.55; /* @kind font */
+
+  /* ---------- Type · the letter surface ----------
+     The cover letter is the system's one long-form prose surface:
+     display serif at reading size, editorial leading. These are
+     TOKENS rather than literals in cover-letter.css so that
+     `data-density="compact"` reaches the letter's dominant vertical
+     space. Three hardcoded sizes previously made compact a near
+     no-op on the letter while still shortening its optical tail trim
+     — the letter got the cost of compact and none of the benefit
+     (STYLE.md §11.7).
+     --fs-signature is deliberately NOT tightened by compact, for the
+     same reason as --fs-display: shrinking the identity mark to claw
+     back lines is the wrong trade. */
+  --fs-letter-body: 10.5pt; /* @kind font */
+  --lh-letter:      1.6;    /* @kind font */
+  --fs-signature:   15pt;   /* @kind font */
 
   /* ---------- Vertical rhythm ----------
      A computed token equal to one body line-box (fs-body × lh-body
@@ -113,7 +135,7 @@
      *elements* visually tight without forcing 4pt arithmetic onto
      every gap. */
   --baseline:    calc(var(--fs-body) * var(--lh-body)); /* @kind spacing */
-  --vr-half:     calc(var(--baseline) * 0.5);   /* @kind spacing */  /* ~7.4pt  */
+  --vr-half:     calc(var(--baseline) * 0.5);   /* @kind spacing */  /* ~7.4pt · (RESERVED — no current caller) */
   --vr-1:        var(--baseline);                /* @kind spacing */  /* ~14.9pt */
   --vr-1-5:      calc(var(--baseline) * 1.5);   /* @kind spacing */  /* ~22.3pt */
   --vr-2:        calc(var(--baseline) * 2);     /* @kind spacing */  /* ~29.7pt */
@@ -133,17 +155,17 @@
   --sep-gap-loose: 0.5em; /* @kind spacing */
 
   /* ---------- Spacing · 4pt baseline ---------- */
-  --s-0:   0; /* @kind spacing */
+  /* (--s-0 was removed: `0` needs no token, and nothing referenced it.) */
   --s-1:   2pt; /* @kind spacing */
   --s-2:   4pt; /* @kind spacing */
   --s-3:   6pt; /* @kind spacing */
   --s-4:   8pt; /* @kind spacing */
   --s-5:  12pt; /* @kind spacing */
   --s-6:  16pt; /* @kind spacing */
-  --s-7:  20pt; /* @kind spacing */
+  --s-7:  20pt; /* @kind spacing */  /* (RESERVED — no current caller) */
   --s-8:  24pt; /* @kind spacing */
   --s-9:  32pt; /* @kind spacing */
-  --s-10: 40pt; /* @kind spacing */
+  --s-10: 40pt; /* @kind spacing */  /* (RESERVED — no current caller) */
 
   /* ---------- Page geometry (Letter) ---------- */
   --page-w:        8.5in;  /* @kind spacing */
@@ -172,8 +194,12 @@
      column sets the row height; the letter ends on a single small line),
      so this is the midpoint: it lands both within ~0.3pt — under the
      0.5pt hairline, i.e. below perceptibility. Overridden for compact,
-     whose tighter leading leaves almost nothing to trim. Applied in
-     resume.css on the trailing flow edge. */
+     whose tighter leading leaves almost nothing to trim — but only for
+     the RÉSUMÉ: cover-letter.css pins the letter back to 1pt in both
+     densities, because the letter's closing line is --fs-signature at
+     1.1 leading, metrics compact deliberately does not touch
+     (STYLE.md §11.7). Applied in resume.css on the trailing flow
+     edge. */
   --optical-tail-trim: 1pt; /* @kind spacing */
 
   /* ---------- Layout columns (single primary column) ---------- */
@@ -315,6 +341,7 @@ ul { margin: 0; padding: 0; list-style: none; }
 
    Tokens that change:
    - body type drops 10.25 → 9.75pt; leading 1.45 → 1.35
+   - the letter's serif body follows: 10.5 → 10pt, leading 1.6 → 1.5
    - meta sizes follow proportionally
    - block-spacing tokens (s-6 / s-8 / s-9) drop roughly 25%
    - page margins shrink 0.72 → 0.6in head/foot
@@ -322,6 +349,8 @@ ul { margin: 0; padding: 0; list-style: none; }
    Tokens deliberately untouched:
    - --fs-display (the name) — shrinking the name to fit content
      is the wrong trade
+   - --fs-signature (the letter's signature) — the same identity mark,
+     the same reasoning
    - --col-meta-w — date strings keep the same metrics
    - --rule-weight, accent, families — visual identity unchanged
 
@@ -341,6 +370,11 @@ ul { margin: 0; padding: 0; list-style: none; }
   --lh-body:      1.35;    /* @kind font */
   --lh-snug:      1.25;    /* @kind font */
 
+  /* The letter's body follows the résumé down ~5%, leading with it.
+     --fs-signature does not move (see the letter-surface tokens). */
+  --fs-letter-body: 10pt;  /* @kind font */
+  --lh-letter:      1.5;   /* @kind font */
+
   --s-6:         12pt;   /* @kind spacing */  /* was 16pt — section head ↔ body   */
   --s-8:         18pt;   /* @kind spacing */  /* was 24pt — role ↔ role           */
   --s-9:         24pt;   /* @kind spacing */  /* was 32pt — section ↔ section     */
@@ -349,7 +383,9 @@ ul { margin: 0; padding: 0; list-style: none; }
   --margin-bot:  0.6in;  /* @kind spacing */
 
   /* Compact's tighter leading leaves ~0.3–0.8pt below the closing
-     line's ink instead of ~1–1.6pt, so the tail trim shrinks with it. */
+     line's ink instead of ~1–1.6pt, so the tail trim shrinks with it.
+     Résumé only — cover-letter.css opts the letter out, whose closing
+     line keeps its 15pt/1.1 metrics under compact (STYLE.md §11.7). */
   --optical-tail-trim: 0.4pt; /* @kind spacing */
 }
 

@@ -24,13 +24,9 @@ var path = require('path');
 
 var ROOT = path.join(__dirname, '..');
 
-var GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', RESET = '\x1b[0m';
-var passed = 0, failed = 0, failures = [];
-
-function ok(name)      { console.log('  ' + GREEN + '✓' + RESET + ' ' + name); passed++; }
-function fail(name, m) { console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m); failed++; failures.push(name); }
-function header(s)     { console.log('\n' + s); }
-function assert(cond, name, msg) { if (cond) ok(name); else fail(name, msg || 'assertion failed'); }
+var H = require('./harness.js');
+var ok = H.ok, fail = H.fail, header = H.header, assert = H.assert;
+var GREEN = H.GREEN, RED = H.RED, DIM = H.DIM, RESET = H.RESET;
 
 function read(rel) { return fs.readFileSync(path.isAbsolute(rel) ? rel : path.join(ROOT, rel), 'utf8'); }
 /* Candidate copy only. Stripped, because none of it reaches the text layer
@@ -50,13 +46,28 @@ if (targets.length === 0) targets = ['resume.html', 'cover-letter.html'];
 
 /* ---- per-document hazards ----------------------------------------- */
 
+/* Shared declaration patterns. Spell out every zero form rather than
+   matching only `opacity: 0`: `0.0`, `00`, `0%`, and `!important`
+   hide text just as completely. `columns` is the shorthand form of the
+   two longhands and creates the same parse-order hazard. */
+var ZERO_VALUE = '(?:0+(?:\\.0+)?|\\.0+)%?';
+var DECLARATION_END = "(?=\\s*(?:[;}\"']))";
+var HIDDEN_TEXT = new RegExp(
+  '(?:visibility\\s*:\\s*hidden|' +
+  'opacity\\s*:\\s*' + ZERO_VALUE + '(?:\\s*!important)?' + DECLARATION_END + '|' +
+  'font-size\\s*:\\s*' + ZERO_VALUE + '(?:px|pt|em|rem)?(?:\\s*!important)?' +
+    DECLARATION_END + ')',
+  'i'
+);
+var CSS_COLUMNS = /(?:^|[;{"'\s])(?:column-(?:count|width)|columns)\s*:/i;
+
 /* Each hazard: [label, regexp over candidate copy, why]. A match fails. */
 var HAZARDS = [
   ['no <table> (cell reading order interleaves lines)',        /<table[\s>]/i],
   ['no <img> / <svg> / <canvas> (text in them extracts as nothing)', /<(img|svg|canvas|picture)[\s>]/i, 'main'],
   ['no position:absolute / fixed on content',                  /position\s*:\s*(absolute|fixed)/i],
-  ['no CSS columns (real columns interleave on parse)',        /column-(count|width)\s*:/i],
-  ['no hidden or zero-size text (reads as keyword stuffing)',  /(visibility\s*:\s*hidden|opacity\s*:\s*0(?!\.)|font-size\s*:\s*0(px|pt)?\s*[;"'])/i],
+  ['no CSS columns (real columns interleave on parse)',        CSS_COLUMNS],
+  ['no hidden or zero-size text (reads as keyword stuffing)',  HIDDEN_TEXT],
   ['no tabular figures (every digit drops from the PDF)',      /(tabular-nums|["']tnum["'])/i],
   ['no &nbsp; in candidate copy (use class="nowrap")',         /&nbsp;|&#160;|&#xa0;|\u00a0/i],
   ['no <font> / <center> / inline text-align hacks',           /<(font|center)[\s>]/i]
@@ -113,7 +124,21 @@ targets.forEach(function (rel) {
 /* Every sheet a shipped document loads is scanned, not just resume.css —
    a hazard added to the letter surface or the token sheet reaches the
    page just as surely. */
-var SHEETS = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
+var SHEETS = ['colors_and_type.css', 'resume.css', 'cover-letter.css', 'styles.css'];
+
+function positionedSelectors(css) {
+  var out = [];
+  var rules = css.match(/[^{}]+\{[^{}]*\}/g) || [];
+  rules.forEach(function (rule) {
+    var brace = rule.indexOf('{');
+    if (!/position\s*:\s*(absolute|fixed)/i.test(rule.slice(brace + 1))) return;
+    rule.slice(0, brace).split(',').forEach(function (selector) {
+      var clean = selector.replace(/\s+/g, ' ').trim();
+      if (clean && !/::?(before|after)\b/.test(clean)) out.push(clean);
+    });
+  });
+  return out;
+}
 
 header('stylesheets — no hazard in any sheet a document loads');
 
@@ -123,18 +148,27 @@ SHEETS.forEach(function (sheet) {
      check that is looking for a real declaration. */
   var s = read(sheet).replace(/\/\*[\s\S]*?\*\//g, '');
   assert(!/tabular-nums|["']tnum["']/.test(s), sheet + ': no rule enables tabular figures');
-  assert(!/column-(count|width)\s*:/.test(s), sheet + ': no CSS multi-column rule');
+  assert(!CSS_COLUMNS.test(s), sheet + ': no CSS multi-column rule');
   /* `position: absolute` is legitimate on the bullet pseudo-element and
-     nowhere else, so skip ::before/::after rules and flag the rest. */
-  var positioned = (s.match(/([^{}]+)\{[^}]*position\s*:\s*(absolute|fixed)[^}]*\}/g) || [])
-    .map(function (r) { return r.slice(0, r.indexOf('{')).replace(/\s+/g, ' ').trim(); })
-    .filter(function (sel) { return !/::?(before|after)\b/.test(sel); });
+     nowhere else, so skip only the pseudo-element selector in a selector
+     list. A mixed `body, li::before` rule must still flag `body`. */
+  var positioned = positionedSelectors(s);
   assert(positioned.length === 0,
     sheet + ': no rule positions content absolutely (bullet pseudo-element excepted)',
     positioned.join(' | '));
-  assert(!/visibility\s*:\s*hidden|font-size\s*:\s*0(px|pt)?\s*[;}]/.test(s),
+  assert(!HIDDEN_TEXT.test(s),
     sheet + ': no rule hides text');
 });
+
+header('checker self-test — bypass forms stay blocked');
+assert(HIDDEN_TEXT.test('opacity: 0.0 !important;') &&
+       HIDDEN_TEXT.test('font-size: 00px;') &&
+       !HIDDEN_TEXT.test('opacity: 0.01;'),
+  'hidden-text detector catches equivalent zero forms without flagging visible opacity');
+assert(CSS_COLUMNS.test('columns: 12rem 2;') && CSS_COLUMNS.test('column-count: 2;'),
+  'multi-column detector covers the shorthand and longhand forms');
+assert(positionedSelectors('body, li::before { position: absolute; }').join(',') === 'body',
+  'pseudo-element exemption does not hide a positioned ordinary selector in the same list');
 
 header('resume.css — parse-safe rules are in place');
 
@@ -161,11 +195,26 @@ assert(meaningful.length === 0,
 assert(!DECORATIVE.test('" \u00b7 trade-off: "') && DECORATIVE.test('"\\2022"'),
   'the decorative whitelist rejects a multi-word label and accepts the bullet glyph');
 
-/* Single column, and no positioned content — covered per-sheet above. */
-assert(true, 'stylesheet hazards checked across ' + SHEETS.length + ' sheets');
+/* The list above must cover every stylesheet the target documents
+   actually link — otherwise a new surface stylesheet ships unscanned and
+   this whole section passes by omission. (This replaced an
+   `assert(true, …)` that reported a passing check while measuring
+   nothing.) Compared by basename, so a filled document written to a
+   subdirectory still resolves. */
+var linkedSheets = [];
+targets.forEach(function (rel) {
+  var re = /<link\b[^>]*rel="stylesheet"[^>]*>/gi, tag;
+  var html = read(rel);
+  while ((tag = re.exec(html)) !== null) {
+    var href = /href="([^"]+)"/i.exec(tag[0]);
+    var base = href && href[1].split('/').pop();
+    if (base && linkedSheets.indexOf(base) === -1) linkedSheets.push(base);
+  }
+});
+var unscanned = linkedSheets.filter(function (s) { return SHEETS.indexOf(s) === -1; });
+assert(unscanned.length === 0,
+  'every stylesheet the target documents link is scanned above (' +
+    (linkedSheets.join(', ') || 'none linked — inlined CSS') + ')',
+  'unscanned: ' + unscanned.join(', '));
 
-console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
-if (failed > 0) {
-  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
-  process.exit(1);
-}
+H.report();

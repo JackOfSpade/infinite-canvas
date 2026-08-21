@@ -13,7 +13,12 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { PDFDocument } from 'pdf-lib';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
-import { extractVariantAttrs, isDualMode } from './resumeHtml.js';
+import {
+  extractVariantAttrs,
+  isDualMode,
+  restoreTrustedReceiptDerivations,
+  sanitizeDocumentMainHtml,
+} from './resumeHtml.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
 
@@ -57,6 +62,24 @@ function isInside(parent, child) {
   return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+function canonicalPathKey(value) {
+  const normalized = path.resolve(value).normalize('NFC');
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+function normalizeWorkspaceIdentity(raw) {
+  const realWorkspaceDir = typeof raw?.realWorkspaceDir === 'string' && path.isAbsolute(raw.realWorkspaceDir)
+    ? path.resolve(raw.realWorkspaceDir)
+    : '';
+  const dev = String(raw?.dev ?? '');
+  const ino = String(raw?.ino ?? '');
+  return realWorkspaceDir && /^\d{1,32}$/.test(dev) && /^\d{1,32}$/.test(ino)
+    ? { realWorkspaceDir, dev, ino }
+    : null;
+}
+
 function normalizeWorkspace(raw) {
   const token = typeof raw?.token === 'string' && /^[a-f0-9]{64}$/i.test(raw.token) ? raw.token : '';
   const workspaceDir = typeof raw?.workspaceDir === 'string' ? path.resolve(raw.workspaceDir) : '';
@@ -67,16 +90,140 @@ function normalizeWorkspace(raw) {
   // Keep persisted data intentionally tiny and reconstruct filenames rather
   // than trusting paths from the state file.
   if (!isInside(workspaceDir, applicationPath) || !isInside(workspaceDir, resumePdfPath) || !isInside(workspaceDir, coverLetterPdfPath)) return null;
-  return { token, workspaceDir, applicationPath, resumePdfPath, coverLetterPdfPath };
+  return {
+    token,
+    workspaceDir,
+    applicationPath,
+    resumePdfPath,
+    coverLetterPdfPath,
+    identity: normalizeWorkspaceIdentity(raw?.identity),
+  };
+}
+
+async function captureOrVerifyWorkspaceIdentity(workspace) {
+  let directoryStat;
+  try {
+    directoryStat = await fs.promises.lstat(workspace.workspaceDir);
+  } catch (error) {
+    throw new Error(`Application Sync workspace is unavailable: ${error?.message || error}`);
+  }
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error('Application Sync workspace must be a regular directory, not a symbolic link.');
+  }
+  const realWorkspaceDir = await fs.promises.realpath(workspace.workspaceDir);
+  if (canonicalPathKey(realWorkspaceDir) !== canonicalPathKey(workspace.workspaceDir)) {
+    throw new Error('Application Sync workspace must not traverse a symbolic link.');
+  }
+  let applicationStat;
+  try {
+    applicationStat = await fs.promises.lstat(workspace.applicationPath);
+  } catch (error) {
+    throw new Error(`Application Sync workspace HTML is unavailable: ${error?.message || error}`);
+  }
+  if (!applicationStat.isFile() || applicationStat.isSymbolicLink()) {
+    throw new Error('Application Sync workspace HTML must be a regular file.');
+  }
+
+  const currentIdentity = {
+    realWorkspaceDir,
+    dev: String(directoryStat.dev),
+    ino: String(directoryStat.ino),
+  };
+  if (workspace.identity
+    && (canonicalPathKey(workspace.identity.realWorkspaceDir) !== canonicalPathKey(currentIdentity.realWorkspaceDir)
+      || workspace.identity.dev !== currentIdentity.dev
+      || workspace.identity.ino !== currentIdentity.ino)) {
+    throw new Error('Application Sync workspace was replaced after it was registered.');
+  }
+  return { ...workspace, identity: currentIdentity };
+}
+
+function sameFileIdentity(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+async function readFileHandleBounded(handle, maxBytes) {
+  const chunks = [];
+  let offset = 0;
+  while (offset <= maxBytes) {
+    const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, maxBytes + 1 - offset));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+    if (!bytesRead) break;
+    chunks.push(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  if (offset > maxBytes) throw new Error('The saved application workspace exceeds the safe Sync size limit.');
+  return Buffer.concat(chunks, offset).toString('utf8');
+}
+
+async function readRegisteredWorkspaceHtml(workspace) {
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  let preOpenStat = null;
+  let handle;
+  if (!noFollow) {
+    preOpenStat = await fs.promises.lstat(workspace.applicationPath);
+    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
+      throw new Error('Application Sync workspace HTML must be a regular file.');
+    }
+  }
+  try {
+    handle = await fs.promises.open(workspace.applicationPath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    // A few filesystems expose O_NOFOLLOW but reject the flag itself. Fall
+    // back only for an unsupported operation, never for ELOOP (the expected
+    // rejection when the path is actually a symbolic link), and bind the
+    // opened handle to a pre-open lstat identity below.
+    if (!noFollow || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) throw error;
+    preOpenStat = await fs.promises.lstat(workspace.applicationPath);
+    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
+      throw new Error('Application Sync workspace HTML must be a regular file.');
+    }
+    handle = await fs.promises.open(workspace.applicationPath, fs.constants.O_RDONLY);
+  }
+
+  try {
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.size > MAX_HTML_BYTES
+      || (preOpenStat && !sameFileIdentity(openedStat, preOpenStat))) {
+      throw new Error('Application Sync workspace HTML changed or is not a safe regular file.');
+    }
+    // Opening a final file with O_NOFOLLOW is not enough if an ancestor was
+    // replaced. Re-check the captured directory after the handle is open,
+    // then prove the current path still names that exact opened file.
+    await captureOrVerifyWorkspaceIdentity(workspace);
+    const currentPathStat = await fs.promises.lstat(workspace.applicationPath);
+    if (!currentPathStat.isFile() || currentPathStat.isSymbolicLink()
+      || !sameFileIdentity(currentPathStat, openedStat)) {
+      throw new Error('Application Sync workspace HTML changed while it was being opened.');
+    }
+    const html = await readFileHandleBounded(handle, MAX_HTML_BYTES);
+    const finalStat = await handle.stat();
+    if (!sameFileIdentity(finalStat, openedStat)
+      || finalStat.size !== openedStat.size
+      || finalStat.mtimeMs !== openedStat.mtimeMs
+      || finalStat.ctimeMs !== openedStat.ctimeMs) {
+      throw new Error('Application Sync workspace HTML changed while it was being read.');
+    }
+    return html;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function persistWorkspaces() {
-  const payload = JSON.stringify({ version: 1, workspaces: [...workspaces.values()].map(({ token, workspaceDir }) => ({ token, workspaceDir })) }, null, 2);
+  const payload = JSON.stringify({
+    version: 2,
+    workspaces: [...workspaces.values()].map(({ token, workspaceDir, identity }) => ({ token, workspaceDir, identity })),
+  }, null, 2);
   const target = statePath();
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-  await fs.promises.writeFile(temporary, payload, { mode: 0o600 });
-  await fs.promises.rename(temporary, target);
+  try {
+    await fs.promises.writeFile(temporary, payload, { mode: 0o600 });
+    await fs.promises.rename(temporary, target);
+  } finally {
+    await fs.promises.unlink(temporary).catch(() => {});
+  }
 }
 
 function persistWorkspacesSerialized() {
@@ -93,10 +240,19 @@ async function loadWorkspaces() {
   stateLoaded = true;
   try {
     const parsed = JSON.parse(await fs.promises.readFile(statePath(), 'utf8'));
+    let migratedIdentity = false;
     for (const raw of Array.isArray(parsed?.workspaces) ? parsed.workspaces : []) {
-      const workspace = normalizeWorkspace(raw);
-      if (workspace) workspaces.set(workspace.token, workspace);
+      const normalized = normalizeWorkspace(raw);
+      if (!normalized) continue;
+      try {
+        const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
+        if (!normalized.identity) migratedIdentity = true;
+        workspaces.set(workspace.token, workspace);
+      } catch (error) {
+        logger.warn(`[ApplicationSync] Ignoring unsafe saved workspace: ${error?.message || error}`);
+      }
     }
+    if (migratedIdentity) await persistWorkspaces();
   } catch (error) {
     if (error?.code !== 'ENOENT') logger.warn(`[ApplicationSync] Could not read saved workspace capabilities: ${error?.message || error}`);
   }
@@ -154,45 +310,150 @@ function readJson(request) {
  * would therefore let an unsynced edit in the OTHER panel leak into
  * Application.html while that panel's PDF remained on the previous revision.
  *
- * Keep the incoming document byte-for-byte except for the inactive panel's
- * inner HTML, which is copied from the last successfully synced file. JSDOM is
- * used only to locate source offsets; it never serializes or executes either
- * document, so scripts, entities, formatting, and the active edit are not
- * normalized as a side effect of the merge.
+ * The saved file is the trusted shell. Browser-supplied HTML may differ only in
+ * the selected editable `<main>`; toolbar/scripts/styles/capability data and the
+ * inactive document all come from the last saved revision. Both document mains
+ * pass through the same strict allowlist used at initial generation, which also
+ * cleans an older pre-sanitizer inactive panel when it next participates in a
+ * Sync. Source-offset replacement preserves the trusted shell byte-for-byte.
  */
-export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, documentKind) {
+export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, documentKind, { expectedToken = '' } = {}) {
   const selected = documentKind === 'cover' ? 'cover' : documentKind === 'resume' ? 'resume' : '';
   if (!selected) throw new Error('A valid application document kind is required.');
-  const inactive = selected === 'cover' ? 'resume' : 'cover';
-  const inspect = (html, label) => {
+  const collectUniqueReviewState = (dom, selector, keyAttribute, stateAttribute, allowedStates) => {
+    const values = new Map();
+    const duplicates = new Set();
+    for (const element of dom.window.document.querySelectorAll(selector)) {
+      const key = String(element.getAttribute(keyAttribute) || '');
+      if (!/^[A-Za-z0-9_-]{1,160}$/.test(key)) continue;
+      if (values.has(key)) {
+        duplicates.add(key);
+        values.delete(key);
+        continue;
+      }
+      if (duplicates.has(key)) continue;
+      const state = String(element.getAttribute(stateAttribute) || '');
+      const location = dom.nodeLocation(element)?.startTag;
+      values.set(key, {
+        state: allowedStates.has(state) ? state : '',
+        location: location && Number.isInteger(location.startOffset) && Number.isInteger(location.endOffset)
+          ? location : null,
+      });
+    }
+    return values;
+  };
+  const inspect = (html, label, { validateCapability = false } = {}) => {
     const dom = new JSDOM(String(html || ''), { includeNodeLocations: true });
     const locations = {};
-    for (const kind of ['resume', 'cover']) {
-      const nodes = dom.window.document.querySelectorAll(`[data-ic-document-panel="${kind}"]`);
-      if (nodes.length !== 1) {
-        dom.window.close();
-        throw new Error(`${label} application workspace must contain exactly one ${kind} panel (found ${nodes.length}).`);
+    try {
+      for (const kind of ['resume', 'cover']) {
+        const nodes = dom.window.document.querySelectorAll(`[data-ic-document-panel="${kind}"]`);
+        if (nodes.length !== 1) {
+          throw new Error(`${label} application workspace must contain exactly one ${kind} panel (found ${nodes.length}).`);
+        }
+        const mains = nodes[0].querySelectorAll('main.page');
+        if (mains.length !== 1) {
+          throw new Error(`${label} application workspace ${kind} panel must contain exactly one document page (found ${mains.length}).`);
+        }
+        const location = dom.nodeLocation(mains[0]);
+        if (!location || !Number.isInteger(location.startOffset) || !Number.isInteger(location.endOffset)) {
+          throw new Error(`${label} application workspace ${kind} panel has no source boundary.`);
+        }
+        locations[kind] = location;
       }
-      if (!nodes[0].querySelector('main.page')) {
-        dom.window.close();
-        throw new Error(`${label} application workspace ${kind} panel is missing its document page.`);
+
+      if (validateCapability) {
+        const bundles = dom.window.document.querySelectorAll('[id="ic-application-bundle-data"][type="application/json"]');
+        if (bundles.length !== 1) throw new Error('Saved application workspace has an invalid Sync capability node.');
+        let bundle;
+        try { bundle = JSON.parse(bundles[0].textContent || '{}'); }
+        catch { throw new Error('Saved application workspace has invalid Sync capability data.'); }
+        if (bundle?.sync?.endpoint !== `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`
+          || (expectedToken && bundle?.sync?.token !== expectedToken)) {
+          throw new Error('Saved application workspace Sync capability does not match this registered workspace.');
+        }
       }
-      locations[kind] = dom.nodeLocation(nodes[0]);
+      return {
+        mains: locations,
+        decisions: collectUniqueReviewState(
+          dom,
+          '[data-ic-insight][data-ic-kind="verify"]',
+          'data-ic-insight',
+          'data-ic-decision',
+          new Set(['verified', 'not_mine']),
+        ),
+        locations: collectUniqueReviewState(
+          dom,
+          '[data-ic-location-check]',
+          'data-ic-location-check',
+          'data-ic-location-decision',
+          new Set(['confirmed']),
+        ),
+      };
+    } finally {
+      dom.window.close();
     }
-    dom.window.close();
-    if (!locations[inactive]?.startTag || !locations[inactive]?.endTag) {
-      throw new Error(`${label} application workspace ${inactive} panel has no source boundary.`);
-    }
-    return locations;
   };
   const incoming = String(incomingHtml || '');
   const stored = String(storedHtml || '');
-  const incomingLocation = inspect(incoming, 'Incoming')[inactive];
-  const storedLocation = inspect(stored, 'Saved')[inactive];
-  const storedInner = stored.slice(storedLocation.startTag.endOffset, storedLocation.endTag.startOffset);
-  return incoming.slice(0, incomingLocation.startTag.endOffset)
-    + storedInner
-    + incoming.slice(incomingLocation.endTag.startOffset);
+  const incomingState = inspect(incoming, 'Incoming');
+  const storedState = inspect(stored, 'Saved', { validateCapability: Boolean(expectedToken) });
+  const incomingLocations = incomingState.mains;
+  const storedLocations = storedState.mains;
+  const replacements = ['resume', 'cover'].map((kind) => {
+    const storedMain = sanitizeDocumentMainHtml(
+      stored.slice(storedLocations[kind].startOffset, storedLocations[kind].endOffset),
+      { documentKind: kind, allowHostState: true, allowTrustedDerivations: true },
+    );
+    const incomingMain = kind === selected
+      ? sanitizeDocumentMainHtml(
+        incoming.slice(incomingLocations[kind].startOffset, incomingLocations[kind].endOffset),
+        { documentKind: kind, allowHostState: true, allowTrustedDerivations: false },
+      )
+      : null;
+    return {
+      start: storedLocations[kind].startOffset,
+      end: storedLocations[kind].endOffset,
+      html: incomingMain
+        ? restoreTrustedReceiptDerivations(incomingMain, storedMain)
+        : storedMain,
+    };
+  });
+
+  const setStartTagAttribute = (startTag, name, value) => {
+    const attribute = new RegExp(`\\s${name}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+))?(?=\\s|/?>)`, 'i');
+    const serialized = ` ${name}="${value}"`;
+    if (attribute.test(startTag)) return startTag.replace(attribute, serialized);
+    const insertionPoint = startTag.endsWith('/>') ? startTag.length - 2 : startTag.length - 1;
+    return startTag.slice(0, insertionPoint) + serialized + startTag.slice(insertionPoint);
+  };
+  const addReviewStateReplacements = (incomingMap, storedMap, attributeName) => {
+    for (const [key, incomingReview] of incomingMap) {
+      if (!incomingReview.state) continue;
+      const storedReview = storedMap.get(key);
+      const location = storedReview?.location;
+      if (!location) continue;
+      // Review controls are trusted shell UI, never part of an editable main.
+      // Refuse an overlapping target even if a malformed stored document
+      // somehow placed a matching attribute inside one of the pages.
+      if (Object.values(storedLocations).some(main => location.startOffset >= main.startOffset && location.endOffset <= main.endOffset)) continue;
+      const current = stored.slice(location.startOffset, location.endOffset);
+      replacements.push({
+        start: location.startOffset,
+        end: location.endOffset,
+        html: setStartTagAttribute(current, attributeName, incomingReview.state),
+      });
+    }
+  };
+  addReviewStateReplacements(incomingState.decisions, storedState.decisions, 'data-ic-decision');
+  addReviewStateReplacements(incomingState.locations, storedState.locations, 'data-ic-location-decision');
+  replacements.sort((a, b) => b.start - a.start);
+
+  let merged = stored;
+  for (const replacement of replacements) {
+    merged = merged.slice(0, replacement.start) + replacement.html + merged.slice(replacement.end);
+  }
+  return merged;
 }
 
 // Sync is atomic per file, but an application workspace has one shared HTML
@@ -315,15 +576,20 @@ async function syncWorkspace(payload) {
       if (workspaces.get(token) !== workspace) {
         throw Object.assign(new Error('This workspace was replaced by a newer generated application. Reopen the latest Application.html before syncing.'), { statusCode: 409 });
       }
+      try {
+        await captureOrVerifyWorkspaceIdentity(workspace);
+      } catch (error) {
+        throw Object.assign(new Error(`The registered application workspace is no longer safe: ${error?.message || error}`), { statusCode: 409 });
+      }
       let storedHtml;
       try {
-        storedHtml = await fs.promises.readFile(workspace.applicationPath, 'utf8');
+        storedHtml = await readRegisteredWorkspaceHtml(workspace);
       } catch (error) {
         throw Object.assign(new Error(`The saved application workspace could not be read: ${error?.message || error}`), { statusCode: 409 });
       }
       let mergedHtml;
       try {
-        mergedHtml = mergeSelectedApplicationPanel(html, storedHtml, documentKind);
+        mergedHtml = mergeSelectedApplicationPanel(html, storedHtml, documentKind, { expectedToken: token });
       } catch (error) {
         throw Object.assign(new Error(`The application workspace could not be merged safely: ${error?.message || error}`), { statusCode: 400 });
       }
@@ -346,7 +612,11 @@ async function syncWorkspace(payload) {
       // produces a page that is neither.
       if (isDualMode(extractVariantAttrs(mergedHtml))) pdf = await applyDualPdf(pdf);
       const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath : workspace.resumePdfPath;
-      await fs.promises.mkdir(workspace.workspaceDir, { recursive: true });
+      try {
+        await captureOrVerifyWorkspaceIdentity(workspace);
+      } catch (error) {
+        throw Object.assign(new Error(`The registered application workspace changed before Sync could write: ${error?.message || error}`), { statusCode: 409 });
+      }
       // HTML and its derived PDF are one logical revision. A failure promoting
       // either file restores both prior versions, so Sync cannot leave a new
       // editable document paired with an old employer-facing PDF.
@@ -400,13 +670,14 @@ export async function registerApplicationSyncWorkspace(workspaceDir, requestedTo
   const token = requestedToken && /^[a-f0-9]{64}$/i.test(requestedToken)
     ? requestedToken
     : crypto.randomBytes(32).toString('hex');
-  const previous = [...workspaces.entries()].filter(([, existing]) => existing.workspaceDir === normalizedDir);
+  const normalized = normalizeWorkspace({ token, workspaceDir: normalizedDir });
+  const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
+  const previous = [...workspaces.entries()].filter(([, existing]) => canonicalPathKey(existing.workspaceDir) === canonicalPathKey(normalizedDir));
   // Regenerating the same application replaces its on-disk workspace, so an
   // older copied HTML must not retain authority to overwrite the new version.
   for (const [existingToken, existing] of workspaces) {
-    if (existing.workspaceDir === normalizedDir) workspaces.delete(existingToken);
+    if (canonicalPathKey(existing.workspaceDir) === canonicalPathKey(normalizedDir)) workspaces.delete(existingToken);
   }
-  const workspace = normalizeWorkspace({ token, workspaceDir: normalizedDir });
   workspaces.set(token, workspace);
   try {
     await persistWorkspacesSerialized();
@@ -464,4 +735,15 @@ export async function stopApplicationSyncServer() {
 // Test seams: deterministic suites do not bind a port, but can verify that
 // persisted capabilities reconstruct only their canonical sibling paths.
 export function __normaliseApplicationSyncWorkspaceForTests(raw) { return normalizeWorkspace(raw); }
+export async function __captureApplicationSyncWorkspaceIdentityForTests(raw) {
+  const workspace = normalizeWorkspace(raw);
+  if (!workspace) throw new Error('Invalid test workspace.');
+  return captureOrVerifyWorkspaceIdentity(workspace);
+}
+export async function __verifyApplicationSyncWorkspaceIdentityForTests(workspace) {
+  return captureOrVerifyWorkspaceIdentity(workspace);
+}
+export async function __readApplicationSyncWorkspaceHtmlForTests(workspace) {
+  return readRegisteredWorkspaceHtml(workspace);
+}
 export function __withApplicationSyncWorkspaceLockForTests(workspaceDir, fn) { return withApplicationSyncWorkspaceLock(workspaceDir, fn); }

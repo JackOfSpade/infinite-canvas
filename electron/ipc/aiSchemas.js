@@ -396,7 +396,7 @@ export const LETTER_NEEDS_SCHEMA = {
       description: 'Three to six requirements, ranked most decisive first; empty only when the posting and research have no usable requirements.',
       items: {
         type: 'object',
-        required: ['need', 'quote', 'source', 'decisiveness', 'kind'],
+        required: ['need', 'quote', 'source', 'decisiveness', 'kind', 'emphasisReason'],
         properties: {
           need: { type: 'string', description: 'One clause describing what the employer needs someone to be able to do.' },
           quote: { type: 'string', description: 'Verbatim supporting span from the posting or research.' },
@@ -406,6 +406,7 @@ export const LETTER_NEEDS_SCHEMA = {
             description: 'How much failing this requirement disqualifies a candidate, from 1 to 100.',
           },
           kind: { type: 'string', enum: ['capability', 'domain', 'scale', 'logistics', 'credential', 'disposition'] },
+          emphasisReason: { type: 'string', description: 'Concise explanation of why this need is prominent or decisive, using structural signals such as repetition, opening placement, unusual specificity, explicit priority, scope ownership, or a hard screen. Treat signals as evidence, not automatic ranking rules.' },
         },
       },
     },
@@ -416,14 +417,15 @@ export const LETTER_PLAN_SCHEMA = {
   type: 'object',
   required: ['roleThesis', 'mappings', 'companyHook', 'logistics', 'droppedNeeds'],
   properties: {
-    roleThesis: { type: 'string', description: 'One-sentence claim the letter argues, never a generic expression of interest.' },
+    roleThesis: { type: 'string', description: 'One-sentence, single-claim angle at the intersection of an emphasized employer need and a distinctive supported candidate capability. It organizes the entire letter and is never a generic expression of interest.' },
     mappings: {
       type: 'array',
+      minItems: 1,
       maxItems: 2,
-      description: 'One or two selected need-to-résumé argument mappings.',
+      description: 'The minimum one or two need-to-résumé mappings required to prove the same roleThesis. Use one by default. Include a second only when it adds a distinct foundation, corroboration, deepening, or extension the primary proof cannot supply; never use it merely to cover another requirement.',
       items: {
         type: 'object',
-        required: ['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference'],
+        required: ['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference', 'narrativeRole', 'relationToPrevious'],
         properties: {
           needIndex: { type: 'integer', minimum: 0, description: 'Zero-based index into the ranked needs array.' },
           need: { type: 'string', description: 'Restatement of the employer need in one clause.' },
@@ -431,7 +433,9 @@ export const LETTER_PLAN_SCHEMA = {
           evidenceRole: { type: 'string', description: 'Role block containing the evidence.' },
           achievementIds: { type: 'array', items: { type: 'string' }, description: 'Ledger receipt ids carried by the cited résumé evidence.' },
           resumeStatus: { type: 'string', enum: ['stated', 'implied', 'absent'], description: 'Whether the résumé already says the mapped conclusion.' },
-          inference: { type: 'string', description: 'The so-what: name the mechanism that makes this evidence relevant; do not merely assert portability.' },
+          inference: { type: 'string', description: 'The so-what: name the mechanism that makes this evidence relevant and explicitly explain how it supports the shared roleThesis; do not merely assert portability.' },
+          narrativeRole: { type: 'string', enum: ['primary', 'foundation', 'corroborates', 'deepens', 'extends', 'qualifies'], description: 'Its argumentative role. The first and usually only mapping is primary; a second must provide a foundation, corroboration, deepening, extension, or honest qualification, never another primary argument.' },
+          relationToPrevious: { type: 'string', description: 'State why this evidence follows the previous proof in the reader’s argument. For the primary mapping, state how it establishes the thesis; for a second, name the specific foundation, corroboration, deepening, extension, or qualification it supplies that the primary evidence cannot.' },
         },
       },
     },
@@ -459,14 +463,14 @@ export const LETTER_PLAN_SCHEMA = {
   },
 };
 
-// Independent final-pass audit for cover-letter prose.  The writer receives
-// only the argument plan, so every concrete factual claim in its output must
-// be traceable to that same plan.  Keeping the audit response to exact quoted
-// spans makes a failed check useful both to the convergent revision call and to
-// the saved workspace's human-review notice.
+// Independent final-pass audit for cover-letter prose. The writer receives
+// only the argument plan, so every concrete factual claim must be traceable to
+// it, and every evidence shift must still serve its one controlling argument.
+// Exact quoted spans make both factual and cohesion defects useful to the
+// convergent revision call and saved workspace's human-review notice.
 export const LETTER_GROUNDING_AUDIT_SCHEMA = {
   type: 'object',
-  required: ['violations'],
+  required: ['violations', 'cohesionObservations'],
   properties: {
     violations: {
       type: 'array',
@@ -476,7 +480,21 @@ export const LETTER_GROUNDING_AUDIT_SCHEMA = {
         required: ['claim', 'reason'],
         properties: {
           claim: { type: 'string', description: 'Exact verbatim span from the cover-letter paragraphs containing the unsupported factual claim.' },
-          reason: { type: 'string', description: 'Concise explanation of what the plan does not support.' },
+          reason: { type: 'string', description: 'Concise explanation of what the allowed factual source does not support.' },
+        },
+      },
+    },
+    cohesionObservations: {
+      type: 'array',
+      maxItems: 8,
+      items: {
+        type: 'object',
+        required: ['kind', 'claim', 'reason', 'repair'],
+        properties: {
+          kind: { type: 'string', enum: ['unclear-antecedent', 'unexplained-shift', 'chronological-backtracking', 'inventory-paragraph', 'overloaded-sentence', 'faulty-parallelism', 'repeated-metaphor', 'detached-synthesis', 'volunteered-gap', 'delayed-relevance', 'second-thesis', 'unnecessary-evidence'], description: 'The cohesion, grammar, or persuasive-prose defect found in the letter.' },
+          claim: { type: 'string', description: 'Exact verbatim span from the cover-letter paragraphs containing the cohesion defect.' },
+          reason: { type: 'string', description: 'Why this span weakens clarity, grammatical flow, or the reader’s ability to follow one controlling argument.' },
+          repair: { type: 'string', description: 'Concise editorial action: make coordinated syntax parallel, replace an unclear reference, ground a synthesis in the preceding evidence, establish the relationship before details, consolidate, cut, or explicitly tie the span to the thesis.' },
         },
       },
     },
@@ -488,6 +506,29 @@ export const APPLICATION_COVER_LETTER_SCHEMA = {
   required: ['paragraphs'],
   properties: {
     paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields.' },
+  },
+};
+
+// The direct fallback intentionally avoids a precomputed plan, but it still
+// returns this ephemeral contract so the same independent cohesion audit can
+// evaluate the writer's claimed through-line. The host never renders it.
+export const APPLICATION_DIRECT_COVER_LETTER_SCHEMA = {
+  type: 'object',
+  required: ['paragraphs', 'argumentContract'],
+  properties: {
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose, with no markdown or envelope fields.' },
+    argumentContract: {
+      type: 'object',
+      required: ['roleThesis', 'primaryEvidence', 'primaryRelationToThesis', 'secondaryNarrativeRole', 'secondaryEvidence', 'secondaryRelationToPrimary'],
+      properties: {
+        roleThesis: { type: 'string', description: 'One controlling claim for the entire letter.' },
+        primaryEvidence: { type: 'string', description: 'Near-quote of the one primary résumé anchor supporting roleThesis.' },
+        primaryRelationToThesis: { type: 'string', description: 'How the primary evidence establishes roleThesis.' },
+        secondaryNarrativeRole: { type: 'string', enum: ['none', 'foundation', 'corroborates', 'deepens', 'extends', 'qualifies'], description: 'none when no secondary evidence is necessary; otherwise its one supporting narrative role.' },
+        secondaryEvidence: { type: 'string', description: 'Near-quote of the optional secondary résumé anchor; empty when secondaryNarrativeRole is none.' },
+        secondaryRelationToPrimary: { type: 'string', description: 'Why the optional secondary evidence follows the primary proof; empty when secondaryNarrativeRole is none.' },
+      },
+    },
   },
 };
 

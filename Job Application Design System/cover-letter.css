@@ -33,6 +33,21 @@
    into its first section). */
 .letter-letterhead { margin-bottom: var(--s-6); }
 
+/* -------- the letter's optical tail trim --------
+   The shared trailing-edge rule lives in resume.css and pulls the
+   final block up by --optical-tail-trim. The résumé's last block ends
+   on a --lh-snug grid row, so compact's tighter leading genuinely
+   leaves less to trim and the token drops to 0.4pt. The letter's last
+   line is .signature at --fs-signature / 1.1 — metrics compact
+   deliberately does not touch — so there is nothing for compact to
+   reduce, and the 0.4pt value left ~0.6–1.2pt of slack against the
+   system's own 0.5pt tolerance. Both selectors carry the same value on
+   purpose: whatever the density, the letter trims the same ~1pt.
+   Specificity note: the compact selector is repeated so it ties with
+   the :root[data-density="compact"] block in colors_and_type.css and
+   wins on sheet order (this file loads last). See STYLE.md §11.7. */
+:root, :root[data-density="compact"] { --optical-tail-trim: 1pt; }
+
 .letterhead-rule {
   border: 0;
   height: var(--rule-weight);
@@ -40,11 +55,11 @@
   margin: 0 0 var(--vr-1);
 }
 
-/* -------- date + recipient --------
-   The date is right-aligned in --ink-meta — a deliberate rhyme
-   with the résumé's right-aligned date column. The recipient
-   block sits left, the organisation name carrying the only
-   --ink-body weight in this region. */
+/* -------- date --------
+   Right-aligned in --ink-meta — a deliberate rhyme with the résumé's
+   right-aligned date column. No recipient address block follows
+   (§11.2.1 of STYLE.md): it duplicated the salutation, and the
+   ATS submission context already carries the company and role. */
 .letter-meta { margin-bottom: var(--vr-1); }
 
 .letter-date {
@@ -57,36 +72,24 @@
      figures extract as Private-Use junk from the PDF (see STYLE.md
      §2.4). A single date has no column to align anyway. */
   letter-spacing: var(--tr-tight);
-  margin: 0 0 var(--vr-half);
+  margin: 0;
 }
-
-.letter-recipient {
-  font-style: normal;            /* it's an <address>; kill the italic */
-  font-size: var(--fs-small);
-  line-height: var(--lh-snug);
-  color: var(--ink-meta);
-}
-.letter-recipient .recipient-name {
-  display: block;
-  font-family: var(--ff-body);
-  font-size: var(--fs-body);
-  font-weight: var(--fw-semibold);
-  color: var(--ink-body);
-  letter-spacing: var(--tr-tight);
-  margin-bottom: var(--s-1);
-}
-.letter-recipient .recipient-line { display: block; }
 
 /* -------- body --------
    Source Serif 4, reading size, generous editorial leading.
    This is the one place body prose runs long, so the measure
    (set by the shared --margin-side on .page) lands at ~70ch and
-   the leading opens to 1.6. */
+   the leading opens to 1.6.
+
+   Size and leading come from --fs-letter-body / --lh-letter, NOT from
+   literals: they are the letter's dominant vertical space, so if they
+   don't track density then `data-density="compact"` cannot shorten a
+   letter at all (STYLE.md §11.7). Never hardcode a pt value here. */
 .letter-body {
   font-family: var(--ff-display);
   font-weight: var(--fw-regular);
-  font-size: 10.5pt;
-  line-height: 1.6;
+  font-size: var(--fs-letter-body);
+  line-height: var(--lh-letter);
   color: var(--ink-body);
   letter-spacing: 0;
   text-wrap: pretty;
@@ -120,15 +123,17 @@
 }
 .valediction {
   font-family: var(--ff-display);
-  font-size: 10.5pt;
-  line-height: 1.6;
+  font-size: var(--fs-letter-body);   /* same run as the body — same tokens */
+  line-height: var(--lh-letter);
   color: var(--ink-body);
   margin: 0 0 var(--s-6);        /* room where a wet signature would sit */
 }
 .signature {
   font-family: var(--ff-display);
   font-weight: var(--fw-semibold);
-  font-size: 15pt;
+  /* One token, and compact does not move it — the signature is an
+     identity mark, like the letterhead name (STYLE.md §11.7). */
+  font-size: var(--fs-signature);
   line-height: 1.1;
   letter-spacing: var(--tr-display);
   color: var(--ink-body);        /* ink — the accent stays a single appearance (letterhead name) */

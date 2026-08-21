@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Settings, Zap, Scale, Sparkles,
@@ -591,6 +591,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const [aiSettings, setAiSettings] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
+  const watchUrlsByPlatformRef = useRef(watchUrlsByPlatform);
   const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
   const [checkingProvider, setCheckingProvider] = useState(null);
   // Live Claude family -> resolved model id (e.g. { OPUS: 'claude-opus-5', ... }),
@@ -598,6 +599,9 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   // actually working, not just a static family name. Empty until the IPC round
   // trip resolves — dropdown options render without the id suffix until then.
   const [claudeModelIds, setClaudeModelIds] = useState({});
+  useLayoutEffect(() => {
+    watchUrlsByPlatformRef.current = watchUrlsByPlatform;
+  }, [watchUrlsByPlatform]);
 
   // Register with the global modal stack while open — unlike Dialog/ConfirmDialog,
   // this component stays mounted at all times (returns null when !isOpen further
@@ -619,7 +623,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
         if (cancelled) return;
         if (storeData && storeData.ai) setAiSettings(storeData.ai);
         if (storeData && storeData.jobs) setJobsSettings(storeData.jobs);
-        if (storeData && storeData.marketplaceWatchUrls) setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
+        if (storeData && storeData.marketplaceWatchUrls) {
+          watchUrlsByPlatformRef.current = storeData.marketplaceWatchUrls;
+          setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
+        }
       })
       .catch(() => { /* IPC unavailable — leave loading state until next open */ });
     // Last-known AI availability (passive — the button does a live re-check).
@@ -698,11 +705,12 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
 
   const updateMarketplaceWatchUrls = useCallback((platformId, urls) => {
     if (!window.electronAPI?.updateSettings) return;
-    setWatchUrlsByPlatform(prev => {
-      const next = { ...prev, [platformId]: urls };
-      window.electronAPI.updateSettings({ marketplaceWatchUrls: next });
-      return next;
-    });
+    const next = { ...watchUrlsByPlatformRef.current, [platformId]: urls };
+    watchUrlsByPlatformRef.current = next;
+    setWatchUrlsByPlatform(next);
+    // IPC must stay outside the React updater: Strict/concurrent rendering may
+    // replay updater functions, which previously issued duplicate writes.
+    window.electronAPI.updateSettings({ marketplaceWatchUrls: next });
   }, []);
 
   // Close on Escape (also cancels capturing)

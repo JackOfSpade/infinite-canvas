@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  browser-test.html — browser companion to build/test.js.
+  browser-check.html — browser companion to build/test.js.
   Loads pdf-lib (from CDN) + dual-mode-pdf.js through their UMD
   *browser* path (window.PDFLib → window.DualModePdf) and runs the
   same assertion suite test.js runs under Node. Covers the
@@ -57,6 +57,13 @@ async function buildPdfWithOcg(name){
   doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs:[other], D:{Order:[other],ON:[other],OFF:[],BaseState:'ON'} }));
   return await doc.save();
 }
+async function buildPdfWithPrintAutoState(name){
+  const doc = await PDFDocument.create(); const ctx = doc.context;
+  doc.addPage([612,792]).drawText('x',{x:72,y:720,size:12});
+  const other = ctx.register(ctx.obj({ Type:'OCG', Name: PDFString.of(name) }));
+  doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs:[other], D:{Order:[other],ON:[other],OFF:[],BaseState:'ON',AS:[{Event:'Print',Category:['Print'],OCGs:[other]}]} }));
+  return await doc.save();
+}
 async function buildPdfWithEmptyOcProps(){
   const doc = await PDFDocument.create(); const ctx = doc.context;
   doc.addPage([612,792]).drawText('x',{x:72,y:720,size:12});
@@ -72,6 +79,37 @@ async function inspectFirstOcg(bytes){
   return { pdf, ocProps, ocgCount: ocgs?ocgs.size():0,
     printState: usage && String(usage.lookup(PDFName.of('Print')).lookup(PDFName.of('PrintState'))),
     viewState:  usage && String(usage.lookup(PDFName.of('View')).lookup(PDFName.of('ViewState'))) };
+}
+function ocgRefByName(pdf,name){
+  const ocProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+  const ocgs = ocProps && ocProps.lookup(PDFName.of('OCGs'));
+  if(!ocgs) return null;
+  for(let i=0;i<ocgs.size();i++){
+    const ocg = pdf.context.lookup(ocgs.get(i));
+    const nm = ocg && ocg.lookup(PDFName.of('Name'));
+    if(nm && nm.asString()===name) return String(ocgs.get(i));
+  }
+  return null;
+}
+function readAutoStates(pdf){
+  const ocProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+  const dDict = ocProps && ocProps.lookup(PDFName.of('D'));
+  const asArr = dDict && dDict.lookup(PDFName.of('AS'));
+  const entries = [];
+  if(!(asArr instanceof PDFArray)) return entries;
+  for(let i=0;i<asArr.size();i++){
+    const e = pdf.context.lookup(asArr.get(i));
+    if(!(e instanceof PDFDict)) continue;
+    const cats=[], cat=e.lookup(PDFName.of('Category'));
+    if(cat instanceof PDFArray) for(let c=0;c<cat.size();c++) cats.push(String(pdf.context.lookup(cat.get(c))));
+    const refs=[], og=e.lookup(PDFName.of('OCGs'));
+    if(og instanceof PDFArray) for(let g=0;g<og.size();g++) refs.push(String(og.get(g)));
+    entries.push({ event:String(e.lookup(PDFName.of('Event'))), categories:cats, ocgRefs:refs });
+  }
+  return entries;
+}
+function printAutoStates(pdf){
+  return readAutoStates(pdf).filter(e=>e.event==='/Print' && e.categories.indexOf('/Print')!==-1);
 }
 function everyPageHasBgBinding(pdf){
   return pdf.getPages().every(p=>{ const res=p.node.Resources(); const props=res&&res.lookup(PDFName.of('Properties')); return !!(props&&props.lookup(PDFName.of('Bg'))); });
@@ -94,6 +132,14 @@ async function run(){
   assert(info1.ocgCount===1,'exactly one OCG registered');
   assert(info1.printState==='/OFF','/Usage/Print/PrintState is /OFF (load-bearing!)');
   assert(info1.viewState==='/ON','/Usage/View/ViewState is /ON');
+  header('Print auto-state (/OCProperties /D /AS)');
+  const creamRef1 = ocgRefByName(info1.pdf, DEFAULT_LAYER_NAME);
+  const as1 = printAutoStates(info1.pdf);
+  assert(!!creamRef1,'cream OCG is resolvable by name in /OCGs');
+  assert(as1.length===1,'/D/AS has exactly one Print auto-state entry',JSON.stringify(readAutoStates(info1.pdf)));
+  assert(as1.length===1 && as1[0].categories.length===1 && as1[0].categories[0]==='/Print','Print auto-state /Category is [ /Print ]',JSON.stringify(as1[0]&&as1[0].categories));
+  assert(as1.length===1 && as1[0].ocgRefs.length===1 && as1[0].ocgRefs[0]===creamRef1,'Print auto-state /OCGs references the cream OCG',JSON.stringify(as1[0]&&as1[0].ocgRefs)+' vs cream '+creamRef1);
+
   const page0 = info1.pdf.getPages()[0];
   const resProps = page0.node.Resources().lookup(PDFName.of('Properties'));
   assert(!!resProps.lookup(PDFName.of('Bg')),'page 0 /Resources/Properties/Bg → OCG binding present');
@@ -147,10 +193,20 @@ async function run(){
   const mNames=[]; for(let mi=0;mi<mOcgs.size();mi++) mNames.push(mPdf.context.lookup(mOcgs.get(mi)).lookup(PDFName.of('Name')).asString());
   assert(mOcgs.size()===2 && mNames.indexOf('Watermark')!==-1 && mNames.indexOf('Editorial cream background')!==-1,'well-formed merge: both OCGs listed in /OCGs');
   assert(mOcp.lookup(PDFName.of('D')).lookup(PDFName.of('ON')).size()===2,'well-formed merge: both OCGs listed in /D/ON');
+  const mAs = printAutoStates(mPdf);
+  assert(mAs.length===1 && mAs[0].ocgRefs.indexOf(ocgRefByName(mPdf,'Editorial cream background'))!==-1,'well-formed merge: /D/AS carries one Print rule governing the cream OCG',JSON.stringify(mAs));
+
+  const mergedAs = await addOcgBackground(await buildPdfWithPrintAutoState('Watermark'));
+  const aPdf = await PDFDocument.load(mergedAs);
+  const aAs = printAutoStates(aPdf);
+  assert(aAs.length===1,'existing Print auto-state: no duplicate equivalent entry added',JSON.stringify(aAs));
+  assert(aAs.length===1 && aAs[0].ocgRefs.indexOf(ocgRefByName(aPdf,'Editorial cream background'))!==-1 && aAs[0].ocgRefs.indexOf(ocgRefByName(aPdf,'Watermark'))!==-1,'existing Print auto-state: cream OCG appended alongside the original',JSON.stringify(aAs));
   const fixedUp = await addOcgBackground(await buildPdfWithEmptyOcProps());
   const fPdf = await PDFDocument.load(fixedUp);
   const fOcgs = fPdf.catalog.lookup(PDFName.of('OCProperties')).lookup(PDFName.of('OCGs'));
   assert(fOcgs && typeof fOcgs.size==='function' && fOcgs.size()>=1,'malformed /OCProperties: our OCG still listed in /OCGs');
+  const fAs = printAutoStates(fPdf);
+  assert(fAs.length===1 && fAs[0].ocgRefs[0]===ocgRefByName(fPdf,'Editorial cream background'),'malformed /OCProperties: Print auto-state authored on the created /D',JSON.stringify(fAs));
 
   sumEl.textContent = passed+' passed, '+failed+' failed';
   sumEl.className = failed===0 ? 'ok' : 'bad';

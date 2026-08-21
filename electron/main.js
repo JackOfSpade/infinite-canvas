@@ -224,6 +224,7 @@ let lastFocusedCanvasWindow = null;
 // Cascades successive windows so they don't land exactly on top of each other.
 let newWindowOffset = 0;
 let isQuitting = false;
+let quitHandshakeInFlight = false;
 const gotTheLock = app.requestSingleInstanceLock();
 
 /** The canvas window a menu action should target: focused, else most-recent. */
@@ -534,6 +535,12 @@ function setupApplicationMenu() {
 
 app.on('web-contents-created', (_, contents) => {
   contents.setWindowOpenHandler((details) => {
+    // Only the user-facing canvas is allowed to hand a web link to the OS.
+    // Auth/monitor pages are third-party content, and generated application
+    // HTML can contain model-authored markup; letting either trigger
+    // shell.openExternal via target=_blank turns an otherwise isolated window
+    // into an OS side effect. Every popup is still denied in Electron itself.
+    if (!contents.__isCanvasRenderer) return { action: 'deny' };
     try {
       const parsedUrl = new URL(details.url);
       if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
@@ -732,15 +739,21 @@ if (!gotTheLock) {
               // rename race). A lost rename race is fine — the winner's file is
               // identical bytes; fall back to the temp if the cache read misses.
               const tmpOut = path.join(os.tmpdir(), `ic_imgtmp_${crypto.randomUUID()}.jpg`);
-              await execFile('/usr/bin/sips', [
-                '-s', 'format', 'jpeg',
-                '-s', 'formatOptions', '85',
-                targetPath,
-                '--out', tmpOut,
-              ]);
-              await fs.promises.rename(tmpOut, cachePath).catch(() => {});
-              jpegBuf = await fs.promises.readFile(cachePath).catch(() => fs.promises.readFile(tmpOut));
-              fs.promises.unlink(tmpOut).catch(() => {});
+              try {
+                await execFile('/usr/bin/sips', [
+                  '-s', 'format', 'jpeg',
+                  '-s', 'formatOptions', '85',
+                  targetPath,
+                  '--out', tmpOut,
+                ]);
+                await fs.promises.rename(tmpOut, cachePath).catch(() => {});
+                jpegBuf = await fs.promises.readFile(cachePath).catch(() => fs.promises.readFile(tmpOut));
+              } finally {
+                // sips can leave a partial output when conversion fails. Keep
+                // the deterministic cache winner, but never leak the unique
+                // per-attempt file on an error or lost rename race.
+                await fs.promises.unlink(tmpOut).catch(() => {});
+              }
             }
             return new Response(jpegBuf, {
               status: 200,
@@ -903,48 +916,62 @@ app.on('before-quit', async (event) => {
   if (isQuitting) return;
   event.preventDefault();
 
-  // 1. Handshake with each open canvas window to check for unsaved changes.
-  // Each window gets 1.5s to respond; a hung/unresponsive renderer is treated
-  // as "no unsaved changes" so a stuck window can't block quit forever. If any
-  // window cancels (or a requested save fails), we abort the whole quit.
-  for (const win of [...canvasWindows]) {
-    if (win.isDestroyed()) continue;
-    const result = await checkUnsavedChanges(win, 'quit');
-    if (result.action === 'cancel') return;
-    if (result.action === 'save') {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-      const saved = await requestSaveAndWait(win);
-      if (!saved) return;
-    }
-  }
+  // A rapid second quit request must not register a second set of renderer IPC
+  // listeners or show duplicate unsaved-change dialogs while the first
+  // handshake is waiting. The first event already prevented Electron's default
+  // quit, so subsequent events can safely no-op until it completes or cancels.
+  if (quitHandshakeInFlight) return;
+  quitHandshakeInFlight = true;
 
-  isQuitting = true;
-
-  // Cleanup with safety timeout
   try {
-    const cleanup = async () => {
-      await Promise.allSettled([
-        closeAllMonitors(),
-        closeAllPages(),
-        closeStealthBrowser(true),
-        stopApplicationSyncServer(),
-      ]);
-    };
-    
-    // Give cleanup 2 seconds to finish, then force quit
-    let forceQuitTimeoutId;
-    try {
-      await Promise.race([
-        cleanup(),
-        new Promise(resolve => { forceQuitTimeoutId = setTimeout(resolve, 2000); })
-      ]);
-    } finally {
-      if (forceQuitTimeoutId) clearTimeout(forceQuitTimeoutId);
+
+    // 1. Handshake with each open canvas window to check for unsaved changes.
+    // Each window gets 1.5s to respond; a hung/unresponsive renderer is treated
+    // as "no unsaved changes" so a stuck window can't block quit forever. If any
+    // window cancels (or a requested save fails), we abort the whole quit.
+    for (const win of [...canvasWindows]) {
+      if (win.isDestroyed()) continue;
+      const result = await checkUnsavedChanges(win, 'quit');
+      if (result.action === 'cancel') return;
+      if (result.action === 'save') {
+        if (win.isMinimized()) win.restore();
+        win.focus();
+        const saved = await requestSaveAndWait(win);
+        if (!saved) return;
+      }
     }
-  } catch (err) {
-    console.error('[Main] Error during cleanup:', err);
+
+    isQuitting = true;
+
+    // Cleanup with safety timeout
+    try {
+      const cleanup = async () => {
+        await Promise.allSettled([
+          closeAllMonitors(),
+          closeAllPages(),
+          closeStealthBrowser(true),
+          stopApplicationSyncServer(),
+        ]);
+      };
+
+      // Give cleanup 2 seconds to finish, then force quit
+      let forceQuitTimeoutId;
+      try {
+        await Promise.race([
+          cleanup(),
+          new Promise(resolve => { forceQuitTimeoutId = setTimeout(resolve, 2000); }),
+        ]);
+      } finally {
+        if (forceQuitTimeoutId) clearTimeout(forceQuitTimeoutId);
+      }
+    } catch (err) {
+      console.error('[Main] Error during cleanup:', err);
+    } finally {
+      app.exit(0);
+    }
   } finally {
-    app.exit(0);
+    // On a cancelled/failed save, allow a later explicit quit to try again.
+    // A successful path sets isQuitting and exits from the inner finally.
+    if (!isQuitting) quitHandshakeInFlight = false;
   }
 });

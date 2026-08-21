@@ -4,7 +4,10 @@
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
 <style>
-  .name { font-family: var(--ff-display); font-weight: 600; font-size: 26pt; line-height: 1.05; letter-spacing: -0.012em; color: var(--accent); margin: 0 0 4px; }
+  /* Every value here is the live token — the card used to restate the
+     name at 26pt against a 28pt --fs-display, i.e. the card documenting
+     the header showed the wrong size. */
+  .name { font-family: var(--ff-display); font-weight: var(--fw-semibold); font-size: var(--fs-display); line-height: var(--lh-display); letter-spacing: var(--tr-display); color: var(--accent-on); margin: 0 0 var(--s-2); }
   .tag  { font-size: 11pt; color: var(--ink-2); margin: 0 0 12px; letter-spacing: -0.005em; text-wrap: pretty; }
   /* One treatment across the whole subtitle — role and credential are set
      identically, so the line reads as a single run (STYLE.md §5.8). */

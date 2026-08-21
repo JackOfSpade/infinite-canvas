@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
+import { buildResumeDocument } from '../electron/ipc/resumeHtml.js';
 
 const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-e2e-'));
 const previewFixtureRoot = await fs.mkdtemp(path.join(
@@ -699,14 +700,14 @@ try {
     assert.equal(await settingsPanel.getByText(label, { exact: true }).count(), 0, `Gemini settings should hide Claude ${label} controls`);
   }
 
-  await settingsPanel.getByRole('button', { name: 'claude', exact: true }).click();
+  await settingsPanel.getByRole('button', { name: 'Claude API', exact: true }).click();
   await claudeKey.waitFor();
   for (const label of claudeOnlyLabels) {
     await settingsPanel.getByText(label, { exact: true }).waitFor();
   }
   assert.equal(await settingsPanel.getByRole('button', { name: 'Check availability', exact: true }).count(), 1, 'Claude settings should show its availability control');
 
-  await settingsPanel.getByRole('button', { name: 'gemini', exact: true }).click();
+  await settingsPanel.getByRole('button', { name: 'Gemini API', exact: true }).click();
   await claudeKey.waitFor({ state: 'detached' });
   for (const label of claudeOnlyLabels) {
     await settingsPanel.getByText(label, { exact: true }).waitFor({ state: 'detached' });
@@ -804,6 +805,51 @@ try {
   );
 
   assert.deepEqual(rendererErrors, [], 'renderer should not emit runtime errors');
+
+  // Exercise the generated workspace's screen-pagination script in real
+  // Chromium. Fixed-height, break-inside blocks make this deterministic: five
+  // 180px blocks fit in the letter type area, so 26 blocks require six shadow
+  // columns/pages. This specifically guards the fifth-column undercount that
+  // occurs when CSS advances by content width while columnIndexOf divides by
+  // the outer paper width.
+  step('generated application preview reports every shadow page');
+  const paginationBlocks = Array.from(
+    { length: 26 },
+    (_, index) => `<p id="pagination-block-${index + 1}">Pagination block ${index + 1}</p>`,
+  ).join('');
+  const paginationHtml = buildResumeDocument({
+    resumeMainHtml: `<main class="page" role="document">${paginationBlocks}</main>`,
+    variantAttrs: 'data-page="letter" data-density="comfortable"',
+    docId: 'pagination-smoke',
+  }).replace(
+    '</style>',
+    'main.page > p { box-sizing:border-box;height:180px;margin:0;break-inside:avoid; }</style>',
+  );
+  await page.setContent(paginationHtml, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(document.querySelector('#ic-resume-panel .ic-page-stage')?.dataset.icPageCount));
+  const paginationState = await page.evaluate(() => {
+    const stage = document.querySelector('#ic-resume-panel .ic-page-stage');
+    const pageElement = stage?.querySelector('main.page');
+    const firstBlock = pageElement?.querySelector('[id^="pagination-block-"]');
+    const pageStyle = pageElement ? getComputedStyle(pageElement) : null;
+    const blockStyle = firstBlock ? getComputedStyle(firstBlock) : null;
+    return {
+      count: stage?.dataset.icPageCount || '',
+      hasRecompute: typeof window.icPageGuidesRecompute === 'function',
+      blockCount: pageElement?.querySelectorAll('[id^="pagination-block-"]').length || 0,
+      pageWidth: pageElement?.getBoundingClientRect().width || 0,
+      pageMinHeight: pageStyle?.minHeight || '',
+      paddingTop: pageStyle?.paddingTop || '',
+      paddingSide: pageStyle?.paddingLeft || '',
+      blockHeight: blockStyle?.height || '',
+    };
+  });
+  assert.equal(
+    paginationState.count,
+    '6',
+    `screen pagination should retain all six fixed-height shadow columns: ${JSON.stringify(paginationState)}`,
+  );
+  assert.deepEqual(rendererErrors, [], 'generated pagination workspace should not emit runtime errors');
   console.log('Electron smoke test passed');
 } finally {
   // Terminate the exact process Playwright launched. Closing the last window

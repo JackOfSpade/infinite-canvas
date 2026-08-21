@@ -69,21 +69,36 @@ output context restricts font availability.
 
 ### 2.2 Type scale (pt — units are intentional)
 
-| Token        | Size      | Weight | Line-height | Tracking | Used on              |
-|--------------|-----------|--------|-------------|----------|----------------------|
-| `--fs-display` | 28pt    | 600    | 1.05        | -0.012em | candidate name       |
-| `--fs-h1`      | 18pt    | 600    | 1.20        | -0.005em | (reserved — document title) |
-| `--fs-h2`      |  9pt    | 500    | 1.20        | 0.14em uppercase | section headers (Experience, Skills…) |
-| `--fs-h3`      | 11pt    | 600    | 1.35        | -0.005em | role title, company, project name |
-| `--fs-body`    | 10.25pt | 400    | 1.45        |  0       | bullets, paragraphs |
-| `--fs-small`   | 9.5pt   | 400    | 1.35        |  0       | dates, locations, role meta |
-| `--fs-caption` | 8.75pt  | 400    | 1.35        | -0.005em | block-level captions (reserved) — **never** the inline `.scope` / `.tradeoff` spans |
-| `--fs-mono`    | 9pt     | 400    | 1.35        | -0.005em | technologies, project metrics |
+| Token        | Size      | Weight | Leading, as applied | Tracking | Used on              |
+|--------------|-----------|--------|---------------------|----------|----------------------|
+| `--fs-display` | 28pt    | 600    | `--lh-display` 1.05 | -0.012em | candidate name       |
+| `--fs-h1`      | 18pt    | —      | —                   | —        | (reserved — no component uses it) |
+| `--fs-h2`      |  9pt    | 500    | `1` (tight box, so the hairline rule sits at cap mid) | 0.14em uppercase | section headers (Experience, Skills…) |
+| `--fs-h3`      | 11pt    | 600    | inherited (`--lh-body` 1.45) | -0.005em | role title, company, project name |
+| `--fs-body`    | 10.25pt | 400    | `--lh-body` 1.45    |  0       | bullets, paragraphs |
+| `--fs-small`   | 9.5pt   | 400    | inherited 1.45; Skills `dd` uses `--lh-snug` 1.35 |  0 | dates, locations, role meta, Skills |
+| `--fs-caption` | 8.75pt  | —      | —                   | -0.005em | block-level captions (reserved) — **never** the inline `.scope` / `.tradeoff` spans |
+| `--fs-mono`    | 9pt     | 400    | inherited           | -0.005em | technologies, project metrics |
+| `--fs-letter-body` | 10.5pt | 400 | `--lh-letter` 1.6   |  0       | cover-letter body + valediction (compact: 10pt / 1.5 — §11.7) |
+| `--fs-signature`   | 15pt   | 600 | 1.1                 | -0.012em | the letter's signature (compact does **not** change it) |
+
+**Leading is set by the component, not implied by the size token.**
+Only three leading tokens ship — `--lh-display`, `--lh-snug`,
+`--lh-body` — plus `--lh-letter` for the one prose surface; a size
+token carries no leading of its own. (An earlier revision of this table
+listed a per-token line-height for every row, which most components
+never applied. The column above says what the shipped CSS actually
+resolves to.)
 
 The body sits at **10.25pt**, deliberately between the 10pt many
 templates use (cramped) and 11pt (sparse for staff+). At 0.78in side
 margins this gives 70–75 characters per line — Butterick's editorial
-sweet spot.
+sweet spot. That figure describes a single line of running prose (the
+cover letter's paragraphs); it is not the bullet budget. A bullet's
+proportional-font line, with mixed short and long words, comfortably
+holds more than 75 characters before it wraps — the bullet-specific,
+renderer-verified number is §5.4's 180-character budget, not 2× this
+figure.
 
 ### 2.3 Heading usage rules
 
@@ -144,6 +159,10 @@ rule).
 | `--accent`    | `#7A1F2B` | Oxblood. Used only on the candidate name.        |
 | `--accent-on` | (alias)   | Indirection token. Default = `--accent`. Override to `--ink-1` for the monochrome variant. |
 
+The hexes in this table are **guarded**: `build/token-sync-test.js`
+parses `colors_and_type.css` and fails if any row here, the PDF module's
+cream default, or a `@page` footer literal disagrees with the token.
+
 **Semantic aliases** for the ink scale are also exposed and are the
 preferred reference in new component CSS — they self-document and
 survive future renames:
@@ -203,14 +222,20 @@ Two scales coexist, on purpose.
 |-------|-------|-----------------------------------------------|
 | `--s-1` |  2pt | nudges; metric line ↔ project name           |
 | `--s-2` |  4pt | name ↔ subtitle                               |
-| `--s-3` |  6pt | bullet ↔ bullet                               |
-| `--s-4` |  8pt | role-meta ↔ first bullet                      |
-| `--s-5` | 12pt | subtitle ↔ contact line; project ↔ project    |
-| `--s-6` | 16pt | section header ↔ section body                 |
-| `--s-7` | 20pt | (reserved)                                    |
+| `--s-3` |  6pt | bullet ↔ bullet; role header ↔ role meta; Skills row gap |
+| `--s-4` |  8pt | role-meta ↔ first bullet; default paragraph gap; subsection-head bottom |
+| `--s-5` | 12pt | subtitle ↔ contact line; project ↔ project; heading ↔ rule gap |
+| `--s-6` | 16pt | section header ↔ section body; letterhead bottom; valediction ↔ signature |
+| `--s-7` | 20pt | (reserved — no current caller)                |
 | `--s-8` | 24pt | role ↔ role within a section                  |
-| `--s-9` | 32pt | (reserved — historical use; section spacing now via `--vr-2`) |
-| `--s-10`| 40pt | (reserved — large blocks)                     |
+| `--s-9` | 32pt | header block ↔ first section (`.resume-header`) |
+| `--s-10`| 40pt | (reserved — no current caller)                |
+
+`--s-0` was removed — `0` needs no token, and nothing referenced it.
+So were `--lh-tight` and `--lh-loose`: an unused leading token invites a
+component to reach for a fourth value that the density variant then
+fails to track. The three rows marked reserved above are kept and
+marked as such in the CSS itself.
 
 ### 4.2 Vertical-rhythm scale — baseline-keyed block spacing
 
@@ -222,9 +247,9 @@ subsection heads).
 
 | Token       | = baseline × | ~pt   | Used between                            |
 |-------------|--------------|-------|-----------------------------------------|
-| `--vr-half` | 0.5          |  7.4  | subsection-head bottom gap              |
-| `--vr-1`    | 1            | 14.9  | subsection-head top gap                 |
-| `--vr-1-5`  | 1.5          | 22.3  | (reserved)                              |
+| `--vr-half` | 0.5          |  7.4  | (reserved — no current caller)          |
+| `--vr-1`    | 1            | 14.9  | subsection-head top gap; letterhead rule ↔ date ↔ letter body |
+| `--vr-1-5`  | 1.5          | 22.3  | letter body ↔ close (`.letter-close`)   |
 | `--vr-2`    | 2            | 29.7  | section ↔ section                       |
 
 Why two scales: the 4 pt grid is right for inline gaps where rhythm
@@ -346,11 +371,38 @@ location are optional but recommended.
   marker. **Never** an emoji.
 - Aim for 3–6 bullets per role. Fewer than 3 looks thin; more than 6
   reads as a list, not a story.
-- Each bullet should ideally contain at least one specific
-  number (QPS, p99, team size, $ volume, percentage change) **or** a
-  trade-off annotation. Adjectives without numbers are wasted lines.
+- Each bullet should contain at least one specific number (QPS,
+  p99, team size, $ volume, percentage change). Adjectives without
+  numbers are wasted lines. A `.tradeoff` annotation (§5.4) is **not**
+  a substitute for that number — it is an optional add-on for a
+  bullet that is already carrying evidence, reached for only when the
+  bullet describes a genuinely decision-defining alternative or
+  constraint. A bullet with no number and no real trade-off to report
+  is a bullet to rewrite or cut, not one to pad with an annotation.
 - Acceptable bullet length: 1.0 – 2.0 wrapped lines. Avoid the
-  3-line bullet — it reads as a paragraph.
+  3-line bullet — it reads as a paragraph. Mechanically, this is one
+  180-visible-character budget that applies to **every** bullet,
+  annotated or not — see §5.4 for the number and how it was measured.
+- **No colon-led inventory, no overloaded sentence, no reused
+  metaphor, no broken parallelism, no unearned generalization.**
+  §11.2.3 states these five rules
+  once, for every string the system writes, and they bind résumé copy
+  — bullets, role summaries, project descriptions — exactly as they
+  bind the letter. On the résumé the colon rule is the one most often
+  broken: a bullet or role summary whose colon is followed by three or
+  more parallel technology phrases is a keyword list wearing a
+  sentence's punctuation. Name the technologies where they carry the
+  claim instead, and cut the ones that only pad it. The parallelism
+  rule catches a related tic in role summaries and process bullets: a
+  span like "from the quote request through presenting findings"
+  pairs a noun phrase against a gerund phrase — repair by putting both
+  ends in the same form ("from requesting quotes through presenting
+  findings"). The generalization rule catches the matching tic in a
+  role summary that concludes about a career rather than about the
+  role: one role's evidence supports "the broader pattern in the
+  role", never "most of my work", and a summary noun like "shape" or
+  "pattern" must name the responsibility it stands for in the same
+  sentence.
 
 ### 5.3.1 Dash punctuation (the one hard rule of copy)
 
@@ -394,7 +446,9 @@ The repair kit, in order of preference: a comma, a semicolon, a colon
 before a genuine explanation, a conjunction (`and`, `because`, `so`,
 `while`), parentheses for a true aside, or two sentences. A dash that
 resists all six was joining two ideas that should not have shared a
-sentence.
+sentence. (A colon used this way introduces one explanatory clause; a
+colon introducing three or more inventoried items is a separate,
+forbidden pattern regardless of the dash question — see §11.2.3.)
 
 Where the joined material is *structural* rather than prose (a role
 summary's label and value, an annotation lead-in), the system's
@@ -405,6 +459,47 @@ That is why `.scope` leads with ` · ` and not ` — ` (§5.4).
 dash) and for a spaced hyphen (` - `): both should return zero hits.
 Grep for `\u2013` (en dash) and confirm every hit sits between two
 dates or two numbers.
+
+### 5.3.2 Bullet ordering within a role (relevance, not chronology)
+
+Bullets are written once per candidate but **ordered once per
+application.** The same role's bullet set is re-sequenced for every
+job description, because "most important" has a different answer for
+every recipient.
+
+**The rule:** within each role, the first bullet is the one whose
+evidence is most persuasive to *this* job description — not the one
+that happened first, not the one that mattered most to the *past*
+employer, and not the one with the largest raw number.
+
+Rank by alignment with what the job description actually asks for:
+its stated responsibilities, its named technologies, the business
+problem it's hiring to solve, its seniority signals (scope, team
+size, ambiguity), and the kind of measurable outcome it seems to
+value. A bullet that is a strong technology match for this job but
+was a minor part of the candidate's actual role can outrank a bullet
+that was the candidate's proudest achievement but has no bearing on
+what this employer needs.
+
+**What ranking must never do:**
+
+- **Never reorder to imply relevance that isn't there.** Promoting a
+  bullet is a claim about its relevance to this job; if the
+  connection is a stretch, fix it with honest framing inside the
+  bullet, not by moving it up the list.
+- **Never change what happened.** Reordering, not rewriting. A
+  bullet's facts, numbers, and scope stay exactly as authored; only
+  its position in the list changes per application.
+- **Never rank by chronology.** The most recent bullet is not
+  automatically first; a two-year-old bullet that matches the JD
+  beats a last-quarter bullet that doesn't.
+- **Never rank by raw metric size alone.** A 10x number that answers
+  a need this employer doesn't have is weaker evidence here than a
+  modest number that answers one they do.
+
+The 3–6-bullets-per-role budget (§5.3) is unaffected — this section
+governs order, not count. Every bullet still needs its own number and
+still passes the same length budget (§5.4) regardless of position.
 
 ### 5.4 Scope &amp; trade-off annotations
 
@@ -431,9 +526,29 @@ Do not reintroduce `font-size`, `font-style`, `font-family`, `color`,
 or `letter-spacing` on these classes — no smaller, lighter, italic,
 serif, or mono treatment inside a bullet.
 `build/annotation-typography-test.js` (and its browser companion,
-`build/annotation-typography-test.html`) fail the build if any of
-them come back. `<strong>` inside a bullet is unaffected: genuine
-metrics still go to SemiBold (§2.2).
+`build/annotation-typography-check.html`) fail the build if any of
+them come back. `<strong>`/`<b>` inside a bullet is a separate rule
+(§5.4.1, below): the annotation spans are semantic-only by inheriting
+the bullet's type; a bullet's own `<strong>`/`<b>` is semantic-only by
+the same mechanism, so the whole bullet — main sentence, annotation,
+and any marked-up metric — sets in one uniform weight.
+
+#### 5.4.1 No inline emphasis inside a bullet
+
+`<strong>` and `<b>` may still appear inside `.highlights li` — the
+host app keys off them (and any `data-achievement-id` attribute they
+carry) as semantic metadata for individual achievements — but they
+render at the surrounding bullet's own weight and colour, not
+SemiBold. A bolded metric mid-sentence draws the eye to a number
+instead of the claim, and once one bullet bolds a figure the reader
+starts scanning for bold instead of reading — the opposite of the
+quiet-confidence voice.
+
+This is scoped to `.highlights li b, .highlights li strong` in
+`resume.css` and does **not** change the global `b, strong` rule in
+`colors_and_type.css`: candidate name, role title, employer, and
+project name stay SemiBold, and cover-letter emphasis (`.letter-body
+strong`) is untouched.
 
 **Label markup.** The prefix label is a real inline span, not
 CSS-injected content. The full markup is:
@@ -453,6 +568,87 @@ correctly. (CSS `content` is dropped on copy in many engines.)
 
 Use **at most one** of these per bullet. They are noise above one per
 bullet.
+
+**When not to reach for `.tradeoff`.** The annotation exists for a
+real architectural fork — CRDT vs. Raft, consistency vs. availability,
+build vs. buy — stated in one concise clause. It is not a device for
+making a thin bullet look substantive, and it is not free: every word
+in it is a word the reader has to process before the bullet ends.
+Don't add one because:
+
+- the bullet has no hard metric. Fix that by finding the number or
+  rewriting the bullet, not by attaching a trade-off instead.
+- it's ordinary implementation detail with no real alternative that
+  was seriously on the table. "Used Postgres because that's what the
+  team already ran" is not a trade-off; it's a fact, and it belongs
+  in prose if it belongs at all.
+- it would push the bullet past the length budget. A `.tradeoff` may
+  **not** turn a 1-2-line bullet into a 3+-line paragraph. If the
+  genuine trade-off can't be said in one short clause, either the
+  bullet's main sentence needs to shrink to make room, or the
+  trade-off doesn't belong on this bullet.
+
+When the trade-off is ordinary and the bullet is otherwise
+self-contained, prefer folding it into the main sentence as a plain
+clause ("replaced the prior consistent-hash scheme after it
+misbalanced under tenant skew") over reaching for the annotation.
+Reserve the annotation for the case where the decision is the whole
+point and stating it separately, in its own clause, is clearer than
+burying it in the sentence.
+
+**Length budget: one number, for every bullet, renderer-verified.**
+§5.3's "1.0–2.0 wrapped lines" and this section's annotation budget
+used to be two different rules stated in two different units (lines
+vs. characters), with the annotated-bullet character cap set high
+enough (290) that a compliant bullet could actually run 3+ lines. It
+was never renderer-checked, so the gap went unnoticed until
+`build/bullet-length-check.html` rendered it: at Letter, default
+density — the tightest of the four supported render configs — a
+bullet needs to stay at or under **~195–206 visible characters**
+(main sentence + label + annotation, all of it) to hold 2 wrapped
+lines, depending on word mix; compact density and A4 are each a
+little more forgiving. The shipped `resume.html` sample's own
+"legitimate" annotated bullets at 269, 228, and 211 characters were,
+it turns out, silently rendering at 3 lines — the number that
+licensed them was simply wrong. It's since been rewritten to comply.
+
+**The budget is now one number, with margin under that measured
+floor: 180 visible characters, for every bullet, annotated or not.**
+No separate, larger allowance for an annotated bullet — the annotation
+counts toward the same 2-line cap the plain-bullet rule in §5.3
+already states, not a bigger one. A `.tradeoff` clause's own text
+(excluding its label) additionally stays under **100 characters**, so
+an annotation reads as a subordinate clause and can't consume the
+whole budget by itself.
+
+Two things enforce this, and they must be read together:
+
+- `build/annotation-budget-test.js` — fast, static, no browser. Checks
+  every bullet in the shipped documents against the 180-character
+  total and the 100-character `.tradeoff` sub-budget, and that a
+  bullet carries at most one annotation total (`.scope` + `.tradeoff`
+  combined) and at most one `.tradeoff`. This is the gate the agent
+  pipeline runs (`SKILL.md §The pipeline`). It takes file paths and
+  defaults to the shipped samples, so the pipeline must pass the
+  **filled** documents — called bare, it re-checks the two templates.
+- `build/bullet-length-check.html` — the render truth the 180/100
+  numbers above are calibrated against, and the regression that
+  catches a future edit (a type-scale change, a margin change, a new
+  density tier) quietly invalidating them. It renders worst-case
+  filler text at exactly the budget, as a plain bullet, a
+  `.scope`-annotated bullet, and a `.tradeoff`-annotated bullet, in
+  the real `.page > .highlights > li` structure, across all four
+  render configs (Letter/A4 × default/compact), and asserts each sets
+  in ≤ 2 lines — plus a fifth fixture ~40 characters over budget that
+  must *not* comply, proving the rig actually discriminates. Open it
+  after touching type scale, margins, or the density tokens.
+
+180 is not the render-measured ceiling — it's that ceiling (≈195 at
+the tightest config) with ~15–25 characters of margin for word-mix
+variance and engine differences between the render check and the
+actual PDF pipeline. Do not raise it without re-running
+`build/bullet-length-check.html` and confirming the new number still
+holds at Letter, default density.
 
 ### 5.5 Meta-row utility
 
@@ -497,7 +693,8 @@ section header and its category rows, and that is a different retrieval
 path from full-text search. Flattening saves a fraction of one line and
 gives up the tag path. **Do not delete the block either** — its content
 is the terms that exist nowhere else on the page (in the shipped
-sample, 12 of the 16).
+sample, 13 of the 16 — only Postgres, Kafka and Elasticsearch also
+appear in a bullet).
 
 ### 5.7 Subsection heads
 
@@ -586,25 +783,42 @@ Rules:
 
 ## 6. Density rules
 
-| Length goal | What "fits" looks like                              |
-|-------------|-----------------------------------------------------|
-| 1.4 pages   | 3 roles + Selected Systems + Skills, with the oldest role collapsed and 4–5 bullets on the current one; page 2 ends ~40% down. Intentional, and the easiest shape to hit from a trim. |
-| 1.0 page    | Reachable by cutting content, not by tightening type. The cuts, in order of how little they cost: drop `Selected Systems` when it restates bullet metrics (the largest single recovery, and it costs zero searchable terms); collapse the oldest role to a dateline + one summary line; trim the skills block to 3 rows. Past that you are deleting evidence — say so rather than doing it silently. |
-| 2.0 pages   | Same blocks with denser bullets, or a subsection head (§5.7) added under Experience; page 2 ends near the bottom margin. Also intentional — **this is what the shipped `resume.html` sample is calibrated to** (measured 1.91 type areas in Chrome with the CDN families: page 2 ends ~91% down, leaving room for a role block to shift on a break without spilling to a third sheet). |
+**One well-filled page is the default and only target shape**, for
+every résumé this system generates, regardless of job title or
+seniority. "Senior Staff," "Principal," "Director," "VP," "executive,"
+or any similar title language is never, on its own, a reason to plan
+for a second page — see `SKILL.md §The pipeline`, step 5, for the
+exact measured workflow that gets there. A multi-page résumé is
+produced only from an explicit host/user override for a specific
+application; §6.1 below still documents how a résumé fragments across
+pages when an override produces one, but that is support for the
+override case, not a second default shape this system aims for.
+
+| Length goal | What "fits" looks like |
+|-------------|--------------------------|
+| One page, 90–100% of the measured type area | The desired default outcome, at any seniority. As many of the candidate's roles as exist (typically 3–5), each with 3–6 bullets; a `Selected Systems` entry only where it carries evidence no bullet already states; a 3-row Skills block. |
+| One page, under 90% | Acceptable only when there is nothing true and distinct left to add — see the pipeline's "under 90%" step. Never reach for filler, restated metrics, or adjectives to close the gap. |
+| Multi-page | Produced only from an explicit host/user override for this application — never the default, and never inferred from title. Once requested, it uses the same measured `data-density="compact"` fallback and the fragmentation rules in §6.1 as any paginated document. |
 
 Block sizes are not quoted here in pixels on purpose: they depend on
 the renderer, the density variant, and whether the Google Fonts CDN
 served the real families or a fallback. Measure the actual render if
 you need a number, and state the renderer alongside it.
 
-**Anything between these shapes is a defect, not a length.** A résumé
-at 2.05 pages that drops three lines onto a third sheet, or a letter at
-1.02 pages that pushes only its signature over, reads as a mistake at a
-glance. Land on a listed shape by cutting copy — or, for a small
-overflow, by the measured `data-density="compact"` path in §6.0.
-
-The template **does not** compress content to fit one page. Staff+
-candidates have content. Trying to squeeze it loses signal.
+**Getting to one well-filled page is a content decision, not a type
+decision.** Cut lower-value or redundant content first — a `Selected
+Systems` entry that restates bullet metrics is the largest single
+recovery and costs zero searchable terms (`SKILL.md`'s "Do not let
+'Selected Systems' restate the bullets" is exactly what the shipped
+`resume.html` sample now does); the skills block stays capped at 3 rows
+regardless. Retain every documented role and at least one factual
+bullet per role even under a large cut — losing a whole role is never
+one of this system's fitting moves. Reaching for smaller type or
+tighter margins as the *primary* path to one page is exactly what this
+system avoids: `data-density="compact"` is the one measured-fit
+fallback (§6.0), applied once, after a render has actually measured an
+overflow — never pre-emptively, and never a substitute for cutting
+content.
 
 ### 6.0 Density ownership
 
@@ -1115,19 +1329,296 @@ Letterhead   ── identical component to the résumé header
 Date         ── right-aligned, --ink-meta, proportional figures.
              Rhymes with the résumé's right-aligned date column.
              **Pegged to the render month, never authored** (§11.6).
-Recipient    ── <address>: addressee (.recipient-name — a named person
-             when you have one, else "Hiring Team"), then company,
-             then the role being applied for (.recipient-line ×2).
-             The addressee line carries the only --ink-body weight;
-             the two lines under it are --ink-meta.
-Salutation   ── "Dear …,"
+Salutation   ── "Dear [Name]," or "Dear [Company] Hiring Team,"
+             when no named contact exists. No address block
+             precedes it — see §11.2.1.
 Body         ── 3–4 paragraphs, Source Serif 4. Specifics over
              adjectives, same as the bullets: a number per claim
-             where one exists. <strong> (SemiBold, never 700) on
-             only the one or two headline figures.
+             where one exists. The opening sentence leads with a
+             job-specific thesis, an evidence-to-need connection, or
+             a supported observation about the company's work — never
+             an announcement of the application itself (§11.2.2).
+             <strong> (SemiBold, never 700) on only the one or two
+             headline figures.
 Close        ── valediction + signature (the name, nothing else),
              wrapped in .letter-close.
 ```
+
+### 11.2.1 No recipient address block — by design
+
+Earlier drafts rendered a postal-style address block (addressee /
+company / role) between the date and the salutation. Removed, for
+modern tech-industry applications specifically:
+
+- **Redundant with the salutation.** Most postings name no contact,
+  so the block's addressee line reads "Hiring Team" — the same two
+  words the salutation repeats one line below ("Dear Vireo Data
+  Hiring Team,"). Stacking them is not formality, it's padding.
+- **Redundant with what the submission already carries.** The ATS
+  upload, the filename, and the job record already tell the reader
+  which role and company this is; the salutation repeats the company
+  name a second time when no named contact exists. A block above the
+  fold restating the same two facts a third time is pure padding, not
+  formality.
+- **Off-register for this voice.** A postal address block answers a
+  letter mailed to an unknown desk. This system's references — Stripe
+  Press, Pentagram partner CVs, staffeng.com — open straight from
+  letterhead to salutation; none carry one. A letter submitted through
+  an ATS upload or an email attachment already arrives with its
+  company and role context attached in the submission itself (§11.2.2)
+  — the block has no job left to do.
+- **Costs space a one-page letter can't spare** (§11.4).
+
+**Named contact known:** put the name in the salutation only —
+"Dear Jane Smith," — never in a standalone block. **No name known:**
+the salutation carries the company instead of a bare "Dear Hiring
+Team," — "Dear Vireo Data Hiring Team," — naming the company is the
+whole reason that line exists.
+
+### 11.2.2 The opening sentence (hard gate)
+
+**The first sentence must immediately give the recruiter information
+useful to them.** The recruiter already knows this is an application —
+the ATS submission context, the filename, the job record, and the
+company-specific salutation directly above the opening paragraph all
+carry that information already. A first sentence that re-announces it
+spends the reader's first six seconds on a fact they already have.
+
+The opening sentence must begin with one of:
+
+1. **A job-specific thesis** — a claim, stated up front, about what
+   the candidate would do or bring to *this* role.
+2. **A concrete evidence-to-employer-need connection** — a specific
+   piece of the candidate's own experience laid directly against
+   something the role or the company needs.
+3. **A supported observation about the company's work** that
+   establishes the candidate's relevant direction — a real, specific
+   read on what the company is building, connected to where the
+   candidate's own work has been pointed.
+
+**Never open by announcing the document's purpose or the act of
+applying.** The following constructions, and anything equivalent, are
+forbidden as an opening:
+
+- "I am writing to apply…" / "I'm writing to apply…"
+- "I am applying for…"
+- "I am writing to express my interest…"
+- "Please accept my application…"
+
+Reject, then rewrite:
+
+| Reject (announces the application) | Write instead (leads with substance) |
+|---|---|
+| "I'm writing to apply for the Principal Engineer role on the storage platform." | "The storage platform problem you're hiring for, making a multi-tenant analytical store behave predictably for tenants whose workloads share nothing, is the one I've spent the last four years solving." |
+| "I am writing to express my interest in the Staff Engineer position." | "Your engineering blog's account of the sharding rewrite reads like a problem I already solved once at smaller scale, and got wrong the first time." |
+
+**This is not a ban on naming the company or the role.** Both may
+appear in the opening sentence — even in the first few words — when
+they are grammatically load-bearing inside the thesis or the
+evidence-to-need connection itself ("Vireo's bet that a multi-tenant
+store can behave predictably…" is a thesis that happens to name the
+company; nothing wrong with that). What is forbidden is naming them
+*only* to announce that a document about them follows. The test is
+structural, not lexical: would the sentence survive with the company
+and role name removed and replaced with almost any other company and
+role, and still read as generic throat-clearing? If yes, it is an
+announcement and must be rewritten. If the sentence falls apart
+without the specific company and role in it, because the substance
+depends on them, it passes.
+
+Audit before shipping: grep the filled letter for the forbidden
+openers before rendering, the same discipline as the dash gate:
+
+```sh
+grep -niE "writing to apply|writing to express my interest|^i am applying for|please accept my application" filled.html
+```
+
+Any hit means the opening needs a rewrite, not a synonym swap —
+"I'm reaching out to apply…" trips the same failure with different
+words.
+
+### 11.2.3 Evidence synthesis, honest qualification, parallel construction, and earned generalization (hard gate)
+
+Six failure modes show up together often enough in generated
+letters that they get one gate. All six are about *how* true,
+relevant evidence gets said, not about inventing or hiding evidence.
+
+**Scope.** Rule 1 (volunteered weaknesses) and the closing
+synthesis rule are cover-letter rules — the résumé has no prose in
+which to commit them. Rules 2, 3, 4, and 5 (colon-led inventories,
+overloaded sentences, reused metaphors, and broken parallel
+construction) bind **every string the system writes**: the letter's
+paragraphs, and equally the résumé's bullets, role summaries, and
+project descriptions (§5.3). Rule 6 (earned generalization) binds
+**every generated prose surface** in the part that can occur there:
+its scope-inflation and bridge-noun clauses apply to any string that
+draws a conclusion from evidence, including a résumé role summary or
+project description; its paragraph-boundary antecedent clause applies
+wherever one paragraph or sentence follows another and refers back —
+in practice the cover letter, which is the only multi-paragraph prose
+surface the system ships. They live here so they are stated once
+rather than twice.
+
+**Diagnose by shape, not by wording.** Each rule below is stated as
+a sentence *pattern*, with schematic placeholders rather than sample
+copy. That is deliberate: a memorable specimen sentence teaches a
+generator to avoid that sentence, not that shape. Test a draft by
+asking what structure it has, never by matching it against a phrase
+list.
+
+**1. Don't volunteer weaknesses.** "Honest" means not exaggerating.
+It does not mean proactively disclosing what the candidate hasn't
+done. Reject any sentence whose grammatical subject or main clause is
+the boundary of the candidate's experience — patterns of the form
+*"that work was [X], which is the limit of my experience against
+[requirement]"*, *"I haven't worked with [technology] directly,
+but…"*, *"while I lack [X]…"* — however the words are chosen. Any
+clause that exists to name what is missing is the failure; a synonym
+for "limit" is still the failure.
+
+When the candidate has adjacent experience, the repair is to make the
+transferable understanding the subject of the sentence: state
+concretely what the adjacent work required them to get right, and let
+the reader draw the connection to the target requirement. Claim the
+understanding, not the equivalence. Only name a gap when the
+application explicitly requires disclosing it, or when omitting it
+would be materially misleading about a hard requirement.
+
+**2. Don't lead evidence with a colon and a list.** The rejected
+shape is *[framing clause] : [item], [item], [item], and [item]* — a
+colon whose right-hand side is three or more parallel phrases naming
+systems, technologies, or accomplishments. It reads as an inventory
+pasted from a résumé rather than an argument, and the parallel
+phrasing means no relationship between the items is ever stated.
+
+The evidence in such a sentence is usually fine; the shape is the
+defect. Repair by writing the same facts as sentences whose verbs
+carry the relationships — what fed what, what one component made
+possible for the next, who owned which part — and by dropping the
+items that were only there for coverage. A colon introducing one
+genuine explanatory clause remains a valid dash repair (§5.3.1); the
+rule is about the enumerated right-hand side, not the colon.
+
+**3. Don't overload a sentence.** Reject any sentence that combines
+several of these at once — two or more independent systems, a
+subordinate qualification, a concessive clause, and a conclusion
+drawn from all of them. The symptom is a sentence a reader must hold
+in memory to finish. Split it so each sentence makes one principal point and the
+next explains its relevance, in causal sequence. Concrete and short
+beats comprehensive and nested.
+
+**4. Don't reach for a metaphor and reuse it as connective tissue.**
+Figurative language for integration boundaries, ownership, or data
+flow — typically a structural or joinery image — is rarely
+load-bearing, and the same figure repeated across paragraphs to
+stitch the letter together reads as a tic, not a voice. The
+diagnostic is repetition and function: if a figure appears more than
+once, or is carrying a paragraph transition rather than clarifying a
+specific claim, replace it with the literal description — what system
+talks to what, who owned which boundary, where the data came from and
+where it went. A figure of speech is allowed only where it does real
+work inside one sentence.
+
+**5. Keep coordinated elements grammatically parallel.** Coordination
+signals — `from X through/to Y`, `both X and Y`, `either X or Y`,
+`not only X but also Y`, and any list construction — promise the
+reader that the elements on either side of the signal are the same
+kind of thing. Reject any instance where they aren't: a noun phrase
+paired with a gerund phrase, an infinitive paired with a finite
+clause, an action paired with a thing. The most common offender is
+the process span *from [noun phrase] through [verb-ing phrase]* —
+"from the quote request through presenting findings to management"
+pairs a bare noun phrase ("the quote request") against a gerund
+phrase ("presenting findings"), so the sentence changes grammatical
+lane mid-construction without announcing it.
+
+Repair by putting every coordinated element in the same form — noun
+phrase with noun phrase, action with action — and prefer whichever
+repair changes the fewest words: "from requesting quotes through
+presenting findings" (both gerund) or "from the initial request for
+quotes through the presentation of findings" (both noun phrase) are
+both valid; picking one is a matter of which reads more natural in
+context, not a further rule. Padding the seam instead of fixing the
+mismatch is not a repair — "from the time of the quote request
+through presenting findings" still coordinates a noun phrase with a
+gerund phrase, it just buries the seam in bureaucratic filler. This
+rule applies everywhere Rules 2–4 apply: cover-letter paragraphs and
+résumé bullets, role summaries, and project descriptions alike.
+
+**6. Earn the generalization, and name what it generalizes.** A
+concluding or transitional sentence may generalize from the evidence
+above it **only when it explicitly names the concrete thing that
+connects that evidence** — the responsibility, the system, the
+decision, the process, or the mechanism. A sentence that draws a
+conclusion without naming what it is a conclusion *about* is detached
+synthesis: it sounds like an argument and carries none. Three
+symptoms, which usually arrive together.
+
+*Scope inflation.* Reject any sentence that widens one example, or
+one role, into a claim the source does not support — patterns of the
+form *"[single example] is the shape most of my work has taken"*,
+*"[one project] is how I have always worked"*, *"throughout my
+career…"* drawn from a single engagement. One example supports a
+claim about that example; one role supports a claim about that role
+("that was the broader pattern in the role" is in scope, "most of my
+work" is not). Career-wide breadth — "most of my work", "throughout
+my career", "my general working style", or any equivalent — requires
+source evidence that is itself career-wide.
+
+*Undefined bridge nouns.* Abstract nouns whose job is to stand in for
+the relationship being summarized — "shape", "pattern", "approach",
+"theme", "throughline" — are permitted only when the same sentence
+immediately defines the concrete actions or relationship they
+summarize. *"[X] at one end and [Y] at the other is the shape my work
+has taken"* names no relationship: it gestures at two endpoints and
+leaves the reader to supply the connection between them. Naming the
+sequence, the ownership, or the hand-off is what turns the bridge noun
+into a claim.
+
+*Ambiguous backward reference at a paragraph boundary.* A paragraph
+that opens with "this", "that", or "it" pointing back at the previous
+paragraph must have **exactly one** plausible antecedent. When the
+previous paragraph offered several — an evaluation, an integration, a
+decision, and an abstract summary noun — the pronoun silently picks
+none of them, and the transition the sentence was supposed to make
+does not happen. Repeat the precise noun phrase instead ("that
+end-to-end responsibility", "that evaluation"), even at the cost of a
+few words. The same test applies inside a paragraph whenever more than
+one candidate antecedent precedes the reference.
+
+**Repair** a detached synthesis one of two ways, and no third way:
+
+- **Rewrite it as a concrete, evidence-scoped conclusion** — name the
+  responsibility or mechanism, and keep the breadth inside what the
+  evidence supports.
+- **Delete it.** A synthesis sentence that adds no supported reasoning
+  is not load-bearing, and the paragraph it sits in is stronger for
+  losing it.
+
+**Filler is not a repair.** "That said", "Additionally", "In this
+way", "With that in mind", and any other connective phrase that names
+nothing leaves the antecedent just as ambiguous and costs a line —
+exactly the non-repair that padding a coordination seam is under Rule
+5. A transition earns its place by naming the thing it carries
+forward.
+
+For orientation only — **explanatory examples, never mandatory
+copy** — a repair of the form *"That was the broader pattern in the
+role: taking ambiguous operational needs through evaluation and
+integration to systems running in production"* names the
+responsibility and holds the breadth to the one role, and a following
+transition of the form *"That end-to-end responsibility is also what
+draws me to…"* replaces an ambiguous "It" with the single noun phrase
+it meant. Diagnose and repair by shape, as with every rule in this
+section; do not pattern-match on these sentences.
+
+**Synthesize, don't list.** The letter's job is to explain what the
+candidate built or owned, the problem it solved, and why that matters
+to *this* role — as a small number of well-chosen examples argued in
+prose, not a converted résumé-bullet list trying to mention every
+related system. Pick the strongest one or two pieces of evidence per
+paragraph and develop them; a paragraph that name-checks five systems
+to be thorough is weaker than one that explains one system well.
 
 ### 11.3 Accent &amp; the close
 
@@ -1159,12 +1650,32 @@ for any letter that runs long.
   shipped Anya Castellanos / Vireo Data figures are **sample data**
   (the same numbers as the résumé bullets, by design) — replace them
   with the candidate's real metrics before sending.
+- **The opening sentence is a hard gate, not a style preference.**
+  §11.2.2 sets the rule and the audit grep: lead with a job-specific
+  thesis, an evidence-to-need connection, or a supported observation
+  about the company's work, never with an announcement that this is
+  an application.
 - No icons, no colour blocks, no second accent, no closing P.S. The
   typographic vocabulary is the résumé's: `·`, `–` (ranges only), `→`.
 - **No dash connects clauses in the letter's sentences.** Long-form
   prose is where em dashes creep in hardest, and where they read most
   strongly as machine-written. §5.3.1 applies to every sentence here;
   the repair is a comma, a conjunction, or two sentences.
+- **Evidence is synthesized, not listed, and no weakness is
+  volunteered.** §11.2.3 is the hard gate: no colon-led inventories,
+  no overloaded multi-clause sentences, no recycled metaphor as
+  connective tissue, no coordinated construction (`from X through Y`,
+  `both`/`either`/`not only` pairs, lists) whose two sides shift
+  grammatical form, and no sentence whose job is to announce what
+  the candidate hasn't done.
+- **Every conclusion stays inside the evidence that earned it, and
+  every paragraph transition names what it carries forward.** One
+  example or one role never becomes "most of my work" or "throughout
+  my career"; a summary noun ("shape", "pattern", "approach") defines
+  the concrete responsibility or sequence it stands for in the same
+  sentence; and a paragraph opening on "this", "that", or "it" has
+  exactly one possible antecedent, or repeats the noun phrase instead
+  (§11.2.3 Rule 6).
 
 ### 11.5 Short letters — `data-letter="centered"`
 
@@ -1227,9 +1738,45 @@ element empty and fills it from the system clock at render time:
 
 ---
 
+### 11.7 Letter type tokens — and the compact contract
+
+The letter's type comes from tokens, never literals:
+`--fs-letter-body` (10.5pt) with `--lh-letter` (1.6) for the body and
+the valediction, and `--fs-signature` (15pt / 1.1) for the signature.
+
+Why that matters more here than anywhere else: those values *are* the
+letter's dominant vertical space. While they were hardcoded in
+`cover-letter.css`, `data-density="compact"` — a combination this system
+documents as supported on both surfaces — did essentially nothing to a
+long letter, yet still shortened the letter's optical tail trim from
+1pt to 0.4pt. The letter paid compact's cost and collected none of its
+benefit, and the untrimmed slack (~0.6–1.2pt) sat above the system's own
+0.5pt perceptibility tolerance (§4.4).
+
+The contract:
+
+- Compact moves the letter body with the résumé's: 10.5 → 10pt, leading
+  1.6 → 1.5.
+- Compact does **not** move `--fs-signature`, for the same reason it
+  does not move `--fs-display`: shrinking an identity mark to claw back
+  lines is the wrong trade.
+- Because the closing line's metrics therefore never change,
+  `cover-letter.css` pins `--optical-tail-trim` back to 1pt in *both*
+  densities. The override is a `:root, :root[data-density="compact"]`
+  pair in that file — equal specificity to the compact block in
+  `colors_and_type.css`, winning on load order, and structurally scoped
+  to the letter because the résumé never loads the file.
+
+Never hardcode a pt value on `.letter-body`, `.valediction` or
+`.signature`. A literal there re-breaks the density contract silently:
+the letter still looks right at default density, which is the only
+state anyone inspects.
+
+---
+
 ## 12. What this template is *not*
 
-- Not a one-pager. Not a creative CV. Not a portfolio site.
+- Not a creative CV. Not a portfolio site.
 - Not driven by colour, illustration, or graphic devices.
 - Not optimised for screen reading at desktop sizes — it is optimised
   for an 8.5×11 PDF that a recruiter scrolls through.

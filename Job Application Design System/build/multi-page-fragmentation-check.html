@@ -1,0 +1,261 @@
+<!doctype html>
+<!--
+  build/multi-page-fragmentation-check.html — fixture for the EXPLICIT
+  multi-page override, not the default pipeline. The shipped
+  resume.html sample now targets one well-filled page (STYLE.md §6 /
+  SKILL.md §The pipeline, step 5) for every candidate regardless of
+  title or seniority. This fixture restores the longer content the
+  sample used to ship (all three roles at full bullet count, the
+  Open Source subsection, and a Selected Systems section) so the
+  system's multi-page mechanics stay exercised somewhere:
+    - page-break avoidance (role headers never orphaned from their
+      first bullet, no bullet split mid-line, .project/.letter-close
+      break-inside: avoid) — STYLE.md §6.1
+    - the named-page @page rules and the running footer ("2 / 2") on
+      pages 2+ — STYLE.md §10.6
+    - the subsection-head component (§5.7) and a Selected Systems
+      entry (§5.5) rendered together in a real page flow, not just in
+      isolation in preview/component-*.html
+
+  This is a candidate opting into (or a host granting) the explicit
+  multi-page override — it is not what the pipeline produces by
+  default. Open in a browser: the on-page readout below confirms the
+  content genuinely overflows one page at default density (proving
+  this fixture still exercises fragmentation); open the browser print
+  preview to confirm the visual page break and the "2 / 2" footer.
+-->
+<html lang="en" data-print="ink-only">
+<head>
+<meta charset="utf-8">
+<title>Multi-page fragmentation fixture (explicit override only)</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  #rig-result { font: 14px/1.5 ui-monospace, Menlo, monospace; background: #1a1815; color: #e8e3d8; padding: 14px 18px; }
+  #rig-result .ok { color: #7CCB8E; } #rig-result .bad { color: #FF8A80; }
+</style>
+</head>
+<body>
+<div id="rig-result">measuring…</div>
+<main class="page" role="document" itemscope itemtype="https://schema.org/Person">
+
+<header class="resume-header">
+  <h1 class="name" itemprop="name">Anya R. Castellanos</h1>
+  <p class="tagline">
+    <span class="subtitle-role" itemprop="jobTitle">Staff Engineer</span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="credential">B.S. Computer Science, Carnegie Mellon University</span>
+  </p>
+  <p class="contact" role="group" aria-label="Contact">
+    <a href="mailto:anya@castellanos.dev" itemprop="email">anya@castellanos.dev</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="tel:+17185550142" itemprop="telephone">(718) 555-0142</a>
+  </p>
+</header>
+
+<section class="section" aria-labelledby="sec-experience">
+  <div class="section-head">
+    <h2 id="sec-experience">Experience</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Staff Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">Tessera Labs</span>
+      </p>
+      <p class="role-dates"><time datetime="2022-03">Mar 2022</time> – <time>Present</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Storage platform <span class="sep" aria-hidden="true">·</span> tech lead, team of 8; query, ingest, replication.</p>
+      <p class="role-location">Brooklyn, NY</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Set technical direction for the storage platform across three sub-teams; chair the
+        platform review forum and own the published service contracts for 14 shared
+        components.
+      </li>
+      <li>
+        Designed the sharding strategy for the timeseries write path, sustaining
+        <strong>1.4M QPS</strong> at <strong class="nowrap">p99 38 ms</strong> across
+        <span class="nowrap">19 PB</span>; replaced the prior scheme after it misbalanced
+        under tenant skew.
+      </li>
+      <li>
+        Led the query layer rewrite from Postgres to a vectorized executor, cutting p99
+        latency <strong class="nowrap">2.1 s → 340 ms</strong> at constant cost.
+        <span class="scope"><span class="annotation-label"> · </span>8 engineers, 11 months,
+        zero read-path regressions</span>
+      </li>
+      <li>
+        Owned the multi-region replication design: 3-region active/active, bounded staleness
+        under <span class="nowrap">200 ms</span>.
+        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>chose CRDT
+        over Raft; accepted slower convergence under partition.</span>
+      </li>
+      <li>
+        Built an internal review agent that summarizes PR diffs against the platform
+        contract; cross-team review cycle dropped from
+        <strong class="nowrap">3.2 → 0.7 days</strong> median, adopted by 4 sibling teams.
+      </li>
+    </ul>
+  </article>
+
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Senior Software Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">Helix Cloud</span>
+      </p>
+      <p class="role-dates"><time datetime="2019-02">Feb 2019</time> – <time datetime="2022-02">Feb 2022</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Edge Compute <span class="sep" aria-hidden="true">·</span> tech lead, team of 12; runtime &amp; control plane.</p>
+      <p class="role-location">Remote (US)</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Drove the cold-start program for the V8 isolate runtime, cutting boot time
+        <strong class="nowrap">380 ms → 18 ms p95</strong> fleet-wide via
+        <code>v8::SnapshotCreator</code>; now used across three product lines.
+      </li>
+      <li>
+        Shipped the autoscaler rewrite for the regional control plane, lifting the
+        per-region ceiling from 8K to <strong>110K concurrent functions</strong>.
+        <span class="scope"><span class="annotation-label"> · </span>1.1M tenants across
+        the control plane</span>
+      </li>
+      <li>
+        Wrote the post-incident retrospective for the 2020 us-east-2 outage; the findings
+        became the basis for the company-wide &ldquo;blast radius&rdquo; review now
+        mandatory for tier-1 services.
+      </li>
+      <li>
+        Established the SLO program for Edge Compute, defining the availability and latency
+        SLOs the org still operates on, including the error-budget policy that gates
+        feature work.
+      </li>
+    </ul>
+  </article>
+
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Software Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">Cardinal Systems</span>
+      </p>
+      <p class="role-dates"><time datetime="2017-06">Jun 2017</time> – <time datetime="2019-02">Feb 2019</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Search &amp; ingestion <span class="sep" aria-hidden="true">·</span> IC on a 6-person team.</p>
+      <p class="role-location">San Francisco, CA</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Built the document indexing pipeline (Kafka → enrichment service → Elasticsearch)
+        sustaining <strong class="nowrap">50K docs/sec</strong>, 3× the Logstash
+        predecessor at a quarter of the compute footprint.
+      </li>
+      <li>
+        Led the cutover of the auth service from monolith to a standalone Go service
+        handling <strong class="nowrap">22K req/s</strong> at
+        <span class="nowrap">p99 9 ms</span>; zero downtime, traffic-shifted over 72 hours
+        behind a feature flag.
+      </li>
+    </ul>
+  </article>
+
+  <div class="subsection-head">
+    <h3>Open Source</h3>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+  <ul class="highlights">
+    <li>
+      Maintainer of <code>shardmap</code>, the bounded-load consistent-hashing library
+      extracted from the Tessera write path; <strong>2.4K</strong> dependent repositories
+      across three major versions.
+    </li>
+    <li>
+      Committer on <code>arrow-rs</code>, working on the columnar spill path that
+      vectorized executors fall back to under memory pressure.
+    </li>
+  </ul>
+</section>
+
+<section class="section" aria-labelledby="sec-systems">
+  <div class="section-head">
+    <h2 id="sec-systems">Selected Systems</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+  <div class="projects">
+    <article class="project">
+      <p>
+        <span class="project-name">Tessera Timeseries Write Path</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="project-desc">sharded ingest tier with CRDT-replicated metadata across
+        three regions; custom vectorized executor on the read side.</span>
+      </p>
+      <span class="project-metrics">
+        3 regions active/active<span class="sep sep-loose" aria-hidden="true">·</span>staleness under 200 ms<span class="sep sep-loose" aria-hidden="true">·</span>14 service contracts
+      </span>
+    </article>
+    <article class="project">
+      <p>
+        <span class="project-name">Helix Edge V8 Snapshot-Restore</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="project-desc">deduplicated heap-snapshot service feeding warm
+        isolates; moved cold-start blast radius from per-request to per-deploy.</span>
+      </p>
+      <span class="project-metrics">
+        snapshot egress down 73%<span class="sep sep-loose" aria-hidden="true">·</span>9 regions<span class="sep sep-loose" aria-hidden="true">·</span>3 product lines
+      </span>
+    </article>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="sec-skills">
+  <div class="section-head">
+    <h2 id="sec-skills">Skills</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+  <dl class="skills">
+    <dt>Languages</dt>
+    <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
+    <dt class="nowrap">Data &amp; Storage</dt>
+    <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch</dd>
+    <dt>Infrastructure</dt>
+    <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS<span class="sep">·</span>gRPC<span class="sep">·</span>Envoy<span class="sep">·</span>OpenTelemetry</dd>
+  </dl>
+</section>
+</main>
+<script>
+document.fonts.ready.then(function () {
+  var probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;visibility:hidden;height:var(--page-h)';
+  document.body.appendChild(probe);
+  var pageHeightPx = probe.getBoundingClientRect().height;
+  probe.remove();
+  var page = document.querySelector('main.page');
+  var cs = getComputedStyle(page);
+  var marginBotPx = parseFloat(cs.paddingBottom) || 0;
+  var pageRect = page.getBoundingClientRect();
+  var lastRect = page.lastElementChild.getBoundingClientRect();
+  var contentHeightPx = (lastRect.bottom - pageRect.top) + marginBotPx;
+  var ratio = contentHeightPx / pageHeightPx;
+  var el = document.getElementById('rig-result');
+  var ok = ratio > 1.0;
+  el.innerHTML = (ok ? '<span class="ok">PASS</span>' : '<span class="bad">FAIL</span>') +
+    ' — measured ' + ratio.toFixed(2) + ' type areas at default density ' +
+    '(expected &gt; 1.0 — this fixture must genuinely span multiple pages to exercise ' +
+    'fragmentation/footer mechanics). Open the browser print preview to confirm the page ' +
+    'break lands cleanly between blocks and the "2 / 2" running footer appears on page 2.';
+  console[ok ? 'log' : 'error']('multi-page-fragmentation-test: ratio=' + ratio.toFixed(3));
+});
+</script>
+</body>
+</html>

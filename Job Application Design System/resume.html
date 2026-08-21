@@ -9,25 +9,36 @@
 <!-- Components: page chrome, header, sections, roles, bullets, projects, skills -->
 <link rel="stylesheet" href="resume.css">
 </head>
-
+<body>
 <template id="__bundler_thumbnail">
   <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-    <rect width="100" height="100" fill="#F7F4ED"></rect>
+    <rect width="100" height="100" fill="var(--bg)"></rect>
     <text x="50" y="60" font-family="Georgia, serif" font-size="40" font-weight="600"
-          fill="#7A1F2B" text-anchor="middle">AC</text>
+          fill="var(--accent)" text-anchor="middle">AC</text>
   </svg>
 </template>
 
-<body>
 <!-- ============================================================
-     REFERENCE SAMPLE — every component of the system, once.
+     REFERENCE SAMPLE — one well-filled page, the system's default
+     shape for every résumé, regardless of title or seniority.
      ----------------------------------------------------------
      Header subtitle (§5.8) · role blocks with both inline annotations
-     (§5.4) · subsection head (§5.7) · Selected Systems with a metrics
-     line (§5.5) · 3-row skills block (§5.6) · inline <code> · both
-     separator gaps (§4.3) · .nowrap value/unit pairs (§8.1) · running
-     footer on pages 2+ (§10.6). Paired with `cover-letter.html`:
-     same candidate, same letterhead, same paper.
+     (§5.4, on the current role) · 3-row skills block (§5.6) · inline
+     <code> · both separator gaps (§4.3) · .nowrap value/unit pairs
+     (§8.1). Paired with `cover-letter.html`: same candidate, same
+     letterhead, same paper.
+
+     Calibrated to ~96–97% of one measured type area at default
+     density in Chrome with the CDN families (STYLE.md §6). A
+     multi-page résumé is produced only from an explicit host/user
+     override — never the default, never inferred from title
+     (SKILL.md §The pipeline, step 5). The subsection-head pattern
+     (§5.7) and the Selected Systems component (§5.5) are demonstrated
+     on their own in `preview/component-*.html`; pagination, the
+     running footer (§10.6), and both components together under an
+     explicit multi-page override are demonstrated in
+     `build/multi-page-fragmentation-check.html` — none of that is this
+     sample's job anymore.
 
      There is no Education section anywhere in this system. The highest
      completed degree rides in the header subtitle (§5.8).
@@ -96,45 +107,34 @@
     </div>
     <ul class="highlights">
       <li>
-        Set technical direction for the storage platform across three sub-teams; chair the
-        platform review forum and own the published service contracts for 14 shared
-        components.
-      </li>
-      <li>
         Designed the sharding strategy for the timeseries write path, sustaining
-        <strong>1.4M QPS</strong> at <strong class="nowrap">p99 38 ms</strong> across a
-        <span class="nowrap">19 PB</span> dataset; replaced the prior consistent-hash
-        scheme after it misbalanced under tenant skew.
-        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>accepted
-        <span class="nowrap">+20 ms</span> tail latency for 4× write capacity and bounded
-        hot-shard recovery time.</span>
+        <strong>1.4M QPS</strong> at <strong class="nowrap">p99 38 ms</strong> across
+        <span class="nowrap">19 PB</span>; replaced the prior scheme after it misbalanced
+        under tenant skew.
       </li>
       <li>
-        Led the query layer rewrite from a Postgres-backed CTE engine to a custom
-        vectorized executor; cut p99 query latency
-        <strong class="nowrap">2.1 s → 340 ms</strong> at constant cost-per-query.
-        <span class="scope"><span class="annotation-label"> · </span>8 engineers, 11-month
-        project, no read-path regressions in cutover</span>
+        Led the query layer rewrite from Postgres to a vectorized executor, cutting p99
+        latency <strong class="nowrap">2.1 s → 340 ms</strong> at constant cost.
+        <span class="scope"><span class="annotation-label"> · </span>8 engineers, 11 months,
+        zero read-path regressions</span>
       </li>
       <li>
-        Owned the multi-region replication design: 3-region active/active with bounded
-        staleness under <span class="nowrap">200 ms</span>; chose CRDT-based metadata sync
-        over Raft after benchmarking showed Raft leader-election added roughly four seconds
-        of unavailability per quorum loss.
-        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>picked
-        CRDT eventual convergence over Raft for metadata because operator pain on quorum
-        loss outweighed the consistency benefit at our read/write ratio.</span>
+        Owned the multi-region replication design: 3-region active/active, bounded staleness
+        under <span class="nowrap">200 ms</span>.
+        <span class="tradeoff"><span class="annotation-label"> · trade-off: </span>chose CRDT
+        over Raft; accepted slower convergence under partition.</span>
       </li>
       <li>
         Built an internal review agent that summarizes PR diffs against the platform
-        contract and flags shared-service ownership conflicts at review time; cross-team
-        review cycle dropped from <strong class="nowrap">3.2 → 0.7 days</strong> median,
-        adopted by 4 sibling platform teams.
+        contract; cross-team review cycle dropped from
+        <strong class="nowrap">3.2 → 0.7 days</strong> median, adopted by 4 sibling teams.
       </li>
     </ul>
   </article>
 
-  <!-- Role 2 — a scope annotation and inline <code> terms. -->
+  <!-- Role 2 — inline <code> term. Kept to one bullet: both
+       annotation types are already shown on the current role above,
+       so this role doesn't need to repeat them to earn its page space. -->
   <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
     <div class="role-header meta-row">
       <p class="role-title-line">
@@ -150,34 +150,14 @@
     </div>
     <ul class="highlights">
       <li>
-        Drove the cold-start program for the V8 isolate runtime: boot time
-        <strong class="nowrap">380 ms → 18 ms p95</strong> across the fleet. Snapshot
-        creation runs via <code>v8::SnapshotCreator</code>; restore is a single
-        <code>mmap</code> plus relocation pass. The design, joint with the runtime team, is
-        now in use across three product lines.
-      </li>
-      <li>
-        Shipped the autoscaler rewrite for the regional control plane, replacing the
-        single-leader scheduler with a sharded scheduler keyed by
-        <code>(tenant, region)</code> and lifting the per-region ceiling from 8K to
-        <strong>110K concurrent functions</strong>.
-        <span class="scope"><span class="annotation-label"> · </span>control plane serving
-        roughly 1.1M tenants</span>
-      </li>
-      <li>
-        Wrote the post-incident retrospective for the 2020 us-east-2 control-plane outage;
-        the published findings became the basis for the company-wide
-        &ldquo;blast radius&rdquo; review now mandatory for new tier-1 services.
-      </li>
-      <li>
-        Established the SLO program for Edge Compute, defining the availability and latency
-        SLOs the org still operates on, including the error-budget policy that gates
-        feature work.
+        Drove the cold-start program for the V8 isolate runtime, cutting boot time
+        <strong class="nowrap">380 ms → 18 ms p95</strong> fleet-wide via
+        <code>v8::SnapshotCreator</code>.
       </li>
     </ul>
   </article>
 
-  <!-- Role 3 — earlier, deliberately shorter: two bullets, no annotations. -->
+  <!-- Role 3 — earlier, deliberately shorter: one bullet, no annotations. -->
   <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
     <div class="role-header meta-row">
       <p class="role-title-line">
@@ -193,79 +173,14 @@
     </div>
     <ul class="highlights">
       <li>
-        Built the document indexing pipeline (Kafka → custom enrichment service →
-        Elasticsearch) sustaining <strong class="nowrap">50K docs/sec</strong>, about three
-        times the Logstash-based predecessor at a quarter of the compute footprint. Replay
-        tooling is a single-binary <code>cardinal-replay</code> that re-reads from a
-        committed Kafka offset and shadows the live writer.
-      </li>
-      <li>
-        Led the cutover of the auth service from monolith to a standalone Go service
-        handling <strong class="nowrap">22K req/s</strong> at
-        <span class="nowrap">p99 9 ms</span>; zero downtime, traffic-shifted over 72 hours
-        behind a feature flag.
+        Built the document indexing pipeline (Kafka → enrichment service → Elasticsearch)
+        sustaining <strong class="nowrap">50K docs/sec</strong>, 3× the Logstash
+        predecessor at a quarter of the compute footprint.
       </li>
     </ul>
   </article>
 
-  <!-- Subsection head (§5.7): a second-tier grouping inside a section.
-       It carries no company and no dates, so each bullet names its own
-       subject — the line stays true whichever role a parser files it
-       under (§8.1). -->
-  <div class="subsection-head">
-    <h3>Open Source</h3>
-    <span class="rule" aria-hidden="true"></span>
-  </div>
-  <ul class="highlights">
-    <li>
-      Maintainer of <code>shardmap</code>, the bounded-load consistent-hashing library
-      extracted from the Tessera write path; <strong>2.4K</strong> dependent repositories
-      and a published compatibility contract across three major versions.
-    </li>
-    <li>
-      Committer on <code>arrow-rs</code>, working on the columnar spill path that
-      vectorized executors fall back to under memory pressure.
-    </li>
-  </ul>
 
-</section>
-
-<!-- ============= Selected Systems =============
-     Each metrics line states facts the bullets do not already carry
-     (shape and surface, not repeated numbers), and spells out the
-     direction of a delta in words so no claim rests on a symbol alone
-     (§8.1). Digit-heavy runs use the loose separator gap. -->
-<section class="section" aria-labelledby="sec-systems">
-  <div class="section-head">
-    <h2 id="sec-systems">Selected Systems</h2>
-    <span class="rule" aria-hidden="true"></span>
-  </div>
-
-  <div class="projects">
-    <article class="project">
-      <p>
-        <span class="project-name">Tessera Timeseries Write Path</span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span class="project-desc">sharded ingest tier with CRDT-replicated metadata across
-        three regions; custom vectorized executor on the read side.</span>
-      </p>
-      <span class="project-metrics">
-        3 regions active/active<span class="sep sep-loose" aria-hidden="true">·</span>staleness under 200 ms<span class="sep sep-loose" aria-hidden="true">·</span>14 service contracts
-      </span>
-    </article>
-
-    <article class="project">
-      <p>
-        <span class="project-name">Helix Edge V8 Snapshot-Restore</span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span class="project-desc">deduplicated heap-snapshot service feeding warm
-        isolates; moved cold-start blast radius from per-request to per-deploy.</span>
-      </p>
-      <span class="project-metrics">
-        snapshot egress down 73%<span class="sep sep-loose" aria-hidden="true">·</span>9 regions<span class="sep sep-loose" aria-hidden="true">·</span>3 product lines
-      </span>
-    </article>
-  </div>
 </section>
 
 <!-- ============= Skills ============= -->

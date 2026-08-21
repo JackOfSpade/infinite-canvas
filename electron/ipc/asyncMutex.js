@@ -45,7 +45,11 @@ export function createFifoLock({ name = 'lock', supportsAbort = false } = {}) {
       throw new Error(`${name}: reentrant withLock() call detected from within its own critical section — this would deadlock waiting on itself. Restructure the caller so it doesn't nest the same lock.`);
     }
     _pending++;
-    const result = _tail.then(() => {
+    let started = false;
+    let detachAbortListener = () => {};
+    const execution = _tail.then(() => {
+      started = true;
+      detachAbortListener();
       if (supportsAbort && signal?.aborted) {
         const err = new Error(`Aborted before acquiring the ${name}`);
         err.name = 'AbortError';
@@ -54,8 +58,40 @@ export function createFifoLock({ name = 'lock', supportsAbort = false } = {}) {
       return als.run(true, () => fn());
     });
     // Advance the tail regardless of outcome so one failure/abort doesn't
-    // wedge the queue; the caller still observes `result`'s resolution/rejection.
-    _tail = result.then(() => {}, () => {});
+    // wedge the queue. This MUST follow the real execution, not the caller's
+    // abortable view below: letting an early-aborted waiter advance the tail
+    // would start the next critical section while the current holder still ran.
+    _tail = execution.then(() => {}, () => {});
+
+    let result = execution;
+    if (supportsAbort && signal?.addEventListener) {
+      result = new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          detachAbortListener();
+          fn(value);
+        };
+        const onAbort = () => {
+          // Once fn has begun, its own cooperative signal handling owns
+          // cancellation. Rejecting only the caller while fn kept the mutex
+          // would make lifecycle and error reporting disagree.
+          if (!started) {
+            const err = new Error(`Aborted while waiting for the ${name}`);
+            err.name = 'AbortError';
+            finish(reject, err);
+          }
+        };
+        detachAbortListener = () => signal.removeEventListener('abort', onAbort);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+        execution.then(
+          value => finish(resolve, value),
+          error => finish(reject, error),
+        );
+      });
+    }
     const settle = () => { _pending--; };
     result.then(settle, settle);
     return result;

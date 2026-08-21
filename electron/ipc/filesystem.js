@@ -13,7 +13,7 @@ import {
   resolveMissingPreviewPath,
 } from './missingPreviewRelink.js';
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
-import { isWithinDirectory, isExistingFile } from '../utils/pathSafety.js';
+import { isWithinDirectory, isExistingFile, isSensitivePath } from '../utils/pathSafety.js';
 
 // Extensions the 'open-file' handler will hand to the OS shell. Covers the
 // image/document/media/archive types this app's own drop/preview handling
@@ -24,32 +24,103 @@ import { isWithinDirectory, isExistingFile } from '../utils/pathSafety.js';
 // otherwise be used to launch.
 const ALLOWED_OPEN_FILE_EXTS = new Set([
   // Images
-  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.bmp', '.ico',
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.ico',
   '.heic', '.heif', '.tiff', '.tif', '.avif', '.jxl',
   // Documents
-  '.pdf', '.doc', '.docx', '.rtf', '.txt', '.md', '.odt', '.pages',
+  '.pdf', '.docx', '.rtf', '.txt', '.md',
   // Spreadsheets / presentations
-  '.csv', '.xls', '.xlsx', '.xlsm', '.numbers', '.ppt', '.pptx', '.key',
+  '.csv', '.xlsx', '.pptx',
   // Data / plain-text formats safe to view (never executed by double-click)
   '.json', '.yaml', '.yml', '.xml', '.ini', '.log', '.toml', '.env',
-  // Source/code files the canvas' own CODE_EXT_RE (src/utils/fileExtensions.js)
-  // treats as valid document-node content, dropped in and viewed/edited like
-  // any other text — none of these auto-execute on double-click on any
-  // mainstream OS (unlike .js, which Windows Script Host runs directly, and
-  // .sh, which a Unix shell association can execute — both stay excluded).
-  '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java',
-  '.c', '.cpp', '.h', '.cs', '.php', '.swift', '.kt',
+  // Source/code files normally associated with an editor. Script-associated
+  // formats (.js/.jsx/.py/.rb/.php/.sh and similar) stay excluded because an
+  // OS association may execute them rather than display them.
+  '.ts', '.tsx', '.go', '.rs', '.java',
+  '.c', '.cpp', '.h', '.cs', '.swift', '.kt',
   // Audio
   '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
   // Video
   '.mp4', '.mov', '.webm', '.avi', '.mkv', '.wmv',
-  // Archives (opening these launches an archive viewer, not their contents)
+  // Archives retained for existing product UX. This app hands the container to
+  // the OS archive handler; it never launches an archived member directly.
   '.zip', '.tar', '.gz', '.rar', '.7z',
 ]);
 
 /** True when `filePath`'s extension is on the open-file allowlist. Pure/exported for testability. */
 export function isAllowedOpenFileExt(filePath) {
   return ALLOWED_OPEN_FILE_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
+}
+
+/**
+ * Resolve an OS-open request to the regular file it will actually launch.
+ * Checking only the renderer-supplied suffix lets `notes.txt -> payload.app`
+ * bypass the allowlist because shell.openPath follows the link itself.
+ */
+async function inspectAllowedOpenFilePath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim() || !path.isAbsolute(filePath)) {
+    throw new Error('A valid absolute file path is required.');
+  }
+  const normalizedPath = path.normalize(filePath);
+  if (!isAllowedOpenFileExt(normalizedPath)) {
+    const ext = path.extname(normalizedPath).toLowerCase();
+    throw new Error(`Opening "${ext || '(no extension)'}" files is restricted for security reasons.`);
+  }
+  const lexicalStat = await fs.promises.lstat(normalizedPath);
+  if (!lexicalStat.isFile() || lexicalStat.isSymbolicLink()) {
+    throw new Error('Only regular document and media files can be opened. Symbolic links are restricted.');
+  }
+  const resolvedPath = await fs.promises.realpath(normalizedPath);
+  if (!isAllowedOpenFileExt(resolvedPath)) {
+    throw new Error('The selected document resolves to a restricted file type.');
+  }
+  const canonicalStat = await fs.promises.lstat(resolvedPath);
+  if (!canonicalStat.isFile() || canonicalStat.isSymbolicLink()
+      || !hasSameIdentity(canonicalStat, { dev: lexicalStat.dev, ino: lexicalStat.ino })) {
+    throw new Error('Only regular document and media files can be opened.');
+  }
+  const parentPath = path.dirname(resolvedPath);
+  const parentStat = await fs.promises.lstat(parentPath);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()
+      || await fs.promises.realpath(parentPath) !== parentPath) {
+    throw new Error('The selected document parent is not a stable canonical directory.');
+  }
+  return {
+    normalizedPath,
+    resolvedPath,
+    targetIdentity: { dev: canonicalStat.dev, ino: canonicalStat.ino },
+    parentPath,
+    parentIdentity: { dev: parentStat.dev, ino: parentStat.ino },
+  };
+}
+
+async function assertAllowedOpenFileIdentity(target) {
+  const [resolvedAgain, targetStat, parentPathAgain, parentStat] = await Promise.all([
+    fs.promises.realpath(target.normalizedPath),
+    fs.promises.lstat(target.resolvedPath),
+    fs.promises.realpath(target.parentPath),
+    fs.promises.lstat(target.parentPath),
+  ]);
+  if (resolvedAgain !== target.resolvedPath
+      || !targetStat.isFile() || targetStat.isSymbolicLink()
+      || !hasSameIdentity(targetStat, target.targetIdentity)
+      || parentPathAgain !== target.parentPath
+      || !parentStat.isDirectory() || parentStat.isSymbolicLink()
+      || !hasSameIdentity(parentStat, target.parentIdentity)) {
+    throw new Error('The selected document changed before it could be opened.');
+  }
+}
+
+export async function resolveAllowedOpenFilePath(filePath) {
+  const target = await inspectAllowedOpenFilePath(filePath);
+  await assertAllowedOpenFileIdentity(target);
+  return target.resolvedPath;
+}
+
+const ALLOWED_TEXT_EDIT_EXTS = new Set(['.md', '.txt']);
+
+/** True when a document is one of the two formats the renderer exposes as editable. */
+export function isAllowedTextEditExt(filePath) {
+  return ALLOWED_TEXT_EDIT_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
 }
 
 /**
@@ -129,7 +200,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
 /**
  * Helper to perform an atomic write (write to tmp then rename).
  */
-async function atomicWriteFile(targetPath, data) {
+export async function atomicWriteFile(targetPath, data) {
   let finalPath = targetPath;
   try {
     // Resolve symlinks so we write to the actual destination, preserving the link structure
@@ -139,13 +210,146 @@ async function atomicWriteFile(targetPath, data) {
   }
 
   const tmpPath = `${finalPath}.__ic_atomic_${randomUUID()}.tmp`;
+  let mode = 0o600;
+  try { mode = (await fs.promises.stat(finalPath)).mode & 0o777; }
+  catch { /* New files default to owner-only; existing files keep their mode. */ }
   try {
-    await fs.promises.writeFile(tmpPath, data, 'utf-8');
+    await fs.promises.writeFile(tmpPath, data, { encoding: 'utf8', mode });
     await fs.promises.rename(tmpPath, finalPath);
   } catch (err) {
     // Clean up tmp file if write succeeded but rename failed
     try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
     throw err;
+  }
+}
+
+/**
+ * Validate a renderer-requested mutation target. Canvas JSON is portable and
+ * therefore untrusted: a node can claim an arbitrary path, but it must not use
+ * the delete/editor IPC to modify credentials, system state, or the canvas file
+ * that is currently open. Returns the normalized path the OS operation should
+ * receive (preserving a final symlink rather than trashing its target).
+ */
+async function inspectMutablePath(filePath, { sender = null, textOnly = false } = {}) {
+  if (typeof filePath !== 'string' || !filePath.trim() || !path.isAbsolute(filePath)) {
+    throw new Error('A valid absolute file path is required.');
+  }
+  const normalizedPath = path.normalize(filePath);
+  const resolvedPath = await fs.promises.realpath(normalizedPath);
+  if (isSensitivePath(normalizedPath) || isSensitivePath(resolvedPath)) {
+    throw new Error('Modifying this sensitive system or credential path is restricted.');
+  }
+  if (textOnly && !isAllowedTextEditExt(resolvedPath)) {
+    throw new Error('Only .md and .txt documents can be edited from the canvas.');
+  }
+
+  const targetStat = await fs.promises.lstat(resolvedPath);
+  if (textOnly && (!targetStat.isFile() || targetStat.isSymbolicLink())) {
+    throw new Error('Only regular text files can be edited from the canvas.');
+  }
+
+  if (sender?.__canvasPath) {
+    let canvasPath = path.resolve(sender.__canvasPath);
+    try { canvasPath = await fs.promises.realpath(canvasPath); } catch { /* stale canvas path */ }
+    const containsCanvas = targetStat.isDirectory() && isWithinDirectory(resolvedPath, canvasPath);
+    if (resolvedPath === canvasPath || containsCanvas) {
+      throw new Error('The open canvas (or a folder containing it) cannot be modified through a canvas node.');
+    }
+  }
+
+  if (!textOnly) return { normalizedPath, resolvedPath };
+  const expectedParentPath = path.dirname(resolvedPath);
+  const parentPath = await fs.promises.realpath(expectedParentPath);
+  if (parentPath !== expectedParentPath
+      || await fs.promises.realpath(normalizedPath) !== resolvedPath) {
+    throw new Error('The text file path changed while it was being validated.');
+  }
+  const parentStat = await fs.promises.lstat(parentPath);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+    throw new Error('The text file parent must be a regular directory.');
+  }
+  return {
+    normalizedPath,
+    resolvedPath,
+    parentPath,
+    targetIdentity: { dev: targetStat.dev, ino: targetStat.ino },
+    parentIdentity: { dev: parentStat.dev, ino: parentStat.ino },
+    mode: targetStat.mode & 0o777,
+  };
+}
+
+/**
+ * Validate a renderer-requested mutation target. Text edits return the
+ * canonical target rather than the caller-controlled symlink spelling; delete
+ * keeps the lexical path so trashing a link does not trash its referent.
+ */
+export async function validateMutablePath(filePath, { sender = null, textOnly = false } = {}) {
+  const inspected = await inspectMutablePath(filePath, { sender, textOnly });
+  return textOnly ? inspected.resolvedPath : inspected.normalizedPath;
+}
+
+function hasSameIdentity(stat, identity) {
+  return stat.dev === identity.dev && stat.ino === identity.ino;
+}
+
+async function assertMutableTextTargetIdentity(target) {
+  const targetStat = await fs.promises.lstat(target.resolvedPath);
+  if (!targetStat.isFile() || targetStat.isSymbolicLink()
+      || !hasSameIdentity(targetStat, target.targetIdentity)) {
+    throw new Error('The text file changed while the edit was being saved.');
+  }
+  await assertMutableTextParentIdentity(target);
+}
+
+async function assertMutableTextParentIdentity(target) {
+  const [parentStat, currentParentPath] = await Promise.all([
+    fs.promises.lstat(target.parentPath),
+    fs.promises.realpath(target.parentPath),
+  ]);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()
+      || currentParentPath !== target.parentPath
+      || !hasSameIdentity(parentStat, target.parentIdentity)) {
+    throw new Error('The text file parent changed while the edit was being saved.');
+  }
+}
+
+/**
+ * Validate and atomically replace an existing text document without following
+ * a caller-controlled path again after validation. Identity checks before and
+ * after creating the private temporary file close the useful symlink/rename
+ * swap windows available through the renderer IPC. The final rename replaces a
+ * last-moment target symlink itself; it never follows that link.
+ */
+export async function writeValidatedTextFile(filePath, content, { sender = null } = {}) {
+  if (typeof content !== 'string') throw new Error('Text file content must be a string.');
+  const target = await inspectMutablePath(filePath, { sender, textOnly: true });
+  await fs.promises.access(target.resolvedPath, fs.constants.W_OK);
+  await assertMutableTextTargetIdentity(target);
+
+  const tmpPath = path.join(target.parentPath, `.__ic_text_${randomUUID()}.tmp`);
+  let tmpCreated = false;
+  try {
+    const handle = await fs.promises.open(tmpPath, 'wx', target.mode || 0o600);
+    tmpCreated = true;
+    try {
+      await handle.writeFile(content, { encoding: 'utf8' });
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await assertMutableTextTargetIdentity(target);
+    await fs.promises.rename(tmpPath, target.resolvedPath);
+    tmpCreated = false;
+    return target.resolvedPath;
+  } finally {
+    if (tmpCreated) {
+      // Do not follow a replaced parent merely to clean up. If its identity no
+      // longer matches, the old directory (and temp) is outside our safe handle.
+      try {
+        await assertMutableTextParentIdentity(target);
+        await fs.promises.unlink(tmpPath);
+      } catch { /* best-effort cleanup without traversing a changed parent */ }
+    }
   }
 }
 
@@ -528,15 +732,12 @@ export function registerFilesystemHandlers() {
     // set of things this app will hand to the OS shell should be the
     // documents/media it actually deals in, not "everything that isn't on a
     // list of known-bad extensions."
-    if (!isAllowedOpenFileExt(filePath)) {
-      const ext = path.extname(filePath).toLowerCase();
-      throw new Error(`Opening "${ext || '(no extension)'}" files is restricted for security reasons.`);
-    }
-
-    // Additional Guard: Ensure the file actually exists before asking the shell to handle it
-    if (!fs.existsSync(filePath)) throw new Error('File not found: ' + filePath);
-
-    const err = await shell.openPath(filePath);
+    const safeTarget = await inspectAllowedOpenFilePath(filePath);
+    // Keep this identity check adjacent to the OS call. The canvas may point
+    // anywhere on disk, so canonical path + file/parent identity are the
+    // containment boundary rather than a fixed application-owned directory.
+    await assertAllowedOpenFileIdentity(safeTarget);
+    const err = await shell.openPath(safeTarget.resolvedPath);
     if (err) throw new Error(err);
   });
 
@@ -758,14 +959,13 @@ export function registerFilesystemHandlers() {
     }
   });
 
-  handleSafe('delete-os-file', async (_event, filePath) => {
-    await shell.trashItem(filePath);
+  handleSafe('delete-os-file', async (event, filePath) => {
+    const safePath = await validateMutablePath(filePath, { sender: event.sender });
+    await shell.trashItem(safePath);
   });
 
-  handleSafe('write-text-file', async (_event, { filePath, content }) => {
-    // Validate the file exists before writing — prevents accidentally creating new files
-    await fs.promises.access(filePath, fs.constants.W_OK);
-    await atomicWriteFile(filePath, content);
+  handleSafe('write-text-file', async (event, { filePath, content }) => {
+    await writeValidatedTextFile(filePath, content, { sender: event.sender });
   });
 
   handleSafe('save-file-dialog', async (_event, { defaultFilename, content, filters }) => {

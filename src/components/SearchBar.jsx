@@ -4,14 +4,17 @@ import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { getNodeDims } from '../utils/constants';
 import { panDuration } from '../utils/layoutGeometry';
-import { matchesQuery } from '../utils/searchMatch';
+import { matchesQuery, nextSearchMatchIndex } from '../utils/searchMatch';
 import { TIMINGS } from '../utils/timings';
 import { cancelTimeout, replaceTimeout } from '../utils/latestTimeout';
+import { useModalStackCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Canvas search bar with match count indicator and navigation.
  * Searches nodes by name/title/text (including deep group search) and pans to the match.
- * Features: match count badge, next/prev arrows, clear button, Cmd+F activation.
+ * Features: match count badge, next/prev arrows, clear button, and configurable
+ * keyboard activation.
  */
 export const SearchBar = React.memo(function SearchBar() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -21,33 +24,43 @@ export const SearchBar = React.memo(function SearchBar() {
   const { setCenter, getViewport, getNodes } = useReactFlow();
   const inputRef = useRef(null);
   const autoDiveTimeoutRef = useRef(null);
+  const focusTimeoutRef = useRef(null);
   const nav = useContext(CanvasNavigationContext);
   const isAnimating = nav?.isAnimating || false;
+  const modalCount = useModalStackCount();
 
-  // Cmd+F / Ctrl+F to focus search
+  const openSearch = useCallback(() => {
+    setIsExpanded(true);
+    replaceTimeout(focusTimeoutRef, () => inputRef.current?.focus(), TIMINGS.FOCUS_DELAY_MS);
+  }, []);
+
+  // The canvas shortcut coordinator dispatches this after applying the current
+  // user binding and modal guards. Keeping focus state local avoids lifting the
+  // whole search UI into Canvas just to support a configurable shortcut.
   useEffect(() => {
-    const handleKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
-        e.preventDefault();
-        setIsExpanded(true);
-        setTimeout(() => inputRef.current?.focus(), TIMINGS.FOCUS_DELAY_MS);
-      }
-      if (e.key === 'Escape' && isExpanded) {
-        setIsExpanded(false);
-        setSearchQuery('');
-        setMatchCount(0);
-        setMatchIndex(0);
-        inputRef.current?.blur();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isExpanded]);
+    document.addEventListener('canvas-search-open', openSearch);
+    return () => document.removeEventListener('canvas-search-open', openSearch);
+  }, [openSearch]);
 
-  // Cleanup autoDiveTimeout on unmount
+  const closeSearch = useCallback(() => {
+    cancelTimeout(focusTimeoutRef);
+    cancelTimeout(autoDiveTimeoutRef);
+    setIsExpanded(false);
+    setSearchQuery('');
+    setMatchCount(0);
+    setMatchIndex(0);
+    inputRef.current?.blur();
+  }, []);
+
+  // A modal owns Escape while it is open; closing both the modal and the
+  // search bar from the same keypress was a surprising hidden side effect.
+  useEscapeToClose(closeSearch, { enabled: isExpanded && modalCount === 0 });
+
+  // Cleanup delayed focus/navigation work on unmount.
   useEffect(() => {
     return () => {
       cancelTimeout(autoDiveTimeoutRef);
+      cancelTimeout(focusTimeoutRef);
     };
   }, []);
 
@@ -92,8 +105,8 @@ export const SearchBar = React.memo(function SearchBar() {
     const matches = getMatches();
     setMatchCount(matches.length);
     if (matches.length === 0) return;
-    const nextIdx = ((matchIndex - 1 + offset) % matches.length + matches.length) % matches.length;
-    const targetInfo = matches[nextIdx];
+    const nextIndex = nextSearchMatchIndex(matchIndex, offset, matches.length);
+    const targetInfo = matches[nextIndex - 1];
     const target = targetInfo.node;
 
     // Preserve the user's current zoom level; only pan to the match
@@ -107,7 +120,7 @@ export const SearchBar = React.memo(function SearchBar() {
     const viewCy = (window.innerHeight / 2 - vp.y) / vp.zoom;
     const travelPx = Math.hypot(targetCx - viewCx, targetCy - viewCy) * vp.zoom;
     setCenter(targetCx, targetCy, { zoom: vp.zoom, duration: panDuration(travelPx) });
-    setMatchIndex(nextIdx + 1);
+    setMatchIndex(nextIndex);
 
     // If it's an internal match, auto-dive after a short delay if the user
     // kept focus in the search bar (indicating they want to navigate deeper).
@@ -131,12 +144,7 @@ export const SearchBar = React.memo(function SearchBar() {
   const handlePrev = useCallback(() => navigateBy(-1), [navigateBy]);
 
   const handleClear = () => {
-    cancelTimeout(autoDiveTimeoutRef);
-    setSearchQuery('');
-    setMatchCount(0);
-    setMatchIndex(0);
-    setIsExpanded(false);
-    inputRef.current?.blur();
+    closeSearch();
   };
 
   useEffect(() => {
@@ -164,12 +172,12 @@ export const SearchBar = React.memo(function SearchBar() {
         <Search
           size={16}
           className="text-white/30 ml-4 shrink-0 cursor-pointer"
-          onClick={() => { setIsExpanded(true); setTimeout(() => inputRef.current?.focus(), TIMINGS.FOCUS_DELAY_MS); }}
+          onClick={openSearch}
         />
         <input
           ref={inputRef}
           type="text"
-          placeholder={isExpanded ? "Search… (Enter to navigate, Shift+Enter for prev)" : "Search items… (⌘F)"}
+          placeholder={isExpanded ? "Search… (Enter to navigate, Shift+Enter for prev)" : "Search items…"}
           className="flex-1 bg-transparent text-white px-3 py-3 focus:outline-none placeholder-white/30 text-sm"
           value={searchQuery}
           onChange={handleQueryChange}

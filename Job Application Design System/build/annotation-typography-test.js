@@ -8,7 +8,7 @@
 
    This test is static (parses the CSS sources) so it runs in CI with
    no browser. The computed-style companion — same contract, measured
-   in a real engine — is build/annotation-typography-test.html.
+   in a real engine — is build/annotation-typography-check.html.
 
    Run from the project root:  node build/annotation-typography-test.js
    Exit code 0 on success, 1 on first failure.
@@ -21,13 +21,9 @@ var path = require('path');
 
 var ROOT = path.join(__dirname, '..');
 
-var GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', RESET = '\x1b[0m';
-var passed = 0, failed = 0, failures = [];
-
-function ok(name)      { console.log('  ' + GREEN + '✓' + RESET + ' ' + name); passed++; }
-function fail(name, m) { console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m); failed++; failures.push(name); }
-function header(s)     { console.log('\n' + s); }
-function assert(cond, name, msg) { if (cond) ok(name); else fail(name, msg || 'assertion failed'); }
+var H = require('./harness.js');
+var ok = H.ok, fail = H.fail, header = H.header, assert = H.assert;
+var GREEN = H.GREEN, RED = H.RED, DIM = H.DIM, RESET = H.RESET;
 
 /* The classes under guard, and the properties that would break a
    continuous read if they took any value other than `inherit`. */
@@ -68,11 +64,29 @@ function declarations(body) {
     .filter(Boolean);
 }
 
-/* Rules whose selector list touches one of the annotation classes. */
+/* True when a selector list applies to the class element itself, not
+   merely to one of its descendants (`.scope em`, for example). */
+function selectorTargetsClass(selector, className) {
+  return selector.split(',').some(function (part) {
+    var compounds = part.trim().split(/\s+|>|\+|~/);
+    var target = compounds[compounds.length - 1];
+    return new RegExp('\\.' + className + '(?![\\w-])').test(target);
+  });
+}
+
+function selectorTargetsTag(selector, tagName) {
+  return selector.split(',').some(function (part) {
+    var compounds = part.trim().split(/\s+|>|\+|~/);
+    var target = compounds[compounds.length - 1];
+    return new RegExp('^' + tagName + '(?:$|[:.#\\[])', 'i').test(target);
+  });
+}
+
+/* Rules whose selector list targets one of the annotation classes. */
 function annotationRules(rules) {
   return rules.filter(function (r) {
     return ANNOTATION_CLASSES.some(function (c) {
-      return new RegExp('\\.' + c + '(?![\\w-])').test(r.selector);
+      return selectorTargetsClass(r.selector, c);
     });
   });
 }
@@ -106,20 +120,29 @@ assert(offenders.length === 0,
   'no font-size / font-style / font-family / color / tracking override on the annotation classes',
   offenders.join('  |  '));
 
-/* 2. …and the load-bearing ones must actually be declared, so the spans
-      are pinned even if a future rule elsewhere targets a bare span. */
-var declared = {};
-resumeRules.forEach(function (r) {
-  declarations(r.body).forEach(function (d) {
-    if (isInherit(d.value)) declared[d.prop] = true;
+/* 2. …and the load-bearing ones must actually be declared on EACH class,
+      so one fully-pinned `.scope` rule cannot mask an unpinned
+      `.tradeoff` or `.annotation-label`. */
+var missingByClass = [];
+ANNOTATION_CLASSES.forEach(function (className) {
+  var classRules = resumeRules.filter(function (r) {
+    return selectorTargetsClass(r.selector, className);
+  });
+  var declared = {};
+  classRules.forEach(function (r) {
+    declarations(r.body).forEach(function (d) {
+      if (isInherit(d.value)) declared[d.prop] = true;
+    });
+  });
+  REQUIRED_INHERITS.forEach(function (prop) {
+    if (!declared[prop] && !(declared.font && prop.indexOf('font-') === 0)) {
+      missingByClass.push('.' + className + ': ' + prop);
+    }
   });
 });
-var missing = REQUIRED_INHERITS.filter(function (p) {
-  return !declared[p] && !(declared.font && p.indexOf('font-') === 0);
-});
-assert(missing.length === 0,
-  'annotation spans inherit the parent bullet type explicitly (' + REQUIRED_INHERITS.join(', ') + ')',
-  'not inherited: ' + missing.join(', '));
+assert(missingByClass.length === 0,
+  'each annotation class inherits the parent bullet type explicitly (' + REQUIRED_INHERITS.join(', ') + ')',
+  'not inherited: ' + missingByClass.join(', '));
 
 /* 3. The specific bug this test exists for: italic on .tradeoff. */
 var italic = resumeRules.filter(function (r) {
@@ -136,16 +159,62 @@ assert(!/\.(scope|tradeoff|annotation-label)[^{}]*\{[^{}]*--fs-caption/.test(
         resumeCss.replace(/\/\*[\s\S]*?\*\//g, '')),
   'annotation classes do not reference --fs-caption');
 
-/* 5. <strong> in a bullet is NOT part of this contract — genuine metrics
-      keep their weight. Guard against an over-broad "inherit everything"
-      fix that flattens them too. */
-var strongRules = parseRules(resumeCss).concat(parseRules(read('cover-letter.css')))
-  .filter(function (r) { return /\bstrong\b/.test(r.selector); });
-assert(strongRules.some(function (r) {
-  return declarations(r.body).some(function (d) {
-    return d.prop === 'font-weight' && !isInherit(d.value);
+/* 5. Bullet-body <strong>/<b> render at the bullet's own weight — no
+      inline emphasis inside .highlights li (STYLE.md §5.4.1). The tags
+      stay in the markup (the host app keys off them, and any
+      data-achievement-id, as semantic metadata) but must resolve to
+      `inherit` for font-weight and color, scoped to .highlights li only. */
+var highlightsBoldRules = parseRules(resumeCss).filter(function (r) {
+  return /\.highlights\s+li\b/.test(r.selector) &&
+    (selectorTargetsTag(r.selector, 'b') || selectorTargetsTag(r.selector, 'strong'));
+});
+assert(highlightsBoldRules.length > 0,
+  'resume.css has a .highlights li b/strong override rule',
+  'no rule matched .highlights li b / .highlights li strong');
+
+var highlightsBoldOffenders = [];
+highlightsBoldRules.forEach(function (r) {
+  declarations(r.body).forEach(function (d) {
+    if ((d.prop === 'font-weight' || d.prop === 'color') && !isInherit(d.value)) {
+      highlightsBoldOffenders.push(r.selector + ' { ' + d.prop + ': ' + d.value + ' }');
+    }
   });
-}), '<strong> still carries its own weight (metrics untouched)');
+});
+assert(highlightsBoldOffenders.length === 0,
+  '.highlights li b/strong sets font-weight and color to inherit only',
+  highlightsBoldOffenders.join('  |  '));
+
+var highlightsMissing = [];
+['b', 'strong'].forEach(function (tagName) {
+  var declared = {};
+  highlightsBoldRules.filter(function (r) {
+    return selectorTargetsTag(r.selector, tagName);
+  }).forEach(function (r) {
+    declarations(r.body).forEach(function (d) {
+      if (isInherit(d.value)) declared[d.prop] = true;
+    });
+  });
+  ['font-weight', 'color'].forEach(function (prop) {
+    if (!declared[prop]) highlightsMissing.push(tagName + ': ' + prop);
+  });
+});
+assert(highlightsMissing.length === 0,
+  '.highlights li b and strong each explicitly inherit font-weight and color',
+  'not inherited: ' + highlightsMissing.join(', '));
+
+/* Structural/global bold is untouched: the base rule (name, role title,
+   employer, project name) and the cover letter's own rule still set a
+   real weight, not inherit — this decision is scoped to résumé bullets. */
+var globalStrongRules = parseRules(read('colors_and_type.css'))
+  .filter(function (r) { return /(^|[\s,])(b|strong)(?![\w-])/.test(r.selector); });
+assert(globalStrongRules.some(function (r) {
+  return declarations(r.body).some(function (d) { return d.prop === 'font-weight' && !isInherit(d.value); });
+}), 'global b, strong rule (colors_and_type.css) still sets its own weight');
+
+var letterStrongRules = parseRules(read('cover-letter.css')).filter(function (r) { return /\bstrong\b/.test(r.selector); });
+assert(letterStrongRules.some(function (r) {
+  return declarations(r.body).some(function (d) { return d.prop === 'font-weight' && !isInherit(d.value); });
+}), 'cover-letter.css .letter-body strong still sets its own weight');
 
 /* ---- preview cards must not re-teach the old treatment ------------- */
 
@@ -161,6 +230,11 @@ header('preview cards — no caption/italic annotation treatment');
       }
     });
   });
+  /* Presence guard, matching the sibling checks above: a card that no
+     longer demonstrates an annotation would pass the loop above by
+     having nothing to inspect. */
+  assert(/class="(scope|tradeoff|annotation-label)"/.test(read(rel)),
+    rel + ' still demonstrates an annotation span');
   assert(bad.length === 0, rel + ' renders annotations in the bullet’s own type', bad.join('  |  '));
 });
 
@@ -184,8 +258,4 @@ STALE.forEach(function (pair) {
 assert(/inherit the owning\s+bullet's/i.test(read('STYLE.md').replace(/[’']/g, "'")),
   'STYLE.md §5.4 states the spans inherit the owning bullet’s type');
 
-console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
-if (failed > 0) {
-  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
-  process.exit(1);
-}
+H.report();

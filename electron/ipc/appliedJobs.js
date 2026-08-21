@@ -139,8 +139,15 @@ function writeStoreAtomic(filePath, records) {
   // hand-editable safety valve, not just a serialization format.
   const content = `${JSON.stringify(payload, null, 2)}\n`;
   const tmp = `${filePath}.__ic_atomic_${randomUUID()}.tmp`;
-  fs.writeFileSync(tmp, content, 'utf8');
-  fs.renameSync(tmp, filePath); // atomic — a crash here leaves the OLD file intact, never a half-written one.
+  let mode = 0o600;
+  try { mode = fs.statSync(filePath).mode & 0o777; }
+  catch { /* New stores contain personal history and default to owner-only. */ }
+  try {
+    fs.writeFileSync(tmp, content, { encoding: 'utf8', mode });
+    fs.renameSync(tmp, filePath); // atomic — a crash here leaves the OLD file intact, never a half-written one.
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* renamed or never created */ }
+  }
   return fileSignatureSync(filePath);
 }
 

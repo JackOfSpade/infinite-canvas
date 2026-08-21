@@ -31,59 +31,17 @@ or both of those.
 > this file is the source of truth for *why*.
 ---
 
-## Sources & provenance
+## Where the developer material lives
 
-This system was designed from a written brief, not from an existing
-codebase or brand. There are no Figma files, no GitHub repos, no
-attached design assets. The references named in the brief are
-**spiritual references**, not licensed source material:
+Build mechanics, the PDF pipeline, the file index, packaging, and the
+system's provenance live in `ENGINEERING.md`. None of that is editorial
+rule, and this file is read whole into every generation prompt — so it
+stays out of here. What belongs here is *why the writing is the way it
+is*.
 
-- Stripe Press book interiors (Stripe — printed books)
-- staffeng.com and lethain.com (Will Larson — public blogs)
-- Pentagram partner CVs (public examples online)
-- modern-cv on Typst Universe (open template — for typographic
-  reference only)
-- Matthew Butterick, *Practical Typography* (practicaltypography.com)
-
-All three families load from the **Google Fonts CDN** (CSS2 API),
-pinned to the exact weights the system uses:
-
-- `Source Serif 4` — 400, 600
-- `Inter` — 400, 500, 600 *(no Bold by design)*
-- `IBM Plex Mono` — 400, 500
-
-Loaded via a single `@import` at the top of `colors_and_type.css`. **No
-longer self-contained** — typography has a render-time dependency on the
-Google Fonts CDN; ensure it's reachable from the render environment, or
-re-vendor the families locally for an air-gapped build. All three embed
-cleanly in Chrome-rendered PDFs and match the documented aesthetic. Swap
-families
-by editing the `--ff-*` variables in `colors_and_type.css`; the system
-is family-agnostic.
-
----
-
-## Index of files
-
-| Path                              | What it is                                                |
-|-----------------------------------|-----------------------------------------------------------|
-| `readme.md`                       | This file — philosophy, content rules, caveats.           |
-| `STYLE.md`                        | Every design decision, fully documented. **Read first.**  |
-| `SKILL.md`                        | Agent prompt — pipeline + per-company variant selection.  |
-| `styles.css`                      | Global entry point — re-exports the token closure.        |
-| `colors_and_type.css`             | Design tokens — color, typography, spacing, page geom, variants. |
-| `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills. |
-| `resume.html`                     | The résumé template + a fully-populated sample (open this). |
-| `cover-letter.css`                | The letter surface — serif body, date / recipient / close. Load after `resume.css`. |
-| `cover-letter.html`               | The paired cover-letter template + sample.                |
-| `build/dual-mode-pdf.js`          | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
-| `build/vendor/`                   | *(removed — pdf-lib is now loaded from CDN in the browser and the `pdf-lib` npm package in Node).* |
-| `fonts/` (removed)                | Families now load from the Google Fonts CDN — no longer bundled. |
-| `preview/`                        | Design-system reference cards (type, color, spacing, components, variants, anti-patterns). Not used at generation time. |
-
-The system covers exactly two surfaces — the printable résumé and
-its paired cover letter (`STYLE.md §11`). No app UIs, no marketing,
-no decks. Adding any of those is a *separate* design system; the
+The system covers exactly two surfaces — the printable résumé and its
+paired cover letter (`STYLE.md §11`). No app UIs, no marketing, no
+decks. Adding any of those is a *separate* design system; the
 typographic restraint here doesn't generalise trivially.
 
 ---
@@ -176,10 +134,120 @@ Why the rule is this strict: the joining dash is the single loudest
 tell of generated prose, and it is also lazy. It lets two ideas share
 a sentence without deciding how they relate. A comma, a semicolon, a
 colon, a conjunction, parentheses, or a full stop each state the
-relationship. Where the material being joined is *structural* rather
+relationship. (A colon used for one explanatory clause is still
+fine; a colon introducing a list of three or more items is a
+separate, forbidden pattern — see the cover-letter honesty section
+below.) Where the material being joined is *structural* rather
 than prose (a role summary's label and value, an annotation lead-in),
 the system's separator is the mid dot: `Storage platform · tech lead,
 team of 8`.
+
+### Bullet ordering: relevance to the job, not chronology
+
+The same role's bullets get **re-sequenced for every application.**
+Within a role, the first bullet is the one whose evidence most
+directly answers *this* job description — its responsibilities,
+named technologies, business problem, seniority signals, and the
+kind of outcome it seems to value — never the one that happened
+first, never the one that mattered most to the past employer, and
+never just the one with the biggest number. Reordering only changes
+position: the facts, numbers, and scope of a bullet never change to
+fit an application, and a bullet never gets promoted to imply a
+relevance it doesn't have. Mechanics in `STYLE.md §5.3.2`.
+
+### Cover letter opening (hard gate)
+
+The letter's first sentence must hand the recruiter something useful
+immediately: a job-specific thesis, a concrete evidence-to-need
+connection, or a supported observation about the company's work that
+establishes the candidate's direction. It must never open by
+announcing the document's purpose or the act of applying — "I am
+writing to apply…", "I'm writing to apply…", "I am applying for…",
+"I am writing to express my interest…", "Please accept my
+application…", or any equivalent throat-clearing. The recruiter
+already knows this is an application; the ATS submission, the
+filename, the job record, and the company-specific salutation already
+say so. The company and role name are still allowed in the opening
+when they're doing real work inside the thesis — the rule bans the
+announcement, not the words. Full rule, the reject/rewrite table, and
+the audit grep are in `STYLE.md §11.2.2`.
+
+### Colon dumps, overloaded sentences, metaphors, broken parallelism, unearned generalization
+
+Five prose failures are banned in **every** string the system
+writes — résumé bullets, role summaries, project descriptions, and
+every sentence of the letter. A colon whose right-hand side is three
+or more parallel items is a keyword list, not an argument: name the
+technologies where they carry the claim, and let the verbs state how
+the pieces relate. A sentence that stacks several independent
+systems, a qualification, and a conclusion should be split so each
+sentence makes one point the next can build on. A figure of
+speech reused across sentences or paragraphs as connective tissue
+should be replaced with the literal description of ownership,
+integration boundary, or data flow. And a coordinated construction —
+`from X through Y`, `both X and Y`, `either X or Y`, `not only X but
+also Y`, or a list — must keep its paired elements in the same
+grammatical form: "from the quote request through presenting
+findings" pairs a noun phrase against a gerund phrase and should
+become "from requesting quotes through presenting findings" (or the
+equally valid noun-phrase repair, "from the initial request for
+quotes through the presentation of findings"). Padding the seam
+("from the time of the quote request through…") doesn't repair the
+mismatch, it just hides it. And a concluding or transitional sentence
+must stay inside the evidence that earned it and name what it
+generalizes: one example or one role supports a claim about that
+example or that role, never "most of my work" or "throughout my
+career", and a summary noun ("shape", "pattern", "approach") has to
+define the concrete responsibility, system, decision, or process it
+stands for in the same sentence. These are defects of *shape*, so
+test a draft structurally rather than against a list of words.
+Rules and repairs: `STYLE.md §11.2.3`.
+
+### Cover letter honesty and synthesis (hard gate)
+
+Being honest about qualifications means not exaggerating — it does
+not mean volunteering what the candidate hasn't done. Reject any
+clause whose purpose is to name the boundary of the candidate's
+experience, in whatever words; when the candidate has adjacent
+experience, make the transferable understanding the subject of the
+sentence and state concretely what that work required them to get
+right, without claiming it's the same thing. Only name a gap when the
+application explicitly asks or omission would be materially
+misleading.
+
+Four more failure modes travel with that one: a colon whose right-hand
+side is three or more parallel items reads as pasted résumé keywords,
+not argument — convert it into sentences whose verbs carry the
+relationships. An overloaded sentence that stacks several
+systems, qualifications, and a conclusion into one clause-chain
+should split into separate sentences, each making one point the next
+can build on. Avoid a figure of speech reused across paragraphs as
+connective tissue — prefer literal description of ownership and data
+flow, and save figurative language for the rare sentence where it's
+doing real work. And a coordinated phrase must keep both sides in the
+same grammatical form — a `from X through Y` span that pairs a noun
+phrase against a gerund phrase is the most common break, repaired by
+putting both ends in the same form.
+
+The letter is also the one surface with paragraph boundaries, and the
+gate covers them. A conclusion may generalize from the evidence above
+it only when it names the concrete responsibility, system, decision,
+process, or mechanism connecting that evidence, and only as wide as
+that evidence goes — one product evaluation is not "the shape most of
+my work has taken". A paragraph that opens by pointing back with
+"this", "that", or "it" must have exactly one plausible antecedent;
+when the previous paragraph offered several (an evaluation, an
+integration, a decision, an abstract summary noun), repeat the precise
+noun phrase — "that end-to-end responsibility" — instead. Repair a
+detached synthesis by rewriting it as a concrete, evidence-scoped
+conclusion or by cutting it; a filler transition that names nothing
+leaves the ambiguity in place and costs a line.
+
+The letter should read as a small number of well-argued examples —
+what the candidate built, the problem it solved, why it matters to
+this role — not a résumé's bullets converted into paragraph form.
+The full rules are stated as sentence *shapes* rather than sample
+copy, on purpose: `STYLE.md §11.2.3`.
 
 ### Tone
 
@@ -196,8 +264,18 @@ signal (scale, latency, prior approach, why it failed).
    PB, % change. If you can't find a number, the bullet is weak.
 2. **The decision or change.** "Replaced X with Y" / "Migrated
    from A to B" / "Designed N for M".
-3. **The trade-off.** What you gave up to get the win.
+3. **The trade-off, if it's a real one.** What you gave up to get
+   the win — only when there was a genuine fork in the road (CRDT vs.
+   Raft, build vs. buy), stated as a one-clause `.tradeoff` annotation.
+   Not every bullet has one, and reaching for the annotation to
+   compensate for a missing number, or letting it balloon a two-line
+   bullet into a paragraph, is the failure mode it's most often abused
+   for (`STYLE.md §5.4`).
 4. **The scope of ownership.** Lead, owner, IC, mentor.
+
+That's what goes inside a bullet. Which bullet goes first within a
+role is a separate decision — see "Bullet ordering" above; never let
+raw metric size or chronology decide it.
 
 ### What to leave out
 
@@ -255,9 +333,11 @@ deep warm near-black body, **one** restrained accent (oxblood
 `#7A1F2B`) used only on the candidate name. Three families:
 **Source Serif 4** for the name only, **Inter** for everything
 else, **IBM Plex Mono** for inline `<code>` and the project-metrics
-line. Body at **10.25 pt** / 1.45 / ~70–75 chars per line. Section
-headers are 9 pt uppercase tracked +0.14 em with a hairline rule
-filling the line. 4 pt spacing grid. **No icons, no skill bars, no
+line. Body at **10.25 pt** / 1.45 / ~70–75 chars per line (that figure is
+running prose — a bullet's own renderer-verified budget, one number
+for every bullet whether annotated or not, is `STYLE.md §5.4`).
+Section headers are 9 pt uppercase tracked +0.14 em with a hairline
+rule filling the line. 4 pt spacing grid. **No icons, no skill bars, no
 progress dots, no photo, no cards, no shadows on the page, no
 gradients, no rounded corners, no emoji.** The only typographic
 flourish is the candidate name. See `preview/anti-patterns.html`
@@ -290,43 +370,17 @@ variant attributes. The host sets the root attributes, renders
 default density first, and enables `data-density="compact"` only
 after measuring an overflow.
 
-## PDF generation — the agent pipeline
+## PDF generation
 
-The default in `resume.html` is `data-print="dual-pdf"`. The full
-pipeline (parse data → classify recipient → fill template → render
-PDF → post-process → emit) is documented in **`SKILL.md §The
-pipeline`** — that's the canonical reference. Pipeline contract in
-one paragraph:
+`data-print="dual-pdf"` is the default in `resume.html`. The agent-facing
+pipeline — including the gates to run before rendering — is `SKILL.md
+§The pipeline`; the module, flags and self-tests are in
+`ENGINEERING.md`. The per-company rule for which variant to apply is
+`SKILL.md §Variant selection`.
 
-Render the filled HTML to PDF with headless Chrome
-(`printBackground: true`, `preferCSSPageSize: true`). If the active
-variant is `dual-pdf`, invoke `addOcgBackground(rawPdfBytes)` from
-`build/dual-mode-pdf.js` to add the view-only OCG cream layer (PDF
-spec §8.11). If the variant is `ink-only` (or any other), skip the
-post-process step — the PDF is already in final form. Emit the
-result as `<First-Last>.pdf`; the dual-mode mechanism is invisible
-to recipients by design.
-
-The build module is UMD — same file works in Node (`require`) and
-browser/Puppeteer contexts (script tag → `window.DualModePdf`).
-pdf-lib 1.17.1 is loaded from CDN in the browser
-(`https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js`)
-and from the `pdf-lib` npm package in Node (`npm i pdf-lib@1.17.1`).
-Self-test: `node build/test.js` from the
-project root round-trips a synthetic PDF through the module and
-asserts on the OCG structure. The same assertions run through the
-browser UMD path (`window.DualModePdf`) by opening
-`build/browser-test.html` in any browser — coverage for the
-browser/Puppeteer access path the Node test can't reach.
-
-The agent's per-company decision rule for which variant to apply
-lives in **`SKILL.md §Variant selection`**, including a
-prose-style inference fallback for unlisted companies and an
-explicit named-fallback for unclassifiable ones.
-
-Pages 2+ also print a mono page indicator (`2 / 3`) at the
-bottom-right via CSS `@page` margin boxes. Page 1 is suppressed so
-a one-pager never shows a counter. See `STYLE.md §10.6`.
+Pages 2+ print a mono page indicator (`2 / 3`) at the bottom right via
+CSS `@page` margin boxes. Page 1 is suppressed so a one-pager never
+shows a counter. See `STYLE.md §10.6`.
 
 ---
 

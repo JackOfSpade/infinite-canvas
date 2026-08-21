@@ -410,6 +410,7 @@ export function Canvas() {
 
   const handleConfirmDialogCancel = useCallback(() => {
     EventLogger.log('ConfirmDialog CANCELLED');
+    confirmDialogDataRef.current?.onCancel?.();
     setConfirmDialogData(null);
   }, [setConfirmDialogData]);
 

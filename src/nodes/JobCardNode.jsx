@@ -28,6 +28,11 @@ function scoreColor(score) {
 // generation must not wedge the hub into permanently skipping its own mine.
 // docs/resume-achievement-mining-design.md §3.6.
 const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
+// Claude Code often makes a sequence of atomic edits while composing one
+// revision. Import only after the same complete result has survived a few poll
+// cycles, otherwise a valid intermediate JSON document can be measured as if
+// it were the author's final revision.
+const LOCAL_AI_RESULT_SETTLE_MS = 6_000;
 
 /**
  * JobCardNode — a transient, scored job result on the canvas.
@@ -135,6 +140,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // Poll ticks and React state propagation can overlap by a frame. This latch
   // ensures a completed local result is imported exactly once.
   const localImportingRef = useRef(new Set());
+  const localResultSettlingRef = useRef(new Map());
   // React state does not disable a button until the next render. Keep a
   // synchronous latch too, so two click events in the same render frame cannot
   // enqueue duplicate applications for this one card.
@@ -215,7 +221,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // A completed Local AI job is converted into the exact same capability-bound
   // workspace that the API flow creates, then saved through saveApplication.
   // The renderer never receives a raw arbitrary path to save.
-  const importCompletedLocalApplication = useCallback(async (jobId) => {
+  const importCompletedLocalApplication = useCallback(async (jobId, expectedResultSha256 = '') => {
     if (!jobId || !window.electronAPI?.importLocalApplication || !window.electronAPI?.saveApplication) return;
     // The queued job remains owned by the canvas location that created it.
     // Preserve that path across app restarts and Save As operations so polling
@@ -228,8 +234,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Claude Code result…' } : current);
     try {
-      const imported = await window.electronAPI.importLocalApplication({ jobId, canvasFilePath: queuedCanvasFilePath || canvasFilePath });
-      if (!imported?.success || !imported.localApplication) throw new Error(imported?.error || 'Could not import the Local AI result.');
+      const imported = await window.electronAPI.importLocalApplication({
+        jobId,
+        canvasFilePath: queuedCanvasFilePath || canvasFilePath,
+        expectedResultSha256,
+      });
+      if (!imported?.success || !imported.localApplication) {
+        const importError = new Error(imported?.error || 'Could not import the Local AI result.');
+        if (imported?.errorCode) importError.code = imported.errorCode;
+        throw importError;
+      }
       const local = imported.localApplication;
       if (local.status === 'revision-required') {
         if (isMountedRef.current) {
@@ -319,13 +333,18 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
     } catch (error) {
       if (!isMountedRef.current) return;
+      if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Claude Code saved a newer result — waiting briefly for the final save…' } : current);
+        return;
+      }
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
   }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, isMountedRef]);
 
   // Claude Code writes result.json manually/asynchronously. Polling only reads
-  // that app-owned job; the import happens once the result validates.
+  // that app-owned job; after a short stable-result window, the import happens
+  // once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
     if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'failed', 'importing', 'render-retry-required', 'revision-exhausted'].includes(localApplication.status)) return undefined;
@@ -339,15 +358,32 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
         const next = result.localJob;
         if (next.status === 'completed') {
+          const resultSha256 = String(next.resultSha256 || '');
+          // Status always supplies the exact file hash. Without it, stay in a
+          // safe ready state instead of treating an unknown snapshot as final.
+          if (!resultSha256) {
+            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Claude Code result found — waiting for a stable file snapshot…' } : current);
+            return;
+          }
+          const settled = localResultSettlingRef.current.get(jobId);
+          const now = Date.now();
+          if (!settled || settled.resultSha256 !== resultSha256) {
+            localResultSettlingRef.current.set(jobId, { resultSha256, observedAt: now });
+            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Claude Code result found — waiting briefly for the final save…' } : current);
+            return;
+          }
+          if (now - settled.observedAt < LOCAL_AI_RESULT_SETTLE_MS) return;
           if (localImportingRef.current.has(jobId)) return;
           localImportingRef.current.add(jobId);
           setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'importing', message: 'Claude Code result found — importing…' } : current);
           try {
-            await importCompletedLocalApplication(jobId);
+            await importCompletedLocalApplication(jobId, resultSha256);
           } finally {
             localImportingRef.current.delete(jobId);
+            localResultSettlingRef.current.delete(jobId);
           }
         } else {
+          localResultSettlingRef.current.delete(jobId);
           setLocalApplication((current) => current?.id === jobId ? { ...current, ...next } : current);
         }
       } catch (error) {
@@ -815,7 +851,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>
             </div>
           </div>
-          {localApplication.id && window.electronAPI?.openLocalApplicationFolder && localApplication.status !== 'saved' && (
+          {localApplication.id && window.electronAPI?.openLocalApplicationFolder && !['saved', 'failed'].includes(localApplication.status) && (
             <button
               onClick={(e) => {
                 e.stopPropagation();

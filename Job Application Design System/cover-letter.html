@@ -12,16 +12,15 @@
 <!-- Letter surface: serif body, date / recipient / close -->
 <link rel="stylesheet" href="cover-letter.css">
 </head>
-
+<body>
 <template id="__bundler_thumbnail">
   <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-    <rect width="100" height="100" fill="#F7F4ED"></rect>
+    <rect width="100" height="100" fill="var(--bg)"></rect>
     <text x="50" y="60" font-family="Georgia, serif" font-size="40" font-weight="600"
-          fill="#7A1F2B" text-anchor="middle">AC</text>
+          fill="var(--accent)" text-anchor="middle">AC</text>
   </svg>
 </template>
 
-<body>
 <!-- ============================================================
      REFERENCE SAMPLE — the letter half of the pair.
      ----------------------------------------------------------
@@ -61,16 +60,18 @@
 
   <hr class="letterhead-rule" aria-hidden="true">
 
-  <!-- ===== Date + recipient =====
-       The date is pegged to the render month, never typed in (§11.6):
-       the adjacent script fills both the visible text and the
-       machine-readable `datetime` from the system clock, so a template
-       filled today and printed next month is never stale. The element
-       stays empty in source — an authored month is the hard-coding this
-       replaces.
+  <!-- ===== Date =====
+       Pegged to the render month, never typed in (§11.6): the adjacent
+       script fills both the visible text and the machine-readable
+       `datetime` from the system clock, so a template filled today and
+       printed next month is never stale. The element stays empty in
+       source — an authored month is the hard-coding this replaces.
 
-       Recipient: addressee (a named person when you have one, else
-       "Hiring Team"), then the company, then the role applied for. -->
+       No recipient address block follows (§11.2.1): it is redundant
+       with the salutation immediately below, and with the ATS submission
+       context (filename, job record) that already carries the role and
+       company. The opening paragraph leads with substance, not with an
+       announcement of the application (§11.2.2). -->
   <div class="letter-meta">
     <p class="letter-date"><time id="letter-date" datetime=""></time></p>
     <script>
@@ -80,11 +81,6 @@
         el.textContent = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
       })();
     </script>
-    <address class="letter-recipient">
-      <span class="recipient-name">Hiring Team</span>
-      <span class="recipient-line">Vireo Data</span>
-      <span class="recipient-line">Principal Engineer, Storage Platform</span>
-    </address>
   </div>
 
   <!-- ===== Body — four paragraphs, a number per claim, <strong> twice ===== -->
@@ -92,17 +88,16 @@
     <p class="salutation">Dear Vireo Data Hiring Team,</p>
 
     <p>
-      I'm writing to apply for the Principal Engineer role on the storage platform.
-      Vireo is doing the thing I find most interesting in this field: making a
-      multi-tenant analytical store behave predictably for customers whose workloads
-      have nothing in common with each other. That is the problem I have spent the last
-      four years inside of, and I would like to work on it at your scale.
+      Vireo is making a multi-tenant analytical store behave predictably for tenants
+      whose workloads have nothing in common with each other, the same problem I have
+      spent the last four years solving at Tessera Labs' scale. I would like to bring
+      that experience to bear at yours.
     </p>
 
     <p>
       At Tessera Labs I am the technical lead for the storage platform across three
       sub-teams. I designed the sharding strategy for our timeseries write path, which
-      now sustains <strong>1.4M QPS</strong> at p99 38 ms over a 19 PB dataset, and I
+      now sustains <strong>1.4M QPS</strong> at p99 38 ms over a 19 PB dataset. I also
       own the published service contracts for the fourteen components other teams build
       against. The part of that work I would bring to Vireo is not the number; it is
       the habit of writing the trade-off down. We chose CRDT metadata sync over Raft
@@ -111,19 +106,21 @@
     </p>
 
     <p>
-      Before Tessera I led the cold-start program for Helix Cloud's isolate runtime,
-      taking boot time from 380 ms to <strong>18 ms at p95</strong> across the fleet,
-      and rewrote the regional autoscaler to lift a per-region ceiling from 8K to 110K
-      concurrent functions. I tend to work at the seam between a runtime and the
-      control plane that schedules it, and I leave a review forum, an SLO, or an
-      error-budget policy behind me so the improvement survives.
+      Before Tessera I led the cold-start program for Helix Cloud's isolate runtime and
+      took boot time from 380 ms to <strong>18 ms at p95</strong> across the fleet. I
+      then rewrote the regional autoscaler to lift a per-region ceiling from 8K to 110K
+      concurrent functions. Both projects required me to own the runtime and the control
+      plane that schedules it at once, because the boot path could not be tuned without
+      changing how the scheduler placed work. I also wrote the error-budget policy and
+      ran the review that kept those latency numbers from regressing after the project
+      closed.
     </p>
 
     <p>
-      What draws me to Vireo specifically is the stage: the storage engine is proven,
-      the multi-tenancy story is still being written, and there is room for someone to
-      own consistency, isolation, and cost per tenant as one problem instead of three.
-      I would welcome the chance to talk about where that work stands today.
+      Vireo's storage engine is already proven, and the multi-tenancy work around it is
+      early enough that one engineer can still own consistency, isolation, and cost per
+      tenant as a single problem rather than three separate ones. That is the work I
+      want to do next. I would welcome the chance to hear where it stands today.
     </p>
   </div>
 

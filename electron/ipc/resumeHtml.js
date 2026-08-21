@@ -45,7 +45,9 @@
  */
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 import electronPkg from 'electron';
+import { JSDOM } from 'jsdom';
 import { logger } from '../logger.js';
 import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger.js';
 
@@ -59,11 +61,207 @@ export function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// Model-authored résumé markup is embedded in a standalone executable HTML
+// workspace. Prompts are not a security boundary: a job description can carry
+// prompt injection, and Local AI output is equally untrusted. Keep the accepted
+// surface deliberately identical to the documented résumé/cover components.
+const SAFE_DOCUMENT_TAGS = new Set([
+  'main', 'header', 'section', 'article', 'div',
+  'h1', 'h2', 'h3', 'p', 'span', 'strong', 'b', 'em',
+  'ul', 'li', 'dl', 'dt', 'dd', 'time', 'a', 'code', 'kbd', 'samp', 'br', 'hr',
+]);
+const RESUME_MODEL_CLASSES = new Set([
+  'page', 'resume-header', 'name', 'tagline', 'subtitle-role', 'credential', 'contact',
+  'section', 'section-head', 'subsection-head', 'rule', 'meta-row',
+  'role', 'role-header', 'role-title-line', 'title', 'company', 'role-dates',
+  'role-meta', 'role-summary', 'role-location', 'highlights',
+  'scope', 'tradeoff', 'annotation-label', 'nowrap', 'sep', 'sep-loose',
+  'projects', 'project', 'project-name', 'project-desc', 'project-metrics', 'skills',
+]);
+const COVER_DOCUMENT_CLASSES = new Set([
+  'page', 'resume-header', 'letter-letterhead', 'name', 'tagline', 'subtitle-role',
+  'credential', 'contact', 'sep', 'letterhead-rule', 'letter-meta', 'letter-date',
+  'letter-body', 'salutation', 'letter-close', 'valediction', 'signature', 'signature-title',
+]);
+const HOST_EDITABLE_CLASSES = new Set(['ic-inferred-skill', 'ic-inferred-skills-section']);
+const ACTIVE_DOCUMENT_TAGS = new Set([
+  'script', 'style', 'link', 'iframe', 'frame', 'object', 'embed', 'base', 'meta',
+  'form', 'input', 'button', 'textarea', 'select', 'option', 'fieldset',
+  'img', 'picture', 'source', 'video', 'audio', 'track', 'svg', 'math', 'canvas',
+  'template', 'portal', 'noscript',
+]);
+const SAFE_ROLES = new Set(['document', 'group']);
+const SAFE_ITEM_PROPS = new Set(['name', 'jobTitle', 'email', 'telephone', 'hasOccupation']);
+const SAFE_ITEM_TYPES = new Set(['https://schema.org/Person', 'https://schema.org/EmployeeRole']);
+const SAFE_ARIA_ATTRS = new Set(['aria-hidden', 'aria-label', 'aria-labelledby']);
+const HOST_EDITABLE_DATA_ATTRS = new Set([
+  'data-ic-inferred-skill', 'data-ic-inferred-separator',
+  'data-ic-inferred-label', 'data-ic-inferred-group', 'data-ic-inferred-section',
+  'data-ic-letter-centered',
+]);
+const MAX_DOCUMENT_MAIN_CHARS = 1024 * 1024;
+
+function hasUnsafeAsciiControl(value, allowTextWhitespace = false) {
+  return [...String(value || '')].some((char) => {
+    const code = char.charCodeAt(0);
+    return code === 127 || (code < 32 && !(allowTextWhitespace && (code === 9 || code === 10 || code === 13)));
+  });
+}
+
+function safeDocumentHref(value) {
+  const href = String(value || '').trim();
+  return /^(?:https?:\/\/|mailto:|tel:)/i.test(href) && !hasUnsafeAsciiControl(href)
+    ? href.slice(0, 2048)
+    : '';
+}
+
+function allowedDocumentClasses(documentKind, allowHostState) {
+  const allowed = documentKind === 'cover' ? COVER_DOCUMENT_CLASSES : RESUME_MODEL_CLASSES;
+  return allowHostState ? new Set([...allowed, ...HOST_EDITABLE_CLASSES]) : allowed;
+}
+
+function sanitizeDocumentElementAttributes(element, { documentKind, allowHostState, allowTrustedDerivations }) {
+  const allowedClasses = allowedDocumentClasses(documentKind, allowHostState);
+  for (const attr of [...element.attributes]) {
+    const name = attr.name.toLowerCase();
+    const rawValue = String(attr.value || '');
+    let keep = false;
+    let value = rawValue;
+
+    if (name === 'class') {
+      value = rawValue.split(/\s+/).filter(token => allowedClasses.has(token)).join(' ');
+      keep = Boolean(value);
+    } else if (name === 'id') {
+      // `ic-*` is the host namespace. A model id there could make
+      // getElementById/querySelector bind trusted controls to attacker markup.
+      keep = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(rawValue) && !/^ic-/i.test(rawValue);
+    } else if (name === 'role') {
+      keep = SAFE_ROLES.has(rawValue);
+    } else if (SAFE_ARIA_ATTRS.has(name)) {
+      keep = rawValue.length <= 256 && !hasUnsafeAsciiControl(rawValue);
+    } else if (name === 'itemprop') {
+      keep = rawValue.split(/\s+/).every(token => SAFE_ITEM_PROPS.has(token));
+    } else if (name === 'itemscope') {
+      keep = true;
+      value = '';
+    } else if (name === 'itemtype') {
+      keep = SAFE_ITEM_TYPES.has(rawValue);
+    } else if (name === 'datetime') {
+      keep = /^[A-Za-z0-9:+.-]{0,64}$/.test(rawValue);
+    } else if (name === 'href' && element.localName === 'a') {
+      value = safeDocumentHref(rawValue);
+      keep = Boolean(value);
+    } else if (name === 'title') {
+      keep = rawValue.length <= 512 && !hasUnsafeAsciiControl(rawValue);
+    } else if (name === 'data-achievement-id') {
+      keep = /^[A-Za-z0-9_.:-]{1,120}$/.test(rawValue);
+    } else if (allowTrustedDerivations && name === 'data-derivation') {
+      keep = rawValue.length <= 2000 && !hasUnsafeAsciiControl(rawValue, true);
+    } else if (allowHostState && HOST_EDITABLE_DATA_ATTRS.has(name)) {
+      if (name === 'data-ic-inferred-skill') {
+        keep = /^[A-Za-z0-9_-]{1,160}$/.test(rawValue);
+      } else if (name === 'data-ic-inferred-separator') {
+        keep = rawValue === 'join' || rawValue === 'between';
+      } else {
+        keep = rawValue === '';
+      }
+    } else if (allowHostState && name === 'hidden') {
+      keep = true;
+      value = '';
+    }
+
+    if (!keep) element.removeAttribute(attr.name);
+    else if (value !== rawValue) element.setAttribute(name, value);
+  }
+}
+
+/**
+ * Return one inert, canonical `<main class="page">` document surface.
+ * Unsupported formatting elements are unwrapped so their text survives;
+ * active/network-capable elements are removed with their contents. Host-only
+ * inferred-skill/receipt state is accepted solely for editor/Sync round trips,
+ * never from initial model output.
+ */
+export function sanitizeDocumentMainHtml(raw, { documentKind = 'resume', allowHostState = false, allowTrustedDerivations = false } = {}) {
+  const html = String(raw || '').trim();
+  if (!html || html.length > MAX_DOCUMENT_MAIN_CHARS) {
+    throw new Error('Document markup is missing or exceeds the safe size limit.');
+  }
+  const dom = new JSDOM(html);
+  try {
+    const mains = [...dom.window.document.querySelectorAll('main')];
+    if (mains.length !== 1 || !mains[0].classList.contains('page')) {
+      throw new Error('Document markup must contain exactly one <main class="page"> block.');
+    }
+    const main = mains[0];
+    const elements = [...main.querySelectorAll('*')].reverse();
+    for (const element of elements) {
+      const tag = element.localName;
+      if (ACTIVE_DOCUMENT_TAGS.has(tag)) {
+        element.remove();
+      } else if (!SAFE_DOCUMENT_TAGS.has(tag)) {
+        element.replaceWith(...element.childNodes);
+      }
+    }
+    const walker = dom.window.document.createTreeWalker(main, dom.window.NodeFilter.SHOW_COMMENT);
+    const comments = [];
+    while (walker.nextNode()) comments.push(walker.currentNode);
+    comments.forEach(comment => comment.remove());
+    sanitizeDocumentElementAttributes(main, { documentKind, allowHostState, allowTrustedDerivations });
+    for (const element of main.querySelectorAll('*')) {
+      sanitizeDocumentElementAttributes(element, { documentKind, allowHostState, allowTrustedDerivations });
+    }
+    // The page class is structural, not optional. Filtering may retain it with
+    // other documented classes, but never accept a non-page root.
+    if (!main.classList.contains('page')) main.classList.add('page');
+    return main.outerHTML;
+  } finally {
+    dom.window.close();
+  }
+}
+
+/**
+ * Reapply only ledger-authored receipt tooltips from an already trusted main.
+ * Both id and visible receipt text must match, so edited/new content cannot
+ * borrow a derivation merely by copying an achievement id.
+ */
+export function restoreTrustedReceiptDerivations(candidateHtml, trustedHtml) {
+  const candidateDom = new JSDOM(String(candidateHtml || ''));
+  const trustedDom = new JSDOM(String(trustedHtml || ''));
+  try {
+    const trusted = new Map();
+    const ambiguous = new Set();
+    for (const element of trustedDom.window.document.querySelectorAll('[data-achievement-id][data-derivation]')) {
+      const id = element.getAttribute('data-achievement-id') || '';
+      const derivation = element.getAttribute('data-derivation') || '';
+      if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(id) || !derivation || derivation.length > 2000) continue;
+      const key = `${id}\u0000${element.textContent || ''}`;
+      if (ambiguous.has(key)) continue;
+      if (!trusted.has(key)) trusted.set(key, derivation);
+      else if (trusted.get(key) !== derivation) {
+        trusted.delete(key);
+        ambiguous.add(key);
+      }
+    }
+    for (const element of candidateDom.window.document.querySelectorAll('[data-achievement-id]')) {
+      const id = element.getAttribute('data-achievement-id') || '';
+      const derivation = trusted.get(`${id}\u0000${element.textContent || ''}`);
+      if (derivation) element.setAttribute('data-derivation', derivation);
+      else element.removeAttribute('data-derivation');
+    }
+    const main = candidateDom.window.document.querySelector('main');
+    if (!main) throw new Error('Sanitized document is missing its main page.');
+    return main.outerHTML;
+  } finally {
+    candidateDom.window.close();
+    trustedDom.window.close();
+  }
+}
+
 /**
  * Decode ESCAPE SEQUENCES the model sometimes emits as literal two-character text
  * — a backslash followed by n / r / t — instead of the whitespace they denote.
- * It's nudged toward this by prompts that mention "a literal \n" (the recipient
- * block), and a JSON round-trip can also leave a double-escaped "\\n" → literal
+ * A JSON round-trip can leave a double-escaped "\\n" → literal
  * "\n". Since escapeHtml never touches backslashes, those surface VERBATIM in the
  * rendered document as "\n" / "\t". Decode the whitespace escapes to the real chars
  * so HTML collapses/breaks them correctly. Matches ONLY the literal 2-char
@@ -74,6 +272,24 @@ export function decodeTextEscapes(s) {
   return String(s ?? '')
     .replace(/\\r\\n|\\n|\\r/g, '\n')
     .replace(/\\t/g, '\t');
+}
+
+/**
+ * Experience bullets use uniform text weight. Models occasionally use visual
+ * emphasis for a tool or metric despite the résumé-writing rules; normalize
+ * only that presentation markup in `.highlights > li` so structural emphasis
+ * elsewhere in the document remains intact. Attributes are deliberately kept
+ * when converting a tag: a receipt span still needs `data-achievement-id` for
+ * the ledger resolver below.
+ */
+export function neutralizeHighlightTextEmphasis(mainHtml) {
+  return String(mainHtml || '').replace(
+    /(<ul\b[^>]*class=(?:"[^"]*\bhighlights\b[^"]*"|'[^']*\bhighlights\b[^']*')[^>]*>)([\s\S]*?)(<\/ul>)/gi,
+    (_whole, open, highlights, close) => `${open}${highlights.replace(
+      /(<li\b[^>]*>)([\s\S]*?)(<\/li>)/gi,
+      (_item, itemOpen, content, itemClose) => `${itemOpen}${content.replace(/<(\/?)(?:b|strong)\b([^>]*)>/gi, '<$1span$2>')}${itemClose}`,
+    )}${close}`,
+  );
 }
 
 /**
@@ -351,7 +567,18 @@ export function getDesignSystemDir() {
 const _cssCache = new Map();
 const _assetDataUrlCache = new Map();
 
-const RUNTIME_DESIGN_FILES = [...CSS_FILES, 'build/dual-mode-pdf.js'];
+// Keep this in lockstep with ENGINEERING.md §Packaging and package.json's
+// extraResources filter. STYLE.md is not injected into generation prompts,
+// but it remains part of the packaged runtime contract and reconnect audit.
+const RUNTIME_DESIGN_FILES = [
+  'SKILL.md',
+  'readme.md',
+  'STYLE.md',
+  ...CSS_FILES,
+  'resume.html',
+  'cover-letter.html',
+  'build/dual-mode-pdf.js',
+];
 const GOOGLE_FONTS_IMPORT_RE = /@import\s+url\(\s*["']?(https:\/\/fonts\.googleapis\.com\/css2\?[^"')\s]+)["']?\s*\)\s*;/gi;
 const REQUIRED_FONT_IMPORT_PARTS = [
   'family=IBM+Plex+Mono:wght@400;500',
@@ -535,7 +762,19 @@ function injectReceipts(mainHtml, ledger) {
 // never invisible: the two variants produce visibly different PDFs, and an
 // unexplained white one looks like a failed dual-mode render. The injected
 // script fills this note from the canonical root `data-print` attribute.
-const PRINT_VARIANT_INDICATOR = '<span id="ic-print-variant-note" class="ic-print-variant-note" role="note"></span>';
+function printVariantIndicator(jobContext = {}) {
+  const company = String(jobContext?.company || '').trim();
+  const title = String(jobContext?.title || jobContext?.jobTitle || '').trim();
+  // No leading "for" here — the client script prepends its own ("analysis
+  // for " + context + " indicates"); a "for" on both sides doubled up into
+  // "analysis for for Acme — Title indicates".
+  const context = company && title
+    ? `${company} — ${title}`
+    : (company ? company : (title ? `the ${title} role` : ''));
+  return `<span id="ic-print-variant-note" class="ic-print-variant-note" role="note"${context ? ` data-ic-paper-context="${escapeHtml(context)}"` : ''}></span>`;
+}
+
+const PRINT_VARIANT_INDICATOR = printVariantIndicator();
 
 const INJECTED_CHROME_CSS = `
 /* ==========================================================
@@ -644,7 +883,17 @@ const INJECTED_CHROME_CSS = `
 .ic-hist-key::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: #d6a86c; }
 .ic-hist-key-verify::before { background: #8eb49b; }
 .ic-preview-area { min-width: 0; padding: 34px 24px 70px; background: #e7e0d1; }
-.ic-preview-area .page { margin: 0 auto; }
+.ic-preview-area .page { margin: 0; }
+.ic-page-stage { position: relative; width: fit-content; margin: 0 auto 24px; }
+.ic-page-stage:last-child { margin-bottom: 0; }
+.ic-page-guides { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.ic-page-seam { position: absolute; left: 0; right: 0; }
+.ic-page-seam-fade-top, .ic-page-seam-fade-bot { position: absolute; left: 0; right: 0; height: 14px; }
+.ic-page-seam-fade-top { top: 0; background: linear-gradient(to bottom, rgba(26,24,21,.10), transparent); }
+.ic-page-seam-fade-bot { bottom: 0; background: linear-gradient(to top, rgba(26,24,21,.10), transparent); }
+.ic-page-seam-line { position: absolute; left: 0; right: 0; height: 1px; background: rgba(26,24,21,.18); }
+.ic-page-seam-line-dashed { position: static; height: 0; border-top: 1px dashed rgba(26,24,21,.30); }
+.ic-page-folio { position: absolute; right: 6px; font: 8.5px/1.3 "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace; letter-spacing: -0.005em; color: #8C857A; white-space: nowrap; }
 .ic-document-tabs { display: flex; gap: 8px; max-width: 794px; margin: 0 auto 16px; }
 .ic-document-tabs .ic-btn { padding: 7px 14px; border: 1px solid #a89f92; border-radius: 4px; background: #f7f4ed; color: #3b352f; font: 600 12px/1.3 -apple-system, "Helvetica Neue", Arial, sans-serif; cursor: pointer; }
 .ic-document-tabs [aria-selected="true"] { background: #7A1F2B; border-color: #7A1F2B; color: #fff; }
@@ -664,6 +913,8 @@ const INJECTED_CHROME_CSS = `
   .ic-document-tabs { display: none !important; }
   .ic-workspace-sidebar { display: none !important; }
   .ic-resume-workspace, .ic-preview-area { display: contents !important; }
+  .ic-page-stage { display: contents; }
+  .ic-page-guides { display: none !important; }
 }
 
 /* ---- receipts (design doc §4.3) ----
@@ -716,6 +967,167 @@ const INJECTED_CHROME_CSS = `
 // free to guard against.
 function jsStringLiteral(s) {
   return JSON.stringify(String(s ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+}
+
+// Browser-side mirror of sanitizeDocumentMainHtml(). It operates on a detached
+// template so old localStorage HTML is inert before it ever reaches the live
+// page. Keep this intentionally explicit instead of shipping a second sanitizer
+// dependency inside every standalone application file.
+function editableRuntimeSanitizerSource() {
+  const editableTags = [...SAFE_DOCUMENT_TAGS].filter(tag => tag !== 'main');
+  return `
+  var IC_SAFE_EDIT_TAGS = new Set(${JSON.stringify(editableTags)});
+  var IC_ACTIVE_EDIT_TAGS = new Set(${JSON.stringify([...ACTIVE_DOCUMENT_TAGS])});
+  var IC_RESUME_EDIT_CLASSES = new Set(${JSON.stringify([...RESUME_MODEL_CLASSES, ...HOST_EDITABLE_CLASSES])});
+  var IC_COVER_EDIT_CLASSES = new Set(${JSON.stringify([...COVER_DOCUMENT_CLASSES, ...HOST_EDITABLE_CLASSES])});
+  var IC_SAFE_EDIT_ROLES = new Set(${JSON.stringify([...SAFE_ROLES])});
+  var IC_SAFE_EDIT_ITEM_PROPS = new Set(${JSON.stringify([...SAFE_ITEM_PROPS])});
+  var IC_SAFE_EDIT_ITEM_TYPES = new Set(${JSON.stringify([...SAFE_ITEM_TYPES])});
+  var IC_SAFE_EDIT_ARIA = new Set(${JSON.stringify([...SAFE_ARIA_ATTRS])});
+  var IC_HOST_EDIT_DATA = new Set(${JSON.stringify([...HOST_EDITABLE_DATA_ATTRS])});
+
+  function icSafeHref(value) {
+    var href = String(value || '').trim();
+    return /^(?:https?:\\/\\/|mailto:|tel:)[^\\u0000-\\u001f\\u007f]*$/i.test(href) ? href.slice(0, 2048) : '';
+  }
+  function icSanitizeEditAttributes(element, kind) {
+    var classes = kind === 'cover' ? IC_COVER_EDIT_CLASSES : IC_RESUME_EDIT_CLASSES;
+    Array.prototype.slice.call(element.attributes).forEach(function (attr) {
+      var name = attr.name.toLowerCase();
+      var raw = String(attr.value || '');
+      var value = raw;
+      var keep = false;
+      if (name === 'class') {
+        value = raw.split(/\\s+/).filter(function (token) { return classes.has(token); }).join(' ');
+        keep = !!value;
+      } else if (name === 'id') {
+        keep = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(raw) && !/^ic-/i.test(raw);
+      } else if (name === 'role') {
+        keep = IC_SAFE_EDIT_ROLES.has(raw);
+      } else if (IC_SAFE_EDIT_ARIA.has(name)) {
+        keep = raw.length <= 256 && !/[\\u0000-\\u001f\\u007f]/.test(raw);
+      } else if (name === 'itemprop') {
+        keep = raw.split(/\\s+/).every(function (token) { return IC_SAFE_EDIT_ITEM_PROPS.has(token); });
+      } else if (name === 'itemscope') {
+        keep = true; value = '';
+      } else if (name === 'itemtype') {
+        keep = IC_SAFE_EDIT_ITEM_TYPES.has(raw);
+      } else if (name === 'datetime') {
+        keep = /^[A-Za-z0-9:+.-]{0,64}$/.test(raw);
+      } else if (name === 'href' && element.localName === 'a') {
+        value = icSafeHref(raw); keep = !!value;
+      } else if (name === 'title') {
+        keep = raw.length <= 512 && !/[\\u0000-\\u001f\\u007f]/.test(raw);
+      } else if (name === 'data-achievement-id') {
+        keep = /^[A-Za-z0-9_.:-]{1,120}$/.test(raw);
+      } else if (IC_HOST_EDIT_DATA.has(name)) {
+        if (name === 'data-ic-inferred-skill') {
+          keep = /^[A-Za-z0-9_-]{1,160}$/.test(raw);
+        } else if (name === 'data-ic-inferred-separator') {
+          keep = raw === 'join' || raw === 'between';
+        } else {
+          keep = raw === '';
+        }
+      } else if (name === 'hidden') {
+        keep = true; value = '';
+      }
+      if (!keep) element.removeAttribute(attr.name);
+      else if (value !== raw) element.setAttribute(name, value);
+    });
+  }
+  function icTrustedDerivationMap(root) {
+    var trusted = new Map();
+    var ambiguous = new Set();
+    if (!root) return trusted;
+    Array.prototype.slice.call(root.querySelectorAll('[data-achievement-id][data-derivation]')).forEach(function (element) {
+      var id = element.getAttribute('data-achievement-id') || '';
+      var derivation = element.getAttribute('data-derivation') || '';
+      if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(id) || !derivation || derivation.length > 2000) return;
+      var key = id + '\\u0000' + (element.textContent || '');
+      if (ambiguous.has(key)) return;
+      if (!trusted.has(key)) trusted.set(key, derivation);
+      else if (trusted.get(key) !== derivation) {
+        trusted.delete(key);
+        ambiguous.add(key);
+      }
+    });
+    return trusted;
+  }
+  function icRestoreTrustedDerivations(root, trusted) {
+    if (!root || !trusted) return;
+    Array.prototype.slice.call(root.querySelectorAll('[data-achievement-id]')).forEach(function (element) {
+      var id = element.getAttribute('data-achievement-id') || '';
+      var derivation = trusted.get(id + '\\u0000' + (element.textContent || ''));
+      if (derivation) element.setAttribute('data-derivation', derivation);
+      else element.removeAttribute('data-derivation');
+    });
+  }
+  function icSanitizeEditableMarkup(raw, kind, trustedDerivations) {
+    var template = document.createElement('template');
+    template.innerHTML = String(raw || '');
+    var root = document.createElement('div');
+    root.appendChild(template.content);
+    Array.prototype.slice.call(root.querySelectorAll('*')).reverse().forEach(function (element) {
+      var tag = element.localName;
+      if (IC_ACTIVE_EDIT_TAGS.has(tag)) element.remove();
+      else if (!IC_SAFE_EDIT_TAGS.has(tag)) element.replaceWith.apply(element, Array.prototype.slice.call(element.childNodes));
+    });
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+    var comments = [], comment;
+    while ((comment = walker.nextNode())) comments.push(comment);
+    comments.forEach(function (node) { node.remove(); });
+    Array.prototype.slice.call(root.querySelectorAll('*')).forEach(function (element) {
+      icSanitizeEditAttributes(element, kind);
+    });
+    icRestoreTrustedDerivations(root, trustedDerivations);
+    return root.innerHTML;
+  }
+  function icInsertPlainText(text) {
+    var value = String(text || '');
+    if (document.execCommand && document.execCommand('insertText', false, value)) return;
+    var selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return;
+    var range = selection.getRangeAt(0);
+    range.deleteContents();
+    var node = document.createTextNode(value);
+    range.insertNode(node);
+    range.setStartAfter(node); range.collapse(true);
+    selection.removeAllRanges(); selection.addRange(range);
+  }
+  function icInstallPlainTextEditing(target) {
+    if (!target) return;
+    target.addEventListener('paste', function (event) {
+      event.preventDefault();
+      icInsertPlainText(event.clipboardData ? event.clipboardData.getData('text/plain') : '');
+    });
+    target.addEventListener('drop', function (event) {
+      event.preventDefault();
+      icInsertPlainText(event.dataTransfer ? event.dataTransfer.getData('text/plain') : '');
+    });
+  }
+`;
+}
+
+function createDocumentScriptNonce() {
+  return crypto.randomBytes(18).toString('base64');
+}
+
+function contentSecurityPolicyMeta(scriptNonce) {
+  const policy = [
+    "default-src 'none'",
+    `script-src 'nonce-${scriptNonce}'`,
+    "style-src 'unsafe-inline' https://fonts.googleapis.com",
+    'font-src https://fonts.gstatic.com',
+    'connect-src http://127.0.0.1:43192',
+    "img-src 'none'",
+    "media-src 'none'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "worker-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; ');
+  return `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(policy)}">`;
 }
 
 // A résumé HTML file is intentionally standalone: people routinely open it
@@ -773,6 +1185,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
       decisiveness: Number.isInteger(need?.decisiveness) && need.decisiveness >= 1 && need.decisiveness <= 100
         ? need.decisiveness : null,
       kind: auditText(need?.kind, 48),
+      emphasisReason: auditText(need?.emphasisReason, 420),
     })),
     finalPlan: {
       roleThesis: auditText(rawAudit.finalPlan?.roleThesis, 600),
@@ -826,7 +1239,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
  */
 export function embedApplicationSyncConfig(applicationHtml, sync) {
   const source = String(applicationHtml || '');
-  const match = /(<script\s+id="ic-application-bundle-data"\s+type="application\/json">)([\s\S]*?)(<\/script>)/i.exec(source);
+  const match = /(<script\s+id="ic-application-bundle-data"\s+type="application\/json"(?:\s+nonce="[^"]+")?>)([\s\S]*?)(<\/script>)/i.exec(source);
   if (!match) throw new Error('Generated application HTML is missing its sync configuration node.');
   let data;
   try { data = JSON.parse(match[2]); } catch { throw new Error('Generated application HTML has invalid sync configuration data.'); }
@@ -1219,7 +1632,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
     <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
-    ${PRINT_VARIANT_INDICATOR}
+    ${printVariantIndicator(jobContext)}
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
     <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
@@ -1266,7 +1679,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
  * design system loads these faces from Google Fonts, so the message directs
  * the user to connectivity/content blocking rather than package repair.
  */
-function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle }) {
+function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle, scriptNonce }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const bundleJson = JSON.stringify(bundle).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
@@ -1283,8 +1696,9 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
 </div>
 <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn\u2019t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
 `;
-  const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json">${bundleJson}</script><script>
+  const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json" nonce="${escapeHtml(scriptNonce)}">${bundleJson}</script><script nonce="${escapeHtml(scriptNonce)}">
 (function () {
+${editableRuntimeSanitizerSource()}
   var DOC_ID = ${jsStringLiteral(safeDocId)};
   var HAS_APPLICATION_BUNDLE = ${isResumeBundle ? 'true' : 'false'};
   var bundleDataElement = document.getElementById('ic-application-bundle-data');
@@ -1314,6 +1728,9 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   var pdfStale = { resume: false, cover: false };
   var syncMessage = '';
   var initialResumeMarkup = resumeMain ? resumeMain.innerHTML : '';
+  var trustedResumeDerivations = icTrustedDerivationMap(resumeMain);
+  icInstallPlainTextEditing(resumeMain);
+  icInstallPlainTextEditing(coverMain);
 
   function persistBundleData() {
     if (bundleDataElement) bundleDataElement.textContent = JSON.stringify(BUNDLE_DATA).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
@@ -1356,11 +1773,18 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   // the shared résumé/cover-letter paper profile from the employer and job
   // context; Sync must preserve that tailored decision. Name both the visible
   // result and the selection rationale so a white PDF cannot be mistaken for a
-  // broken dual-mode render.
+  // broken dual-mode render. ink-only now flips the on-screen preview to
+  // white too (colors_and_type.css §10.3 / STYLE.md §10.3), so "white in
+  // viewers and print" is literally true of the page the user is looking at,
+  // not just of the eventual export.
   if (printVariantNote) {
+    var paperContext = printVariantNote.getAttribute('data-ic-paper-context') || '';
+    var paperDecisionReasonLead = paperContext
+      ? 'analysis for ' + paperContext + ' indicates'
+      : 'the company or role appears';
     printVariantNote.textContent = document.documentElement.getAttribute('data-print') === 'ink-only'
-      ? 'AI paper decision: Flat white PDF — white in viewers and print; the company or role appears ATS-heavy, enterprise, regulated, or otherwise conservative.'
-      : 'AI paper decision: Dual-mode PDF — cream in viewers, white in print; the company or role appears design-conscious, startup-oriented, or craft-focused.';
+      ? 'AI paper decision: Flat white PDF — white in viewers and print; ' + paperDecisionReasonLead + (paperContext ? ' an ' : ' ') + 'ATS-heavy, enterprise, regulated, or otherwise conservative recipient profile.'
+      : 'AI paper decision: Dual-mode PDF — cream in viewers, white in print; ' + paperDecisionReasonLead + (paperContext ? ' a ' : ' ') + 'design-conscious, startup-oriented, or craft-focused recipient profile.';
   }
 
   function selectDocument(kind) {
@@ -1388,6 +1812,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     if (editBtn) editBtn.textContent = 'Edit ' + (kind === 'cover' ? 'cover letter' : 'résumé');
     updateSync();
     updateSkillReviewStatus();
+    if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
   }
   documentTabs.forEach(function (tab) {
     tab.addEventListener('click', function () { selectDocument(tab.getAttribute('data-ic-document-tab')); });
@@ -1542,7 +1967,10 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     try {
       var saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        main.innerHTML = saved;
+        // Parse/sanitize in a detached template first. Assigning legacy rich
+        // HTML directly to a connected main can fire an image/event payload
+        // before any later cleanup gets a chance to run.
+        main.innerHTML = icSanitizeEditableMarkup(saved, 'resume', trustedResumeDerivations);
         if (restoreNote) restoreNote.hidden = false;
         markPdfStale('resume');
       }
@@ -1554,16 +1982,20 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
         // The main variable follows the selected tab. Capture the stable résumé node so
         // switching to the cover tab during the debounce cannot save cover
         // markup into the résumé's storage slot.
-        try { localStorage.setItem(STORAGE_KEY, resumeMain.innerHTML); } catch (e) {}
+        try { localStorage.setItem(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, 'resume', trustedResumeDerivations)); } catch (e) {}
       }, 500);
     }
-    main.addEventListener('input', function () { scheduleSave(); markPdfStale('resume'); });
+    main.addEventListener('input', function () {
+      scheduleSave();
+      markPdfStale('resume');
+      if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+    });
   }
   if (coverMain) {
     try {
       var savedCover = localStorage.getItem(STORAGE_KEY + ':cover');
       if (savedCover) {
-        coverMain.innerHTML = savedCover;
+        coverMain.innerHTML = icSanitizeEditableMarkup(savedCover, 'cover');
         markPdfStale('cover');
       }
     } catch (e) {}
@@ -1571,9 +2003,10 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     coverMain.addEventListener('input', function () {
       if (coverSaveTimer) clearTimeout(coverSaveTimer);
       coverSaveTimer = setTimeout(function () {
-        try { localStorage.setItem(STORAGE_KEY + ':cover', coverMain.innerHTML); } catch (e) {}
+        try { localStorage.setItem(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover')); } catch (e) {}
       }, 500);
       markPdfStale('cover');
+      if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
     });
   }
 
@@ -1604,6 +2037,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
       stopEditing();
       persistBundleData();
       var documentToSync = activeDocument === 'cover' ? 'cover' : 'resume';
+      if (main) main.innerHTML = icSanitizeEditableMarkup(main.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
       syncMessage = '';
       var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;
       syncBtn.disabled = true;
@@ -1711,16 +2145,17 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
  */
 export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter, coverLetterCentered = false } = {}) {
   let main = String(resumeMainHtml || '').trim();
-  // Defensive: if the model wrapped its answer in a full document or fences,
-  // extract just the <main> block.
+  // Defensive: accept a fenced response, but let the DOM-based sanitizer find
+  // the one real <main> element. Regex extraction is unsafe here: a script or
+  // attribute can contain convincing literal "<main>" text.
   const fence = /```(?:html)?\s*([\s\S]*?)\s*```/i.exec(main);
   if (fence) main = fence[1].trim();
-  const mainMatch = /<main[\s\S]*<\/main>/i.exec(main);
-  if (mainMatch) main = mainMatch[0];
   // Decode any literal "\n"/"\t" the model left in the markup so they collapse as
   // HTML whitespace instead of printing verbatim (real newlines are untouched).
   main = decodeTextEscapes(main);
+  main = sanitizeDocumentMainHtml(main, { documentKind: 'resume', allowHostState: false });
   main = stripMainVariantAttrs(main);
+  main = neutralizeHighlightTextEmphasis(main);
   assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter });
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
@@ -1745,12 +2180,14 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
     coverMain = coverMain.replace(/<main\b/i, '<main data-ic-letter-centered');
   }
   const css = inlineStylesheets(CSS_FILES);
-  const chrome = buildInjectedChrome({ docId, kind: 'resume', workspace: true, downloadBundle });
+  const scriptNonce = createDocumentScriptNonce();
+  const chrome = buildInjectedChrome({ docId, kind: 'resume', workspace: true, downloadBundle, scriptNonce });
 
   return `<!doctype html>
 <html lang="en" ${attrs}>
 <head>
 <meta charset="utf-8">
+${contentSecurityPolicyMeta(scriptNonce)}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Application Workspace</title>
 <style>
@@ -1767,20 +2204,182 @@ ${workspace.markup}
       <button type="button" id="ic-resume-tab" class="ic-btn" role="tab" data-ic-document-tab="resume" aria-controls="ic-resume-panel" aria-selected="true" tabindex="0">Résumé</button>
       <button type="button" id="ic-cover-tab" class="ic-btn" role="tab" data-ic-document-tab="cover" aria-controls="ic-cover-panel" aria-selected="false" tabindex="-1">Cover letter</button>
     </div>
-    <section id="ic-resume-panel" role="tabpanel" aria-labelledby="ic-resume-tab" data-ic-document-panel="resume">${main}</section>
-    <section id="ic-cover-panel" role="tabpanel" aria-labelledby="ic-cover-tab" data-ic-document-panel="cover" hidden>${coverMain}</section>
+    <section id="ic-resume-panel" role="tabpanel" aria-labelledby="ic-resume-tab" data-ic-document-panel="resume"><div class="ic-page-stage">${main}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
+    <section id="ic-cover-panel" role="tabpanel" aria-labelledby="ic-cover-tab" data-ic-document-panel="cover" hidden><div class="ic-page-stage">${coverMain}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
 ${chrome}
   </div>
 </div>
+<script nonce="${escapeHtml(scriptNonce)}">
+(function () {
+  'use strict';
+  try {
+    var stages = Array.prototype.slice.call(document.querySelectorAll('.ic-page-stage'));
+    if (!stages.length) return;
+    // .role-dates / .role-location are the right-hand cell of a two-column
+    // (1fr auto) meta row — they sit far from the row's own left edge by
+    // design, not because they start a new page. Testing them as independent
+    // candidates makes columnIndexOf() below mistake a right-aligned date or
+    // location for a second page. dd (skills values) has the same shape and
+    // is redundant anyway: its paired dt already reports that row's column
+    // correctly from the left edge.
+    var CANDIDATE_SELECTOR = 'li, p:not(.role-dates):not(.role-location), dt, header, hr, h1, h2, h3, .role-header, .role-meta, .project, .letter-close';
+
+    function pxFromVar(varValue) {
+      var probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;height:' + varValue + ';';
+      document.body.appendChild(probe);
+      var px = probe.getBoundingClientRect().height;
+      probe.remove();
+      return px;
+    }
+
+    function measureGeometry(pageEl) {
+      var rootVar = getComputedStyle(document.documentElement).getPropertyValue('--page-h').trim() || '11in';
+      var pageHeightPx = pxFromVar(rootVar);
+      var cs = getComputedStyle(pageEl);
+      var marginTopPx = parseFloat(cs.paddingTop) || 0;
+      var marginBotPx = parseFloat(cs.paddingBottom) || 0;
+      var marginSidePx = parseFloat(cs.paddingLeft) || 0;
+      return {
+        contentPerPagePx: Math.max(60, pageHeightPx - marginTopPx - marginBotPx),
+        marginSidePx: marginSidePx,
+        outerWidthPx: pageEl.getBoundingClientRect().width,
+      };
+    }
+
+    function buildShadowClone(pageEl, geometry) {
+      var host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-99999px;top:0;visibility:hidden;pointer-events:none;';
+      var clone = pageEl.cloneNode(true);
+      clone.removeAttribute('contenteditable');
+      Array.prototype.slice.call(clone.querySelectorAll('[id]')).forEach(function (el) { el.removeAttribute('id'); });
+      clone.style.cssText = 'box-sizing:border-box;margin:0;box-shadow:none;min-height:0;'
+        + 'width:' + geometry.outerWidthPx + 'px;height:' + geometry.contentPerPagePx + 'px;'
+        + 'padding:0 ' + geometry.marginSidePx + 'px;'
+        // With border-box sizing, the usable CSS column is the outer paper
+        // width minus both side paddings. Add those paddings back as the gap so
+        // each successive column begins exactly one outer paper width later —
+        // the same advance columnIndexOf() measures below.
+        + 'column-width:' + geometry.outerWidthPx + 'px;column-gap:' + (geometry.marginSidePx * 2) + 'px;column-fill:auto;overflow:visible;';
+      host.appendChild(clone);
+      document.body.appendChild(host);
+      void clone.getBoundingClientRect();
+      return { host: host, clone: clone };
+    }
+
+    function columnIndexOf(left, containerLeft, columnWidth) {
+      return columnWidth <= 0 ? 0 : Math.max(0, Math.round((left - containerLeft) / columnWidth));
+    }
+
+    function computeBreaks(pageEl) {
+      var geometry = measureGeometry(pageEl);
+      var liveCandidates = Array.prototype.slice.call(pageEl.querySelectorAll(CANDIDATE_SELECTOR));
+      if (!liveCandidates.length) return { breaks: [], pageCount: 1 };
+      var shadow = buildShadowClone(pageEl, geometry);
+      try {
+        var cloneCandidates = Array.prototype.slice.call(shadow.clone.querySelectorAll(CANDIDATE_SELECTOR));
+        var containerLeft = shadow.clone.getBoundingClientRect().left;
+        var pageLiveRect = pageEl.getBoundingClientRect();
+        var breaks = [];
+        var lastColumn = 0;
+        var n = Math.min(liveCandidates.length, cloneCandidates.length);
+        for (var i = 0; i < n; i++) {
+          var rects = cloneCandidates[i].getClientRects();
+          if (!rects.length) continue;
+          var firstCol = columnIndexOf(rects[0].left, containerLeft, geometry.outerWidthPx);
+          var lastCol = columnIndexOf(rects[rects.length - 1].left, containerLeft, geometry.outerWidthPx);
+          if (firstCol > lastColumn) {
+            var prevLive = liveCandidates[i - 1];
+            var afterBottom = prevLive ? prevLive.getBoundingClientRect().bottom : pageLiveRect.top;
+            var beforeTop = liveCandidates[i].getBoundingClientRect().top;
+            var top = Math.min(Math.max(afterBottom - pageLiveRect.top, 0), Math.max(beforeTop - pageLiveRect.top, 0));
+            var bottom = Math.max(beforeTop - pageLiveRect.top, top);
+            breaks.push({ page: firstCol + 1, top: top, bottom: bottom, approximate: false });
+            lastColumn = firstCol;
+          }
+          if (lastCol > firstCol) {
+            for (var c = firstCol; c < lastCol; c++) {
+              var ratio = (c + 1 - firstCol) / (lastCol - firstCol + 1);
+              var liveRect = liveCandidates[i].getBoundingClientRect();
+              breaks.push({ page: c + 2, top: liveRect.top - pageLiveRect.top + liveRect.height * ratio, bottom: 0, approximate: true });
+            }
+            lastColumn = lastCol;
+          }
+        }
+        return { breaks: breaks, pageCount: lastColumn + 1 };
+      } finally {
+        shadow.host.remove();
+      }
+    }
+
+    function renderGuides(stage) {
+      var pageEl = stage.querySelector('.page');
+      var guides = stage.querySelector('.ic-page-guides');
+      if (!pageEl || !guides) return;
+      var result;
+      try { result = computeBreaks(pageEl); } catch (e) { guides.innerHTML = ''; return; }
+      var html = '';
+      result.breaks.forEach(function (b) {
+        if (b.approximate) {
+          html += '<div class="ic-page-seam ic-page-seam-approx" style="top:' + b.top + 'px">'
+            + '<div class="ic-page-seam-line ic-page-seam-line-dashed"></div>'
+            + '<span class="ic-page-folio" style="top:-11px">Page ' + b.page + '</span></div>';
+        } else {
+          var h = Math.max(1, b.bottom - b.top);
+          html += '<div class="ic-page-seam" style="top:' + b.top + 'px;height:' + h + 'px">'
+            + '<div class="ic-page-seam-fade-top"></div><div class="ic-page-seam-line" style="top:' + (h / 2) + 'px"></div>'
+            + '<div class="ic-page-seam-fade-bot"></div><span class="ic-page-folio" style="top:' + (h / 2 - 6) + 'px">Page ' + b.page + '</span></div>';
+        }
+      });
+      guides.innerHTML = html;
+      stage.setAttribute('data-ic-page-count', String(result.pageCount));
+    }
+
+    var scheduled = false;
+    function scheduleRecompute() {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(function () {
+        scheduled = false;
+        stages.forEach(function (stage) { if (stage.offsetParent !== null) renderGuides(stage); });
+      });
+    }
+    window.icPageGuidesRecompute = scheduleRecompute;
+    if (window.ResizeObserver) {
+      var ro = new ResizeObserver(scheduleRecompute);
+      stages.forEach(function (stage) {
+        var pageEl = stage.querySelector('.page');
+        if (pageEl) ro.observe(pageEl);
+      });
+    }
+    window.addEventListener('resize', scheduleRecompute);
+    new MutationObserver(scheduleRecompute).observe(document.documentElement, {
+      attributes: true, attributeFilter: ['data-page', 'data-density', 'data-mono', 'data-print', 'data-letter'],
+    });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleRecompute).catch(function () {});
+    scheduleRecompute();
+  } catch (e) { /* Screen-only preview enhancement: never block the application. */ }
+})();
+</script>
 </body>
 </html>`;
+}
+
+function coverLetterDateTime(value) {
+  const match = String(value || '').match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\b.*\b(\d{4})\b/i);
+  if (!match) return '';
+  const month = [
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+  ].indexOf(match[1].toLowerCase()) + 1;
+  return month ? `${match[2]}-${String(month).padStart(2, '0')}` : '';
 }
 
 /**
  * Build the cover-letter document from structured fields using the design
  * system's NATIVE cover-letter surface (`cover-letter.html` / `cover-letter.css`):
  * the same `.resume-header` letterhead as the résumé, a hairline rule, the
- * date+recipient `.letter-meta` block, the Source-Serif `.letter-body`, and the
+ * date-only `.letter-meta` block, the Source-Serif `.letter-body`, and the
  * `.letter-close` signature block. We own only field substitution — the
  * typography, spacing, and the serif-body voice come straight from the design
  * system's stylesheets (no guessed inline CSS). `variantAttrs` mirrors the
@@ -1790,7 +2389,7 @@ ${chrome}
  * appears in the résumé where it *does* carry one.
  *
  * @param {object} args
- * @param {object} [args.letter]        { name, tagline, contact[], date, recipient (\n-separated lines),
+ * @param {object} [args.letter]        { name, tagline, contact[], date,
  *                                         salutation, paragraphs[], closing, signatureTitle }
  * @param {string} [args.variantAttrs]
  * @param {string} [args.docId]         stable id for this document, namespaces localStorage autosave (§5.5)
@@ -1808,16 +2407,7 @@ export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId
     .join('\n      <span class="sep" aria-hidden="true">·</span>\n      ');
 
   const date       = escapeHtml(decodeTextEscapes(letter.date || ''));
-  // The design system renders the recipient as a block: the first line is the
-  // addressee (.recipient-name, set bolder), the rest are .recipient-line rows.
-  // The schema delivers the block as a single \n-separated string — decode first
-  // so a literal "\n" (real OR double-escaped) splits into rows correctly.
-  const recipientLines = decodeTextEscapes(letter.recipient || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const recipientHtml = recipientLines
-    .map((line, i) => i === 0
-      ? `<span class="recipient-name">${escapeHtml(line)}</span>`
-      : `<span class="recipient-line">${escapeHtml(line)}</span>`)
-    .join('\n      ');
+  const dateTime   = coverLetterDateTime(letter.date);
 
   const salutation = escapeHtml(decodeTextEscapes(letter.salutation || 'Dear Hiring Team,'));
   const paragraphs = (Array.isArray(letter.paragraphs) ? letter.paragraphs : [])
@@ -1833,12 +2423,14 @@ export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId
   const signatureTitle = escapeHtml(decodeTextEscapes(letter.signatureTitle || ''));
 
   const css = inlineStylesheets(CSS_FILES);
-  const chrome = buildInjectedChrome({ docId, kind: 'cover-letter' });
+  const scriptNonce = createDocumentScriptNonce();
+  const chrome = buildInjectedChrome({ docId, kind: 'cover-letter', scriptNonce });
 
   return `<!doctype html>
 <html lang="en" ${variantAttrs}>
 <head>
 <meta charset="utf-8">
+${contentSecurityPolicyMeta(scriptNonce)}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cover Letter</title>
 <style>
@@ -1861,10 +2453,7 @@ ${chrome}
   <hr class="letterhead-rule" aria-hidden="true">
 
   <div class="letter-meta">
-    ${date ? `<p class="letter-date"><time>${date}</time></p>` : ''}
-    ${recipientHtml ? `<address class="letter-recipient">
-      ${recipientHtml}
-    </address>` : ''}
+    ${date ? `<p class="letter-date"><time${dateTime ? ` datetime="${dateTime}"` : ''}>${date}</time></p>` : ''}
   </div>
 
   <div class="letter-body">
@@ -1929,7 +2518,6 @@ export function assertDesignSystemIntact() {
     }
 
     for (const [file, key] of [['resume.html', 'mainExtractionOk'], ['cover-letter.html', 'coverMainExtractionOk']]) {
-      result.checked.push(file);
       const htmlPath = path.join(dir, file);
       if (!fs.existsSync(htmlPath)) {
         result.missing.push(file);

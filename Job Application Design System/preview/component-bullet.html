@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- @dsCard group="Components" name="Component · Bullet" subtitle="Inline scope / trade-off annotations inherit the bullet's type — one continuous run" viewport="700x240" -->
+<!-- @dsCard group="Components" name="Component · Bullet" subtitle="Uniform bullet weight: scope / trade-off annotations and inline <strong> metrics all inherit the bullet's type" viewport="700x240" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
@@ -8,7 +8,10 @@
   .bullets li { padding-left: 1.05em; position: relative; font-size: 10.25pt; line-height: 1.45; margin-bottom: 8px; }
   .bullets li::before { content: "•"; position: absolute; left: 0; color: var(--ink-3); }
   .bullets li:last-child { margin-bottom: 0; }
-  .bullets strong { font-weight: 600; }
+  /* <strong>/<b> mark metrics semantically but render at the bullet's own
+     weight/colour — no bold inside bullet copy (STYLE.md §5.4.1). Structural
+     bold (name, role title, employer, project name) is unaffected elsewhere. */
+  .bullets strong, .bullets b { font-weight: inherit; color: inherit; }
   /* Semantic only: no visual treatment. An annotation can start mid-bullet,
      so it inherits the bullet's type outright — no caption size, no italic,
      no metadata grey. Labels are real spans, as in the résumé markup. */
@@ -17,7 +20,7 @@
 </style>
 </head><body>
 <ul class="bullets">
-  <li>Plain bullet: <strong>1.4M QPS</strong> at p99 <strong>38 ms</strong> across 19 PB. <span class="tag">plain</span></li>
+  <li>Plain bullet: <strong>1.4M QPS</strong> at p99 <strong>38 ms</strong> across 19 PB, same weight throughout. <span class="tag">plain</span></li>
   <li>With scope: owned the multi-region replication design.<span class="scope"><span class="annotation-label"> · </span>8 engineers, 11-month project</span> <span class="tag">x_scope</span></li>
   <li>With trade-off: chose CRDT metadata sync over Raft.<span class="tradeoff"><span class="annotation-label"> · trade-off: </span>eventual convergence in exchange for fewer quorum-loss outages.</span> <span class="tag">x_tradeoff</span></li>
 </ul>

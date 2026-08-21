@@ -10,28 +10,33 @@
 </head><body>
 <div class="grid">
   <div class="swatch">
-    <div class="chip" style="background:#F7F4ED;"></div>
-    <div class="lbl"><span class="name">--bg · ground</span><span class="hex">#F7F4ED</span><span class="hex" style="color:var(--ink-3)">warm off-white, never #FFF</span></div>
+    <div class="chip" style="background:var(--bg);"></div>
+    <div class="lbl"><span class="name">--bg · ground</span><span class="hex" data-token="--bg"></span><span class="hex" style="color:var(--ink-3)">warm off-white, never #FFF</span></div>
   </div>
   <div class="swatch">
-    <div class="chip" style="background:#1A1815;"></div>
-    <div class="lbl"><span class="name">--ink-1 · primary</span><span class="hex">#1A1815</span><span class="hex" style="color:var(--ink-3)">body, role title, name</span></div>
+    <div class="chip" style="background:var(--ink-1);"></div>
+    <div class="lbl"><span class="name">--ink-1 · primary</span><span class="hex" data-token="--ink-1"></span><span class="hex" style="color:var(--ink-3)">body, role title, name</span></div>
   </div>
   <div class="swatch">
-    <div class="chip" style="background:#54504A;"></div>
-    <div class="lbl"><span class="name">--ink-2 · secondary</span><span class="hex">#54504A</span><span class="hex" style="color:var(--ink-3)">dates, locations, summary</span></div>
+    <div class="chip" style="background:var(--ink-2);"></div>
+    <div class="lbl"><span class="name">--ink-2 · secondary</span><span class="hex" data-token="--ink-2"></span><span class="hex" style="color:var(--ink-3)">dates, locations, summary</span></div>
   </div>
   <div class="swatch">
-    <div class="chip" style="background:#8C857A;"></div>
-    <div class="lbl"><span class="name">--ink-3 · tertiary</span><span class="hex">#8C857A</span><span class="hex" style="color:var(--ink-3)">bullet glyphs, subdued meta</span></div>
+    <div class="chip" style="background:var(--ink-3);"></div>
+    <div class="lbl"><span class="name">--ink-3 · tertiary</span><span class="hex" data-token="--ink-3"></span><span class="hex" style="color:var(--ink-3)">bullet glyphs, subdued meta</span></div>
   </div>
   <div class="swatch">
-    <div class="chip" style="background:#B6AFA2;"></div>
-    <div class="lbl"><span class="name">--ink-4 · quaternary</span><span class="hex">#B6AFA2</span><span class="hex" style="color:var(--ink-3)">separators, disabled</span></div>
+    <div class="chip" style="background:var(--ink-4);"></div>
+    <div class="lbl"><span class="name">--ink-4 · quaternary</span><span class="hex" data-token="--ink-4"></span><span class="hex" style="color:var(--ink-3)">separators, disabled</span></div>
   </div>
   <div class="swatch">
-    <div class="chip" style="background:rgba(26,24,21,0.10); background-color:#F7F4ED; background-image:linear-gradient(rgba(26,24,21,0.10),rgba(26,24,21,0.10));"></div>
+    <div class="chip" style="background-color:var(--bg); background-image:linear-gradient(var(--bg-rule),var(--bg-rule));"></div>
     <div class="lbl"><span class="name">--bg-rule · hairline</span><span class="hex">10% ink-1</span><span class="hex" style="color:var(--ink-3)">section header rules</span></div>
   </div>
 </div>
+<script>
+for (const el of document.querySelectorAll('[data-token]')) {
+  el.textContent = getComputedStyle(document.documentElement).getPropertyValue(el.dataset.token).trim().toUpperCase();
+}
+</script>
 </body></html>

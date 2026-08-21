@@ -983,8 +983,22 @@ export default [
       assert(isSensitivePath('/Users/x/.bash_history') === true, 'blocks bash history');
       assert(isSensitivePath('/Users/x/Library/Keychains/login.keychain-db') === true, 'blocks macOS keychain');
       assert(isSensitivePath('/etc/passwd') === true, 'blocks /etc');
+      for (const exactSensitiveDirectory of [
+        '/Users/x/.ssh', '/Users/x/.aws', '/Users/x/.config', '/Users/x/.gnupg',
+        '/etc', '/var', '/Users/Shared', '/Volumes',
+        'C:\\Users\\x\\.ssh', 'C:\\Windows\\System32',
+      ]) {
+        assert(isSensitivePath(exactSensitiveDirectory) === true,
+          `blocks exact sensitive directory target ${exactSensitiveDirectory}`);
+      }
       assert(isSensitivePath('/') === true, 'blocks unix root');
       assert(isSensitivePath('C:\\') === true, 'blocks windows root');
+      assert(isSensitivePath('/Volumes/External Drive/resume.pdf') === false,
+        'a document below a mounted volume remains editable');
+      assert(isSensitivePath('/Users/Shared/team-notes.txt') === false,
+        'a document below the shared user folder remains editable');
+      assert(isSensitivePath('/Volumes/External Drive/.ssh/id_rsa') === true,
+        'credential directories remain blocked even below a mounted volume');
       assert(isSensitivePath('/Users/x/Downloads/resume.pdf') === false, 'a normal downloaded attachment passes');
       assert(isSensitivePath('/Users/x/Pictures/product.jpg') === false, 'a normal photo passes');
       assert(isSensitivePath('') === false, 'empty path → false (no throw)');
@@ -1016,13 +1030,21 @@ export default [
       assert(isAllowedOpenFileExt('/x/script.scpt') === false, 'scpt blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/launcher.desktop') === false, 'desktop blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/lib.jar') === false, 'jar blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/macro.xlsm') === false, 'macro-enabled spreadsheets are never handed to the OS shell');
+      for (const activeExt of [
+        '.svg', '.doc', '.xls', '.xlsm', '.ppt', '.odt',
+        '.pages', '.numbers', '.key', '.py', '.rb', '.php', '.jsx',
+      ]) {
+        assert(isAllowedOpenFileExt(`/x/active${activeExt}`) === false,
+          `${activeExt} is active, macro-capable, or may execute through its OS association`);
+      }
       assert(isAllowedOpenFileExt('/x/no-extension') === false, 'no extension → blocked, not allowed');
       // Regression: every extension CODE_EXT_RE (src/utils/fileExtensions.js)
       // treats as valid code/text DocumentNode content must be openable here
       // too, or dropping one of these onto the canvas creates a node whose
-      // own double-click-to-open silently fails. .js/.sh are the deliberate
-      // exceptions (Windows Script Host / shell can execute them directly).
-      for (const ext of ['.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.cs', '.php', '.swift', '.kt', '.toml', '.env']) {
+      // own double-click-to-open silently fails. Script-associated formats are
+      // deliberate exceptions: their OS association can execute the file.
+      for (const ext of ['.ts', '.tsx', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.cs', '.swift', '.kt', '.toml', '.env']) {
         assert(isAllowedOpenFileExt(`/x/file${ext}`) === true, `${ext} must be openable — CODE_EXT_RE treats it as valid document content`);
       }
       assert(isAllowedOpenFileExt('/x/script.js') === false, 'js still blocked — Windows Script Host executes it directly');
@@ -1703,7 +1725,7 @@ export default [
           computed: { isNumeric: true, display: '74% ($4.2M → $1.1M)' },
         },
       ];
-      const mainHtml = '<main class="page"><p>Cut debt <strong data-achievement-id="a1">74%</strong> and grew <strong data-achievement-id="ghost-id">40%</strong> revenue.</p></main>';
+      const mainHtml = '<main class="page"><article class="role"><ul class="highlights"><li>Python cut debt <strong data-achievement-id="a1">74%</strong> and grew <strong data-achievement-id="ghost-id">40%</strong> revenue.</li></ul></article></main>';
       const doc = buildResumeDocument({ resumeMainHtml: mainHtml, ledger });
 
       // CSS and behavior stay inline; typography retains the design-owned CDN
@@ -1740,7 +1762,12 @@ export default [
       assert(resolvedMatch, 'a resolving data-achievement-id gets a data-derivation attribute written next to it');
       assert(resolvedMatch[1].includes('74%') && resolvedMatch[1].includes('debt $4.2M'), 'the injected tooltip text is the CODE-COMPUTED figure + derivation, not anything the model wrote itself');
       assert(!doc.includes('data-achievement-id="ghost-id"'), 'an id absent from the ledger is stripped ENTIRELY — no bare data-achievement-id left behind (that would keep the CSS underline hook alive with nothing to show on hover)');
-      assert(doc.includes('<strong >40%</strong>') || doc.includes('<strong>40%</strong>'), 'the figure text itself survives even when its receipt is stripped — only the attribute (and its underline) is removed, not the number');
+      const highlight = /<ul class="highlights">([\s\S]*?)<\/ul>/.exec(doc)?.[1] || '';
+      assert(doc.includes('.highlights li b, .highlights li strong')
+        && !/<(?:b|strong)\b/i.test(highlight)
+        && /<span data-achievement-id="a1" data-derivation="[^"]+">74%<\/span>/.test(highlight)
+        && (highlight.includes('<span >40%</span>') || highlight.includes('<span>40%</span>')),
+      'the scoped design rule is inlined, while app normalization converts highlight emphasis to spans and keeps receipt text intact');
       return { ok: true };
     },
 },
@@ -1749,7 +1776,11 @@ export default [
     run: async () => {
       const { assertDesignSystemIntact, getDesignSystemDir, inlineDesignCssUrls } = await import('../../electron/ipc/resumeHtml.js');
       const result = assertDesignSystemIntact();
-      const required = ['colors_and_type.css', 'resume.css', 'cover-letter.css', 'resume.html', 'cover-letter.html', 'build/dual-mode-pdf.js'];
+      const required = [
+        'SKILL.md', 'readme.md', 'STYLE.md',
+        'colors_and_type.css', 'resume.css', 'cover-letter.css',
+        'resume.html', 'cover-letter.html', 'build/dual-mode-pdf.js',
+      ];
       assert(result.ok && result.fontDelivery === 'google-fonts' && result.fontContractOk
         && result.mainExtractionOk && result.coverMainExtractionOk
         && required.every(file => result.checked.includes(file)),
@@ -1761,8 +1792,9 @@ export default [
         'inliner preserves external and fragment URLs');
       const packageConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
       const resource = packageConfig?.build?.extraResources?.find(entry => entry?.from === 'Job Application Design System');
-      assert(resource?.to === 'Job Application Design System',
-        'electron-builder copies the design system to the runtime resource path getDesignSystemDir resolves');
+      assert(resource?.to === 'Job Application Design System'
+        && JSON.stringify(resource.filter) === JSON.stringify(required),
+      'electron-builder copies exactly the documented runtime design-system read set to the path getDesignSystemDir resolves');
       const errorFor = (css) => {
         try { inlineDesignCssUrls(css, cssPath, dir); } catch (error) { return String(error?.message || error); }
         return '';

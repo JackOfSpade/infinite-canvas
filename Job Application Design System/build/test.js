@@ -4,7 +4,7 @@
    Round-trips a synthetic PDF through `addOcgBackground()` and
    asserts on the structural properties that make the dual-mode
    contract work: OCG dictionary, /PrintState /OFF flag, per-page
-   marked-content stream, idempotency guard, custom-cream param,
+   marked-content stream, /D/AS Print auto-state, idempotency guard, custom-cream param,
    rotation/box assertions, layer-name idempotency boundary.
 
    Run from the project root:    node build/test.js
@@ -18,6 +18,15 @@
 
 var PDFLib = require('pdf-lib');
 var Mod    = require('./dual-mode-pdf.js');
+var Tokens = require('./css-tokens.js');
+
+/* The cream colour is READ FROM THE CSS, never restated here. Two
+   assertions below used to compare a hardcoded #F7F4ED against the
+   module's hardcoded copy of the same value — the pair could drift from
+   the actual --bg token in lockstep while reporting a match. */
+var CSS_BG      = Tokens.tokenValue('--bg');
+var CSS_BG_RGB  = Tokens.hexToRgb01(CSS_BG);
+var CSS_BG_OPS  = Tokens.pdfRgbOperands(CSS_BG);
 var addOcgBackground = Mod.addOcgBackground;
 
 // PDFLib classes — destructured once to keep assertions readable.
@@ -25,18 +34,15 @@ var PDFDocument = PDFLib.PDFDocument;
 var PDFName     = PDFLib.PDFName;
 var PDFArray    = PDFLib.PDFArray;
 var PDFDict     = PDFLib.PDFDict;
+var PDFRawStream = PDFLib.PDFRawStream;
 var PDFString   = PDFLib.PDFString;
 var degrees     = PDFLib.degrees;
 
 // ----- Tiny assertion harness ------------------------------------------
 
-var GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', RESET = '\x1b[0m';
-var passed = 0, failed = 0, failures = [];
-
-function ok(name)      { console.log('  ' + GREEN + '✓' + RESET + ' ' + name); passed++; }
-function fail(name, m) { console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m); failed++; failures.push(name); }
-function header(s)     { console.log('\n' + s); }
-function assert(cond, name, msg) { if (cond) ok(name); else fail(name, msg || 'assertion failed'); }
+var H = require('./harness.js');
+var ok = H.ok, fail = H.fail, header = H.header, assert = H.assert;
+var GREEN = H.GREEN, RED = H.RED, DIM = H.DIM, RESET = H.RESET;
 
 /* Run `fn` and report whether it threw and (optionally) whether the
  * thrown message matched `pattern`. Collapses the repeated
@@ -57,6 +63,9 @@ async function buildBasePdf(opts) {
     var p = pdf.addPage([612, 792]); // US Letter
     p.drawText('Page ' + (i + 1) + ' — test content', { x: 72, y: 720, size: 14 });
     if (opts.rotate) p.setRotation(degrees(opts.rotate));
+    if (opts.mediaBox) {
+      p.setMediaBox(opts.mediaBox.x, opts.mediaBox.y, opts.mediaBox.width, opts.mediaBox.height);
+    }
   }
   return await pdf.save();
 }
@@ -75,6 +84,24 @@ async function buildPdfWithOcg(name) {
   return await doc.save();
 }
 
+/* Build a PDF that already carries an unrelated OCG AND a Print
+ * auto-state rule governing it — exercises the /AS merge path (we
+ * must join the existing rule, not author a second equivalent one). */
+async function buildPdfWithPrintAutoState(name) {
+  var doc = await PDFDocument.create();
+  var ctx = doc.context;
+  doc.addPage([612, 792]).drawText('x', { x: 72, y: 720, size: 12 });
+  var other = ctx.register(ctx.obj({ Type: 'OCG', Name: PDFString.of(name) }));
+  doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({
+    OCGs: [other],
+    D: {
+      Order: [other], ON: [other], OFF: [], BaseState: 'ON',
+      AS: [{ Event: 'Print', Category: ['Print'], OCGs: [other] }]
+    }
+  }));
+  return await doc.save();
+}
+
 /* Build a PDF whose /OCProperties is present but EMPTY (no /OCGs,
  * no /D) — exercises the defensive merge path. */
 async function buildPdfWithEmptyOcProps() {
@@ -82,6 +109,47 @@ async function buildPdfWithEmptyOcProps() {
   var ctx = doc.context;
   doc.addPage([612, 792]).drawText('x', { x: 72, y: 720, size: 12 });
   doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({}));
+  return await doc.save();
+}
+
+/* Build a PDF whose catalog points /OCProperties at the wrong object
+ * type. The transform should replace it with a valid dictionary rather
+ * than crashing while trying to call `.lookup()` on a PDF name. */
+async function buildPdfWithNonDictOcProps() {
+  var doc = await PDFDocument.create();
+  doc.addPage([612, 792]).drawText('x', { x: 72, y: 720, size: 12 });
+  doc.catalog.set(PDFName.of('OCProperties'), PDFName.of('Broken'));
+  return await doc.save();
+}
+
+/* A valid but uncommon /Contents shape: an indirect reference to an
+ * array of streams. The rewritten page must flatten that array instead
+ * of producing an invalid nested /Contents array. */
+async function buildPdfWithIndirectContentsArray() {
+  var doc = await PDFDocument.create();
+  var ctx = doc.context;
+  var page = doc.addPage([612, 792]);
+  var bytes = new TextEncoder().encode('q\nQ\n');
+  var stream = ctx.register(PDFRawStream.of(ctx.obj({ Length: bytes.length }), bytes));
+  var contents = PDFArray.withContext(ctx);
+  contents.push(stream);
+  page.node.set(PDFName.of('Contents'), ctx.register(contents));
+  return await doc.save();
+}
+
+/* An unrelated input OCG already owns the short page-resource name
+ * /Bg. The new layer must choose another name and leave /Bg intact. */
+async function buildPdfWithBgResourceCollision() {
+  var doc = await PDFDocument.create();
+  var ctx = doc.context;
+  var page = doc.addPage([612, 792]);
+  page.drawText('x', { x: 72, y: 720, size: 12 });
+  var other = ctx.register(ctx.obj({ Type: 'OCG', Name: PDFString.of('Watermark') }));
+  doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({
+    OCGs: [other],
+    D: { Order: [other], ON: [other], OFF: [], BaseState: 'ON' }
+  }));
+  page.node.Resources().set(PDFName.of('Properties'), ctx.obj({ Bg: other }));
   return await doc.save();
 }
 
@@ -100,6 +168,50 @@ async function inspectFirstOcg(bytes) {
     printState: usage && String(usage.lookup(PDFName.of('Print')).lookup(PDFName.of('PrintState'))),
     viewState:  usage && String(usage.lookup(PDFName.of('View')).lookup(PDFName.of('ViewState')))
   };
+}
+
+/* Reference (as a "n 0 R" string) of the OCG named `name`, or null. */
+function ocgRefByName(pdf, name) {
+  var ocProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+  var ocgs = ocProps && ocProps.lookup(PDFName.of('OCGs'));
+  if (!ocgs) return null;
+  for (var i = 0; i < ocgs.size(); i++) {
+    var ocg = pdf.context.lookup(ocgs.get(i));
+    var nm = ocg && ocg.lookup(PDFName.of('Name'));
+    if (nm && nm.asString() === name) return String(ocgs.get(i));
+  }
+  return null;
+}
+
+/* Flatten /OCProperties /D /AS into plain JS for assertions:
+ * [{ event: '/Print', categories: ['/Print'], ocgRefs: ['5 0 R'] }] */
+function readAutoStates(pdf) {
+  var ocProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+  var dDict = ocProps && ocProps.lookup(PDFName.of('D'));
+  var asArr = dDict && dDict.lookup(PDFName.of('AS'));
+  var entries = [];
+  if (!(asArr instanceof PDFArray)) return entries;
+  for (var i = 0; i < asArr.size(); i++) {
+    var e = pdf.context.lookup(asArr.get(i));
+    if (!(e instanceof PDFDict)) continue;
+    var cats = [], cat = e.lookup(PDFName.of('Category'));
+    if (cat instanceof PDFArray) {
+      for (var c = 0; c < cat.size(); c++) cats.push(String(pdf.context.lookup(cat.get(c))));
+    }
+    var refs = [], og = e.lookup(PDFName.of('OCGs'));
+    if (og instanceof PDFArray) {
+      for (var g = 0; g < og.size(); g++) refs.push(String(og.get(g)));
+    }
+    entries.push({ event: String(e.lookup(PDFName.of('Event'))), categories: cats, ocgRefs: refs });
+  }
+  return entries;
+}
+
+/* The Print/Print auto-state entries of a produced PDF. */
+function printAutoStates(pdf) {
+  return readAutoStates(pdf).filter(function (e) {
+    return e.event === '/Print' && e.categories.indexOf('/Print') !== -1;
+  });
 }
 
 /* True if every page carries the /Resources/Properties/Bg → OCG binding. */
@@ -122,7 +234,9 @@ async function run() {
   assert(typeof addOcgBackground === 'function', 'addOcgBackground is exported as a function');
   assert(Array.isArray(Mod.DEFAULT_CREAM_RGB) && Mod.DEFAULT_CREAM_RGB.length === 3, 'DEFAULT_CREAM_RGB is exposed');
   assert(typeof Mod.DEFAULT_LAYER_NAME === 'string' && Mod.DEFAULT_LAYER_NAME.length > 0, 'DEFAULT_LAYER_NAME is exposed');
-  assert(Math.abs(Mod.DEFAULT_CREAM_RGB[0] - 0xF7 / 255) < 1e-6, 'DEFAULT_CREAM_RGB matches CSS --bg (#F7F4ED)');
+  assert(Mod.DEFAULT_CREAM_RGB.every(function (v, i) { return Math.abs(v - CSS_BG_RGB[i]) < 1e-6; }),
+    'DEFAULT_CREAM_RGB matches the --bg token parsed from colors_and_type.css (' + CSS_BG + ')',
+    'module: ' + JSON.stringify(Mod.DEFAULT_CREAM_RGB) + ' vs CSS: ' + JSON.stringify(CSS_BG_RGB));
 
   header('Round-trip — single page');
   var base1 = await buildBasePdf({ pages: 1 });
@@ -134,6 +248,18 @@ async function run() {
   assert(info1.ocgCount === 1, 'exactly one OCG registered');
   assert(info1.printState === '/OFF', '/Usage/Print/PrintState is /OFF (load-bearing!)');
   assert(info1.viewState === '/ON', '/Usage/View/ViewState is /ON');
+
+  header('Print auto-state (/OCProperties /D /AS)');
+  var creamRef1 = ocgRefByName(info1.pdf, Mod.DEFAULT_LAYER_NAME);
+  var as1 = printAutoStates(info1.pdf);
+  assert(!!creamRef1, 'cream OCG is resolvable by name in /OCGs');
+  assert(as1.length === 1, '/D/AS has exactly one Print auto-state entry',
+    'found ' + as1.length + ': ' + JSON.stringify(readAutoStates(info1.pdf)));
+  assert(as1.length === 1 && as1[0].categories.length === 1 && as1[0].categories[0] === '/Print',
+    'Print auto-state /Category is [ /Print ]', JSON.stringify(as1[0] && as1[0].categories));
+  assert(as1.length === 1 && as1[0].ocgRefs.length === 1 && as1[0].ocgRefs[0] === creamRef1,
+    'Print auto-state /OCGs references the cream OCG',
+    JSON.stringify(as1[0] && as1[0].ocgRefs) + ' vs cream ' + creamRef1);
 
   var page0 = info1.pdf.getPages()[0];
   var resProps = page0.node.Resources().lookup(PDFName.of('Properties'));
@@ -158,8 +284,8 @@ async function run() {
   var raw = latin1(out1);
   assert(raw.indexOf('/OC /Bg BDC') !== -1, 'content stream contains /OC /Bg BDC marker');
   assert(raw.indexOf('EMC') !== -1, 'content stream contains EMC terminator');
-  assert(/0\.9686\s+0\.9569\s+0\.9294\s+rg/.test(raw),
-    'content stream paints the cream colour matching --bg (#F7F4ED → 0.9686 0.9569 0.9294)');
+  assert(new RegExp(CSS_BG_OPS.join('\\s+') + '\\s+rg').test(raw),
+    'content stream paints the cream colour read from --bg (' + CSS_BG + ' → ' + CSS_BG_OPS.join(' ') + ')');
 
   header('Idempotency guard');
   await expectThrow(function () { return addOcgBackground(out1); },
@@ -187,6 +313,17 @@ async function run() {
   var rotated = await buildBasePdf({ pages: 1, rotate: 90 });
   await expectThrow(function () { return addOcgBackground(rotated); },
     'page with /Rotate 90 is rejected with clear message', /Rotate/);
+  var fullTurn = await buildBasePdf({ pages: 1, rotate: 360 });
+  assert((await addOcgBackground(fullTurn)).length > fullTurn.length,
+    'page with an effective /Rotate 0 (stored as 360) is accepted');
+
+  var offsetBox = await buildBasePdf({
+    pages: 1,
+    mediaBox: { x: 10, y: 20, width: 612, height: 792 }
+  });
+  var offsetRaw = latin1(await addOcgBackground(offsetBox));
+  assert(/10\.00\s+20\.00\s+612\.00\s+792\.00\s+re/.test(offsetRaw),
+    'non-zero MediaBox origin is preserved when drawing the background');
 
   header('Input flexibility');
   var ab = base1.buffer.slice(base1.byteOffset, base1.byteOffset + base1.byteLength);
@@ -212,6 +349,26 @@ async function run() {
     'well-formed merge: both OCGs listed in /OCGs', JSON.stringify(mNames));
   assert(mOcp.lookup(PDFName.of('D')).lookup(PDFName.of('ON')).size() === 2,
     'well-formed merge: both OCGs listed in /D/ON');
+  var mCreamRef = ocgRefByName(mPdf, 'Editorial cream background');
+  var mAs = printAutoStates(mPdf);
+  assert(mAs.length === 1 && mAs[0].ocgRefs.indexOf(mCreamRef) !== -1,
+    'well-formed merge: /D/AS carries one Print rule governing the cream OCG',
+    JSON.stringify(mAs));
+
+  // (a2) Input already has its OWN Print auto-state rule. We must join
+  //      it (one rule, two OCGs) instead of authoring a duplicate.
+  var withAs = await buildPdfWithPrintAutoState('Watermark');
+  var mergedAs = await addOcgBackground(withAs);
+  var aPdf = await PDFLib.PDFDocument.load(mergedAs);
+  var aCreamRef = ocgRefByName(aPdf, 'Editorial cream background');
+  var aOther = ocgRefByName(aPdf, 'Watermark');
+  var aAs = printAutoStates(aPdf);
+  assert(aAs.length === 1, 'existing Print auto-state: no duplicate equivalent entry added',
+    'found ' + aAs.length + ': ' + JSON.stringify(aAs));
+  assert(aAs.length === 1 && aAs[0].ocgRefs.indexOf(aCreamRef) !== -1 &&
+         aAs[0].ocgRefs.indexOf(aOther) !== -1,
+    'existing Print auto-state: cream OCG appended alongside the original',
+    JSON.stringify(aAs));
 
   // (b) Malformed: /OCProperties present but EMPTY (no /OCGs, no /D).
   //     Our OCG must still be registered in a freshly-created /OCGs —
@@ -224,12 +381,46 @@ async function run() {
   assert(fOcgs && typeof fOcgs.size === 'function' && fOcgs.size() >= 1,
     'malformed /OCProperties: our OCG is still listed in /OCGs',
     'OCGs=' + (fOcgs ? fOcgs.size() : 'MISSING'));
+  var fAs = printAutoStates(fPdf);
+  assert(fAs.length === 1 && fAs[0].ocgRefs[0] === ocgRefByName(fPdf, 'Editorial cream background'),
+    'malformed /OCProperties: Print auto-state authored on the created /D',
+    JSON.stringify(fAs));
 
-  console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
-  if (failed > 0) {
-    console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
-    process.exit(1);
+  // (c) Malformed: /OCProperties is present but is not a dictionary.
+  //     Replace it with a valid structure instead of throwing a TypeError.
+  var wrongType = await addOcgBackground(await buildPdfWithNonDictOcProps());
+  var wtPdf = await PDFDocument.load(wrongType);
+  var wtProps = wtPdf.catalog.lookup(PDFName.of('OCProperties'));
+  assert(wtProps instanceof PDFDict && wtProps.lookup(PDFName.of('OCGs')).size() === 1,
+    'non-dictionary /OCProperties is replaced with a valid one-OCG dictionary');
+
+  header('Page resource and content preservation');
+
+  var collided = await addOcgBackground(await buildPdfWithBgResourceCollision());
+  var cPdf = await PDFDocument.load(collided);
+  var cPage = cPdf.getPages()[0];
+  var cProps = cPage.node.Resources().lookup(PDFName.of('Properties'));
+  var cOtherRef = ocgRefByName(cPdf, 'Watermark');
+  var cCreamRef = ocgRefByName(cPdf, 'Editorial cream background');
+  assert(String(cProps.get(PDFName.of('Bg'))) === cOtherRef,
+    'an existing /Resources/Properties/Bg binding is preserved');
+  assert(String(cProps.get(PDFName.of('Bg1'))) === cCreamRef,
+    'the cream layer uses the next free resource name after /Bg');
+  assert(latin1(collided).indexOf('/OC /Bg1 BDC') !== -1,
+    'the prepended stream references the collision-free /Bg1 binding');
+
+  var indirect = await addOcgBackground(await buildPdfWithIndirectContentsArray());
+  var iPdf = await PDFDocument.load(indirect);
+  var iContents = iPdf.context.lookup(iPdf.getPages()[0].node.get(PDFName.of('Contents')));
+  var resolvedStreams = [];
+  for (var ii = 0; ii < iContents.size(); ii++) {
+    resolvedStreams.push(iPdf.context.lookup(iContents.get(ii)) instanceof PDFRawStream);
   }
+  assert(iContents.size() === 2 && resolvedStreams.every(Boolean),
+    'indirect /Contents arrays are flattened to two stream entries, never nested',
+    'size=' + iContents.size() + ', streams=' + JSON.stringify(resolvedStreams));
+
+  H.report();
 }
 
 run().catch(function (e) {

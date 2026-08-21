@@ -10,7 +10,7 @@
 
    Static (parses the shipped sources), so it runs in CI with no
    browser. The rendered/computed-style companion is
-   build/education-placement-test.html.
+   build/education-placement-check.html.
 
    Run from the project root:  node build/education-placement-test.js
    Exit code 0 on success, 1 on first failure.
@@ -23,13 +23,9 @@ var path = require('path');
 
 var ROOT = path.join(__dirname, '..');
 
-var GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', RESET = '\x1b[0m';
-var passed = 0, failed = 0, failures = [];
-
-function ok(name)      { console.log('  ' + GREEN + '✓' + RESET + ' ' + name); passed++; }
-function fail(name, m) { console.log('  ' + RED + '✗' + RESET + ' ' + name + ' — ' + m); failed++; failures.push(name); }
-function header(s)     { console.log('\n' + s); }
-function assert(cond, name, msg) { if (cond) ok(name); else fail(name, msg || 'assertion failed'); }
+var H = require('./harness.js');
+var ok = H.ok, fail = H.fail, header = H.header, assert = H.assert;
+var GREEN = H.GREEN, RED = H.RED, DIM = H.DIM, RESET = H.RESET;
 
 function read(rel)   { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); }
 function exists(rel) { return fs.existsSync(path.join(ROOT, rel)); }
@@ -172,8 +168,4 @@ assert(/### 5\.8 Header subtitle/.test(read('STYLE.md')), 'STYLE.md documents §
 assert(/highest completed degree/i.test(read('SKILL.md')),
   'SKILL.md pipeline names the highest-completed-degree subtitle pattern');
 
-console.log('\n' + (failed === 0 ? GREEN : RED) + passed + ' passed, ' + failed + ' failed' + RESET);
-if (failed > 0) {
-  console.log(RED + 'Failures: ' + failures.join(', ') + RESET);
-  process.exit(1);
-}
+H.report();

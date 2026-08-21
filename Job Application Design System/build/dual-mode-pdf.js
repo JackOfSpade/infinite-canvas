@@ -33,6 +33,7 @@
 
      hasOcgNamed()           — idempotency guard
      registerCreamOcg()      — build the OCG + wire it into /OCProperties
+     ensurePrintAutoState()  — /OCProperties /D /AS Print rule
      assertNormalPage()      — reject rotated / cropped pages
      prependCreamRectangle() — draw the cream behind one page's content
    ============================================================ */
@@ -146,6 +147,26 @@
     return false;
   }
 
+  /* Pick a page-resource name without overwriting an existing
+   * /Properties entry. `Bg` is intentionally short and remains the
+   * common case, but imported PDFs can already use it for an unrelated
+   * OCG. Rebinding their name would silently retag existing content. */
+  function availableOcgResourceName(properties) {
+    var suffix = 0;
+    var candidate;
+    do {
+      candidate = OCG_MC_NAME + (suffix || '');
+      suffix++;
+    } while (properties.has(PDFName.of(candidate)));
+    return candidate;
+  }
+
+  /* True if `obj` is the PDF name /<expected>. Works for direct names
+   * and for anything whose toString() is the canonical "/Name" form. */
+  function isPdfName(obj, expected) {
+    return !!obj && String(obj) === '/' + expected;
+  }
+
   /* Ensure `dict` has an array under `name`, creating an empty one if
    * absent or malformed. Returns the array so the caller can push. */
   function ensureArray(dict, name, ctx) {
@@ -155,6 +176,54 @@
       dict.set(PDFName.of(name), arr);
     }
     return arr;
+  }
+
+  /* True if an /AS entry's /Category array lists /Print. */
+  function categoryHasPrint(entry, ctx) {
+    var cat = entry.lookup(PDFName.of('Category'));
+    if (!(cat instanceof PDFArray)) return false;
+    for (var i = 0; i < cat.size(); i++) {
+      if (isPdfName(ctx.lookup(cat.get(i)), 'Print')) return true;
+    }
+    return false;
+  }
+
+  /* Auto-state (PDF spec §8.11.4.4). /Usage alone is advisory: a viewer
+   * only consults it when the default configuration tells it to, via an
+   * /AS (auto states) entry naming the event, the usage categories to
+   * read, and the OCGs the rule governs. Without this, most viewers
+   * keep the on-screen state at print time and the cream background
+   * ends up on paper / in Print → Save as PDF.
+   *
+   *   /AS [ << /Event /Print /Category [ /Print ] /OCGs [ <cream> ] >> ]
+   *
+   * Merge semantics: if a Print/Print rule already exists (the input
+   * carried its own OCGs), append our OCG to it rather than authoring
+   * a second equivalent entry; if our OCG is already listed, do
+   * nothing. Any missing or malformed /AS is created. */
+  function ensurePrintAutoState(dDict, ctx, ocgRef) {
+    var asArr = ensureArray(dDict, 'AS', ctx);
+
+    for (var i = 0; i < asArr.size(); i++) {
+      var entry = ctx.lookup(asArr.get(i));
+      if (!(entry instanceof PDFDict)) continue;
+      if (!isPdfName(entry.lookup(PDFName.of('Event')), 'Print')) continue;
+      if (!categoryHasPrint(entry, ctx)) continue;
+
+      var governed = ensureArray(entry, 'OCGs', ctx);
+      for (var j = 0; j < governed.size(); j++) {
+        if (String(governed.get(j)) === String(ocgRef)) return asArr;
+      }
+      governed.push(ocgRef);
+      return asArr;
+    }
+
+    asArr.push(ctx.obj({
+      Event: 'Print',
+      Category: ['Print'],
+      OCGs: [ocgRef]
+    }));
+    return asArr;
   }
 
   /* Build the view-on / print-off OCG and wire it into the catalog's
@@ -168,7 +237,9 @@
    *
    * /Usage drives automatic show/hide based on viewer intent.
    * /Print /PrintState /OFF is the load-bearing declaration — it
-   * tells the print pipeline to skip this content.
+   * tells the print pipeline to skip this content — but it is only
+   * consulted when /OCProperties /D /AS carries a matching Print
+   * auto-state rule, which `ensurePrintAutoState` guarantees.
    *
    * If the document already has /OCProperties (carrying OCGs from
    * other sources) we merge into it rather than overwriting; the
@@ -197,10 +268,14 @@
       }
       ensureArray(dDict, 'Order', ctx).push(ocgRef);
       ensureArray(dDict, 'ON', ctx).push(ocgRef);
+      ensurePrintAutoState(dDict, ctx, ocgRef);
     } else {
       pdf.catalog.set(PDFName.of('OCProperties'), ctx.obj({
         OCGs: [ocgRef],
-        D: { Order: [ocgRef], ON: [ocgRef], OFF: [], BaseState: 'ON' }
+        D: {
+          Order: [ocgRef], ON: [ocgRef], OFF: [], BaseState: 'ON',
+          AS: [{ Event: 'Print', Category: ['Print'], OCGs: [ocgRef] }]
+        }
       }));
     }
     return ocgRef;
@@ -208,9 +283,9 @@
 
   // ----- Page helpers ----------------------------------------------------
 
-  /* Page sanity check. The cream rectangle is drawn from (0,0) to
-   * (width,height) in MediaBox coordinates with no rotation transform.
-   * If the input PDF has /Rotate or a CropBox smaller than MediaBox,
+  /* Page sanity check. The cream rectangle follows the MediaBox origin
+   * and dimensions with no rotation transform. If the input PDF has a
+   * non-zero effective rotation or a CropBox smaller than MediaBox,
    * the rectangle's positioning becomes unpredictable. Chrome's print-
    * to-PDF doesn't emit either of those for the design system's
    * resume.html, so this is a defensive assert — better to fail loudly
@@ -219,26 +294,25 @@
    * Signature matches Array#forEach's (element, index) so it can be
    * passed directly: `pages.forEach(assertNormalPage)`. */
   function assertNormalPage(page, idx) {
-    var node = page.node;
-
-    var rotate = node.lookup(PDFName.of('Rotate'));
-    if (rotate && typeof rotate.asNumber === 'function' && rotate.asNumber() !== 0) {
+    var rotation = page.getRotation().angle;
+    var effectiveRotation = ((rotation % 360) + 360) % 360;
+    if (effectiveRotation !== 0) {
       throw new Error(
-        'dual-mode-pdf: page ' + (idx + 1) + ' has /Rotate ' + rotate.asNumber() +
+        'dual-mode-pdf: page ' + (idx + 1) + ' has /Rotate ' + rotation +
         '; rotated pages are not supported. Re-render the source PDF without rotation.'
       );
     }
 
-    var cropBox = node.lookup(PDFName.of('CropBox'));
-    var mediaBox = node.lookup(PDFName.of('MediaBox'));
-    if (cropBox && mediaBox) {
-      for (var i = 0; i < 4; i++) {
-        if (Math.abs(mediaBox.get(i).asNumber() - cropBox.get(i).asNumber()) > BOX_EPSILON) {
-          throw new Error(
-            'dual-mode-pdf: page ' + (idx + 1) + ' has CropBox ≠ MediaBox; ' +
-            'this is not supported. Re-render the source PDF without a crop box.'
-          );
-        }
+    var cropBox = page.getCropBox();
+    var mediaBox = page.getMediaBox();
+    var boxProps = ['x', 'y', 'width', 'height'];
+    for (var i = 0; i < boxProps.length; i++) {
+      var prop = boxProps[i];
+      if (Math.abs(mediaBox[prop] - cropBox[prop]) > BOX_EPSILON) {
+        throw new Error(
+          'dual-mode-pdf: page ' + (idx + 1) + ' has CropBox ≠ MediaBox; ' +
+          'this is not supported. Re-render the source PDF without a crop box.'
+        );
       }
     }
   }
@@ -261,7 +335,7 @@
    * order: first drawn = bottom). */
   function prependCreamRectangle(page, ctx, ocgRef, cream, encoder) {
     var node = page.node;
-    var size = page.getSize();
+    var mediaBox = page.getMediaBox();
 
     // Ensure /Resources exists.
     var resources = node.Resources();
@@ -277,15 +351,17 @@
       properties = ctx.obj({});
       resources.set(PDFName.of('Properties'), properties);
     }
-    properties.set(PDFName.of(OCG_MC_NAME), ocgRef);
+    var resourceName = availableOcgResourceName(properties);
+    properties.set(PDFName.of(resourceName), ocgRef);
 
     // Build the content stream (no filter — ~100 bytes, compression
     // isn't worth the debugging cost).
     var ops =
       'q\n' +
-      '/OC /' + OCG_MC_NAME + ' BDC\n' +
+      '/OC /' + resourceName + ' BDC\n' +
       cream[0].toFixed(4) + ' ' + cream[1].toFixed(4) + ' ' + cream[2].toFixed(4) + ' rg\n' +
-      '0 0 ' + size.width.toFixed(2) + ' ' + size.height.toFixed(2) + ' re\n' +
+      mediaBox.x.toFixed(2) + ' ' + mediaBox.y.toFixed(2) + ' ' +
+      mediaBox.width.toFixed(2) + ' ' + mediaBox.height.toFixed(2) + ' re\n' +
       'f\n' +
       'EMC\n' +
       'Q\n';
@@ -297,10 +373,16 @@
     // Prepend to /Contents. May be a single stream/ref, an array of
     // refs, or absent.
     var existing = node.get(PDFName.of('Contents'));
+    var resolvedExisting = existing && ctx.lookup(existing);
     var newContents = PDFArray.withContext(ctx);
     newContents.push(streamRef);
-    if (existing instanceof PDFArray) {
-      for (var i = 0; i < existing.size(); i++) newContents.push(existing.get(i));
+    if (resolvedExisting instanceof PDFArray) {
+      /* /Contents itself may be an indirect reference to an array. A
+       * nested array is not a valid page-content sequence, so flatten
+       * the resolved array while preserving its stream references. */
+      for (var i = 0; i < resolvedExisting.size(); i++) {
+        newContents.push(resolvedExisting.get(i));
+      }
     } else if (existing) {
       newContents.push(existing);
     }
@@ -349,6 +431,10 @@
     var pdf = await PDFDocument.load(inputBytes, { ignoreEncryption: true });
     var ctx = pdf.context;
     var existingOcProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+    /* A malformed catalog entry must not turn the defensive merge path
+     * into `TypeError: lookup is not a function`. Replacing a non-dict
+     * /OCProperties value is the only spec-valid recovery. */
+    if (!(existingOcProps instanceof PDFDict)) existingOcProps = null;
 
     if (existingOcProps && hasOcgNamed(existingOcProps, ctx, layerName)) {
       throw new Error(

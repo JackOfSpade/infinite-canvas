@@ -1,4 +1,4 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -41,28 +41,74 @@ export default [
       assert(Object.keys(APPLICATION_COVER_LETTER_SCHEMA.properties).join(',') === 'paragraphs',
         'prose schema contains no model-authored letterhead or envelope fields');
       const need = LETTER_NEEDS_SCHEMA.properties.needs.items;
-      assert(JSON.stringify(need.required) === JSON.stringify(['need', 'quote', 'source', 'decisiveness', 'kind']),
-        'needs schema preserves the ranked, verbatim-grounded requirement contract');
+      assert(JSON.stringify(need.required) === JSON.stringify(['need', 'quote', 'source', 'decisiveness', 'kind', 'emphasisReason']),
+        'needs schema preserves the ranked, verbatim-grounded, emphasis-aware requirement contract');
       assert(need.properties.source.enum.join(',') === 'posting,research',
         'needs sources are limited to the posting and research');
       assert(LETTER_NEEDS_SCHEMA.properties.needs.maxItems === 6,
         'needs schema caps the ranked list at six without preventing the empty-input degrade path');
       assert(need.properties.decisiveness.minimum === 1 && need.properties.decisiveness.maximum === 100,
         'needs schema enforces the documented 1–100 decisiveness range');
+      assert(need.properties.emphasisReason.type === 'string',
+        'needs schema makes the structural basis for emphasis visible to the argument planner');
       const mapping = LETTER_PLAN_SCHEMA.properties.mappings.items;
-      assert(JSON.stringify(mapping.required) === JSON.stringify(['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference']),
-        'plan mappings carry both résumé evidence and the inferential step');
+      assert(JSON.stringify(mapping.required) === JSON.stringify(['needIndex', 'need', 'evidence', 'evidenceRole', 'achievementIds', 'resumeStatus', 'inference', 'narrativeRole', 'relationToPrevious']),
+        'plan mappings carry evidence, the inferential step, and an explicit narrative relationship');
       assert(mapping.properties.resumeStatus.enum.join(',') === 'stated,implied,absent',
         'plan mappings force an explicit résumé-status declaration');
-      assert(LETTER_PLAN_SCHEMA.properties.mappings.maxItems === 2,
-        'plan schema caps the argument at two evidence mappings');
+      assert(LETTER_PLAN_SCHEMA.properties.mappings.minItems === 1
+        && LETTER_PLAN_SCHEMA.properties.mappings.maxItems === 2,
+      'plan schema requires one primary mapping and caps the argument at two');
+      assert(mapping.properties.narrativeRole.enum.join(',') === 'primary,foundation,corroborates,deepens,extends,qualifies'
+        && mapping.properties.relationToPrevious.type === 'string'
+        && LETTER_PLAN_SCHEMA.properties.mappings.description.includes('Use one by default'),
+      'plan schema prefers minimum-sufficient primary proof and records why optional evidence follows it');
+      assert(LETTER_PLAN_SCHEMA.properties.roleThesis.description.includes('organizes the entire letter')
+        && LETTER_PLAN_SCHEMA.properties.mappings.description.includes('same roleThesis'),
+      'plan schema makes one controlling angle, rather than two adjacent matches, the structural contract');
       assert(LETTER_PLAN_SCHEMA.required.includes('logistics') && LETTER_PLAN_SCHEMA.required.includes('droppedNeeds'),
         'plan preserves logistics isolation and visible dropped needs');
+      const directContract = APPLICATION_DIRECT_COVER_LETTER_SCHEMA.properties.argumentContract;
+      assert(JSON.stringify(APPLICATION_DIRECT_COVER_LETTER_SCHEMA.required) === JSON.stringify(['paragraphs', 'argumentContract'])
+        && JSON.stringify(directContract.required) === JSON.stringify(['roleThesis', 'primaryEvidence', 'primaryRelationToThesis', 'secondaryNarrativeRole', 'secondaryEvidence', 'secondaryRelationToPrimary'])
+        && directContract.properties.secondaryNarrativeRole.enum.join(',') === 'none,foundation,corroborates,deepens,extends,qualifies',
+      'direct fallback returns an ephemeral primary/secondary argument contract for the cohesion audit');
       const groundingViolation = LETTER_GROUNDING_AUDIT_SCHEMA.properties.violations;
+      const cohesionObservation = LETTER_GROUNDING_AUDIT_SCHEMA.properties.cohesionObservations;
       assert(LETTER_GROUNDING_AUDIT_SCHEMA.required.includes('violations')
+        && LETTER_GROUNDING_AUDIT_SCHEMA.required.includes('cohesionObservations')
         && groundingViolation.maxItems === 8
-        && JSON.stringify(groundingViolation.items.required) === JSON.stringify(['claim', 'reason']),
-      'final factual audit is bounded and requires an exact claim plus explanation');
+        && JSON.stringify(groundingViolation.items.required) === JSON.stringify(['claim', 'reason'])
+        && cohesionObservation.maxItems === 8
+        && JSON.stringify(cohesionObservation.items.required) === JSON.stringify(['kind', 'claim', 'reason', 'repair'])
+        && cohesionObservation.items.properties.kind.enum.join(',') === 'unclear-antecedent,unexplained-shift,chronological-backtracking,inventory-paragraph,overloaded-sentence,faulty-parallelism,repeated-metaphor,detached-synthesis,volunteered-gap,delayed-relevance,second-thesis,unnecessary-evidence',
+      'final audit separates bounded factual violations from exact-span cohesion observations');
+      const faultyParallelismFixture = {
+        kind: 'faulty-parallelism',
+        claim: 'from the quote request through presenting findings',
+        reason: 'The process span coordinates a noun phrase with a verb-ing phrase.',
+        repair: 'Use parallel nouns or parallel actions.',
+      };
+      assert(cohesionObservation.items.properties.kind.enum.includes(faultyParallelismFixture.kind)
+        && cohesionObservation.items.required.every(key => String(faultyParallelismFixture[key] || '').length > 0),
+      'the grounding-audit schema can return an exact-span observation for the reported noun-to-gerund regression');
+      const detachedSynthesisFixture = {
+        kind: 'detached-synthesis',
+        claim: 'An ambiguous problem at one end and something running in production at the other is the shape most of my work has taken.',
+        reason: 'The conclusion jumps from one role example to unsupported breadth and never names the concrete relationship it summarizes.',
+        repair: 'Scope the conclusion to the role and name the evaluation-to-production responsibility, or delete it.',
+      };
+      const unclearTransitionFixture = {
+        kind: 'unclear-antecedent',
+        claim: 'It',
+        reason: 'The paragraph-opening reference could mean the evaluation, integration, boundary decision, or abstract shape.',
+        repair: 'Name the exact end-to-end responsibility.',
+      };
+      assert([detachedSynthesisFixture, unclearTransitionFixture].every(item => (
+        cohesionObservation.items.properties.kind.enum.includes(item.kind)
+        && cohesionObservation.items.required.every(key => String(item[key] || '').length > 0)
+      )),
+      'the audit schema represents the detached-synthesis sentence and its ambiguous cross-paragraph “It” as separate repairable defects');
       const providerNeeds = toGeminiSchema(LETTER_NEEDS_SCHEMA);
       const providerPlan = toGeminiSchema(LETTER_PLAN_SCHEMA);
       assert(providerNeeds.properties.needs.maxItems === 6
@@ -70,6 +116,7 @@ export default [
         && providerNeeds.properties.needs.items.properties.decisiveness.maximum === 100,
       'Gemini receives the bounded needs contract, not a description-only approximation');
       assert(providerPlan.properties.mappings.maxItems === 2
+        && providerPlan.properties.mappings.minItems === 1
         && providerPlan.properties.mappings.items.properties.needIndex.minimum === 0,
       'Gemini receives the bounded non-negative argument-mapping contract');
       return { ok: true };
@@ -1301,8 +1348,9 @@ export default [
       assert(decodeTextEscapes('already\nreal') === 'already\nreal', 'real newline untouched (no-op)');
       assert(decodeTextEscapes('plain text') === 'plain text', 'plain text untouched');
 
-      // Cover letter: a recipient with a LITERAL backslash-n splits into rows
-      // (recipient-name + recipient-line), and no verbatim "\n" leaks through.
+      // Cover letter: legacy recipient data is intentionally ignored. The
+      // design system now identifies a generic addressee in the salutation,
+      // without a redundant postal-style recipient block.
       // buildCoverLetterDocument takes { letter, variantAttrs, docId } — fields
       // nest under `letter`, they are not top-level (signature changed under
       // the HTML-first rewrite, design doc §5.2).
@@ -1323,8 +1371,8 @@ export default [
       // free of a literal two-character backslash-n/t.
       const clContent = cl.split('</style>').pop().replace(/<script[\s\S]*?<\/script>/g, '');
       assert(!/\\n|\\t/.test(clContent), 'cover letter must contain NO literal backslash-n/t');
-      assert(clContent.includes('<span class="recipient-name">Hiring Team</span>'), 'recipient first line → recipient-name');
-      assert(clContent.includes('<span class="recipient-line">Monster Brewing Company</span>'), 'recipient second line → recipient-line');
+      assert(!clContent.includes('recipient-name') && !clContent.includes('recipient-line')
+        && !clContent.includes('Monster Brewing Company'), 'legacy recipient data must not render a recipient block');
       // An in-paragraph newline must COLLAPSE (flowing prose), NOT become a hard
       // <br> — a stray model newline mid-sentence (around a title's en-dash) would
       // otherwise render as a bad break. Both halves still present, no <br>.

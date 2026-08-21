@@ -14,8 +14,8 @@ const TITLE_FETCH_TIMEOUT_MS = 3000;
 
 export function registerNetworkHandlers() {
   // Add direct listener for node task cancellation
-  ipcMain.on('cancel-node-task', (_event, nodeId) => {
-    if (nodeId) abortNodeTasks(nodeId);
+  ipcMain.on('cancel-node-task', (event, nodeId) => {
+    if (nodeId) abortNodeTasks(nodeId, event.sender);
   });
 
   handleSafe('fetch-url-title', async (event, url, signal) => {

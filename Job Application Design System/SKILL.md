@@ -19,20 +19,30 @@ post-processes it into the right print variant for the recipient.
 |-------------------------------|-------------------------------------------------------------------------------------|
 | `STYLE.md`                    | The full design specification. **Read this first.** Every rule, with rationale.    |
 | `readme.md`                   | Philosophy, content rules, system caveats, anti-patterns.                          |
+| `ENGINEERING.md`              | Developer material — file index, PDF mechanics, test wiring, packaging, provenance. Deliberately **not** part of the editorial rubric. |
 | `styles.css`                  | Global entry point — re-exports the token closure.                                 |
 | `colors_and_type.css`         | Design tokens — colour, typography, spacing, page geometry, all variants.          |
 | `resume.css`                  | Components — page chrome, header, sections, roles, bullets, projects, skills. |
 | `resume.html`                 | The résumé template + a fully-populated realistic sample. Adapt this per candidate. |
-| `cover-letter.css`            | The letter surface (serif body, date / recipient / close). Load after `resume.css`. |
+| `cover-letter.css`            | The letter surface (serif body, date / salutation / close, no recipient block). Load after `resume.css`. |
 | `cover-letter.html`           | The paired cover-letter template + sample. Same paper, ink, and geometry.           |
 | `build/dual-mode-pdf.js`      | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
-| `build/test.js` · `build/browser-test.html` | Self-test for the dual-mode PDF module (Node / browser). |
+| `build/test.js` · `build/browser-check.html` | Self-test for the dual-mode PDF module: `test.js` is wired into `npm test`; `browser-check.html` is the **manual** browser-path companion. |
 | `build/annotation-typography-test.js` | Typography regression: the inline `.scope` / `.tradeoff` / `.annotation-label` spans must inherit the owning bullet's type, and `.tradeoff` must not be italic (STYLE.md §5.4). Static; no browser needed. |
+| `build/annotation-budget-test.js`     | Restraint + length regression: at most one annotation per bullet (one `.tradeoff` max), and every bullet — annotated or not — stays under the 180-visible-character budget so a `.tradeoff` can't substitute for evidence or turn a bullet into a paragraph (STYLE.md §5.4). Static; no browser needed. |
+| `build/bullet-length-check.html`       | **Manual** browser check behind that budget: renders worst-case bullet text at 180/100 characters in the real page structure (Letter/A4 × default/compact) and asserts each holds ≤ 2 wrapped lines (STYLE.md §5.4). Open it in a browser — nothing runs it for you. |
+| `build/parallelism-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 5 parallel-construction gate: fails if the failure-mode count reverts to four or five, the coordination shapes (`from X through Y`, `both`/`either`/`not only`) or the noun-phrase/gerund-phrase repair examples are dropped from `STYLE.md`, or the résumé-facing enumerations in `SKILL.md`/`readme.md` regress to covering only colon-dumps/overloaded-sentences/metaphors. No browser needed. |
+| `build/synthesis-scope-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 6 earned-generalization gate: fails if the failure-mode count reverts, or if `STYLE.md`/`SKILL.md`/`readme.md` drop the evidence-scope requirement, the named-connector requirement, the bridge-noun clause, the one-antecedent rule at paragraph boundaries, the rewrite-or-delete repair, or the "filler is not a repair" prohibition. No browser needed. |
 | `build/ats-parse-test.js`     | Parse-safety gate (STYLE.md §8.1): fails on tables, imagery in `<main>`, absolute positioning, CSS columns, hidden text, tabular figures, `&nbsp;` in copy, contact outside `<main>`, and reading-order inversions. Takes file paths; defaults to the shipped samples. |
-| `build/annotation-typography-test.html` | Computed-style companion to the above — measures a rendered bullet in a real engine. |
+| `build/education-placement-test.js` | Static regression: no Education section anywhere, and the degree rides in the header subtitle (STYLE.md §5.8). Wired into `npm test`. |
+| `build/page-policy-doc-test.js` | Static doc regression for the one-page default and its explicit-override language (STYLE.md §6 · pipeline step 5). Wired into `npm test`. |
+| `build/token-sync-test.js`    | Sync gate for every place a token value is restated as a literal: the PDF module's cream default, the four `@page` footers and margin pairs, STYLE.md §3.1's colour table, the preview cards and thumbnail. |
+| `build/harness.js` · `build/css-tokens.js` | Shared assertion harness; token reader — so no test hardcodes a token value. |
+| `build/MANUAL-CHECKS.md`      | The eight `*-check` browser fixtures (including `annotation-typography-check.html`): what each measures, when to run it, and why nothing automates them. |
 | `build/vendor/` (removed)     | pdf-lib 1.17.1 now loads from CDN (browser) / the `pdf-lib` npm package (Node) — no longer vendored. |
 | `fonts/` (removed)            | Source Serif 4, Inter, IBM Plex Mono now load from the Google Fonts CDN — no longer bundled. |
 | `preview/`                    | Standalone preview cards for each design subsystem. Reference material only.       |
+| `handoff/`                    | Frozen developer handoff for the paginated screen preview. Reference only; no shipped code reads it. |
 
 ## The pipeline
 
@@ -74,9 +84,37 @@ End-to-end, given candidate data + job description:
 4. **Fill `resume.html`** with candidate content following the
    structural conventions in `STYLE.md §4–§7`. Preserve the existing
    semantic markup; do not invent new component shapes. Use the
-   `.scope` cell for role ownership, `.tradeoff` for trade-off
-   annotations on staff-level bullets, `<strong>` for scale numbers
-   inside bullets.
+   `.scope` cell for role ownership, `<strong>` to mark scale numbers
+   inside bullets (semantic metadata only — it renders at the bullet's
+   own weight, not bold: STYLE.md §5.4.1), and `.tradeoff` **sparingly** — only for a
+   genuinely decision-defining alternative or constraint, never as an
+   automatic stand-in for a bullet that lacks a hard metric, and never
+   past the length budget in `STYLE.md §5.4`. Most bullets should ship
+   with no annotation at all.
+
+   **Order each role's bullets by relevance to this job, not
+   chronology.** Re-sequence per application: the first bullet in a
+   role is whichever one most directly answers this job description's
+   responsibilities, named technologies, business problem, and
+   seniority signals — never the most recent, never the one that
+   mattered most to the past employer, and never just the one with
+   the biggest number. Reordering never changes a bullet's facts or
+   invents relevance a bullet doesn't have. Full rule: `STYLE.md
+   §5.3.2`.
+
+   **Prose fields obey the synthesis rules too.** Role summaries and
+   project descriptions are subject to `STYLE.md §11.2.3` exactly as
+   the letter is: no colon followed by an inventory of technologies,
+   no sentence stacking several systems and a conclusion, no reused
+   metaphor doing connective work, no coordinated phrase — a
+   `from X through Y` span, a `both`/`either`/`not only` pair, a list —
+   whose two sides shift grammatical form (a noun phrase spliced to a
+   gerund phrase is the most common case), and no conclusion wider
+   than the evidence under it. One role's summary may generalize about
+   that role; it may not generalize about "most of my work" or a
+   career, and a summary noun ("shape", "pattern", "approach") must
+   name the responsibility or sequence it stands for in the same
+   sentence.
 
    **The header subtitle** is `[current professional role] ·
    [highest completed degree], [institution]` — e.g. `Staff Engineer
@@ -97,11 +135,82 @@ End-to-end, given candidate data + job description:
    joining dash is the loudest tell of machine-written copy, and it
    survives into the PDF where nothing downstream will catch it.
 
+   **Then run the evidence-synthesis gate — cover letter only.**
+   `STYLE.md §11.2.3` bans six sentence shapes in the filled letter:
+   a clause whose job is to name a boundary of the candidate's
+   experience instead of stating the adjacent strength positively; a
+   colon whose right-hand side is three or more parallel items; a
+   sentence combining several independent systems, a qualification,
+   and a conclusion; a figure of speech repeated across paragraphs to
+   carry transitions; a coordinated construction (`from X through
+   Y`, `both X and Y`, `either X or Y`, `not only X but also Y`, or a
+   list) whose paired elements don't share a grammatical form — most
+   often a noun phrase spliced to a gerund phrase ("from the quote
+   request through presenting findings"); and a concluding or
+   transitional sentence that generalizes past the evidence under it
+   or without naming the concrete responsibility, system, decision,
+   process, or mechanism that connects it (one example or one role
+   becoming "most of my work" or "throughout my career"; a bare
+   "shape", "pattern", or "approach" left undefined; a paragraph
+   opening on "this", "that", or "it" with more than one plausible
+   antecedent). Judge by shape, not by
+   phrase list — these are structural defects that survive any
+   rewording, so this is a required close read of the letter body,
+   not a keyword scan. Two structural greps are worth running as
+   triage:
+
+   ```sh
+   grep -noE ': [A-Za-z][^.]*, [^.]*, and ' filled.html   # colon → 3+ item list
+   grep -noiE 'most of my work|throughout my career|my (general )?(working )?(style|approach)|(the|a) (shape|pattern|throughline) (of|my|most)' filled.html   # breadth past the evidence
+   ```
+
+   They catch two of the six; read every paragraph for the rest, and
+   read every paragraph's first sentence specifically for the
+   one-antecedent test. Repair a detached synthesis by rewriting it as
+   a concrete, evidence-scoped conclusion or by deleting it — never by
+   inserting a filler transition ("That said", "Additionally", "In
+   this way"), which leaves the reference just as ambiguous.
+   Evidence should read as two or three well-argued examples, not a
+   résumé converted to prose.
+
+   **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
+   the first sentence must lead with a job-specific thesis, a concrete
+   evidence-to-employer-need connection, or a supported observation
+   about the company's work — never an announcement that this is an
+   application. The recruiter already knows that from the ATS
+   submission, the filename, and the salutation above it. Reject and
+   rewrite any opening built on "I am writing to apply…", "I'm writing
+   to apply…", "I am applying for…", "I am writing to express my
+   interest…", "Please accept my application…", or an equivalent —
+   swapping in a synonym doesn't pass, only leading with substance
+   does. The company and role name may still appear in the opening
+   when they're load-bearing inside the thesis itself; they just can't
+   appear only to announce the application. Grep before rendering:
+
+   ```sh
+   grep -niE "writing to apply|writing to express my interest|^i am applying for|please accept my application" filled.html
+   ```
+
    **The letter date is never typed in.** `cover-letter.html` fills it
    from the system clock at render time (month + year, plus the
    `datetime` attribute) — see `STYLE.md §11.6`. Leave that element
    and its inline script alone; if your pipeline renders without
    JavaScript, substitute the current month yourself at fill time.
+
+   **Then run the annotation-budget gate.** Run
+   `node build/annotation-budget-test.js <filled.html> <filled-letter.html>`
+   — it takes file paths as arguments and defaults to the shipped
+   samples, so **pass the candidate's documents explicitly**. With no
+   arguments it re-checks the two shipped templates and tells you
+   nothing about this application.
+   It fails on more than one annotation per bullet, more than one
+   `.tradeoff`, and any bullet — annotated or not — that exceeds the
+   180-visible-character budget in `STYLE.md §5.4` (a `.tradeoff`'s own
+   text additionally caps at 100 characters). That budget is one
+   coherent number derived from `build/bullet-length-check.html`
+   actually rendering worst-case text in the page and measuring wrapped
+   lines — open that file after any type-scale, margin, or density
+   change to confirm the number still holds.
 
    **Then run the parse gate.** `STYLE.md §8.1` lists the hazards that
    silently destroy a PDF's text layer. Run
@@ -113,35 +222,74 @@ End-to-end, given candidate data + job description:
    copy — use `class="nowrap"` for value/unit pairs instead. None of
    these have a visual cost; all of them cost numbers in the parse.
 
+   **The full gate list.** Two gates read the candidate's documents and
+   take paths; the rest guard the system and its docs, and all of them
+   run together with `cd build && npm test`:
+
+   | Gate | Per-candidate? |
+   |------|----------------|
+   | `node build/annotation-budget-test.js <files>` | **yes** — pass the filled documents |
+   | `node build/ats-parse-test.js <files>` | **yes** — pass the filled documents |
+   | `node build/test.js` | no — the PDF module (needs `pdf-lib`) |
+   | `node build/token-sync-test.js` | no — token/literal drift |
+   | `node build/annotation-typography-test.js` | no — the annotation CSS |
+   | `node build/education-placement-test.js` | no — the no-Education rule |
+   | `node build/page-policy-doc-test.js` | no — the one-page default |
+   | `node build/parallelism-gate-doc-test.js` · `node build/synthesis-scope-gate-doc-test.js` | no — the §11.2.3 prose rules |
+
+   The `build/*-check.html` fixtures are **manual** browser checks, not
+   gates — see `build/MANUAL-CHECKS.md`. Nothing runs them for you.
+
 5. **Generate the source PDF.** From the filled HTML, render to
    PDF via Puppeteer / Playwright / equivalent. Required flags:
    `printBackground: true`, `preferCSSPageSize: true`. The system
    defines CSS named pages (`letter`, `a4`), so the PDF size matches
    automatically when `data-page="a4"` is set.
 
-   **Page-count handling — the compact-density algorithm.** Default
-   density is what you render first, always. After that first
-   render, count the pages in the produced PDF:
+   **Page-count handling — one page is the default, always.** Every
+   generated résumé targets **one page**, regardless of job title or
+   seniority. Never infer a multi-page target from "Senior Staff,"
+   "Principal," "Director," "VP," "executive," or any similar title
+   language — title alone is never a reason to plan for a second page.
+   A multi-page résumé is produced **only** when the host application
+   or the candidate has explicitly requested one for this application;
+   absent that explicit override, one page is the only target this
+   pipeline renders toward.
 
-   - **Page count == target.** Ship as-is. Don't apply
-     `data-density="compact"`.
-   - **Page count > target AND overflow looks small** (~1–9 lines,
-     or the final page is < 30% full): set
-     `data-density="compact"` on the root `<html>` element and
-     re-render once. This reclaims 6–9 lines per page and usually
-     fits the content.
-   - **Page count > target AND overflow is large** (final page >
-     30% full, or > 9 lines): the *content* is too long. Cut
-     bullets per the rules in `STYLE.md §5` before re-rendering.
-     Compact density alone won't save it, and applying it to a
-     content-bloated résumé just compresses bad material.
+   Default density is what you render first, always. After that first
+   render, measure the result against the one-page target:
 
-   `compact` is the system's **one** measured-fit fallback. It is
-   never the default, there is no second tier, and it is not a
-   substitute for editing content — see `## Density ownership`.
+   - **One page, 90–100% of the measured type area used.** This is the
+     desired default outcome. Ship as-is.
+   - **One page, under 90% utilized.** Don't pad it. Look for
+     genuinely distinct, source-supported evidence — a real bullet,
+     project, or skill the candidate has that isn't on the page yet
+     and would improve interview odds — and add only that. If there is
+     nothing true and distinct left to add, ship the page under 90%; a
+     shorter honest page beats a padded one. Never add adjectives,
+     restated metrics, or filler to reach the target.
+   - **Overflows one page, and the overflow is small** (roughly 1–9
+     lines, or the excess would occupy less than ~30% of a second
+     page): apply the existing measured `data-density="compact"`
+     fallback **once** and re-render. This is the system's one density
+     lever — see `## Density ownership` — not a tier to escalate past.
+   - **Still overflows after compact, or the overflow was large to
+     begin with:** cut lower-value or redundant content per
+     `STYLE.md §5` — drop a `Selected Systems` entry that restates
+     bullet metrics, trim the skills block, shorten a bullet — while
+     retaining **every documented role** and **at least one factual
+     bullet per role**. Never drop a role, and never reduce a role to
+     zero evidence, to make the page count. If the content genuinely
+     can't fit one page even after those cuts, that is the signal to
+     ask for the explicit multi-page override above, not to keep
+     cutting roles.
 
-   Target page count is conventionally 1 for IC roles up to staff
-   and 2 for principal+. Don't deviate without a reason in the JD.
+   A multi-page result — from an explicit override — still uses the
+   compact-density fallback and the fragmentation rules in `STYLE.md
+   §6.1` exactly as before; only the *default target* changed, not the
+   mechanics of how a longer résumé paginates once one is requested.
+   `build/multi-page-fragmentation-check.html` is a fixture demonstrating
+   that override case.
 
 6. **Post-process the PDF** if and only if `data-print="dual-pdf"`
    is the active variant. Invoke:
@@ -316,13 +464,30 @@ The design will amplify whatever it wraps. Bad content in this
 template looks worse than bad content in Calibri — the visual
 confidence becomes a magnifying glass on the substance gap.
 
+**Order matters as much as content.** Within a role, sequence the
+bullets by relevance to the target job (`STYLE.md §5.3.2`) before
+applying the per-bullet rules below — chronology and raw metric size
+are not ordering criteria.
+
 Hard rules for every bullet:
 
 - **At least one specific number** (scale, latency, throughput,
-  team size, revenue impact, $ saved). Numbers go in `<strong>`.
-- **Or one trade-off annotation** (prefixed with " ·
-  trade-off:", set in the bullet's own type — never italic or
-  caption-sized). At most one per bullet; staff-level differentiator.
+  team size, revenue impact, $ saved). Numbers go in `<strong>` — this
+  marks them as metrics in the markup, but they render at the same
+  weight as the rest of the bullet, not bold (STYLE.md §5.4.1). This
+  is the default evidence every bullet should carry.
+- **A `.tradeoff` annotation is optional, not a substitute for the
+  number above.** Reach for it only when the bullet reports a
+  genuinely decision-defining alternative or constraint (prefixed with
+  " · trade-off:", set in the bullet's own type — never italic or
+  caption-sized), and only when it still fits inside the length budget
+  (`STYLE.md §5.4` — at most one per bullet, the annotation text under
+  100 characters, the whole bullet — same as any other — under 180).
+  Don't add one just
+  because a bullet has no hard metric, and don't let it turn a 1-2-line
+  bullet into a paragraph — fold ordinary implementation detail into
+  the main sentence instead. A bullet with neither a number nor a real
+  trade-off should be rewritten or cut, not padded with an annotation.
 - **No bare adjectives.** "Optimised", "improved", "led" without
   measured outcomes are wasted lines. Cut them.
 - **1.0–2.0 wrapped lines per bullet.** Three-line bullets read
@@ -330,6 +495,19 @@ Hard rules for every bullet:
 - **3–6 bullets per role.** Fewer reads thin; more reads as a list.
 - **No dash may join ideas.** See `## Dash punctuation` below. This
   is a hard gate, checked before the PDF is rendered.
+- **No colon-led inventory, no overloaded sentence, no reused
+  metaphor, no broken parallelism, no unearned generalization** — in
+  bullets, role summaries, and
+  project descriptions alike. A colon whose right-hand side is three
+  or more parallel technology phrases, a sentence carrying several
+  systems plus a conclusion, a figure of speech doing connective work,
+  a coordinated phrase (`from X through Y`, `both X and Y`, a
+  list) whose two sides don't share a grammatical form — a noun
+  phrase paired with a gerund phrase, for instance — and a conclusion
+  broader than the evidence under it, or resting on an undefined
+  "shape"/"pattern"/"approach", are all rejected
+  on the résumé for the same reasons they are in the letter
+  (`STYLE.md §11.2.3`).
 
 Verbs to prefer: *designed, shipped, owned, drove, killed, replaced,
 rewrote, migrated, decommissioned, halved, tripled, tenfold-d*.
@@ -374,7 +552,9 @@ numeric ranges (`Mar 2022 – Present`, `3–5 engineers`).
 Repair kit, in order: comma, semicolon, colon before a real
 explanation, conjunction (`and`, `because`, `so`, `while`),
 parentheses for a true aside, two sentences. Do not swap one dash for
-another.
+another. (A colon introducing one explanatory clause is still an
+allowed repair; a colon introducing three or more inventoried items
+is forbidden regardless — see `STYLE.md §11.2.3`.)
 
 For *structural* label-and-value pairs (a role summary, an annotation
 lead-in) the system's separator is the mid dot, not a dash:
@@ -442,9 +622,14 @@ and cutting it loses the term outright.
 The most common space waste in generated output is not the skills block
 — it is a `Selected Systems` section that re-lists metrics already in
 the Experience bullets. It is typically the largest block on the page
-after Experience itself, and in the shipped sample every metric in it
-(1.4M QPS, p99 38 ms, 19 PB, cold-start 380 → 18 ms, 50K docs/sec)
-also appears in a bullet above.
+after Experience itself. The shipped `resume.html` sample used to ship
+one; every metric it carried (1.4M QPS, p99 38 ms, 19 PB, 50K docs/sec)
+also appeared in a bullet above, so it was cut outright when the sample
+was recalibrated to the one-page default (`STYLE.md §6`) — the sample
+now demonstrates this rule instead of being an exception to it.
+`preview/component-projects.html` still shows the component on its
+own, and `build/multi-page-fragmentation-check.html` shows one in
+context.
 
 A project entry earns its place only if it carries something the
 bullets do not: a system the candidate built outside the roles listed,

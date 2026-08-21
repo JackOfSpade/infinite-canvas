@@ -1,4 +1,4 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 
 import { assessDetailSelection, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, createRunOwnershipGuard, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
 
@@ -358,7 +358,127 @@ export default [
       const fpA = fingerprint({ nodes: migrated, edges: [], drawings: [{ points: [{ x: 0, y: 0 }, { x: 5, y: 5 }, { x: 10, y: 10 }] }] });
       const fpB = fingerprint({ nodes: migrated, edges: [], drawings: [{ points: [{ x: 0, y: 0 }, { x: 7, y: 7 }, { x: 10, y: 10 }] }] });
       assert(fpA !== fpB, 'Serialization migration and fingerprints: middle drawing point should affect fingerprint');
+      const loadedSignature = persistenceContentFingerprint({ nodes: migrated, edges: [], drawings: [] });
+      const runtimeOnlyChange = [{
+        ...migrated[0],
+        selected: true,
+        measured: { width: 240, height: 180 },
+      }];
+      assert(
+        persistenceContentFingerprint({ nodes: runtimeOnlyChange, edges: [], drawings: [] }) === loadedSignature,
+        'Persistence fingerprint: ReactFlow selection/measurement state should not make a loaded canvas dirty'
+      );
+      const nestedTextEdit = [{
+        ...migrated[0],
+        data: {
+          ...migrated[0].data,
+          canvasData: {
+            ...migrated[0].data.canvasData,
+            nodes: migrated[0].data.canvasData.nodes.map((node) => ({
+              ...node,
+              data: { ...node.data, text: 'B' },
+            })),
+          },
+        },
+      }];
+      assert(
+        persistenceContentFingerprint({ nodes: nestedTextEdit, edges: [], drawings: [] }) !== loadedSignature,
+        'Persistence fingerprint: a nested edit that preserves node/edge/drawing counts must remain dirty'
+      );
+      assert(nextSearchMatchIndex(0, -1, 3) === 3, 'Search navigation: initial previous should wrap to the final match');
+      assert(nextSearchMatchIndex(0, 1, 3) === 1, 'Search navigation: initial next should start at the first match');
       return { migratedNodes: migrated[0].data.canvasData.nodes.length };
+    },
+  },
+{
+    name: 'Document text reload waits for in-flight writes before reading disk',
+    run: () => {
+      // DocumentNode is JSX and is not imported by this Node-only runner, so
+      // keep a focused source contract around the ordering that prevents the
+      // reload/read -> late-write race.
+      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
+      const start = source.indexOf('const handleReloadFromDisk');
+      const end = source.indexOf('const handleKeepEdits', start);
+      const handler = start >= 0 && end > start ? source.slice(start, end) : '';
+      const barrierIndex = handler.indexOf('await writeBarrier');
+      const fetchIndex = handler.indexOf('await fetch(');
+      assert(
+        barrierIndex >= 0 && fetchIndex > barrierIndex,
+        'Document text reload: the existing write chain must settle before disk is fetched'
+      );
+      assert(
+        handler.includes('gen !== loadGenerationRef.current')
+          && handler.includes('filePathRef.current !== reloadPath')
+          && handler.includes('!isMountedRef.current'),
+        'Document text reload: stale generation, relink, and unmount guards must protect the re-read'
+      );
+      return { writeBarrierBeforeFetch: true };
+    },
+  },
+{
+    name: 'Document watcher reconciles own and external writes after the write chain',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
+      const start = source.indexOf('// When the file watcher fires');
+      const end = source.indexOf('// Collapsing an expanded text node', start);
+      const watcher = start >= 0 && end > start ? source.slice(start, end) : '';
+      const barrierIndex = watcher.indexOf('await writeBarrier');
+      const fetchIndex = watcher.indexOf('await fetch(');
+      assert(
+        barrierIndex >= 0 && fetchIndex > barrierIndex,
+        'Document watcher: disk reconciliation must wait for the current write chain'
+      );
+      assert(
+        !watcher.includes('activeWritePathRef.current === filePath) return')
+          && watcher.includes('lastSettledWriteRef.current')
+          && watcher.includes('reflectsOwnWrite')
+          && watcher.includes('setExternalChange(true)'),
+        'Document watcher: own writes should be classified without dropping genuine external changes'
+      );
+      assert(
+        watcher.includes('draftRevision !== latestDraftRevisionRef.current')
+          && watcher.includes('filePathRef.current === watchedPath')
+          && watcher.includes('isMountedRef.current')
+          && watcher.includes('gen === loadGenerationRef.current'),
+        'Document watcher: reconciliation must guard draft, path, mount, and generation changes'
+      );
+      return { deferredReconciliation: true };
+    },
+  },
+{
+    name: 'Document watcher suspends pending and queued writes until classification',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
+      const watcherStart = source.indexOf('// When the file watcher fires');
+      const watcherEnd = source.indexOf('// Collapsing an expanded text node', watcherStart);
+      const watcher = watcherStart >= 0 && watcherEnd > watcherStart
+        ? source.slice(watcherStart, watcherEnd)
+        : '';
+      const writeStart = source.indexOf('const writeToDisk');
+      const writeEnd = source.indexOf('// When the file watcher fires', writeStart);
+      const writeToDiskSource = writeStart >= 0 && writeEnd > writeStart
+        ? source.slice(writeStart, writeEnd)
+        : '';
+      const cancelIndex = watcher.indexOf('clearTimeout(saveTimerRef.current)');
+      const barrierIndex = watcher.indexOf('await writeBarrier');
+      assert(
+        cancelIndex >= 0 && barrierIndex > cancelIndex
+          && watcher.includes('pendingWriteRef.current = null')
+          && watcher.includes('discardedThroughRevisionRef.current = Math.max'),
+        'Document watcher suspension: debounce and queued revisions must be stopped before the write barrier'
+      );
+      assert(
+        writeToDiskSource.includes("watcherWriteSuspensionRef.current?.filePath === filePath")
+          && writeToDiskSource.includes('do not arm a timer'),
+        'Document watcher suspension: edits during reconciliation must remain timer-free'
+      );
+      assert(
+        watcher.includes('if (reflectsOwnWrite || convergedWithDraft)')
+          && watcher.includes('writeToDisk(currentDraft)')
+          && watcher.includes('Reload and Keep Mine'),
+        'Document watcher suspension: only own/converged classification may resume the draft'
+      );
+      return { pendingWritesSuspended: true };
     },
   },
 {
@@ -564,7 +684,8 @@ export default [
         && generationScope.includes('canvasFilePath,'),
       'a Local AI handoff must receive the post-lease saved canvas path, so its job folder is canvas-local');
       assert(source.includes('getLocalApplicationStatus({ jobId, canvasFilePath })')
-        && source.includes('importLocalApplication({ jobId, canvasFilePath: queuedCanvasFilePath || canvasFilePath })')
+        && source.includes('canvasFilePath: queuedCanvasFilePath || canvasFilePath')
+        && source.includes('expectedResultSha256')
         && source.includes('openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath })'),
       'poll, import, and open operations must keep using the canvas path that owns the queued job');
       assert(generateIpc > originRead && saveIpc > generateIpc && release > saveIpc,

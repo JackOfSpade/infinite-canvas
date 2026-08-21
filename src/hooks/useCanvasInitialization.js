@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
@@ -22,24 +22,26 @@ export function useCanvasInitialization({
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
   const stateRef = useRef({ nodes, edges, drawings });
-  useEffect(() => {
+  const stateRevisionRef = useRef(0);
+  useLayoutEffect(() => {
     stateRef.current = { nodes, edges, drawings };
+    stateRevisionRef.current += 1;
   }, [nodes, edges, drawings]);
 
   // Mirror flushStack and hasUnsavedChanges into refs so the auto-save timer
   // callback can read live values without being a dependency of the effect.
   const flushRef = useRef(flushStack);
-  useEffect(() => { flushRef.current = flushStack; }, [flushStack]);
+  useLayoutEffect(() => { flushRef.current = flushStack; }, [flushStack]);
 
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
-  useEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
+  useLayoutEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
 
   // Mirror currentFile into a ref for the in-flight-file-switch guard below —
   // an already-fired attemptSave keeps running to completion even after the
   // effect re-runs (clearTimeout only stops a timer that hasn't fired yet), so
   // it needs a way to notice the live file changed out from under it.
   const currentFileRef = useRef(currentFile);
-  useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
+  useLayoutEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
 
   // Mark the canvas dirty whenever content changes.
   // Skip the very first render where all collections are empty — that's the clean
@@ -66,18 +68,23 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     let timer;
+    let cancelled = false;
+    const retry = (delayMs) => {
+      if (!cancelled) timer = setTimeout(attemptSave, delayMs);
+    };
     const attemptSave = async () => {
+      if (cancelled) return;
       // Safety guard 1: never auto-save while navigation animations are active
       // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) {
-        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_ANIMATING_MS);
+        retry(TIMINGS.AUTOSAVE_RETRY_ANIMATING_MS);
         return;
       }
 
       // Safety guard 2: don't save if a manual save (Cmd+S) is already in-progress.
       // Concurrent writes to the same file can cause partial-write corruption or OS lock conflicts.
       if (saveStateRef?.current && saveStateRef.current !== 'idle') {
-        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_SAVING_MS);
+        retry(TIMINGS.AUTOSAVE_RETRY_SAVING_MS);
         return;
       }
 
@@ -94,7 +101,7 @@ export function useCanvasInitialization({
       // still mid-sentence. Defer and retry; the manual save / quit-time flush
       // still force-commits, since those are deliberate user actions.
       if (document.activeElement?.isContentEditable) {
-        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_EDITING_MS);
+        retry(TIMINGS.AUTOSAVE_RETRY_EDITING_MS);
         return;
       }
 
@@ -106,8 +113,13 @@ export function useCanvasInitialization({
         flushStack: flushRef.current,
         fallbackState: stateRef.current,
       });
-      if (!isMountedRef.current) return;
+      if (cancelled || !isMountedRef.current) return;
       if (!data.nodes || !Array.isArray(data.nodes)) return;
+
+      // Capture the serialized revision. A later edit tears down this effect,
+      // but the explicit revision check also closes the commit-to-passive-cleanup
+      // window where a fast IPC response could otherwise mark newer state clean.
+      const savedRevision = stateRevisionRef.current;
 
       // Safety guard 5: the open workspace may have been swapped to a
       // different file while this attempt was mid-flight (buildSaveData has
@@ -121,18 +133,40 @@ export function useCanvasInitialization({
       // autosave once its content settles, so just drop this stale attempt.
       if (currentFileRef.current !== currentFile) return;
 
-      window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
-        if (!isMountedRef.current) return;
-        if (res?.success && res.filePath) {
-          // Only update currentFile if the path changed (e.g. first save via dialog)
+      // Acquire the same imperative write lock used by manual save. This makes
+      // the check-and-set atomic on the JS thread and prevents both overlapping
+      // auto-saves and an auto/manual write collision.
+      if (saveStateRef?.current && saveStateRef.current !== 'idle') {
+        retry(TIMINGS.AUTOSAVE_RETRY_SAVING_MS);
+        return;
+      }
+      if (saveStateRef) saveStateRef.current = 'autosaving';
+
+      try {
+        const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+        if (cancelled || !isMountedRef.current) return;
+        const snapshotIsCurrent = currentFileRef.current === currentFile
+          && stateRevisionRef.current === savedRevision;
+        if (res?.success && res.filePath && snapshotIsCurrent) {
+          // Only update currentFile if the path changed (e.g. an on-disk rename
+          // was resolved by the save implementation).
           if (res.filePath !== currentFile) setCurrentFile(res.filePath);
           setHasUnsavedChanges(false);
+        } else if (!res?.success && !res?.canceled) {
+          EventLogger.error('[auto-save] saveWorkspace failed:', res?.error || 'unknown error');
         }
-      }).catch(err => EventLogger.error('[auto-save] saveWorkspace failed:', err));
+      } catch (err) {
+        EventLogger.error('[auto-save] saveWorkspace failed:', err);
+      } finally {
+        if (saveStateRef?.current === 'autosaving') saveStateRef.current = 'idle';
+      }
     };
 
     // Debounce scales with workspace size (bigger = costlier to serialize/write).
     timer = setTimeout(attemptSave, autosaveDebounceMs(nodes.length));
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, isMountedRef]);
 }

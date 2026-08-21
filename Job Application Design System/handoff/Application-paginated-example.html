@@ -1,0 +1,2212 @@
+<!doctype html>
+<html lang="en" data-print="ink-only" data-mono>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Application Workspace</title>
+<style>
+@charset "utf-8";
+/* ============================================================
+   Job Application Design System — design tokens
+   ----------------------------------------------------------
+   Type:    Source Serif 4 (display)  ·  Inter (body)  ·  IBM Plex
+            Mono (technologies). All three load from the Google Fonts
+            CDN (CSS2 API) — see the @import below.
+   Color:   Warm off-white ground · deep warm ink · one oxblood
+            accent, used sparingly (default: candidate name only)
+   Units:   Print-first. Sizes given in pt so they survive PDF
+            export at exact metric. The root `html` font-size is
+            bound to --fs-body (10.25pt) — so 1rem == 10.25pt.
+            Spacing tokens are absolute (pt), not rem-derived;
+            change --fs-body without disturbing the spacing scale.
+   ============================================================ */
+
+/* All three families load from the Google Fonts CDN (CSS2 API).
+   Weights are pinned to exactly what the system uses:
+     Source Serif 4 — 400, 600
+     Inter          — 400, 500, 600   (NO 700 by design — see note below)
+     IBM Plex Mono  — 400, 500
+   Swap families by editing this @import AND the --ff-* tokens below. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap");
+
+/* Inter Bold (700) is intentionally NOT requested. The system uses
+   SemiBold (600) for every "bold" affordance — body <strong>, role
+   titles, project names, candidate name. Pulling 700 invites drift
+   toward a heavier, less editorial voice. If a future variant truly
+   needs 700, add it to the @import above AND the --fw-bold token below. */
+
+:root {
+  /* ---------- Color · ground ----------
+     Warm off-white, ~4% warm tint. The whole "ink on warm paper"
+     reading depends on this being a coloured ground, not white.
+
+     NOTE: keep in sync with `DEFAULT_CREAM_RGB` in
+     `build/dual-mode-pdf.js`. That module paints this colour as
+     the OCG background layer in the generated PDF; if the two
+     drift, the on-screen design colour and the printed-PDF
+     background colour will mismatch. Better: pass `--bg`'s actual
+     value into `addOcgBackground({ cream: '#F7F4ED' })` at the
+     call site so the CSS token stays authoritative. */
+  --bg:          #F7F4ED;
+  --bg-rule:    rgba(26, 24, 21, 0.10); /* hairline rule color */
+
+  /* ---------- Color · ink (text) ----------
+     Positional tokens (--ink-1..4) are the canonical declarations.
+     Semantic aliases (--ink-body, --ink-meta, --ink-quiet,
+     --ink-fade) are exposed below and are the preferred reference
+     in new code; the positional names remain in place for
+     backward compatibility and for cases where the *position* in
+     the scale is what's being expressed (e.g. selector cascades). */
+  --ink-1:       #1A1815;   /* primary — body, role titles    */
+  --ink-2:       #54504A;   /* secondary — dates, locations   */
+  --ink-3:       #8C857A;   /* tertiary — bullet glyphs       */
+  --ink-4:       #B6AFA2;   /* quaternary — separators, fades */
+
+  /* Semantic aliases — prefer these in component CSS. */
+  --ink-body:    var(--ink-1);   /* body copy, role titles, names */
+  --ink-meta:    var(--ink-2);   /* dates, locations, annotations */
+  --ink-quiet:   var(--ink-3);   /* glyphs, the most subdued meta */
+  --ink-fade:    var(--ink-4);   /* separators, "trade-off:" leads */
+
+  /* ---------- Color · accent ---------- */
+  /* Default usage: candidate name ONLY. The single override point
+     is --accent-on. Set it to var(--ink-1) for a pure-monochrome
+     variant — via the root-level `data-mono` attribute (see
+     Variants below), which is the only supported way to switch it.
+     Do NOT introduce a second accent token. */
+  --accent:      #7A1F2B;   /* oxblood — quiet, ink-like      */
+  --accent-on:   var(--accent);
+
+  /* ---------- Type · families ---------- */
+  --ff-display:  "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif; /* @kind font */
+  --ff-body:     "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif; /* @kind font */
+  --ff-mono:     "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace; /* @kind font */
+
+  /* ---------- Type · scale (pt for print fidelity) ---------- */
+  --fs-display:  28pt;      /* @kind font */  /* candidate name */
+  --fs-h1:       18pt;      /* @kind font */  /* document title (rarely used) */
+  --fs-h2:        9pt;      /* @kind font */  /* section header (uppercase) */
+  --fs-h3:       11pt;      /* @kind font */  /* role title / company */
+  --fs-body:     10.25pt;   /* @kind font */  /* bullets, paragraphs */
+  --fs-small:     9.5pt;    /* @kind font */  /* meta (dates, location) */
+  --fs-caption:   8.75pt;   /* @kind font */  /* block-level captions only —
+                                                 NOT the inline .scope /
+                                                 .tradeoff spans, which inherit
+                                                 their bullet's type */
+  --fs-mono:      9pt;      /* @kind font */  /* inline technologies */
+
+  /* ---------- Type · weight ---------- */
+  /* Inter Light (300) and Bold (700) are not bundled — by design.
+     The system uses SemiBold (600) for every "bold" affordance to
+     keep the voice quietly confident, not loud. */
+  --fw-regular:  400; /* @kind font */
+  --fw-medium:   500; /* @kind font */
+  --fw-semibold: 600; /* @kind font */
+
+  /* ---------- Type · leading ---------- */
+  --lh-display:  1.05; /* @kind font */
+  --lh-tight:    1.20; /* @kind font */
+  --lh-snug:     1.35; /* @kind font */
+  --lh-body:     1.45; /* @kind font */
+  --lh-loose:    1.55; /* @kind font */
+
+  /* ---------- Vertical rhythm ----------
+     A computed token equal to one body line-box (fs-body × lh-body
+     ≈ 14.86pt). Use multiples of this for between-block spacing
+     where vertical rhythm matters (section ↔ section, header ↔ body,
+     role ↔ role). The 4pt --s-* scale below is finer-grained and
+     used for inline / intra-block spacing. The two systems coexist
+     by design: --baseline keeps the *page* on a grid; --s-* keeps
+     *elements* visually tight without forcing 4pt arithmetic onto
+     every gap. */
+  --baseline:    calc(var(--fs-body) * var(--lh-body)); /* @kind spacing */
+  --vr-half:     calc(var(--baseline) * 0.5);   /* @kind spacing */  /* ~7.4pt  */
+  --vr-1:        var(--baseline);                /* @kind spacing */  /* ~14.9pt */
+  --vr-1-5:      calc(var(--baseline) * 1.5);   /* @kind spacing */  /* ~22.3pt */
+  --vr-2:        calc(var(--baseline) * 2);     /* @kind spacing */  /* ~29.7pt */
+
+  /* ---------- Type · tracking ---------- */
+  --tr-display:  -0.012em; /* @kind font */
+  --tr-h2:        0.14em;   /* @kind font */  /* uppercase tracked */
+  --tr-mono:     -0.005em; /* @kind font */
+  --tr-tight:    -0.005em; /* @kind font */
+
+  /* ---------- Inline separators ----------
+     The `·` separator appears in many contexts (contact line,
+     role title, edu line, metrics, skills run). Two gap sizes
+     cover every usage: tight for prose-adjacent runs, loose for
+     mono / numeric / metric lines where digits need air. */
+  --sep-gap-tight: 0.35em; /* @kind spacing */
+  --sep-gap-loose: 0.5em; /* @kind spacing */
+
+  /* ---------- Spacing · 4pt baseline ---------- */
+  --s-0:   0; /* @kind spacing */
+  --s-1:   2pt; /* @kind spacing */
+  --s-2:   4pt; /* @kind spacing */
+  --s-3:   6pt; /* @kind spacing */
+  --s-4:   8pt; /* @kind spacing */
+  --s-5:  12pt; /* @kind spacing */
+  --s-6:  16pt; /* @kind spacing */
+  --s-7:  20pt; /* @kind spacing */
+  --s-8:  24pt; /* @kind spacing */
+  --s-9:  32pt; /* @kind spacing */
+  --s-10: 40pt; /* @kind spacing */
+
+  /* ---------- Page geometry (Letter) ---------- */
+  --page-w:        8.5in;  /* @kind spacing */
+  --page-h:       11.0in;  /* @kind spacing */
+  --margin-top:    0.72in; /* @kind spacing */
+  --margin-bot:    0.72in; /* @kind spacing */
+  --margin-side:   0.78in; /* @kind spacing */
+  --rule-weight:   0.5pt;  /* @kind spacing */
+
+  /* Optical edge alignment. The display line box carries half-leading +
+     the ascender-to-ink gap above the first glyph, so ink used to start
+     ~3.7pt below the top margin while a flush last line ends only ~0.3pt
+     above the bottom margin — the top read airier than the bottom on a
+     full page. This trim removes that overshoot on the first block only.
+     Expressed in em: it resolves against the display font-size, so it
+     tracks --fs-display and the screen clamp automatically. Applied in
+     resume.css (.page > :first-child > .name). */
+  --optical-lead-trim: 0.123em;
+
+  /* The mirror at the foot: the last line's half-leading sits below its
+     ink, so a flush final line ends ~1–1.6pt above the bottom margin
+     against the top's 0.3pt. Absolute pt, not em — unlike the display
+     line the closing line has no viewport clamp, and the value must not
+     drift with whichever block it lands on. One value cannot be exact
+     for both documents (the résumé ends on a grid row whose larger left
+     column sets the row height; the letter ends on a single small line),
+     so this is the midpoint: it lands both within ~0.3pt — under the
+     0.5pt hairline, i.e. below perceptibility. Overridden for compact,
+     whose tighter leading leaves almost nothing to trim. Applied in
+     resume.css on the trailing flow edge. */
+  --optical-tail-trim: 1pt; /* @kind spacing */
+
+  /* ---------- Layout columns (single primary column) ---------- */
+  --col-meta-w:   1.45in;   /* @kind spacing */  /* right-aligned date/location column
+                               — visual alignment, NOT a 2-col flow */
+  --col-gap:      0.32in;   /* @kind spacing */
+}
+
+/* ============================================================
+   Semantic / element-level defaults
+   These are the rules that apply when nothing else is set —
+   the document's resting voice.
+   ============================================================ */
+
+html {
+  background: var(--bg);
+  color: var(--ink-1);
+  font-family: var(--ff-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  /* kern/liga/calt: universal text rendering hygiene — these shape
+     LETTERS only and round-trip cleanly through PDF text extraction.
+
+     tnum (tabular numerals) is deliberately NOT enabled, and must not
+     be. Inter's tabular figures are GSUB-substituted glyphs with no
+     `cmap` entry, so Chrome's print-to-PDF subsetter can't reverse-map
+     them to U+0030–0039 — it assigns Private-Use-Area codepoints
+     instead. The numbers then render correctly on screen but extract
+     as nothing: every QPS, $, %, and date silently drops out of the
+     PDF text layer, and therefore out of ATS parsing, copy-paste, and
+     screen readers. Parse-safety beats digit-column alignment
+     (STYLE.md §1); the right-aligned date cell is aligned by the grid,
+     not by monospaced figures. Do NOT add "tnum" (or "pnum"/"lnum"/
+     "onum") here — they all trip the same substitution hazard.
+
+     No stylistic-set toggles (ss01 etc.) either — they do different
+     things across the three families and would leak family-specific
+     behavior into the global default. */
+  font-feature-settings: "kern", "liga", "calt";
+  /* Preserve the warm ground in print. Without this, Chrome strips
+     --bg to save toner and the "ink on warm paper" reading collapses
+     to plain black-on-white. The whole aesthetic depends on this. */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Screen-only focus ring. The artifact is a PDF first, but the
+   screen preview is interactive — the browser-default ring on a
+   warm-serif document is jarring. This one stays in family. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 1.5pt solid var(--ink-3);
+  outline-offset: 2pt;
+  border-radius: 0;
+}
+@media print {
+  :focus, :focus-visible { outline: none; }
+}
+
+body { margin: 0; }
+
+p   { margin: 0 0 var(--s-4); }
+b, strong { font-weight: var(--fw-semibold); color: var(--ink-1); }
+em, i     { font-style: italic; }
+small     { font-size: var(--fs-small); color: var(--ink-2); }
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 0.5pt solid var(--bg-rule);
+}
+a:hover { border-bottom-color: var(--ink-2); }
+
+code, kbd, samp {
+  font-family: var(--ff-mono);
+  font-size: 0.92em;
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-2);
+}
+
+ul { margin: 0; padding: 0; list-style: none; }
+
+/* ============================================================
+   Variants — the canonical variant contract
+   ----------------------------------------------------------
+   Four opt-in attributes: data-print, data-page, data-mono,
+   data-density.
+
+   THEY ARE VALID ONLY ON THE ROOT <html> ELEMENT. Every selector
+   below is anchored with `:root`, so an attribute on
+   <main class="page">, on <body>, or on any other ancestor has NO
+   effect. This is deliberate: one document = one configuration,
+   selectors stay flat, and no mixed / nested placement can produce
+   a half-applied variant. Consumers of this system emit a bare
+   <main class="page">…</main> and let the host set root attributes.
+
+   Each variant is a closed override block — a new one follows the
+   same shape (`:root[data-…]`).
+   ============================================================ */
+
+/* ---------- A4 paper ----------
+   Letter is 8.5" wide, A4 is 8.27" wide. Keeping the same 0.78in
+   side margin would give a different measure (chars per line),
+   breaking Butterick's editorial sweet spot. Recompute the margins
+   so the content width is preserved at ~6.94in.
+
+   Apply with:  <html data-page="a4">   (root only)
+
+   The physical paper size is selected by CSS named pages declared
+   in `resume.css` (`@page a4 { size: A4 }` + a root-scoped
+   `page: a4` rule on `.page`). No separate top-level override is
+   required. */
+:root[data-page="a4"] {
+  --page-w:      210mm;   /* @kind spacing */  /* 8.27in */
+  --page-h:      297mm;   /* @kind spacing */  /* 11.69in */
+  --margin-top:   18mm;   /* @kind spacing */  /* ~0.71in — preserves vertical rhythm */
+  --margin-bot:   18mm;   /* @kind spacing */
+  --margin-side:  16mm;   /* @kind spacing */  /* ~0.63in — keeps measure ≈ 70-75ch  */
+}
+
+/* ---------- Monochrome ----------
+   Pure ink, no oxblood accent. The candidate name renders in
+   --ink-1. Useful for B&W laser pipelines or when the recipient
+   org has a documented aversion to colour on résumés.
+
+   Apply with:  <html data-mono>   (root only)                    */
+:root[data-mono] {
+  --accent-on: var(--ink-1);
+}
+
+/* ---------- Density: compact ----------
+   Tightens vertical rhythm and shrinks body type ~5% to claw back
+   roughly 6–9 lines per page. The intended use is the single
+   lever a user reaches for when content overflows by a small
+   margin — "1.1 pages, want 1.0" — without rewriting bullets.
+
+   Tokens that change:
+   - body type drops 10.25 → 9.75pt; leading 1.45 → 1.35
+   - meta sizes follow proportionally
+   - block-spacing tokens (s-6 / s-8 / s-9) drop roughly 25%
+   - page margins shrink 0.72 → 0.6in head/foot
+
+   Tokens deliberately untouched:
+   - --fs-display (the name) — shrinking the name to fit content
+     is the wrong trade
+   - --col-meta-w — date strings keep the same metrics
+   - --rule-weight, accent, families — visual identity unchanged
+
+   Apply with:  <html data-density="compact">   (root only)
+
+   This is a FALLBACK, not the default and not a tier in a scale:
+   there is exactly one density variant, applied only after a
+   render has measured an overflow. Pairs cleanly with
+   `data-page="a4"` and `data-mono`. If "compact" still overflows,
+   the content is the problem; trim a bullet — do not add another
+   density level or compress type further.                     */
+:root[data-density="compact"] {
+  --fs-body:      9.75pt;  /* @kind font */
+  --fs-small:     9pt;     /* @kind font */
+  --fs-caption:   8.5pt;   /* @kind font */  /* block-level captions only */
+  --fs-mono:      8.5pt;   /* @kind font */
+  --lh-body:      1.35;    /* @kind font */
+  --lh-snug:      1.25;    /* @kind font */
+
+  --s-6:         12pt;   /* @kind spacing */  /* was 16pt — section head ↔ body   */
+  --s-8:         18pt;   /* @kind spacing */  /* was 24pt — role ↔ role           */
+  --s-9:         24pt;   /* @kind spacing */  /* was 32pt — section ↔ section     */
+
+  --margin-top:  0.6in;  /* @kind spacing */
+  --margin-bot:  0.6in;  /* @kind spacing */
+
+  /* Compact's tighter leading leaves ~0.3–0.8pt below the closing
+     line's ink instead of ~1–1.6pt, so the tail trim shrinks with it. */
+  --optical-tail-trim: 0.4pt; /* @kind spacing */
+}
+
+/* ---------- Print: ink-only ----------
+   Flips the warm ground to pure white **only when printing**. Screen
+   preview keeps the editorial warm cream — this is purely a paper /
+   toner concession for recipients who expect or require white stock.
+
+   Coloured text is unaffected. `print-color-adjust: exact` (set on
+   `html` above) keeps any explicitly-coloured ink rendering at its
+   true value, so the oxblood `--accent-on` on the candidate name
+   still prints in colour. Only `--bg` flips, and `--bg-rule` is
+   nudged from 10% to 16% ink so the hairline rules survive on a
+   pure-white field (the rule colour is a translucent ink overlay;
+   over warm cream the visual contrast is slightly higher than over
+   white, so we compensate).
+
+   Apply with:  <html data-print="ink-only">   (root only)
+
+   Pairs cleanly with `data-page="a4"`, `data-mono`, and
+   `data-density="compact"`. If you also set `data-mono`, the printed
+   page is plain ink-on-white — equivalent to a traditional B&W
+   résumé without rewriting any content.                            */
+@media print {
+  /* Because the token is redefined on :root, `html` reads the white
+     value directly and `body` inherits it, so the print rule in
+     resume.css (`html, body { background: var(--bg) }`) paints the
+     whole sheet white with no mirror selectors. The old `:has()` and
+     `.page`-level compatibility branches existed only to patch up
+     subtree-scoped placements; root-only placement removes the need. */
+  :root[data-print="ink-only"] {
+    --bg:        #FFFFFF;
+    --bg-rule:   rgba(26, 24, 21, 0.16);
+  }
+}
+
+/* ---------- Print: dual-pdf  (default for PDF generation) ----------
+   Strips ALL background from the printed page so a headless-Chrome
+   "print to PDF" emits a file with no baked-in background fill in
+   the page content stream. The companion build module
+   (`build/dual-mode-pdf.js`) then post-processes that PDF, adding a
+   cream rectangle in a view-only OCG (Optional Content Group, PDF
+   spec §8.11). The result is a SINGLE PDF that:
+
+       • shows warm cream + oxblood name when viewed on screen
+       • prints on clean white paper, oxblood name preserved
+       • requires no settings change from the recipient
+
+   Coloured text (the oxblood candidate name, any future accent ink)
+   is unaffected in either state because it is part of the page
+   content stream, not the OCG-layered background. `print-color-adjust:
+   exact` (set on `html` above) carries it through Chrome's print
+   pipeline at its true CMYK / RGB value, so a color printer renders
+   it in oxblood and a B&W printer renders it as a dark grey — exactly
+   the same behavior as ordinary coloured text in any PDF.
+
+   --bg-rule is bumped to 16% ink (from the default 10%) for the same
+   reason as ink-only: hairline rules must remain visible when the
+   cream layer is hidden during print. On the cream view, the rule
+   appears very slightly heavier than the default 10% — an acceptable
+   trade for printability.
+
+   Apply with:  <html data-print="dual-pdf">   (root only)
+
+   This is the DEFAULT in resume.html. To opt out (e.g. you want a
+   one-state cream-baked PDF for a context where the recipient will
+   not print), remove the attribute or switch to data-print="ink-only".
+
+   Pairs cleanly with `data-page="a4"`, `data-mono`, and
+   `data-density="compact"`.                                          */
+@media print {
+  /* Root-only, same as ink-only: `html` reads --bg directly and `body`
+     inherits, so `html, body { background: var(--bg) }` in resume.css
+     emits a page content stream with NO background fill — exactly what
+     the OCG post-processor needs in order to layer cream as the
+     bottom-most drawn element. No mirror or `:has()` branch required. */
+  :root[data-print="dual-pdf"] {
+    --bg:        transparent;
+    --bg-rule:   rgba(26, 24, 21, 0.16);
+  }
+}
+
+
+@charset "utf-8";
+/* ============================================================
+   resume.css — components & page chrome
+   ----------------------------------------------------------
+   Pair with `colors_and_type.css` (tokens + element defaults).
+   This file covers everything specific to the résumé surface:
+   page chrome (screen preview + paged media), the header, section
+   heads, the meta-row utility, role / project / skills blocks,
+   bullets, inline separators and annotations. Education is not a
+   section in this system: the highest completed degree and its
+   institution ride in the header subtitle (STYLE.md §5.8).
+
+   Semantic markup maps 1:1 to JSON Resume v1.0.0 + the following
+   namespaced custom fields:
+     work[].highlights[i].x_scope     → .scope
+     work[].highlights[i].x_tradeoff  → .tradeoff
+     work[].x_summary                 → .role-summary
+     projects[].x_metrics             → .project-metrics
+   Full mapping table lives in STYLE.md §9.
+   ============================================================ */
+
+/* -------- viewport / page chrome (screen preview only) -------- */
+@media screen {
+  body {
+    padding: 32px 16px 64px;
+    background:
+      radial-gradient(ellipse at top,
+        #EEE9DC 0%, #E6E0CF 60%, #DCD5C2 100%);
+    min-height: 100vh;
+  }
+  .page {
+    background: var(--bg);
+    width: var(--page-w);
+    min-height: var(--page-h);
+    margin: 0 auto 24px;
+    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    box-shadow:
+      0 1px 0 rgba(26,24,21,0.04),
+      0 24px 48px -16px rgba(26,24,21,0.18),
+      0 4px 12px -4px rgba(26,24,21,0.10);
+    box-sizing: border-box;
+  }
+}
+
+/* -------- print: CSS Paged Media --------
+   Named pages let the root-level data-page / data-density attributes
+   fully control paper size. Chromium 85+ honours `page: <name>` on an
+   element + matching `@page <name> { size: ... }` rules — no top-level
+   override needed. The margin tokens inside .page are recomputed by
+   the variant blocks in colors_and_type.css.
+
+   Running footer:
+   The @bottom-right margin box prints the page number on every
+   page except the first. Styling is hardcoded because CSS custom
+   properties don't reliably cascade into @page contexts across
+   engines; values mirror the mono / --ink-quiet tokens so the
+   footer stays in family. Page 1 is suppressed via `:first` —
+   a one-page resume should never show "1". */
+@page letter {
+  size: Letter;
+  /* Vertical margins live HERE, not as .page padding, so they repeat
+     on every printed page. Padding on a page-breaking element only
+     applies top-pad to the first fragment and bottom-pad to the last,
+     which left pages 2+ with no top margin. Side margins stay as
+     .page padding so they remain token-driven (a4 / density variants). */
+  margin: 0.72in 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 0.78in 0.4in 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page letter:first { @bottom-right { content: none; } }
+@page a4 {
+  size: A4;
+  margin: 18mm 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;
+    margin: 0 16mm 12mm 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page a4:first { @bottom-right { content: none; } }
+/* -------- compact density: tightened printed vertical margins --------
+   Compact shrinks head/foot from 0.72in → 0.6in (Letter) and
+   18mm → 15.24mm (A4), matching the --margin-top/--margin-bot
+   overrides in the :root[data-density="compact"] block. Named pages are
+   required because @page margins cannot read custom properties. */
+@page letter-compact {
+  size: Letter;
+  margin: 0.6in 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 0.78in 0.4in 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page letter-compact:first { @bottom-right { content: none; } }
+@page a4-compact {
+  size: A4;
+  margin: 15.24mm 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 16mm 10mm 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page a4-compact:first { @bottom-right { content: none; } }
+@page {
+  /* Fallback for engines that don't support named pages — defaults
+     to Letter. Vertical margins repeat per page via @page; side
+     margins are handled by .page padding. */
+  size: Letter;
+  margin: 0.72in 0;
+}
+/* -------- named-page selection --------
+   Variant attributes are valid ONLY on the root <html> element (see
+   the Variants section of colors_and_type.css), so each rule is a
+   single `:root[…] .page` descendant selector. Four states, four
+   rules — no enumeration of nested / page-level placements, and no
+   `.page[data-…]` self-selectors. Specificity does the ordering:
+   compact (0,3,0, declared later) beats plain letter/a4, and the
+   two-attribute a4-compact rule (0,4,0) beats both. */
+.page                                              { page: letter; }
+:root[data-page="a4"] .page                        { page: a4; }
+:root[data-density="compact"] .page                { page: letter-compact; }
+:root[data-page="a4"][data-density="compact"] .page { page: a4-compact; }
+@media print {
+  /* --bg is redefined on :root by the data-print variants, so html reads
+     it directly and body inherits: white for ink-only, transparent for
+     dual-pdf. No mirror selectors needed. */
+  html, body { background: var(--bg); }
+  body { padding: 0; }
+  .page {
+    width: auto;
+    min-height: auto;
+    margin: 0;
+    /* Side padding only — top/bottom margins are on @page so they
+       repeat on every printed page. (Bug fix: pages 2+ were losing
+       their top margin because padding on a fragmented box is applied
+       once, at the first/last fragment, not per page.) */
+    padding: 0 var(--margin-side);
+    box-shadow: none;
+    page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+}
+
+/* =========================================================
+   Trailing flow edge — no phantom margin at the foot
+   ---------------------------------------------------------
+   `p { margin: 0 0 var(--s-4) }` leaves an 8pt bottom margin on
+   the document's very last paragraph. That margin is part of the
+   flow, so on a page filled to the bottom margin the last LINE
+   stops 8pt short of it while the first line starts 0.3pt below
+   the top margin (§4.4) — the equal-ink guarantee would be off by
+   8pt in exactly the filled-page case it exists for. Zero the
+   trailing margin along the final last-child chain only.
+
+   The second selector covers the final block being a grid (the
+   résumé ends on the Skills `dl`, the letter on .letter-close): a
+   grid row's height counts its items' margins, so the row's OTHER
+   item would re-introduce the gap. Only the last row is touched —
+   earlier
+   rows keep their spacing, and a multi-paragraph final block
+   (the letter's .letter-close) keeps its internal rhythm because
+   the chain stops at its last child. */
+.page > :last-child,
+.page > :last-child > :last-child,
+.page > :last-child > :last-child > :last-child,
+.page > :last-child > :last-child > :last-child > :last-child { margin-bottom: 0; }
+.page > :last-child > :last-child > * { margin-bottom: 0; }
+/* Then mirror the top's optical trim: pull the final block's box up by
+   the last line's half-leading so ink-to-margin reads 0.3pt at BOTH
+   ends on a filled page. Applied once, on the outermost final block, so
+   it can't compound down the chain above. */
+.page > :last-child { margin-bottom: calc(-1 * var(--optical-tail-trim)); }
+
+/* =========================================================
+   Header — name, subtitle, contact line. All body text;
+   never use document <header> for parser-critical info.
+   =========================================================*/
+.resume-header {
+  margin-bottom: var(--s-9);
+}
+.name {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-display);
+  letter-spacing: var(--tr-display);
+  color: var(--accent-on);
+  margin: 0 0 var(--s-2);
+  /* Screen preview only: shrink the name on narrow viewports
+     (mobile, scaled-down windows) so it still reads gracefully
+     when the page is wider than the viewport. The clamp keys off
+     viewport width, NOT name length — a long name on a desktop
+     viewport still renders at the full token. text-wrap: balance
+     keeps any forced wrap visually centred. */
+  font-size: clamp(calc(var(--fs-display) - 4pt), 4.2vw + 6pt, var(--fs-display));
+  text-wrap: balance;
+}
+/* Optical edge alignment — see --optical-lead-trim in colors_and_type.css.
+   Pulls the display line's leading overshoot out of the top margin so the
+   first glyph's ink sits the same distance from the paper edge as a flush
+   last line's ink sits from the bottom edge (~0.3pt each). Scoped to the
+   page's first block, so a .name used anywhere else is untouched. Applies
+   on screen and in print, and only to page 1 in a multi-page flow. */
+.page > :first-child > .name:first-child { margin-top: calc(-1 * var(--optical-lead-trim)); }
+@media print {
+  /* Print uses the token directly — deterministic, fixed-paper output. */
+  .name { font-size: var(--fs-display); }
+}
+/* Subtitle: [current professional role] · [highest completed degree],
+   [institution] — the system's one permanent home for education
+   (STYLE.md §5.8). One line, one treatment: the role and the credential
+   are set identically, so the line reads as a single run and stays
+   balanced whether it carries both halves or the role alone.
+   `text-wrap: pretty` handles the rare long-institution wrap.
+
+   NOTE the class name: `.subtitle-role`, never `.role`. `.role` is the
+   Experience block component (below); reusing it here would put this
+   inline span inside the role block's margin, break, and last-child
+   rules, and any consumer restyling `.role` per §5.2 would silently
+   restyle the header. */
+.tagline {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-regular);
+  color: var(--ink-meta);
+  margin: 0 0 var(--s-5);
+  letter-spacing: var(--tr-tight);
+  text-wrap: pretty;
+}
+.tagline .subtitle-role, .tagline .credential {
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+.contact {
+  font-size: var(--fs-small);
+  color: var(--ink-body);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s-5);
+  row-gap: var(--s-2);
+}
+.contact a { border-bottom-color: rgba(26,24,21,0.18); }
+
+/* =========================================================
+   Section + subsection heads
+   Small uppercase mark + thin rule that fills the rest of
+   the line. Sections sit on the baseline grid via --vr-2.
+   Subsection: same shape, quieter type, italic.
+   =========================================================*/
+.section {
+  margin-top: var(--vr-2);
+}
+.section:first-of-type { margin-top: 0; }
+
+.section-head,
+.subsection-head {
+  display: flex;
+  align-items: center;          /* center the rule to the heading's optical mid */
+  gap: var(--s-5);
+  break-after: avoid;
+}
+.section-head { margin: 0 0 var(--s-6); }
+.section-head h2 {
+  font-family: var(--ff-body);
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-h2);
+  text-transform: uppercase;
+  color: var(--ink-body);
+  margin: 0;
+  flex-shrink: 0;
+  line-height: 1;               /* tight box — lets the rule sit at cap mid */
+}
+.section-head .rule,
+.subsection-head .rule {
+  flex: 1;
+  height: var(--rule-weight);
+  background: var(--bg-rule);
+  /* No magic margin-top; align-items:center on the parent + line-height:1
+     on the heading puts the rule at its vertical centre across any font. */
+}
+
+/* Subsection head — quieter, second-tier divider for groupings
+   *inside* a section ("Open Source" under Experience, "Talks"
+   under Selected Systems). Italic sans, no uppercase, no tracked +0.14em.
+   --vr-1 above keeps it on the baseline grid one line-box below
+   the previous block. Render with:
+     <div class="subsection-head">
+       <h3>Open Source</h3><span class="rule" aria-hidden="true"></span>
+     </div>                                                       */
+.subsection-head {
+  margin: var(--vr-1) 0 var(--s-4);
+}
+.subsection-head h3 {
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  font-weight: var(--fw-medium);
+  font-style: italic;
+  letter-spacing: var(--tr-tight);
+  color: var(--ink-meta);
+  margin: 0;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* =========================================================
+   Meta-row utility
+   The "content left, right-aligned meta right" pattern
+   appears in role headers, role-meta lines, edu lines, and is
+   available for any future block that needs it. One grid, one
+   class, one place to change column widths.
+
+   Compose it onto the block element; element-specific classes
+   layer typography on top (e.g. .role-header is also a
+   .meta-row, but adds its own break-after rule).
+   =========================================================*/
+.meta-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--col-gap);
+  align-items: baseline;
+}
+/* A one-cell row spans the full grid. Without this a lone right-aligned
+   child (e.g. a location with no summary) stops one --col-gap short of
+   the content edge instead of aligning flush right. */
+.meta-row > :only-child {
+  grid-column: 1 / -1;
+}
+
+/* =========================================================
+   Inline separator (·) used between sibling inline items.
+   Two modifiers cover every usage:
+     default (.sep)    — tight, prose-adjacent runs
+     .sep.sep-loose    — mono / metric / digit-heavy runs
+   Always declared via the modifier class on the span itself;
+   no selector-per-context overrides.
+   =========================================================*/
+.sep {
+  color: var(--ink-fade);
+  user-select: none;
+  font-weight: var(--fw-regular);   /* never inherit bold from context */
+  margin: 0 var(--sep-gap-tight);
+}
+.sep.sep-loose { margin: 0 var(--sep-gap-loose); }
+/* Inside flex layouts the inline margin is harmless—flex gap wins—
+   but we collapse it explicitly so the contact line behaves cleanly
+   on viewports where the flex container's gap is 0. */
+.contact .sep { margin: 0; }
+
+/* =========================================================
+   Role — the core repeating block.
+   Two-line header: (line 1) title · company   ·   dates
+                    (line 2) scope summary     ·   location
+   Below: bullets at full content width.
+   =========================================================*/
+.role {
+  margin-bottom: var(--s-8);
+  /* Don't try to keep a 6-bullet role unsplit — just protect
+     the header and ensure no orphan first bullet. */
+}
+.role:last-child { margin-bottom: 0; }
+
+/* .role-header / .role-meta compose with .meta-row for the grid;
+   these rules only layer role-specific spacing and break behaviour. */
+.role-header {
+  break-after: avoid;
+  margin-bottom: var(--s-3);
+}
+.role-meta {
+  break-after: avoid;
+  margin-bottom: var(--s-4);
+}
+.role-title-line {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-semibold);
+  color: var(--ink-body);
+  letter-spacing: var(--tr-tight);
+}
+.role-dates,
+.role-location {
+  /* The date range and the location are the two right-aligned meta
+     cells of the role grid; they share one treatment. */
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  text-align: right;
+  white-space: nowrap;
+}
+.role-summary {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  font-style: italic;
+  letter-spacing: var(--tr-tight);
+}
+
+/* =========================================================
+   Highlights / bullets
+   Standard bullet glyph (•), tight enough to scan vertically,
+   roomy enough to wrap to 1.5–2 lines cleanly.
+   =========================================================*/
+.highlights {
+  margin: 0;
+  padding: 0;
+}
+.highlights li {
+  position: relative;
+  padding-left: 1.05em;
+  margin-bottom: var(--s-3);
+  line-height: var(--lh-body);
+  break-inside: avoid;          /* keep a bullet's lines together */
+  orphans: 2;
+  widows: 2;
+}
+.highlights li:last-child { margin-bottom: 0; }
+.highlights li::before {
+  content: "\2022";             /* U+2022 BULLET — escape avoids
+                                   charset / encoding pitfalls */
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ink-quiet);
+  font-size: 1em;
+  line-height: var(--lh-body);
+}
+
+/* Don't orphan the first bullet from its role header. */
+.role-meta + .highlights > li:first-child,
+.role-header + .highlights > li:first-child { break-before: avoid; }
+
+/* -------- inline annotations on a bullet --------
+   Annotation labels ("·", "· trade-off:") are written in the
+   HTML as <span class="annotation-label"> rather than injected
+   via CSS `content`. That keeps presentation out of the content
+   layer: labels can be localised, omitted, restyled, or linted
+   from the markup, and copy-paste round-trips correctly (CSS
+   `content` is dropped on copy in many browsers).
+
+   TYPOGRAPHY: these spans are PURELY SEMANTIC — they carry no
+   visual treatment of their own. A .scope / .tradeoff run can
+   land mid-bullet, and any size / colour / style / tracking
+   change there makes one sentence visibly switch type partway
+   through, which breaks reading flow. So all three classes
+   inherit the owning bullet's typography outright: the bullet
+   reads as one continuous run, and the annotation's job (label
+   text + JSON field mapping + lintability) is done by the markup,
+   not by a caption size or an italic. Do NOT reintroduce
+   font-size, font-style, font-family, color or letter-spacing
+   here — see STYLE.md §5.4 and build/annotation-typography-test.js. */
+.scope, .tradeoff, .annotation-label {
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+/* -------- no inline emphasis inside bullets --------
+   Decision: bullet body copy renders at one uniform weight. A bolded
+   metric mid-sentence draws the eye to a number instead of the claim,
+   and once one bullet bolds a figure the reader starts scanning for
+   bold instead of reading — the opposite of the quiet-confidence voice
+   (§2.2 elsewhere still uses SemiBold for structural emphasis: name,
+   role title, employer, project name).
+
+   <b>/<strong> stay in the markup — the host app keys off them (and
+   any data-achievement-id attribute they carry) as semantic metadata
+   for individual achievements/metrics — but inside a bullet they are
+   visually inert: same weight, same colour as the surrounding text.
+   Scoped to .highlights li so this does NOT touch role headings,
+   employers, project headings, Skills, or the cover letter, which
+   still bold via the global `b, strong` rule in colors_and_type.css. */
+.highlights li b, .highlights li strong {
+  font-weight: inherit;
+  color: inherit;
+}
+
+/* =========================================================
+   Selected Systems / Projects
+   Compact tabular block: name · one-line description · metrics.
+   =========================================================*/
+.project  { margin-bottom: var(--s-5); break-inside: avoid; }
+.project:last-child { margin-bottom: 0; }
+
+.project-name {
+  font-weight: var(--fw-semibold);
+  color: var(--ink-body);
+}
+.project-desc {
+  color: var(--ink-body);
+}
+.project-metrics {
+  display: block;
+  margin-top: var(--s-1);
+  font-family: var(--ff-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-meta);
+}
+
+/* =========================================================
+   Skills by category
+   Sans body for the keyword run — mono at 9pt has wider glyph
+   advance than body Inter, which pushes long categories
+   (Distributed Systems, Infrastructure) to extra wraps and
+   widens the perceived measure. Reserve mono for inline <code>.
+   =========================================================*/
+.skills {
+  display: grid;
+  grid-template-columns: var(--col-meta-w) 1fr;
+  column-gap: var(--col-gap);
+  row-gap: var(--s-3);
+}
+.skills dt {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-tight);
+  break-after: avoid;
+}
+.skills dd {
+  margin: 0;
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-body);
+  line-height: var(--lh-snug);
+  text-wrap: pretty;
+}
+
+/* =========================================================
+   .nowrap — the parse-safe way to keep a value and its unit
+   together ("38 ms", "2.1 s → 340 ms", "Data & Storage").
+   ---------------------------------------------------------
+   Renders identically to `&nbsp;` — same glyph, same advance, same
+   unbreakable pair — but leaves an ORDINARY space in the text layer.
+   A non-breaking space extracts as U+00A0, and parser patterns that
+   expect "38 ms" with an ASCII space silently miss the figure. Zero
+   visual cost, one less way to lose a number (STYLE.md §8.1).
+   Use this instead of `&nbsp;` in every candidate-facing string.
+   =========================================================*/
+.nowrap { white-space: nowrap; }
+
+/* =========================================================
+   Numerals — proportional (font default), NOT tabular.
+   `tabular-nums` / "tnum" selects GSUB-only tabular figures that
+   carry no `cmap` entry, so Chrome's PDF subsetter maps them to
+   Private-Use codepoints and EVERY number drops out of the
+   extracted text layer (ATS, copy-paste, screen readers). The
+   date / metric columns are aligned by their grid cell, not by
+   monospaced digits, so nothing visual is lost. Keep this
+   `normal`; do not reintroduce tabular-nums. See STYLE.md §2.4 + §8.
+   =========================================================*/
+.tnum, .role-dates, .project-metrics {
+  font-variant-numeric: normal;
+}
+
+
+@charset "utf-8";
+/* ============================================================
+   cover-letter.css — the letter surface
+   ----------------------------------------------------------
+   Pairs with `colors_and_type.css` (tokens) and `resume.css`
+   (shared page chrome + paged-media model + the letterhead
+   component + .meta-row + .sep). Load all three, in that order.
+
+   DESIGN NOTE — the system's one serif-body surface.
+   The résumé sets body copy in Inter because it is a scannable
+   data grid: the reader skims for numbers and scope. A cover
+   letter is the only long-form prose surface in the system, so
+   its body is set in Source Serif 4 — the "book interior" move
+   from the same Stripe-Press / Pentagram lineage the résumé
+   draws on. Same three-family palette, same ink, same paper;
+   a different document voice. This is the single sanctioned use
+   of the display serif at reading size — do not carry it back
+   into the résumé, where Inter's even colour is load-bearing
+   for the scan.
+
+   The letterhead (name / tagline / contact) is the SAME
+   component as the résumé header, so the two documents read as
+   one set. The oxblood accent appears exactly ONCE — the
+   letterhead name — same as the résumé. The signature is ink:
+   repeating the accent at the foot would tip it from a quiet
+   identity mark toward a brand colour.
+   ============================================================ */
+
+/* -------- letterhead --------
+   Reuses .resume-header / .name / .tagline / .contact from
+   resume.css verbatim. We only tighten the trailing gap (a
+   hairline rule follows it here, where the résumé runs straight
+   into its first section). */
+.letter-letterhead { margin-bottom: var(--s-6); }
+
+.letterhead-rule {
+  border: 0;
+  height: var(--rule-weight);
+  background: var(--bg-rule);
+  margin: 0 0 var(--vr-1);
+}
+
+/* -------- date --------
+   Right-aligned in --ink-meta — a deliberate rhyme with the résumé's
+   right-aligned date column. No recipient address block follows
+   (§11.2.1 of STYLE.md): it duplicated the salutation, and the
+   ATS submission context already carries the company and role. */
+.letter-meta { margin-bottom: var(--vr-1); }
+
+.letter-date {
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  text-align: right;
+  white-space: nowrap;
+  /* proportional figures (font default) — NOT tabular-nums: tabular
+     figures extract as Private-Use junk from the PDF (see STYLE.md
+     §2.4). A single date has no column to align anyway. */
+  letter-spacing: var(--tr-tight);
+  margin: 0;
+}
+
+/* -------- body --------
+   Source Serif 4, reading size, generous editorial leading.
+   This is the one place body prose runs long, so the measure
+   (set by the shared --margin-side on .page) lands at ~70ch and
+   the leading opens to 1.6. */
+.letter-body {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-regular);
+  font-size: 10.5pt;
+  line-height: 1.6;
+  color: var(--ink-body);
+  letter-spacing: 0;
+  text-wrap: pretty;
+}
+.letter-body p { margin: 0 0 var(--vr-1); }
+.letter-body p:last-child { margin-bottom: 0; }
+.letter-body .salutation { margin-bottom: var(--vr-1); }
+/* strong stays SemiBold (600) — the system loads no 700. Used
+   sparingly here: only the one or two headline figures. */
+.letter-body strong { font-weight: var(--fw-semibold); color: var(--ink-body); }
+
+/* -------- close --------
+   break-inside: avoid keeps the valediction and signature
+   together — the structural cure for the "Sincerely, on one
+   page / name on the next" orphan. The signature is set in the
+   display serif one size down from the letterhead name, but in
+   INK, not oxblood: the accent stays a single appearance (the
+   letterhead name), which is what keeps it reading as a quiet
+   identity mark rather than a brand colour. Type carries the
+   signature's distinction, not colour.
+
+   The close is valediction + name, and nothing else. There is no
+   role caption under the signature: the candidate's role and
+   credential are already in the letterhead subtitle (§5.8), and a
+   second title line at the foot reads as a business card rather
+   than a letter. */
+.letter-close {
+  margin-top: var(--vr-1-5);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+.valediction {
+  font-family: var(--ff-display);
+  font-size: 10.5pt;
+  line-height: 1.6;
+  color: var(--ink-body);
+  margin: 0 0 var(--s-6);        /* room where a wet signature would sit */
+}
+.signature {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-semibold);
+  font-size: 15pt;
+  line-height: 1.1;
+  letter-spacing: var(--tr-display);
+  color: var(--ink-body);        /* ink — the accent stays a single appearance (letterhead name) */
+  margin: 0;
+}
+
+/* =========================================================
+   Optical centring for short letters — data-letter="centered"
+   ---------------------------------------------------------
+   Equal top/bottom margins are guaranteed only when the block
+   reaches the bottom margin (see STYLE.md §4.4). A letter that
+   runs ~two-thirds of a page or less leaves all its slack at the
+   foot and reads as if it slid off the top of the sheet. The
+   editorial fix for a short letter is to hang it optically
+   centred in the type area — a convention for correspondence,
+   and one that must NEVER be applied to the résumé (which is
+   read top-down as a data grid). This rule lives in
+   cover-letter.css, which the résumé does not load, so the
+   scoping is structural, not just conventional.
+
+   Root-only, opt-in, same contract as the other four variants:
+     <html data-letter="centered">
+   The host/agent sets it only after measuring the rendered
+   letter at ≲⅔ of the type-area height — identical in spirit to
+   the data-density="compact" measure-then-set rule (§6.0).
+
+   Mechanism: `align-content` on the block container, NOT flex.
+   Switching .page to flex would disable margin collapsing, which
+   the optical trims (§4.4) rely on — measured, it grew a full
+   letter's page box by ~9pt, enough to tip a one-page letter onto
+   a second sheet. `align-content` centres block children inside a
+   definite height while leaving the formatting context — and
+   therefore every other measurement — untouched. `safe` means a
+   letter that fills or overflows the page is left exactly as it
+   was and can never be pushed off the top edge, so behaviour
+   degrades gracefully at any length: the shorter the letter, the
+   more it centres.
+
+   The optical lead trim still applies inside the letterhead, so
+   a centred letter keeps equal ink-to-edge distances too. */
+:root[data-letter="centered"] .page { align-content: safe center; }
+
+@media print {
+  /* In print the screen page box is dropped (`min-height: auto`,
+     vertical margins move to @page), so there is no definite
+     height to centre within. Restore one: the type area is the
+     paper minus the printed vertical margins, and the margin
+     tokens track the same values @page uses across all four
+     paper/density variants, so this one calc covers letter, a4,
+     letter-compact and a4-compact. Only a one-page letter is in
+     scope, which is already the content rule (§11.4). */
+  :root[data-letter="centered"] .page {
+    min-height: calc(var(--page-h) - var(--margin-top) - var(--margin-bot));
+  }
+}
+
+
+
+/* ==========================================================
+   Injected chrome (electron/ipc/resumeHtml.js) — NOT part of
+   Job Application Design System/. Namespaced ic- throughout. Every rule
+   in this block is inert on print.
+   ========================================================== */
+.ic-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  background: #1A1815;
+  color: #F7F4ED;
+  font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+.ic-toolbar .ic-btn {
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(247, 244, 237, 0.35);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.ic-toolbar .ic-btn:hover { background: rgba(247, 244, 237, 0.12); }
+.ic-toolbar .ic-btn:disabled { opacity: .42; cursor: not-allowed; background: transparent; }
+.ic-toolbar .ic-btn-primary { background: #7A1F2B; border-color: #7A1F2B; }
+.ic-toolbar .ic-btn-primary:hover { background: #8F2534; }
+.ic-toolbar .ic-hint { margin-left: auto; opacity: 0.8; font-size: 12px; }
+.ic-toolbar .ic-restore-note { opacity: 0.8; font-size: 12px; }
+.ic-print-variant-note { max-width: 340px; font-size: 11px; line-height: 1.35; opacity: 0.85; }
+.ic-banner {
+  padding: 8px 20px;
+  font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+.ic-font-warning { background: #FCEFC7; color: #6B4E00; border-bottom: 1px solid #E8CE84; }
+
+/* ---- résumé workspace --------------------------------------------------
+   This is deliberately an application shell around (not in) .page.  The
+   page remains the sole printed artifact; see the print reset below. */
+.ic-resume-workspace {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  align-items: stretch;
+  background: #e7e0d1;
+}
+.ic-workspace-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 22px 18px 30px;
+  background: #241f19;
+  color: #f7f1e6;
+  font: 13px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+.ic-workspace-kicker { margin: 0 0 5px; color: #d6a86c; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
+.ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
+.ic-workspace-context { margin: 8px 0 18px; color: #cfc2b0; font-size: 12px; }
+.ic-model-provenance { margin: -8px 0 18px; color: #cfc2b0; font-size: 11px; }
+.ic-model-provenance summary { color: #f7f1e6; cursor: pointer; }
+.ic-model-provenance ul { margin: 7px 0 0; padding-left: 18px; }
+.ic-model-provenance li + li { margin-top: 3px; }
+.ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
+.ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
+.ic-workspace-sidebar .ic-toolbar .ic-hint { margin: 5px 0 0; color: #cfc2b0; font-size: 11px; }
+.ic-workspace-sidebar .ic-banner { margin: 12px -18px 0; padding: 9px 18px; }
+.ic-panel { margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(247, 241, 230, .18); }
+.ic-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 10px; }
+.ic-panel-title { margin: 0; color: inherit; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.ic-panel-note, .ic-review-status { color: #cfc2b0; font-size: 11px; }
+.ic-review-status { display: block; margin: 0 0 10px; }
+.ic-insight-card { padding: 12px; margin: 8px 0; border: 1px solid rgba(247, 241, 230, .2); background: #302921; }
+.ic-insight-card[data-ic-decision="verified"] { border-color: #8eb49b; }
+.ic-insight-card[data-ic-decision="not_mine"] { opacity: .62; }
+.ic-insight-skill { margin: 0 0 5px; color: #fffaf0; font-size: 14px; font-weight: 700; }
+.ic-insight-meta { margin: 0 0 7px; color: #d6a86c; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.ic-insight-copy { margin: 0; color: #d8cdbc; font-size: 12px; }
+.ic-insight-copy + .ic-insight-copy { margin-top: 6px; }
+.ic-insight-label { color: #fffaf0; font-weight: 700; }
+.ic-insight-prompt { margin: 9px 0 0; padding: 8px; border-left: 2px solid #d6a86c; background: rgba(0,0,0,.14); color: #f2e7d6; font-size: 11px; }
+.ic-insight-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+.ic-insight-actions button { padding: 5px 8px; border: 1px solid rgba(247,241,230,.35); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.ic-insight-actions button[aria-pressed="true"] { background: #d6a86c; border-color: #d6a86c; color: #241f19; font-weight: 700; }
+.ic-learn-card { padding: 10px 0; border-top: 1px solid rgba(247, 241, 230, .12); }
+.ic-learn-card:first-of-type { border-top: 0; }
+.ic-hist-role { width: 100%; margin: 0 0 10px; padding: 7px 8px; border: 1px solid rgba(247,241,230,.35); background: #302921; color: #fffaf0; font: inherit; }
+.ic-hist-panel[hidden] { display: none; }
+.ic-hist-row { display: grid; grid-template-columns: minmax(88px, 38%) minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 8px 0; }
+.ic-hist-label { overflow-wrap: anywhere; color: #f7f1e6; font-size: 11px; line-height: 1.2; }
+.ic-hist-bar { display: flex; height: 9px; overflow: hidden; background: #4b4035; }
+.ic-hist-bar > span { display: block; height: 100%; }
+.ic-hist-verify { width: var(--ic-verify, 0%); background: #8eb49b; }
+.ic-hist-learn { width: var(--ic-learn, 0%); background: #d6a86c; }
+.ic-hist-count { color: #fffaf0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ic-hist-breakdown { grid-column: 2 / 4; margin-top: -5px; color: #cfc2b0; font-size: 10px; }
+.ic-hist-legend { display: flex; gap: 12px; margin: 7px 0 12px; color: #cfc2b0; font-size: 10px; }
+.ic-hist-key::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: #d6a86c; }
+.ic-hist-key-verify::before { background: #8eb49b; }
+.ic-preview-area { min-width: 0; padding: 34px 24px 70px; background: #e7e0d1; }
+.ic-preview-area .page { margin: 0; }
+.ic-page-stage { position: relative; width: fit-content; margin: 0 auto 24px; }
+.ic-page-stage:last-child { margin-bottom: 0; }
+.ic-page-guides { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.ic-page-seam { position: absolute; left: 0; right: 0; }
+.ic-page-seam-fade-top, .ic-page-seam-fade-bot { position: absolute; left: 0; right: 0; height: 14px; }
+.ic-page-seam-fade-top { top: 0; background: linear-gradient(to bottom, rgba(26,24,21,.10), transparent); }
+.ic-page-seam-fade-bot { bottom: 0; background: linear-gradient(to top, rgba(26,24,21,.10), transparent); }
+.ic-page-seam-line { position: absolute; left: 0; right: 0; height: 1px; background: rgba(26,24,21,.18); }
+.ic-page-seam-line-dashed { position: static; height: 0; border-top: 1px dashed rgba(26,24,21,.30); }
+.ic-page-folio { position: absolute; right: 6px; font: 8.5px/1.3 "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace; letter-spacing: -0.005em; color: #8C857A; white-space: nowrap; }
+@media print {
+  .ic-page-stage { display: contents; }
+  .ic-page-guides { display: none !important; }
+}
+.ic-document-tabs { display: flex; gap: 8px; max-width: 794px; margin: 0 auto 16px; }
+.ic-document-tabs .ic-btn { padding: 7px 14px; border: 1px solid #a89f92; border-radius: 4px; background: #f7f4ed; color: #3b352f; font: 600 12px/1.3 -apple-system, "Helvetica Neue", Arial, sans-serif; cursor: pointer; }
+.ic-document-tabs [aria-selected="true"] { background: #7A1F2B; border-color: #7A1F2B; color: #fff; }
+.ic-pdf-attachment { display: grid; gap: 5px; color: #cfc2b0; font-size: 11px; }
+.ic-pdf-attachment input { min-width: 0; max-width: 100%; color: #f7f1e6; font: inherit; }
+.ic-inferred-skill { white-space: normal; }
+@media screen {
+  body { padding: 0; background: #e7e0d1; }
+}
+@media (max-width: 860px) {
+  .ic-resume-workspace { display: block; }
+  .ic-workspace-sidebar { position: static; max-height: none; }
+  .ic-preview-area { padding: 22px 12px 48px; overflow-x: auto; }
+}
+@media print {
+  .ic-toolbar, .ic-banner { display: none !important; }
+  .ic-document-tabs { display: none !important; }
+  .ic-workspace-sidebar { display: none !important; }
+  .ic-resume-workspace, .ic-preview-area { display: contents !important; }
+}
+
+/* ---- receipts (design doc §4.3) ----
+   Attributes, not classes — data-achievement-id is written by the model
+   (id only) and data-derivation is written by resumeHtml.js's post-process
+   (tooltip text only); both survive a design-system swap untouched since
+   nothing here is coupled to a Job Application Design System/ class name. */
+[data-achievement-id] {
+  border-bottom: 1px dotted var(--ink-3, #8C857A);
+  cursor: help;
+}
+[data-derivation] { position: relative; }
+[data-derivation]:hover::after,
+[data-derivation]:focus::after {
+  content: attr(data-derivation);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 2147483000;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 10px;
+  background: #1A1815;
+  color: #F7F4ED;
+  font: 11.5px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  white-space: normal;
+}
+@media print {
+  [data-achievement-id] { border-bottom: none; cursor: auto; }
+  [data-derivation]:hover::after,
+  [data-derivation]:focus::after { content: none; }
+}
+
+/* ---- edit mode (design doc §5.5) ---- */
+[contenteditable="true"] {
+  outline: 1px dashed rgba(122, 31, 43, 0.5);
+  outline-offset: 6px;
+}
+@media print {
+  [contenteditable="true"] { outline: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="ic-resume-workspace">
+<aside class="ic-workspace-sidebar" aria-label="Résumé tailoring workspace">
+  <p class="ic-workspace-kicker">Application workspace</p>
+  <h1 class="ic-workspace-title">Application, with receipts.</h1>
+  <p class="ic-workspace-context">Sr Staff Engineer, Solution Architect - Full Stack · Futuretek</p>
+
+
+  <div id="ic-skill-workspace-data" data-ic-workspace="{&quot;insights&quot;:[],&quot;histogram&quot;:[]}" hidden></div>
+  <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
+    <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
+    <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
+    <span id="ic-print-variant-note" class="ic-print-variant-note" role="note" data-ic-paper-context="for Futuretek — Sr Staff Engineer, Solution Architect - Full Stack"></span>
+    <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
+    <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
+    <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
+  </div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn’t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
+  <section class="ic-panel" aria-labelledby="ic-check-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
+    <span id="ic-review-status" class="ic-review-status" role="status"></span>
+    <p class="ic-panel-note">No high-impact claims need confirmation.</p>
+  </section>
+  <section class="ic-panel" aria-labelledby="ic-learn-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-learn-title">Skills to learn</h2><span class="ic-panel-note">Never added to résumé</span></div>
+    <p class="ic-panel-note">No adjacent learning gaps surfaced for this role.</p>
+  </section>
+  <section class="ic-panel" aria-labelledby="ic-demand-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-demand-title">Demand over time</h2><span class="ic-panel-note">Across applications</span></div>
+    <div class="ic-hist-legend"><span class="ic-hist-key ic-hist-key-verify">nearby / verify</span><span class="ic-hist-key">learn</span></div>
+
+    <div id="ic-histograms"><p class="ic-panel-note">Signals will accumulate as you tailor more applications.</p></div>
+  </section>
+
+</aside>
+  <div class="ic-preview-area">
+    <div class="ic-document-tabs" role="tablist" aria-label="Application documents">
+      <button type="button" id="ic-resume-tab" class="ic-btn" role="tab" data-ic-document-tab="resume" aria-controls="ic-resume-panel" aria-selected="true" tabindex="0">Résumé</button>
+      <button type="button" id="ic-cover-tab" class="ic-btn" role="tab" data-ic-document-tab="cover" aria-controls="ic-cover-panel" aria-selected="false" tabindex="-1">Cover letter</button>
+    </div>
+    <section id="ic-resume-panel" role="tabpanel" aria-labelledby="ic-resume-tab" data-ic-document-panel="resume"><div class="ic-page-stage"><main class="page" role="document" itemscope="" itemtype="https://schema.org/Person">
+<header class="resume-header">
+  <h1 class="name" itemprop="name">Jordan Lee</h1>
+  <p class="tagline">
+    <span class="subtitle-role" itemprop="jobTitle">Software Engineer</span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="credential">B.S. Computer Science, York University</span>
+  </p>
+  <p class="contact" role="group" aria-label="Contact">
+    <a href="mailto:jordan.lee@example.test" itemprop="email">jordan.lee@example.test</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="tel:+12025550147" itemprop="telephone">(202) 555-0147</a>
+  </p>
+</header>
+
+<section class="section" aria-labelledby="sec-experience">
+  <div class="section-head">
+    <h2 id="sec-experience">Experience</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <article class="role" itemprop="hasOccupation" itemscope="" itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Software Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">Thomson School District</span>
+      </p>
+      <p class="role-dates"><time datetime="2023-05">May 2023</time> – <time datetime="2026-06">June 2026</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Internal tools platform <span class="sep" aria-hidden="true">·</span> ticketing, device lifecycle, and third-party data integration.</p>
+      <p class="role-location">Loveland, Colorado</p>
+    </div>
+    <ul class="highlights">
+      <li>Built the internal tools hub full stack, a React front end served by Nginx over a Gunicorn and Django back end, containerized in Docker Compose to deploy on any VM configuration.</li>
+      <li>Owned the Python ETL between the district information system and third-party platforms, both for data those platforms consume and for data they produce that we ingest.</li>
+      <li>Transferred ticketing, device check-in and check-out, and repair tracking, with their data, from in-house systems onto third-party solutions without disrupting daily operations.</li>
+      <li>Put fully agentic coding through hands-on trials at work, mapping its tradeoffs and the points where agent output has to be verified before it can ship.</li>
+      <li>Built the district-wide device check-in and check-out system from scratch in React and TypeScript, and added role-restricted staff access to the in-house Next.js ticketing system.</li>
+      <li>Ran third-party product evaluations before full-scale adoption, from quote request to presenting findings to management, including Gemini Notebook as a documentation front end.</li>
+    </ul>
+  </article>
+
+  <article class="role" itemprop="hasOccupation" itemscope="" itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Data Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">Horizon Health Alliance</span>
+      </p>
+      <p class="role-dates"><time datetime="2022-10">Oct 2022</time> – <time datetime="2023-01">Jan 2023</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Medical data platform <span class="sep" aria-hidden="true">·</span> ingestion, access APIs, and reporting.</p>
+      <p class="role-location">Getzville, New York</p>
+    </div>
+    <ul class="highlights">
+      <li>Built Python REST APIs over the local database to give controlled access to the medical data it held.</li>
+      <li>Built Python ETL pipelines that pulled medical data onto a local server, with scheduled upserts that refreshed the database from spreadsheet sources.</li>
+      <li>Automated recurring database work with SQL functions and views, and published reporting from that data as Tableau dashboards.</li>
+    </ul>
+  </article>
+
+  <article class="role" itemprop="hasOccupation" itemscope="" itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header meta-row">
+      <p class="role-title-line">
+        <span class="title">Software Engineer</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="company">FliteX (Plan de Vol International)</span>
+      </p>
+      <p class="role-dates"><time datetime="2021-12">Dec 2021</time> – <time datetime="2022-03">Mar 2022</time></p>
+    </div>
+    <div class="role-meta meta-row">
+      <p class="role-summary">Flight route optimization <span class="sep" aria-hidden="true">·</span> routing algorithms and FAA data sync.</p>
+      <p class="role-location">Oshawa, Ontario</p>
+    </div>
+    <ul class="highlights">
+      <li>Maintained the bash cron jobs that pull the FAA's daily data emissions into the local database through their APIs.</li>
+      <li>Built a modified A* route optimizer in Python that accounts for the curvature of the Earth, chosen after researching and testing shortest path algorithms for flight routing.</li>
+    </ul>
+  </article>
+</section>
+
+<section class="section" aria-labelledby="sec-systems">
+  <div class="section-head">
+    <h2 id="sec-systems">Selected Systems</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <div class="projects">
+    <article class="project">
+      <p>
+        <span class="project-name">AI-Chalkboard</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="project-desc">transparent, click-through screen overlay an agent draws on while it works, so it can mark the exact button or field it means without taking the mouse or blocking the work underneath.</span>
+      </p>
+      <span class="project-metrics">
+        native macOS<span class="sep sep-loose" aria-hidden="true">·</span>MCP server<span class="sep sep-loose" aria-hidden="true">·</span>Claude Desktop, Code, and Cowork
+      </span>
+    </article>
+
+    <article class="project">
+      <p>
+        <span class="project-name">Maarketplace</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="project-desc">identifies an item from photos, drafts its listing, and prices it against comparable listings pulled from resale sites, then watches the live listings for anything needing attention.</span>
+      </p>
+      <span class="project-metrics">
+        Gemini API<span class="sep sep-loose" aria-hidden="true">·</span>quick-sell to max-profit price range<span class="sep sep-loose" aria-hidden="true">·</span>cross-platform listing monitor
+      </span>
+    </article>
+
+    <article class="project">
+      <p>
+        <span class="project-name">Infinite Canvas</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="project-desc">spatial workspace of notes, bookmarks, and document previews where any node opens into its own canvas, so a board expands into another board instead of staying one flat surface.</span>
+      </p>
+      <span class="project-metrics">
+        React Flow<span class="sep sep-loose" aria-hidden="true">·</span>nested sub-canvases with breadcrumb navigation<span class="sep sep-loose" aria-hidden="true">·</span>local persistence
+      </span>
+    </article>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="sec-skills">
+  <div class="section-head">
+    <h2 id="sec-skills">Skills</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <dl class="skills">
+    <dt>Languages</dt>
+    <dd>TypeScript<span class="sep">·</span>JavaScript<span class="sep">·</span>Python<span class="sep">·</span>SQL<span class="sep">·</span>Bash</dd>
+
+    <dt class="nowrap">Web &amp; Data</dt>
+    <dd>React<span class="sep">·</span>Next.js<span class="sep">·</span>Django<span class="sep">·</span>Gunicorn<span class="sep">·</span>React Flow<span class="sep">·</span>Tableau</dd>
+
+    <dt class="nowrap">Infrastructure &amp; AI</dt>
+    <dd>Docker Compose<span class="sep">·</span>Nginx<span class="sep">·</span>Gemini API<span class="sep">·</span>MCP<span class="sep">·</span>Claude Code</dd>
+  </dl>
+</section>
+</main><div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
+    <section id="ic-cover-panel" role="tabpanel" aria-labelledby="ic-cover-tab" data-ic-document-panel="cover" hidden><div class="ic-page-stage"><main class="page" role="document" itemscope itemtype="https://schema.org/Person">
+  <header class="resume-header letter-letterhead">
+    <h1 class="name" itemprop="name">Jordan Lee</h1>
+    <p class="tagline" itemprop="jobTitle">Software Engineer · B.S. Computer Science, York University</p>
+    <p class="contact" role="group" aria-label="Contact">
+      jordan.lee@example.test
+      <span class="sep" aria-hidden="true">·</span>
+      (202) 555-0147
+    </p>
+  </header>
+
+  <hr class="letterhead-rule" aria-hidden="true">
+
+  <div class="letter-meta">
+
+  </div>
+
+  <div class="letter-body">
+    <p class="salutation">Dear Futuretek Hiring Team,</p>
+    <p>Most of what I built at Thomson School District eventually had to keep working against a third-party platform, which is the condition this role puts on every brand-specific feature delivered over a shared core. I built the district's device check-in and check-out system from scratch, covering the laptops and iPads issued to staff and students. The tools we kept in house ran on a web hub I built full stack, with a React front end and a Django back end, containerized so it could be deployed on any VM the district had. When ticketing, device check-in and check-out, and repair tracking moved onto third-party solutions, I owned that transfer and the Python ETL that keeps the district information system and those platforms in agreement in both directions.</p>
+    <p>That same ownership is what I bring to AI-assisted delivery, which I treat as part of the engineering job rather than a separate skill. I have put fully agentic coding through hands-on trials at work, and the useful result was a clear read on its tradeoffs, in particular which agent output can be taken at face value and which has to be verified before it goes near production. I have also built for agents and not only with them. AI-Chalkboard is a native macOS MCP server that gives Claude a transparent, click-through overlay for drawing on the screen while it works through a computer-use task, so it can mark the exact control it means without taking the mouse.</p>
+    <p>That combination is what I would bring to your client's platform: someone who builds the feature and stays with it through the point where it depends on a system the team does not control. I would welcome the chance to walk through how the district's move onto third-party tooling was carried out, and where agents did and did not earn their place in that work.</p>
+  </div>
+
+  <div class="letter-close">
+    <p class="valediction">Sincerely,</p>
+    <p class="signature" itemprop="name">Jordan Lee</p>
+
+  </div>
+</main><div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
+<script id="ic-application-bundle-data" type="application/json">{"company":"Futuretek","candidateName":"Jordan Lee","jobMarkdown":"# Sr Staff Engineer, Solution Architect \\- Full Stack\n\n**Company:** Futuretek\n**Location:** Toronto,ON\n**Posted:** 10 days ago\n**Source:** ziprecruiter\n**Listing URL:** \u003chttps://www.ziprecruiter.com/c/Futuretek/Job/Sr-Staff-Engineer,-Solution-Architect-Full-Stack/-in-Toronto,ON?jid=0aeac00cbb5b1b10\u003e\n\n---\n\n## Original scraped listing\n\n```text\nSenior Staff Engineer — Full-Stack\nAbout the role\nOur client is building an AI-centric engineering platform where brands operate as self-reliant, B2B-style customers. You will own product features end-to-end across the full stack — leveraging AI agents to multiply delivery throughput — while architecting robust, highly-available systems on a stable, brand-agnostic platform.\nThis is a full-time IN-OFFICE position in Toronto.\nWhat you will do:\n• Own delivery of product features end-to-end: design, build, verify against acceptance criteria, and ship to production.\n• Build and operate 3rd-party and B2B integrations on the platform, delivering brand- and customer-specific features on top of a shared core.\n• Use AI coding agents and automated verification to accelerate delivery, working within engineering quality gates and independent review.\n• Set technical patterns and unblock yourself and others across a fast-moving, multi-workstream environment.\nTechnical must have:\n• Full-stack, production-grade. Senior/staff experience building software end-to-end: .NET / C# REST APIs and Next.js / React front-ends with server-side rendering and real-time streaming (Server-Sent Events).\n• Architecture at scale. Proven design and operation of highly-available, high-throughput systems.\n• Data. Hands-on with MongoDB, Redis (sessions, caching, sorted-set/leaderboard patterns) and PostgreSQL; chooses the right store per workload.\n• Event-driven systems. Building producers/consumers on an event hub / Apache Kafka; event-schema design and real-time aggregations.\n• 3rd-party and B2B integrations. Designing and delivering integrations against external and game-provider APIs, and building brand-/customer-specific capabilities on a stable, brand-agnostic platform.\n• API security. OAuth-based auth, request signing (HMAC), idempotency, replay protection, and audit logging.\n• AI-assisted delivery. Demonstrated use of AI coding agents/tooling to multiply throughput, and fluency working within automated verification (testing against acceptance criteria, regression, edge cases).\n• Hands-on production monitoring. Operating production monitoring and issue triage (Sentry or equivalent); treats observability and CI/CD as part of “done.”\nDelivery & Ownership - must have:\n• Proven track record of delivering robust solutions within tight, fixed timeframes — quality and speed together, not one at the expense of the other.\n• Handles competing priorities across multiple workstreams without dropping commitments.\n• End-to-end ownership of deliverables, from an ambiguous problem statement through to production.\n• A can-do operator who embraces uncertainty and figures things out as they go — self-sufficient, decisive with incomplete information, and escalates judiciously rather than by default.\nBenefits\n• Exposure to cutting-edge AI and automation technology that is actively transforming how marketing and operations are run at scale\n• Genuinely interesting projects with modern tooling, and the freedom to bring your own ideas to the table\n• A collaborative, high-performance culture where ambition, accountability, and innovation are valued and rewarded\n• Clear paths for development, progression, and advancement as the business scales\n• A competitive salary plus discretionary bonus\n• Comprehensive health benefits, including extended healthcare, dental, and vision coverage.\n• On-site leisure facilities to switch off and recharge during the day.\n• Fantastic company events\n• On-site leisure facilities and on-site parking\n```\n","resumePdfBase64":"","coverLetterPdfBase64":"","sync":{"endpoint":"","token":"INERT_FIXTURE_TOKEN","version":1}}</script><script>
+(function () {
+  var DOC_ID = "04511391-e768-43f5-9cb6-105ca4374721";
+  var HAS_APPLICATION_BUNDLE = true;
+  var bundleDataElement = document.getElementById('ic-application-bundle-data');
+  var BUNDLE_DATA = {};
+  try { BUNDLE_DATA = JSON.parse(bundleDataElement ? bundleDataElement.textContent : '{}') || {}; } catch (e) {}
+  var STORAGE_KEY = 'ic-edit:' + DOC_ID;
+  var main = document.querySelector('main.page') || document.querySelector('main');
+  var resumeMain = main;
+  var coverMain = document.querySelector('[data-ic-document-panel="cover"] main');
+  var activeDocument = 'resume';
+  var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
+  var editBtn = document.getElementById('ic-edit-toggle');
+  var syncBtn = document.getElementById('ic-sync-btn');
+  var printVariantNote = document.getElementById('ic-print-variant-note');
+  var pdfBundleNote = document.getElementById('ic-pdf-bundle-note');
+  var restoreNote = document.getElementById('ic-restore-note');
+  var fontWarning = document.getElementById('ic-font-warning');
+  var saveTimer = null;
+  var skillStorageKey = 'ic-skill-review:' + DOC_ID;
+  var skillCards = Array.prototype.slice.call(document.querySelectorAll('[data-ic-insight][data-ic-kind="verify"]'));
+  var skillDecisions = {};
+  var locationCard = document.querySelector('[data-ic-location-check]');
+  var locationStorageKey = 'ic-location-review:' + DOC_ID;
+  var locationConfirmed = !!(locationCard && locationCard.getAttribute('data-ic-location-decision') === 'confirmed');
+  // Each document has its own exported companion. A résumé edit must never
+  // invalidate a still-current cover-letter PDF (and vice versa).
+  var pdfStale = { resume: false, cover: false };
+  var syncMessage = '';
+  var initialResumeMarkup = resumeMain ? resumeMain.innerHTML : '';
+
+  function persistBundleData() {
+    if (bundleDataElement) bundleDataElement.textContent = JSON.stringify(BUNDLE_DATA).replace(/</g, '\u003c').replace(/>/g, '\u003e');
+  }
+  function documentLabel(kind) {
+    return kind === 'cover' ? 'cover letter' : 'résumé';
+  }
+  function markPdfStale(kind) {
+    if (HAS_APPLICATION_BUNDLE) {
+      pdfStale[kind === 'cover' ? 'cover' : 'resume'] = true;
+      updateSync();
+    }
+  }
+  function updateSync() {
+    if (!syncBtn || !HAS_APPLICATION_BUNDLE) return;
+    var reviewBlocked = skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
+    var configured = !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
+    var locationBlocked = !!locationCard && !locationConfirmed;
+    var blocked = locationBlocked || (activeDocument === 'resume' && reviewBlocked);
+    syncBtn.disabled = blocked || !configured;
+    syncBtn.setAttribute('aria-disabled', String(blocked || !configured));
+    syncBtn.textContent = 'Sync ' + documentLabel(activeDocument);
+    syncBtn.title = locationBlocked ? 'Confirm that you can work in the on-site job location before syncing.'
+      : (blocked ? 'Resolve every high-impact skill check before syncing the résumé.'
+      : (!configured ? 'This copy has not been saved by Infinite Canvas yet.' : 'Render and replace the current ' + documentLabel(activeDocument) + ' PDF in this application folder.'));
+    if (pdfBundleNote) {
+      if (locationBlocked) { syncMessage = ''; pdfBundleNote.textContent = 'Confirm the on-site work location before syncing.'; }
+      else if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
+      else if (!configured) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas before Sync is available.'; }
+      // pdfStale is per-document on purpose: a résumé edit must not imply the
+      // still-current cover-letter PDF is out of date. Saying which one drifted
+      // is the whole point of tracking it — a stale PDF beside a fresh HTML is
+      // the one failure mode of this workspace a user cannot see for themselves.
+      else if (pdfStale[activeDocument]) pdfBundleNote.textContent = syncMessage || ('This ' + documentLabel(activeDocument) + ' has changed since its PDF was written — Sync to replace it.');
+      else pdfBundleNote.textContent = syncMessage || ('Sync renders a fresh ' + documentLabel(activeDocument) + ' PDF and replaces it in this folder.');
+    }
+  }
+
+  // This is deliberately an explanation, not an override. The model selected
+  // the shared résumé/cover-letter paper profile from the employer and job
+  // context; Sync must preserve that tailored decision. Name both the visible
+  // result and the selection rationale so a white PDF cannot be mistaken for a
+  // broken dual-mode render.
+  if (printVariantNote) {
+    var paperContext = printVariantNote.getAttribute('data-ic-paper-context') || '';
+    var paperDecisionReasonLead = paperContext
+      ? 'analysis for ' + paperContext + ' indicates'
+      : 'the company or role appears';
+    printVariantNote.textContent = document.documentElement.getAttribute('data-print') === 'ink-only'
+      ? 'AI paper decision: Flat white PDF — white in viewers and print; ' + paperDecisionReasonLead + (paperContext ? ' an ' : ' ') + 'ATS-heavy, enterprise, regulated, or otherwise conservative recipient profile.'
+      : 'AI paper decision: Dual-mode PDF — cream in viewers, white in print; ' + paperDecisionReasonLead + (paperContext ? ' a ' : ' ') + 'design-conscious, startup-oriented, or craft-focused recipient profile.';
+  }
+
+  function selectDocument(kind) {
+    if (kind !== 'resume' && kind !== 'cover') return;
+    stopEditing();
+    activeDocument = kind;
+    main = kind === 'cover' ? coverMain : resumeMain;
+    // data-letter is root-only in the design system, but Application.html
+    // contains both surfaces and therefore also inlines cover-letter.css.
+    // Toggle the root attribute only while its marked cover panel is active so
+    // it can never centre the résumé (including a PDF render that switches
+    // tabs programmatically).
+    if (kind === 'cover' && coverMain && coverMain.hasAttribute('data-ic-letter-centered')) {
+      document.documentElement.setAttribute('data-letter', 'centered');
+    } else {
+      document.documentElement.removeAttribute('data-letter');
+    }
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel]')).forEach(function (panel) {
+      panel.hidden = panel.getAttribute('data-ic-document-panel') !== kind;
+    });
+    documentTabs.forEach(function (tab) {
+      tab.setAttribute('aria-selected', String(tab.getAttribute('data-ic-document-tab') === kind));
+      tab.setAttribute('tabindex', tab.getAttribute('data-ic-document-tab') === kind ? '0' : '-1');
+    });
+    if (editBtn) editBtn.textContent = 'Edit ' + (kind === 'cover' ? 'cover letter' : 'résumé');
+    updateSync();
+    updateSkillReviewStatus();
+    if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+  }
+  documentTabs.forEach(function (tab) {
+    tab.addEventListener('click', function () { selectDocument(tab.getAttribute('data-ic-document-tab')); });
+    tab.addEventListener('keydown', function (event) {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      var index = documentTabs.indexOf(tab);
+      var next = documentTabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + documentTabs.length) % documentTabs.length];
+      selectDocument(next.getAttribute('data-ic-document-tab'));
+      next.focus();
+    });
+  });
+
+  // ---- High-impact inferred skills --------------------------------------
+  // A candidate may be close enough to be worth checking, but it is never a
+  // résumé claim until the person explicitly marks it verified. Decisions are
+  // stored separately from editable HTML; data attributes also preserve the
+  // current state in a downloaded edited copy when file:// storage is blocked.
+  skillCards.forEach(function (card) {
+    var existing = card.getAttribute('data-ic-decision');
+    if (existing === 'verified' || existing === 'not_mine') skillDecisions[card.getAttribute('data-ic-insight')] = existing;
+  });
+  try {
+    var savedSkillDecisions = JSON.parse(localStorage.getItem(skillStorageKey) || '{}');
+    if (savedSkillDecisions && typeof savedSkillDecisions === 'object') {
+      Object.keys(savedSkillDecisions).forEach(function (id) {
+        if (savedSkillDecisions[id] === 'verified' || savedSkillDecisions[id] === 'not_mine') skillDecisions[id] = savedSkillDecisions[id];
+      });
+    }
+  } catch (e) {}
+  if (locationCard) {
+    try { if (localStorage.getItem(locationStorageKey) === 'confirmed') locationConfirmed = true; } catch (e) {}
+  }
+
+  function inferredNodes(id, attribute) {
+    return Array.prototype.slice.call(document.querySelectorAll('[' + attribute + ']')).filter(function (node) {
+      return node.getAttribute(attribute) === id;
+    });
+  }
+  function applySkillDecision(id, decision, persist) {
+    var resumeBefore = resumeMain ? resumeMain.innerHTML : '';
+    if (decision === 'verified' || decision === 'not_mine') skillDecisions[id] = decision;
+    else delete skillDecisions[id];
+    var resolved = skillDecisions[id];
+    skillCards.filter(function (card) { return card.getAttribute('data-ic-insight') === id; }).forEach(function (card) {
+      if (resolved) card.setAttribute('data-ic-decision', resolved);
+      else card.removeAttribute('data-ic-decision');
+      Array.prototype.slice.call(card.querySelectorAll('[data-ic-skill-action]')).forEach(function (button) {
+        button.setAttribute('aria-pressed', String(button.getAttribute('data-ic-skill-action') === resolved));
+      });
+      Array.prototype.slice.call(card.querySelectorAll('[data-ic-not-mine-plan]')).forEach(function (plan) {
+        plan.hidden = resolved !== 'not_mine';
+      });
+    });
+    inferredNodes(id, 'data-ic-inferred-skill').forEach(function (node) { node.hidden = resolved !== 'verified'; });
+    // Created groups only (a merged skill lives in an untagged <dd> that's
+    // already visible — real corpus content — and needs no row toggling).
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-group]')).forEach(function (group) {
+      var groupVisible = Array.prototype.slice.call(group.querySelectorAll('[data-ic-inferred-skill]')).some(function (node) { return !node.hidden; });
+      group.hidden = !groupVisible;
+      var label = group.previousElementSibling;
+      if (label && label.hasAttribute('data-ic-inferred-label')) label.hidden = !groupVisible;
+    });
+    // Each separator's data-ic-inferred-separator VALUE states its own
+    // visibility rule (set once at injection time, when the real content
+    // that precedes it is known for certain — see injectInferredSkills'
+    // block comment). The runtime just applies whichever rule it's told:
+    //   "join"    (real corpus content precedes the whole run) — visible iff
+    //             its own next inferred skill is visible. No backward walk:
+    //             a real <dd> is bare text between <span class="sep"> nodes,
+    //             so a single real skill leaves no element to walk back to.
+    //   "between" (only inferred skills can precede it — a created <dd>, or
+    //             a degenerate merge target) — visible iff its next inferred
+    //             skill is visible AND an earlier [data-ic-inferred-skill]
+    //             sibling in the same parent is visible.
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-separator]')).forEach(function (sep) {
+      var rule = sep.getAttribute('data-ic-inferred-separator');
+      var next = sep.nextElementSibling;
+      var nextVisible = false;
+      while (next) {
+        if (next.hasAttribute('data-ic-inferred-skill')) { nextVisible = !next.hidden; break; }
+        next = next.nextElementSibling;
+      }
+      if (rule === 'join') {
+        sep.hidden = !nextVisible;
+        return;
+      }
+      var earlierVisible = false;
+      var prev = sep.previousElementSibling;
+      while (prev) {
+        if (prev.hasAttribute('data-ic-inferred-skill') && !prev.hidden) { earlierVisible = true; break; }
+        prev = prev.previousElementSibling;
+      }
+      sep.hidden = !(nextVisible && earlierVisible);
+    });
+    var fallback = document.querySelector('[data-ic-inferred-section]');
+    if (fallback) fallback.hidden = !Array.prototype.slice.call(fallback.querySelectorAll('[data-ic-inferred-skill]')).some(function (node) { return !node.hidden; });
+    if (persist) {
+      try { localStorage.setItem(skillStorageKey, JSON.stringify(skillDecisions)); } catch (e) {}
+      if (resumeMain && resumeMain.innerHTML !== resumeBefore) markPdfStale('resume');
+    }
+    updateSkillReviewStatus();
+  }
+  function updateSkillReviewStatus() {
+    var total = skillCards.length + (locationCard ? 1 : 0);
+    var resolved = skillCards.filter(function (card) { return !!skillDecisions[card.getAttribute('data-ic-insight')]; }).length + (locationCard && locationConfirmed ? 1 : 0);
+    var verified = skillCards.filter(function (card) { return skillDecisions[card.getAttribute('data-ic-insight')] === 'verified'; }).length;
+    var progress = document.getElementById('ic-review-progress');
+    var status = document.getElementById('ic-review-status');
+    if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
+    if (status) status.textContent = !total ? '' : (resolved < total
+      ? 'Sync unlocks after every required location and high-impact claim check is resolved.'
+      : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
+    updateSync();
+  }
+  skillCards.forEach(function (card) {
+    var id = card.getAttribute('data-ic-insight');
+    applySkillDecision(id, skillDecisions[id], false);
+    Array.prototype.slice.call(card.querySelectorAll('[data-ic-skill-action]')).forEach(function (button) {
+      button.addEventListener('click', function () { applySkillDecision(id, button.getAttribute('data-ic-skill-action'), true); });
+    });
+  });
+  if (locationCard) {
+    if (locationConfirmed) locationCard.setAttribute('data-ic-location-decision', 'confirmed');
+    var locationButton = locationCard.querySelector('[data-ic-location-action="confirmed"]');
+    if (locationButton) {
+      locationButton.setAttribute('aria-pressed', String(locationConfirmed));
+      locationButton.addEventListener('click', function () {
+        locationConfirmed = true;
+        locationCard.setAttribute('data-ic-location-decision', 'confirmed');
+        locationButton.setAttribute('aria-pressed', 'true');
+        try { localStorage.setItem(locationStorageKey, 'confirmed'); } catch (e) {}
+        updateSkillReviewStatus();
+      });
+    }
+  }
+  if (resumeMain && resumeMain.innerHTML !== initialResumeMarkup) markPdfStale('resume');
+  updateSkillReviewStatus();
+  selectDocument('resume');
+
+  var histogramSelector = document.getElementById('ic-hist-role');
+  if (histogramSelector) histogramSelector.addEventListener('change', function () {
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-hist-panel]')).forEach(function (panel) {
+      panel.hidden = panel.getAttribute('data-ic-hist-panel') !== histogramSelector.value;
+    });
+  });
+
+  // ---- Edit mode + localStorage autosave (§5.5). contenteditable edits
+  // vanish on reload without this; keyed by docId so different documents
+  // (and different applications generated from the same hub) never collide. ----
+  if (main) {
+    try {
+      var saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        main.innerHTML = saved;
+        if (restoreNote) restoreNote.hidden = false;
+        markPdfStale('resume');
+      }
+    } catch (e) { /* localStorage unavailable (e.g. file:// under strict privacy settings) — degrade to no-autosave */ }
+
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function () {
+        // The main variable follows the selected tab. Capture the stable résumé node so
+        // switching to the cover tab during the debounce cannot save cover
+        // markup into the résumé's storage slot.
+        try { localStorage.setItem(STORAGE_KEY, resumeMain.innerHTML); } catch (e) {}
+      }, 500);
+    }
+    main.addEventListener('input', function () { scheduleSave(); markPdfStale('resume'); if (window.icPageGuidesRecompute) window.icPageGuidesRecompute(); });
+  }
+  if (coverMain) {
+    try {
+      var savedCover = localStorage.getItem(STORAGE_KEY + ':cover');
+      if (savedCover) {
+        coverMain.innerHTML = savedCover;
+        markPdfStale('cover');
+      }
+    } catch (e) {}
+    var coverSaveTimer = null;
+    coverMain.addEventListener('input', function () {
+      if (coverSaveTimer) clearTimeout(coverSaveTimer);
+      coverSaveTimer = setTimeout(function () {
+        try { localStorage.setItem(STORAGE_KEY + ':cover', coverMain.innerHTML); } catch (e) {}
+      }, 500);
+      markPdfStale('cover');
+      if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+    });
+  }
+
+  function stopEditing() {
+    if (!main) return;
+    main.removeAttribute('contenteditable');
+    if (editBtn) editBtn.textContent = 'Edit';
+  }
+
+  if (editBtn && main) {
+    editBtn.addEventListener('click', function () {
+      var editing = main.getAttribute('contenteditable') === 'true';
+      if (editing) {
+        stopEditing();
+      } else {
+        main.setAttribute('contenteditable', 'true');
+        main.focus();
+        editBtn.textContent = 'Done editing';
+      }
+    });
+  }
+
+  if (syncBtn) {
+    syncBtn.addEventListener('click', function () {
+      if (syncBtn.disabled || !HAS_APPLICATION_BUNDLE) return;
+      var sync = BUNDLE_DATA.sync || {};
+      if (!sync.endpoint || !sync.token) { updateSync(); return; }
+      stopEditing();
+      persistBundleData();
+      var documentToSync = activeDocument === 'cover' ? 'cover' : 'resume';
+      syncMessage = '';
+      var currentHtml = '<!doctype html>\n' + document.documentElement.outerHTML;
+      syncBtn.disabled = true;
+      syncBtn.textContent = 'Syncing…';
+      if (pdfBundleNote) pdfBundleNote.textContent = 'Rendering a fresh ' + documentLabel(documentToSync) + ' PDF…';
+      fetch(sync.endpoint, {
+        method: 'POST', mode: 'cors', credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml })
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not sync this application.');
+          pdfStale[documentToSync] = false;
+          syncMessage = 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder.';
+          if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
+        });
+      }).catch(function (error) {
+        var message = error && error.message ? error.message : '';
+        if (!message || /fetch|network|load failed/i.test(message)) message = 'Infinite Canvas is not running or its Sync service is unavailable. Launch it, then try Sync again.';
+        syncMessage = message;
+        if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
+      }).finally(function () { updateSync(); });
+    });
+  }
+
+  // ---- Web-font availability detection (§5.3) ----
+  try {
+    var check = function () {
+      var readiness = (function () {
+    try {
+      if (!document.fonts || !document.fonts.check) return { loaded: true, missingFaces: [] };
+
+      var rootStyle = getComputedStyle(document.documentElement);
+      var familyFor = function (property) {
+        return (rootStyle.getPropertyValue(property).split(',')[0] || '').trim().replace(/^["']|["']$/g, '');
+      };
+      var normalizedFamily = function (value) {
+        return (String(value || '').split(',')[0] || '').trim().replace(/^["']|["']$/g, '').toLowerCase();
+      };
+      var knownFamilies = [familyFor('--ff-display'), familyFor('--ff-body'), familyFor('--ff-mono')]
+        .filter(Boolean);
+      var requiredByKey = {};
+      var surfaces = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel], main.page'));
+      var isDocumentText = function (node) {
+        if (!String(node.nodeValue || '').trim()) return false;
+        var parent = node.parentElement;
+        return !!parent && surfaces.some(function (surface) { return surface.contains(parent); });
+      };
+      var walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+      var node;
+      while ((node = walker.nextNode())) {
+        if (!isDocumentText(node)) continue;
+        var style = getComputedStyle(node.parentElement);
+        var family = normalizedFamily(style.fontFamily);
+        var rawWeight = String(style.fontWeight || '400').trim().toLowerCase();
+        var weight = rawWeight === 'normal' ? '400' : rawWeight === 'bold' ? '700' : rawWeight;
+        var knownFamily = knownFamilies.find(function (candidate) { return family === candidate.toLowerCase(); });
+        if (knownFamily) {
+          requiredByKey[knownFamily + '\u0000' + weight] = { family: knownFamily, weight: weight };
+        } else {
+          requiredByKey['unexpected\u0000' + family + '\u0000' + weight] = { family: family || '(none)', weight: weight, unexpected: true };
+        }
+      }
+      var required = Object.keys(requiredByKey).map(function (key) { return requiredByKey[key]; });
+
+      var missingFaces = required.filter(function (face) {
+        return face.unexpected || !document.fonts.check(face.weight + ' 12px "' + face.family + '"');
+      });
+      return { loaded: missingFaces.length === 0, missingFaces: missingFaces.map(function (face) { return (face.unexpected ? 'unexpected ' : '') + face.family + ' ' + face.weight; }), requiredFaces: required.filter(function (face) { return !face.unexpected; }).map(function (face) { return face.weight + ' 12px \"' + face.family + '\"'; }) };
+    } catch (e) { return { loaded: true, missingFaces: [] }; }
+  })();
+      // A CSS @import can add FontFace records after the first fulfilled
+      // document.fonts.ready promise. Always clear a speculative warning once
+      // the requested document faces have settled, rather than leaving a stale
+      // banner after Chrome served them from cache.
+      if (fontWarning) fontWarning.hidden = !!readiness.loaded;
+      return readiness;
+    };
+    var loadRequiredDocumentFaces = function () {
+      var initial = (function () {
+    try {
+      if (!document.fonts || !document.fonts.check) return { loaded: true, missingFaces: [] };
+
+      var rootStyle = getComputedStyle(document.documentElement);
+      var familyFor = function (property) {
+        return (rootStyle.getPropertyValue(property).split(',')[0] || '').trim().replace(/^["']|["']$/g, '');
+      };
+      var normalizedFamily = function (value) {
+        return (String(value || '').split(',')[0] || '').trim().replace(/^["']|["']$/g, '').toLowerCase();
+      };
+      var knownFamilies = [familyFor('--ff-display'), familyFor('--ff-body'), familyFor('--ff-mono')]
+        .filter(Boolean);
+      var requiredByKey = {};
+      var surfaces = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel], main.page'));
+      var isDocumentText = function (node) {
+        if (!String(node.nodeValue || '').trim()) return false;
+        var parent = node.parentElement;
+        return !!parent && surfaces.some(function (surface) { return surface.contains(parent); });
+      };
+      var walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+      var node;
+      while ((node = walker.nextNode())) {
+        if (!isDocumentText(node)) continue;
+        var style = getComputedStyle(node.parentElement);
+        var family = normalizedFamily(style.fontFamily);
+        var rawWeight = String(style.fontWeight || '400').trim().toLowerCase();
+        var weight = rawWeight === 'normal' ? '400' : rawWeight === 'bold' ? '700' : rawWeight;
+        var knownFamily = knownFamilies.find(function (candidate) { return family === candidate.toLowerCase(); });
+        if (knownFamily) {
+          requiredByKey[knownFamily + '\u0000' + weight] = { family: knownFamily, weight: weight };
+        } else {
+          requiredByKey['unexpected\u0000' + family + '\u0000' + weight] = { family: family || '(none)', weight: weight, unexpected: true };
+        }
+      }
+      var required = Object.keys(requiredByKey).map(function (key) { return requiredByKey[key]; });
+
+      var missingFaces = required.filter(function (face) {
+        return face.unexpected || !document.fonts.check(face.weight + ' 12px "' + face.family + '"');
+      });
+      return { loaded: missingFaces.length === 0, missingFaces: missingFaces.map(function (face) { return (face.unexpected ? 'unexpected ' : '') + face.family + ' ' + face.weight; }), requiredFaces: required.filter(function (face) { return !face.unexpected; }).map(function (face) { return face.weight + ' 12px \"' + face.family + '\"'; }) };
+    } catch (e) { return { loaded: true, missingFaces: [] }; }
+  })();
+      var requiredFaces = Array.isArray(initial.requiredFaces) ? initial.requiredFaces : [];
+      var loads = document.fonts && document.fonts.load
+        ? Promise.all(requiredFaces.map(function (descriptor) {
+          return document.fonts.load(descriptor, 'A').catch(function () { return []; });
+        }))
+        : Promise.resolve();
+      return loads.then(function () {
+        return document.fonts && document.fonts.ready ? document.fonts.ready : null;
+      }).then(check).catch(check);
+    };
+    if (window.document.fonts && document.fonts.ready && document.fonts.ready.then) {
+      // Run now, after window load, and whenever Chrome finishes a later font
+      // batch. This covers cached Google Fonts as well as slow networks.
+      loadRequiredDocumentFaces();
+      window.addEventListener('load', loadRequiredDocumentFaces, { once: true });
+      if (document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', check);
+    } else check();
+  } catch (e) { /* font-loading API unsupported — this is an enhancement, degrade quietly */ }
+})();
+</script>
+  </div>
+</div>
+<script>
+(function () {
+  'use strict';
+  try {
+    var stages = Array.prototype.slice.call(document.querySelectorAll('.ic-page-stage'));
+    if (!stages.length) return;
+    var CANDIDATE_SELECTOR = 'li, p, dt, dd, header, hr, h1, h2, h3, .role-header, .role-meta, .project, .letter-close';
+
+    function pxFromVar(varValue) {
+      var probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;height:' + varValue + ';';
+      document.body.appendChild(probe);
+      var px = probe.getBoundingClientRect().height;
+      probe.remove();
+      return px;
+    }
+
+    function measureGeometry(pageEl) {
+      var rootVar = getComputedStyle(document.documentElement).getPropertyValue('--page-h').trim() || '11in';
+      var pageHeightPx = pxFromVar(rootVar);
+      var cs = getComputedStyle(pageEl);
+      var marginTopPx = parseFloat(cs.paddingTop) || 0;
+      var marginBotPx = parseFloat(cs.paddingBottom) || 0;
+      var marginSidePx = parseFloat(cs.paddingLeft) || 0;
+      var outerWidthPx = pageEl.getBoundingClientRect().width;
+      return {
+        contentPerPagePx: Math.max(60, pageHeightPx - marginTopPx - marginBotPx),
+        marginSidePx: marginSidePx,
+        outerWidthPx: outerWidthPx
+      };
+    }
+
+    function buildShadowClone(pageEl, geometry) {
+      var host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-99999px;top:0;visibility:hidden;pointer-events:none;';
+      var clone = pageEl.cloneNode(true);
+      clone.removeAttribute('contenteditable');
+      Array.prototype.slice.call(clone.querySelectorAll('[id]')).forEach(function (el) { el.removeAttribute('id'); });
+      clone.style.cssText = 'box-sizing:border-box;margin:0;box-shadow:none;min-height:0;' +
+        'width:' + geometry.outerWidthPx + 'px;height:' + geometry.contentPerPagePx + 'px;' +
+        'padding:0 ' + geometry.marginSidePx + 'px;' +
+        // Border-box padding makes the usable column narrower than the outer
+        // paper. Add both side paddings back as the gap so the next column
+        // begins exactly one outer paper width later, matching columnIndexOf.
+        'column-width:' + geometry.outerWidthPx + 'px;column-gap:' + (geometry.marginSidePx * 2) + 'px;column-fill:auto;overflow:visible;';
+      host.appendChild(clone);
+      document.body.appendChild(host);
+      void clone.getBoundingClientRect();
+      return { host: host, clone: clone };
+    }
+
+    function columnIndexOf(left, containerLeft, columnWidth) {
+      if (columnWidth <= 0) return 0;
+      return Math.max(0, Math.round((left - containerLeft) / columnWidth));
+    }
+
+    function computeBreaks(pageEl) {
+      var geometry = measureGeometry(pageEl);
+      var liveCandidates = Array.prototype.slice.call(pageEl.querySelectorAll(CANDIDATE_SELECTOR));
+      if (!liveCandidates.length) return { breaks: [], pageCount: 1 };
+      var shadow = buildShadowClone(pageEl, geometry);
+      var cloneCandidates = Array.prototype.slice.call(shadow.clone.querySelectorAll(CANDIDATE_SELECTOR));
+      var containerLeft = shadow.clone.getBoundingClientRect().left;
+      var pageLiveRect = pageEl.getBoundingClientRect();
+      var breaks = [];
+      var lastColumn = 0;
+      var n = Math.min(liveCandidates.length, cloneCandidates.length);
+      for (var i = 0; i < n; i++) {
+        var rects = cloneCandidates[i].getClientRects();
+        if (!rects.length) continue;
+        var firstCol = columnIndexOf(rects[0].left, containerLeft, geometry.outerWidthPx);
+        var lastCol = columnIndexOf(rects[rects.length - 1].left, containerLeft, geometry.outerWidthPx);
+        if (firstCol > lastColumn) {
+          var prevLive = liveCandidates[i - 1];
+          var afterBottom = prevLive ? prevLive.getBoundingClientRect().bottom : pageLiveRect.top;
+          var beforeTop = liveCandidates[i].getBoundingClientRect().top;
+          var top = Math.min(Math.max(afterBottom - pageLiveRect.top, 0), Math.max(beforeTop - pageLiveRect.top, 0));
+          var bottom = Math.max(beforeTop - pageLiveRect.top, top);
+          breaks.push({ page: firstCol + 1, top: top, bottom: bottom, approximate: false });
+          lastColumn = firstCol;
+        }
+        if (lastCol > firstCol) {
+          for (var c = firstCol; c < lastCol; c++) {
+            var ratio = (c + 1 - firstCol) / (lastCol - firstCol + 1);
+            var liveRect = liveCandidates[i].getBoundingClientRect();
+            var y = liveRect.top - pageLiveRect.top + liveRect.height * ratio;
+            breaks.push({ page: c + 2, top: y, bottom: y, approximate: true });
+          }
+          lastColumn = lastCol;
+        }
+      }
+      shadow.host.remove();
+      return { breaks: breaks, pageCount: lastColumn + 1 };
+    }
+
+    function renderGuides(stage) {
+      var pageEl = stage.querySelector('.page');
+      var guides = stage.querySelector('.ic-page-guides');
+      if (!pageEl || !guides) return;
+      var result;
+      try { result = computeBreaks(pageEl); } catch (e) { guides.innerHTML = ''; return; }
+      var html = '';
+      result.breaks.forEach(function (b) {
+        if (b.approximate) {
+          html += '<div class="ic-page-seam ic-page-seam-approx" style="top:' + b.top + 'px">' +
+            '<div class="ic-page-seam-line ic-page-seam-line-dashed"></div>' +
+            '<span class="ic-page-folio" style="top:-11px">Page ' + b.page + '</span></div>';
+        } else {
+          var h = Math.max(1, b.bottom - b.top);
+          html += '<div class="ic-page-seam" style="top:' + b.top + 'px;height:' + h + 'px">' +
+            '<div class="ic-page-seam-fade-top"></div>' +
+            '<div class="ic-page-seam-line" style="top:' + (h / 2) + 'px"></div>' +
+            '<div class="ic-page-seam-fade-bot"></div>' +
+            '<span class="ic-page-folio" style="top:' + (h / 2 - 6) + 'px">Page ' + b.page + '</span></div>';
+        }
+      });
+      guides.innerHTML = html;
+      stage.setAttribute('data-ic-page-count', String(result.pageCount));
+    }
+
+    var scheduled = false;
+    function scheduleRecompute() {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(function () {
+        scheduled = false;
+        stages.forEach(function (stage) {
+          if (stage.offsetParent !== null) renderGuides(stage);
+        });
+      });
+    }
+    window.icPageGuidesRecompute = scheduleRecompute;
+
+    if (window.ResizeObserver) {
+      var ro = new ResizeObserver(scheduleRecompute);
+      stages.forEach(function (stage) {
+        var pageEl = stage.querySelector('.page');
+        if (pageEl) ro.observe(pageEl);
+      });
+    }
+    window.addEventListener('resize', scheduleRecompute);
+    new MutationObserver(scheduleRecompute).observe(document.documentElement, {
+      attributes: true, attributeFilter: ['data-page', 'data-density', 'data-mono', 'data-print', 'data-letter']
+    });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleRecompute).catch(function () {});
+    scheduleRecompute();
+  } catch (e) { /* pagination guide is a screen-only enhancement — never block the app */ }
+})();
+</script>
+</body>
+</html>

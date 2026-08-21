@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  annotation-typography-test.html — computed-style companion to
+  annotation-typography-check.html — computed-style companion to
   build/annotation-typography-test.js. Loads the real stylesheets and
   measures a rendered bullet: every inline annotation span must resolve
   to exactly the owning <li>'s typography, so the bullet reads as one
@@ -73,12 +73,13 @@ function run(){
   assert(getComputedStyle(document.querySelector('#b-tradeoff .annotation-label')).fontStyle === 'normal',
     '.annotation-label computes font-style: normal');
 
-  header('Sanity: the bullet itself is still body type, and <strong> is untouched');
+  header('Sanity: the bullet itself is still body type, and <strong> is visually inert');
   const liCs = getComputedStyle(document.getElementById('b-tradeoff'));
   assert(/Inter/.test(liCs.fontFamily), 'bullet is set in Inter (résumé body family)', liCs.fontFamily);
   const strong = document.querySelector('#b-tradeoff strong');
-  assert(Number(getComputedStyle(strong).fontWeight) >= 600, '<strong> metric still renders at SemiBold+',
-    getComputedStyle(strong).fontWeight);
+  const strongDiff = diff(styleOf(strong), styleOf(document.getElementById('b-tradeoff')));
+  assert(strongDiff.length === 0, '<strong> inside a bullet matches the bullet (no bold, no colour change)',
+    strongDiff.join(' | '));
   /* Single continuous run: one flat font-size across every text node. */
   const sizes = new Set([...document.querySelectorAll('#b-tradeoff, #b-tradeoff span')]
     .map(el => getComputedStyle(el).fontSize));

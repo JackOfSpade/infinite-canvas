@@ -1,0 +1,75 @@
+<!doctype html>
+<!--
+  build/resume-one-page-check.html — renderer-verified regression:
+  the shipped resume.html sample must render as ONE page, 90–100% of
+  one measured type area, at DEFAULT density, regardless of the
+  candidate's title (STYLE.md §6, SKILL.md §The pipeline step 5).
+  Fetches the real ../resume.html, mounts its real main.page under the
+  real stylesheets, and measures actual rendered geometry — the same
+  method used to calibrate the sample. Open in any browser; result
+  prints to the page and console.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>resume.html — one-page regression</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  body { background: #1a1815; padding: 24px; }
+  #log, #result { color: #e8e3d8; font: 14px ui-monospace, Menlo, monospace; }
+  #log div { margin-bottom: 4px; }
+  #result { font-size: 16px; margin-top: 14px; padding: 10px 14px; border-radius: 6px; }
+  #result.ok { background: #16301d; color: #7CCB8E; }
+  #result.bad { background: #3a1517; color: #FF8A80; }
+  #rig { background: var(--bg); max-width: 816px; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<div id="result">running…</div>
+<div id="rig" hidden></div>
+<script>
+(async function () {
+  var log = document.getElementById('log'), result = document.getElementById('result'), rig = document.getElementById('rig');
+  function line(t) { var d = document.createElement('div'); d.textContent = t; log.appendChild(d); }
+  try {
+    var res = await fetch('../resume.html');
+    var text = await res.text();
+    var doc = new DOMParser().parseFromString(text, 'text/html');
+    var page = doc.querySelector('main.page');
+    if (!page) throw new Error('resume.html has no main.page');
+    if (doc.querySelectorAll('main.page').length !== 1) throw new Error('resume.html must have exactly one main.page');
+    rig.hidden = false;
+    rig.appendChild(page);
+    await document.fonts.ready;
+    var probe = document.createElement('div');
+    probe.style.cssText = 'position:absolute;visibility:hidden;height:var(--page-h)';
+    document.body.appendChild(probe);
+    var pageHeightPx = probe.getBoundingClientRect().height;
+    probe.remove();
+    var cs = getComputedStyle(page);
+    var marginBotPx = parseFloat(cs.paddingBottom) || 0;
+    var pageRect = page.getBoundingClientRect();
+    var last = page.lastElementChild;
+    var lastRect = last.getBoundingClientRect();
+    var contentHeightPx = (lastRect.bottom - pageRect.top) + marginBotPx;
+    var util = contentHeightPx / pageHeightPx;
+    line('pageHeightPx=' + pageHeightPx.toFixed(1));
+    line('contentHeightPx=' + contentHeightPx.toFixed(1));
+    line('utilization=' + (util * 100).toFixed(1) + '%  (target: 90–100%, one page)');
+    var ok = util > 0.90 && util <= 1.0;
+    result.className = ok ? 'ok' : 'bad';
+    result.textContent = ok
+      ? 'PASS — one page, ' + (util * 100).toFixed(1) + '% utilized.'
+      : 'FAIL — utilization ' + (util * 100).toFixed(1) + '% is outside the 90–100% one-page target.';
+    console[ok ? 'log' : 'error'](result.textContent);
+  } catch (e) {
+    result.className = 'bad';
+    result.textContent = 'FAIL — ' + e.message;
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>

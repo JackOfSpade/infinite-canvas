@@ -1,6 +1,7 @@
 import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
-import { JOB_COLLECTION_PAGE_CEILING, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
+import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
+import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
@@ -443,7 +444,7 @@ export default [
             jobId: '123e4567-e89b-42d3-a456-426614174000',
             handoffHistory: [{
               at: '2026-08-18T05:16:00.000Z', type: 'fit-revision-requested', resultSha256: '0123456789abcdef', revisionRound: 2,
-              resume: { pageCount: 2, targetPageCount: 1, attempts: [{ attempt: 1, density: 'default', pageCount: 2 }, { attempt: 2, density: 'compact', pageCount: 2 }] },
+              resume: { pageCount: 2, targetPageCount: 1, layout: { utilization: 0.86 }, attempts: [{ attempt: 1, density: 'default', pageCount: 2 }, { attempt: 2, density: 'compact', pageCount: 2 }] },
               coverLetter: { pageCount: 1, targetPageCount: 1 },
               qualityReview: {
                 resume: { decision: 'changed_materially', rationale: 'Removed redundant evidence and retained the job-specific backend proof.' },
@@ -460,10 +461,11 @@ export default [
         }, 901).markdown;
         assert(report.includes('Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review):')
           && report.includes('fit-revision-requested · revision 2 · result 0123456789abcdef')
+          && report.includes('résumé type area 86%')
           && report.includes('résumé attempts #1=2p, #2[compact]=2p')
           && report.includes('AI-authored quality review: résumé changed_materially')
           && report.includes('cover letter kept_diminishing_returns'),
-        'FULL reports retain the exact app-measured Local AI result/version/page sequence and AI-authored quality disposition needed to audit a claimed revision loop');
+      'FULL reports retain the exact app-measured Local AI result/version/page sequence and AI-authored quality disposition needed to audit a claimed revision loop');
       } finally {
         recordApplicationTelemetry(prior);
       }
@@ -591,6 +593,14 @@ export default [
       assert(rejected,
         'a summary-only role must be rejected so unpolished career notes can never be copied into a bullet');
 
+      const renamedRoleMarkup = `<main class="page"><article class="experience-entry"><span class="title">Architect</span><span class="company">Contract Changed Inc.</span><ul class="highlights"><li>Evidence exists but the role contract changed.</li></ul></article></main>`;
+      let structuralError = '';
+      try { assertRetainedResumeRoleBullets(renamedRoleMarkup); } catch (error) { structuralError = String(error?.message || error); }
+      assert(structuralError.includes('structural validation failed')
+        && structuralError.includes('no role elements matched')
+        && structuralError.includes('design-system role markup may have changed'),
+      'a zero-match role parse must fail distinctly instead of passing the bullet safety net');
+
       const headerOnly = `<main class="page"><article class="role"><span class="title">Intern</span><span class="company">No Evidence Inc.</span></article></main>`;
       assert(retainedResumeRolesWithoutBullets(headerOnly).length === 1,
         'a header-only role must remain detectable for the hard validation gate');
@@ -604,7 +614,7 @@ export default [
         && prompt.includes('For every invalid role, write one concise, polished employer-facing bullet supported by that data')
         && prompt.includes('Do NOT remove, merge, rename, or otherwise omit any role'),
       'the repair editor must polish career notes with source-backed prose while retaining every role');
-      return { detected: missing.length, rejected: true, removalRejected: true, repairPrompted: true };
+      return { detected: missing.length, rejected: true, structuralGuarded: true, removalRejected: true, repairPrompted: true };
     },
   },
 {
@@ -649,7 +659,50 @@ export default [
       'cover-letter generation must preserve evidence specificity, availability granularity, and geography truthfulness');
       assert(source.includes('does not make CPR/BLS a high-impact gap unless the target posting explicitly requires or strongly prefers CPR/BLS'),
         'skill-gap analysis must not elevate an adjacent, unstated CPR/BLS credential into a blocking check');
-      return { achievementScope: true, coverEvidenceScope: true, cprGate: true };
+      assert(source.includes('COMPRESSED-EVIDENCE SYNTHESIS: the CAREER DATA is shorthand evidence, not finished résumé copy')
+        && source.includes('Combine compatible facts when the data clearly places them in the same role, project, or professional practice')
+        && source.includes('Do not merely dress up familiarity or self-assessed knowledge')
+        && source.includes('Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result')
+        && source.includes('never move a fact between employers or projects'),
+      'résumé generation must permit narrow synthesis of compressed career evidence without manufacturing an achievement, outcome, scope, or attribution');
+      assert(source.includes('const PARALLEL_STRUCTURE_RULE = `PARALLEL STRUCTURE:')
+        && source.includes('Reject a span shaped like “from [noun phrase] through [verb-ing phrase]”')
+        && source.includes('do not repair the mismatch with bureaucratic padding such as “from the time of.”')
+        && source.includes('- ${PARALLEL_STRUCTURE_RULE}')
+        && source.includes('${COVER_LETTER_OPENING_RULE}\n\n${PARALLEL_STRUCTURE_RULE}')
+        && source.includes('${COVER_LETTER_OPENING_RULE} ${PARALLEL_STRUCTURE_RULE}')
+        && source.includes('faulty-parallelism when coordinated elements use mismatched grammatical forms'),
+      'résumé, planned-letter, direct-letter, and semantic-audit prompts must prevent and repair faulty grammatical parallelism');
+      assert(source.includes('Treat breadth and frequency language as factual scope')
+        && source.includes('detached-synthesis when a concluding or transitional sentence introduces a broader abstraction')
+        && source.includes('including across a paragraph boundary')
+        && source.includes('For detached-synthesis, either rewrite the sentence as a concrete conclusion')
+        && source.includes('For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means')
+        && source.includes('every synthesis is explicitly tied to and scoped by its evidence'),
+      'the independent audit and both revision paths must catch unsupported synthesis and ambiguous cross-paragraph references, then repair them concretely');
+      assert(source.includes('it is not permission to volunteer a weakness')
+        && source.includes('Do not use a colon to unload tools, systems, or achievements')
+        && source.includes('never repeat an abstract metaphor across paragraphs as connective tissue')
+        && source.includes('overloaded-sentence')
+        && source.includes('repeated-metaphor')
+        && source.includes('volunteered-gap'),
+      'cover-letter generation and semantic audit reject volunteered gaps, overloaded evidence lists, and repeated organizing metaphors');
+      const revisionPrompts = [
+        buildResumeLengthRevisionPrompt({ mainHtml: '<main class="page"></main>', pageCount: 2, targetPageCount: 1, compactApplied: true }),
+        buildResumeUnderfillRevisionPrompt({ mainHtml: '<main class="page"></main>', contentUtilization: 0.75, targetPageCount: 1 }),
+        buildResumeRoleEvidenceRevisionPrompt({ mainHtml: '<main class="page"></main>' }),
+      ];
+      assert(source.includes('HIGHLIGHT BULLET PRESENTATION: inside every')
+        && source.includes('<span data-achievement-id="ID">figure</span>')
+        && source.includes('_resumeSampleMain = neutralizeHighlightTextEmphasis(m[0])')
+        && source.includes('Every top-level résumé category is a peer')
+        && revisionPrompts.every(prompt => prompt.includes('HIGHLIGHT BULLET PRESENTATION')
+          && prompt.includes('Never emit `<b>` or `<strong>`')
+          && prompt.includes('<span data-achievement-id="ID">figure</span>')
+          && prompt.includes('TOP-LEVEL SECTION HIERARCHY')
+          && prompt.includes('Every top-level résumé category is a peer')),
+      'the normalized sample, initial generation, and every API résumé revision/repair prompt must preserve uniform-weight highlights, neutral receipt spans, and peer-level section hierarchy');
+      return { achievementScope: true, compressedEvidenceSynthesis: true, parallelStructurePrompts: true, earnedSynthesisAudit: true, coverEvidenceScope: true, cprGate: true, uniformHighlightPrompts: revisionPrompts.length, peerSectionHierarchyPrompts: revisionPrompts.length };
     },
   },
 {
@@ -716,7 +769,7 @@ export default [
         ]);
         const realOps = fs.promises;
         const failingOps = {
-          access: (...args) => realOps.access(...args),
+          lstat: (...args) => realOps.lstat(...args),
           writeFile: (...args) => realOps.writeFile(...args),
           unlink: (...args) => realOps.unlink(...args),
           rename: (source, destination) => {
@@ -756,7 +809,47 @@ export default [
           && await fs.promises.readFile(files.html, 'utf8') === 'baseline html'
           && await fs.promises.readFile(files.resume, 'utf8') === '%PDF-baseline resume',
         'a failed post-write verification also restores the prior visible artifacts');
-        return { staleRemoved: 2, rollbackRestored: 4, readbackRollback: true };
+
+        let duplicateRejected = false;
+        try {
+          await replaceApplicationBundleAtomically([
+            { destination: files.html, data: 'first duplicate' },
+            { destination: files.html, data: 'second duplicate' },
+          ]);
+        } catch (error) {
+          duplicateRejected = /duplicate destination/.test(error.message);
+        }
+        assert(duplicateRejected && await fs.promises.readFile(files.html, 'utf8') === 'baseline html',
+          'duplicate destinations must be rejected before any staging or visible mutation');
+
+        const directoryDestination = path.join(dir, 'must-remain-a-directory');
+        await fs.promises.mkdir(directoryDestination);
+        let directoryRejected = false;
+        try {
+          await replaceApplicationBundleAtomically([{ destination: directoryDestination, data: 'not a directory' }]);
+        } catch (error) {
+          directoryRejected = /regular file/.test(error.message);
+        }
+        assert(directoryRejected && (await fs.promises.lstat(directoryDestination)).isDirectory(),
+          'a destination directory must never be hidden as a transaction backup or reported as successfully replaced');
+
+        const linkTarget = path.join(dir, 'outside-link-target.txt');
+        const linkDestination = path.join(dir, 'linked-destination.txt');
+        await fs.promises.writeFile(linkTarget, 'outside bytes');
+        await fs.promises.symlink(linkTarget, linkDestination);
+        await replaceApplicationBundleAtomically([{ destination: linkDestination, data: 'safe replacement' }]);
+        assert(await fs.promises.readFile(linkTarget, 'utf8') === 'outside bytes'
+          && !(await fs.promises.lstat(linkDestination)).isSymbolicLink()
+          && await fs.promises.readFile(linkDestination, 'utf8') === 'safe replacement',
+        'an existing symlink destination is replaced as an object without reading or mutating its target');
+        return {
+          staleRemoved: 2,
+          rollbackRestored: 4,
+          readbackRollback: true,
+          duplicateRejected,
+          directoryRejected,
+          symlinkTargetUntouched: true,
+        };
       } finally {
         await fs.promises.rm(dir, { recursive: true, force: true });
       }
@@ -824,17 +917,18 @@ export default [
 {
     name: 'Application Sync persists only the selected panel revision',
     run: () => {
-      const workspace = (resume, cover, shell) => `<!doctype html><html><body data-shell="${shell}"><section data-ic-document-panel="resume"><main class="page">${resume}</main></section><section data-ic-document-panel="cover"><main class="page">${cover}</main></section></body></html>`;
+      const workspace = (resume, cover, shell, extra = '') => `<!doctype html><html><body data-shell="${shell}"><section data-ic-document-panel="resume"><main class="page">${resume}</main></section><section data-ic-document-panel="cover"><main class="page">${cover}</main></section>${extra}</body></html>`;
       const stored = workspace('saved resume', 'saved cover', 'stored');
-      const incoming = workspace('edited resume', 'edited cover', 'incoming');
+      const incoming = workspace('edited resume<script>steal()</script><img src="https://evil.test/pixel">', 'edited cover', 'incoming', '<script id="attacker-shell">stealShell()</script>');
       const resumeMerged = mergeSelectedApplicationPanel(incoming, stored, 'resume');
       assert(resumeMerged.includes('edited resume') && resumeMerged.includes('saved cover')
-        && !resumeMerged.includes('edited cover') && resumeMerged.includes('data-shell="incoming"'),
-      'résumé Sync must retain the incoming résumé and last-synced cover panel without serializing the shell');
+        && !resumeMerged.includes('edited cover') && resumeMerged.includes('data-shell="stored"')
+        && !resumeMerged.includes('attacker-shell') && !resumeMerged.includes('evil.test'),
+      'résumé Sync must sanitize only the selected main and rebuild from the last trusted shell/cover revision');
       const coverMerged = mergeSelectedApplicationPanel(incoming, stored, 'cover');
       assert(coverMerged.includes('saved resume') && coverMerged.includes('edited cover')
-        && !coverMerged.includes('edited resume'),
-      'cover Sync must retain the incoming cover and last-synced résumé panel');
+        && !coverMerged.includes('edited resume') && coverMerged.includes('data-shell="stored"'),
+      'cover Sync must retain only the sanitized incoming cover within the stored shell and résumé revision');
       let malformedRejected = false;
       try {
         mergeSelectedApplicationPanel('<html><body></body></html>', stored, 'resume');
@@ -856,7 +950,70 @@ export default [
       }
       assert(missingSelectedRejected && duplicateRejected,
         'Sync must reject a missing selected panel and duplicate selected/inactive panels before rendering');
-      return { resumeIsolated: true, coverIsolated: true, malformedRejected, missingSelectedRejected, duplicateRejected };
+      const token = 'f'.repeat(64);
+      const storedWithCapability = workspace('saved resume', 'saved cover', 'stored', `<script id="ic-application-bundle-data" type="application/json">{"sync":{"endpoint":"http://127.0.0.1:43192/application-sync","token":"${token}"}}</script>`);
+      const incomingWithCapability = workspace('edited resume', 'edited cover', 'attacker');
+      const capabilityMerged = mergeSelectedApplicationPanel(incomingWithCapability, storedWithCapability, 'resume', { expectedToken: token });
+      let wrongCapabilityRejected = false;
+      try { mergeSelectedApplicationPanel(incomingWithCapability, storedWithCapability, 'resume', { expectedToken: 'e'.repeat(64) }); }
+      catch (error) { wrongCapabilityRejected = /capability does not match/.test(error.message); }
+      assert(capabilityMerged.includes(token) && capabilityMerged.includes('data-shell="stored"') && wrongCapabilityRejected,
+        'Sync must retain and verify the saved capability instead of accepting browser-supplied shell data');
+      const storedReviewShell = workspace('saved resume', 'saved cover', 'stored', '<article data-ic-insight="skill-1" data-ic-kind="verify"><button>Review</button></article><article data-ic-location-check="work-location"><button>Location</button></article>');
+      const incomingReviewShell = workspace('edited resume', 'edited cover', 'incoming', '<article data-ic-insight="skill-1" data-ic-kind="verify" data-ic-decision="verified" onclick="steal()" data-attacker="yes"><button>Replaced attacker control</button></article><article data-ic-location-check="work-location" data-ic-location-decision="confirmed" onmouseover="steal()"><button>Replaced attacker location</button></article><article data-ic-insight="unknown-skill" data-ic-kind="verify" data-ic-decision="verified"></article>');
+      const reviewMerged = mergeSelectedApplicationPanel(incomingReviewShell, storedReviewShell, 'cover');
+      assert(reviewMerged.includes('data-ic-insight="skill-1" data-ic-kind="verify" data-ic-decision="verified"')
+        && reviewMerged.includes('data-ic-location-check="work-location" data-ic-location-decision="confirmed"')
+        && reviewMerged.includes('<button>Review</button>') && reviewMerged.includes('<button>Location</button>')
+        && !reviewMerged.includes('onclick=') && !reviewMerged.includes('onmouseover=')
+        && !reviewMerged.includes('data-attacker=') && !reviewMerged.includes('unknown-skill'),
+      'Sync may copy only bounded review-state enum attributes onto matching trusted controls, never incoming shell markup/attrs');
+
+      const storedReceipt = workspace(
+        'Saved <span data-achievement-id="a1" data-derivation="trusted ledger calculation">74%</span>',
+        'saved cover',
+        'stored',
+      );
+      const forgedReceipt = workspace(
+        'Edited <span data-achievement-id="a1" data-derivation="forged browser tooltip">74%</span>',
+        'edited cover',
+        'incoming',
+      );
+      const receiptMerged = mergeSelectedApplicationPanel(forgedReceipt, storedReceipt, 'resume');
+      assert(receiptMerged.includes('data-achievement-id="a1" data-derivation="trusted ledger calculation"')
+        && !receiptMerged.includes('forged browser tooltip'),
+      'Sync must restore a matching receipt derivation only from the stored trusted page');
+      const changedReceipt = mergeSelectedApplicationPanel(
+        forgedReceipt.replace('>74%</span>', '>75%</span>'),
+        storedReceipt,
+        'resume',
+      );
+      assert(changedReceipt.includes('data-achievement-id="a1">75%</span>')
+        && !changedReceipt.includes('data-derivation="trusted ledger calculation"'),
+      'editing a receipt value must remove its prior trusted derivation instead of borrowing it by id');
+      const ambiguousStoredReceipt = workspace(
+        'Saved <span data-achievement-id="a1" data-derivation="first calculation">74%</span><span data-achievement-id="a1" data-derivation="conflicting calculation">74%</span><span data-achievement-id="a1" data-derivation="first calculation">74%</span>',
+        'saved cover',
+        'stored',
+      );
+      const ambiguousReceiptMerged = mergeSelectedApplicationPanel(
+        workspace('Edited <span data-achievement-id="a1">74%</span>', 'edited cover', 'incoming'),
+        ambiguousStoredReceipt,
+        'resume',
+      );
+      assert(!ambiguousReceiptMerged.includes('data-derivation='),
+        'a conflicting trusted receipt key must remain permanently ambiguous; a later duplicate cannot re-authorize it');
+      return {
+        resumeIsolated: true,
+        coverIsolated: true,
+        malformedRejected,
+        missingSelectedRejected,
+        duplicateRejected,
+        wrongCapabilityRejected,
+        reviewStatePreserved: true,
+        receiptDerivationBound: true,
+        ambiguousReceiptRejected: true,
+      };
     },
   },
 {
@@ -881,7 +1038,7 @@ export default [
           stage: 'completed',
           companyResearch: { available: true, error: null },
           coverLetter: {
-            salutation: 'Dear Example Co Hiring Team,', recipient: 'Hiring Team\nExample Co',
+            salutation: 'Dear Example Co Hiring Team,', recipient: '',
             paragraphs: ['A concise thesis.', 'A grounded mechanism.'], closing: 'Sincerely,',
             signatureTitle: 'Platform Engineer · candidate', contact: ['Toronto, ON'],
             needsAvailable: true, needsCount: 3, topNeedArgued: true, mappingCount: 1,
@@ -4068,6 +4225,12 @@ export default [
       assert(doc.includes('.resume-header') && doc.includes('.name'), 'resume doc: resume.css was not inlined');
       assert(doc.includes('--ff-display'), 'resume doc: colors_and_type.css was not inlined');
       assert(doc.includes('data-print="ink-only"') && doc.includes('Jane'), 'resume doc: lost the <main> block');
+      assert(doc.includes('<div class="ic-page-stage"><main class="page"')
+        && doc.includes('<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div>'),
+      'resume doc: each document surface is wrapped in screen-only page-guide chrome');
+      assert(doc.includes('window.icPageGuidesRecompute = scheduleRecompute')
+        && doc.includes('.ic-page-guides { display: none !important; }'),
+      'resume doc: page guides recompute on screen and are excluded from print');
       const renderedMain = doc.split('</style>').pop().match(/<main\b[^>]*>/i)?.[0] || '';
       assert(!/\sdata-(?:print|mono|page|density)\b/i.test(renderedMain), 'resume doc: root variants must not be shadowed by model-level main attributes');
       // A model that mistakenly returns a full fenced document is normalized to
@@ -4118,7 +4281,7 @@ export default [
         variantAttrs: attrs || 'data-print="dual-pdf"',
         docId: 'variant-roundtrip',
       });
-      const resumePanelMain = (doc) => /<section[^>]*data-ic-document-panel="resume"[^>]*>\s*(<main\b[^>]*>)/i.exec(doc)?.[1] || '';
+      const resumePanelMain = (doc) => /<section[^>]*data-ic-document-panel="resume"[^>]*>\s*(?:<div class="ic-page-stage">\s*)?(<main\b[^>]*>)/i.exec(doc)?.[1] || '';
 
       for (const [attrs, expected] of [
         ['data-print="ink-only"', 'data-print="ink-only"'],
@@ -4158,23 +4321,17 @@ export default [
     },
   },
 {
-    name: 'Application: target page count heuristic (SKILL.md §5 — "1 for IC roles up to staff, 2 for principal+")',
+    name: 'Application: target page count defaults to one page regardless of job-title seniority',
     run: () => {
-      assert(targetPageCountForJob('Senior Software Engineer') === 1, 'senior IC → 1 page');
-      assert(targetPageCountForJob('Staff Software Engineer') === 1, 'bare "staff" is still an IC role under SKILL.md — 1 page, NOT 2');
-      assert(targetPageCountForJob('Software Engineer, Staff+') === 2, '"Staff+" (literal plus) is the ladder shorthand for staff-and-above → 2 pages');
-      assert(targetPageCountForJob('Senior Staff Engineer') === 2, 'senior staff is above the Staff ceiling → 2 pages');
-      assert(targetPageCountForJob('Sr. Staff Engineer') === 2, 'abbreviated senior staff is above the Staff ceiling → 2 pages');
-      assert(targetPageCountForJob('Principal Engineer') === 2, 'principal → 2 pages');
-      assert(targetPageCountForJob('Director of Engineering') === 2, 'director → 2 pages');
-      assert(targetPageCountForJob('VP of Engineering') === 2, 'VP → 2 pages');
-      assert(targetPageCountForJob('Head of Platform') === 2, '"head of" → 2 pages');
-      assert(targetPageCountForJob('Chief Technology Officer') === 2, 'chief → 2 pages');
-      assert(targetPageCountForJob('Chief of Staff') === 1, 'Chief of Staff is an administrative/advisory title, not a principal+ IC title');
-      assert(targetPageCountForJob('Chief-of-Staff') === 1, 'hyphenated Chief-of-Staff is the same administrative/advisory title');
-      assert(targetPageCountForJob('') === 1, 'empty/missing title defaults to 1 page, not a throw');
-      assert(targetPageCountForJob(null) === 1, 'null title defaults to 1 page, not a throw');
-      return { ok: true };
+      const titles = [
+        'Senior Software Engineer', 'Staff Software Engineer', 'Software Engineer, Staff+',
+        'Senior Staff Engineer', 'Sr. Staff Engineer', 'Principal Engineer',
+        'Director of Engineering', 'VP of Engineering', 'Head of Platform',
+        'Chief Technology Officer', 'Chief of Staff', 'Chief-of-Staff', '', null,
+      ];
+      assert(titles.every(title => targetPageCountForJob(title) === 1),
+        'every title defaults to one page; longer targets require an explicit override');
+      return { checkedTitles: titles.length };
     },
   },
 {
@@ -4186,6 +4343,36 @@ export default [
       assert(fits.action === 'ship', 'fits target → ship');
       const underTarget = decideFitStep({ pageCount: 1, target: 2, compactTried: false });
       assert(underTarget.action === 'ship', 'under target → ship (never pads to fill the target)');
+      const underfilledLayout = { contentHeightPx: 620, typeAreaHeightPx: 720 };
+      const underfilled = decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: underfilledLayout });
+      assert(underfilled.action === 'enrich' && resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: underfilledLayout })
+        && Math.round(resumeTypeAreaUtilization(underfilledLayout) * 100) === 86,
+      'a materially underfilled one-page résumé requests evidence-led enrichment instead of shipping unused space');
+      const twoPageLayout = decideFitStep({ pageCount: 1, target: 2, compactTried: false, layout: underfilledLayout });
+      assert(twoPageLayout.action === 'ship', 'the utilization check never pads a multi-page target');
+
+      // A screen-preview page grows when its text overflows; the measurable
+      // type area must remain the fixed minimum paper height minus padding.
+      const fixedTypeArea = fixedPageTypeAreaHeight(1056, 69.12, 69.12);
+      assert(Math.abs(fixedTypeArea - 917.76) < 0.001
+        && fixedPageTypeAreaHeight(1056, 69.12, 69.12) === fixedTypeArea,
+      'type-area height remains fixed when an overflowing screen page expands');
+
+      // The render window evaluates this exact string. It is assembled without
+      // a template literal because an inline backtick previously made `.page`
+      // a template-tag function call before either document could be measured.
+      const pageMeasurement = pageTextMeasurementExpression();
+      const emptyMeasurement = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${pageMeasurement};`)(
+        {
+          querySelector: () => ({}),
+          createTreeWalker: () => ({ nextNode: () => null }),
+        },
+        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px' }),
+        { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
+      );
+      assert(emptyMeasurement === null
+        && !pageMeasurement.includes('`'),
+      'the injected page-text probe is free of the template-literal delimiter that broke layout measurement');
 
       // Over target, nothing tried yet → the FREE lever first, never straight to an LLM call.
       const first = decideFitStep({ pageCount: 2, target: 1, compactTried: false });
@@ -4230,7 +4417,14 @@ export default [
 
       // Every decision carries a human-readable reason (bug-report / log line).
       assert(typeof first.reason === 'string' && first.reason.length > 0, 'decision carries a non-empty reason');
-      return { ok: true };
+      const underfillPrompt = buildResumeUnderfillRevisionPrompt({
+        mainHtml: '<main class="page">Evidence</main>', contentUtilization: 0.86, targetPageCount: 1,
+        job: { title: 'Backend Engineer', company: 'Acme' }, revisionAttempt: 1,
+      });
+      assert(underfillPrompt.includes('86%') && underfillPrompt.includes('strongest omitted evidence')
+        && underfillPrompt.includes('not permission to add generic filler') && underfillPrompt.includes('byte-for-byte unchanged'),
+      'underfill revision guidance prioritizes supported evidence and permits a truthful diminishing-returns stop');
+      return { ok: true, underfill: underfilled.action };
     },
   },
 {
@@ -4244,7 +4438,7 @@ export default [
           name: 'Jane Doe',
           tagline: 'Product Marketer',
           contact: ['Austin, TX', 'jane@x.com'],
-          date: 'May 31, 2026',
+          date: 'May 2026',
           recipient: 'Hiring Team\nAcme\nProduct Marketing',
           salutation: 'Dear Acme Team,',
           paragraphs: ['I love <Acme> & your work.', 'Second para.', '   '],
@@ -4260,40 +4454,41 @@ export default [
       assert((html.match(/<style>/g) || []).length === 1, 'cover: exactly one inlined <style> block');
       assert(html.includes('.letter-body') && html.includes('.resume-header') && html.includes('--ff-display'),
         'cover: colors_and_type.css + resume.css + cover-letter.css must all be inlined');
-      // Every "does the MARKUP use this class/text" check below is scoped to
-      // the content AFTER the inlined <style> block, never to the raw `html`
-      // string as a whole — the design-system CSS is now inlined into the
-      // same document (§5.2), and it names its own selectors in plain text
-      // ('.letter-recipient', '.signature-title', …), so a whole-document
-      // substring search would pass even when the builder emitted NEITHER
-      // markup element. `</style>` is a reliable split point: it can only
-      // close the one real <style> tag (asserted singular just above).
+      // Inspect the document surface itself. Both the inlined CSS and the
+      // runtime sanitizer intentionally name component classes, so whole-file
+      // substring checks can no longer prove that an element was rendered.
       const body = html.split('</style>').pop();
+      const dom = new JSDOM(html);
+      const main = dom.window.document.querySelector('main.page');
+      assert(main, 'cover: document main missing');
       // Native structure classes (cover-letter.html / cover-letter.css).
-      for (const cls of ['resume-header letter-letterhead', 'letterhead-rule', 'letter-meta', 'letter-date', 'letter-recipient', 'letter-body', 'salutation', 'letter-close', 'valediction', 'signature']) {
-        assert(body.includes(cls), `cover: missing native class "${cls}"`);
+      for (const cls of ['resume-header letter-letterhead', 'letterhead-rule', 'letter-meta', 'letter-date', 'letter-body', 'salutation', 'letter-close', 'valediction', 'signature']) {
+        assert(main.querySelector(`.${cls.replace(/\s+/g, '.')}`), `cover: missing native class "${cls}"`);
       }
-      assert(body.includes('Jane Doe') && body.includes('Product Marketer'), 'cover: letterhead missing');
-      assert(html.includes('data-print="ink-only"'), 'cover: variant not mirrored onto <html>');
-      // Recipient block split: first line is the bolded .recipient-name, the rest .recipient-line.
-      assert(body.includes('<span class="recipient-name">Hiring Team</span>'), 'cover: recipient-name (first line) missing');
-      assert((body.match(/<span class="recipient-line">/g) || []).length === 2, 'cover: expected 2 recipient-line rows');
+      assert(main.textContent.includes('Jane Doe') && main.textContent.includes('Product Marketer'), 'cover: letterhead missing');
+      assert(main.querySelector('time[datetime="2026-05"]')?.textContent === 'May 2026', 'cover: month-year date needs a machine-readable YYYY-MM datetime');
+      assert(dom.window.document.documentElement.getAttribute('data-print') === 'ink-only', 'cover: variant not mirrored onto <html>');
+      assert(!main.querySelector('.letter-recipient,.recipient-name,.recipient-line'), 'cover: recipient address block must not render');
       // signatureTitle renders under the signature.
-      assert(body.includes('<p class="signature-title">Senior Product Marketer · candidate</p>'), 'cover: signature-title missing');
+      assert(main.querySelector('.signature-title')?.textContent === 'Senior Product Marketer · candidate', 'cover: signature-title missing');
       // User text is HTML-escaped (no markup injection from model output).
       assert(body.includes('I love &lt;Acme&gt; &amp; your work.'), 'cover: body not HTML-escaped');
       // Blank/whitespace paragraphs dropped; body uses bare <p> (every other
       // paragraph is classed, so this count isolates the body).
-      const bodyParas = (body.match(/<p>/g) || []).length;
+      const bodyParas = [...main.querySelectorAll('.letter-body > p')].filter(paragraph => !paragraph.className).length;
       assert(bodyParas === 2, `cover: expected 2 body paragraphs, got ${bodyParas}`);
-      assert(body.includes('jane@x.com') && body.includes('class="sep"'), 'cover: contact line missing separators');
+      assert(main.querySelector('.contact')?.textContent.includes('jane@x.com') && main.querySelector('.contact .sep'), 'cover: contact line missing separators');
       // Sensible fallbacks when optional fields are omitted: salutation/closing
-      // default; no recipient → no <address>; no signatureTitle → no signature-title.
+      // default; the recipient block is always absent; no signatureTitle → no signature-title.
       const bareFull = buildCoverLetterDocument({ letter: { name: 'X' } });
-      const bare = bareFull.split('</style>').pop();
-      assert(bare.includes('Dear Hiring Team,') && bare.includes('Sincerely,'), 'cover: missing salutation/closing fallback');
-      assert(!bare.includes('letter-recipient') && !bare.includes('signature-title'), 'cover: optional blocks must be omitted when empty');
-      assert(bare.includes('<p class="signature"'), 'cover: signature (name) always present');
+      const bareDom = new JSDOM(bareFull);
+      const bareMain = bareDom.window.document.querySelector('main.page');
+      assert(bareMain?.querySelector('.salutation')?.textContent === 'Dear Hiring Team,'
+        && bareMain.querySelector('.valediction')?.textContent === 'Sincerely,', 'cover: missing salutation/closing fallback');
+      assert(!bareMain.querySelector('.letter-recipient,.signature-title'), 'cover: recipient and optional signature-title blocks must be omitted');
+      assert(bareMain.querySelector('p.signature'), 'cover: signature (name) always present');
+      bareDom.window.close();
+      dom.window.close();
 
       // The new short-letter treatment is root-only on a standalone cover,
       // but Application.html carries both documents under one root. Its cover

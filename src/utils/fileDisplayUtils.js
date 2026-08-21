@@ -10,7 +10,8 @@ import {
  * encoded first so the other replacements don't double-encode their `%` outputs.
  */
 export function toLocalFileUrl(filePath) {
-  return `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+  const normalizedPath = typeof filePath === 'string' ? filePath : String(filePath ?? '');
+  return `local-file://${normalizedPath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
 }
 
 export function toLocalFilePreviewUrl(filePath, { maxBytes = 10 * 1024 * 1024, maxDimension = 1600 } = {}) {
@@ -49,7 +50,7 @@ export const THEME_COLORS = {
 };
 
 export function getFileCategoryInfo(filename) {
-  const parts = (filename || '').split('.');
+  const parts = String(filename ?? '').split('.');
   const ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
   const badge = ext ? ext.substring(0, 4).toUpperCase() : 'FILE';
   

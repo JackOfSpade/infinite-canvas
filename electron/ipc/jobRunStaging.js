@@ -66,8 +66,14 @@ async function atomicWriteJson(filePath, obj) {
   // the per-path mutex below already serializes manifest writers, so this is
   // defense-in-depth for any caller that bypasses the lock.
   const tmp = `${filePath}.${process.pid}.${_tmpSeq++}.tmp`;
-  await fs.promises.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
-  await fs.promises.rename(tmp, filePath);
+  try {
+    await fs.promises.writeFile(tmp, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 });
+    await fs.promises.rename(tmp, filePath);
+  } finally {
+    // A failed write/rename must not accumulate sidecars forever. If rename
+    // succeeded the temporary no longer exists, so ENOENT is expected here.
+    await fs.promises.unlink(tmp).catch(() => {});
+  }
 }
 
 // Per-manifest-path FIFO mutex. Every mutator is a read-modify-write of the WHOLE
@@ -80,8 +86,13 @@ const _manifestTails = new Map();
 function withManifestLock(filePath, fn) {
   const prev = _manifestTails.get(filePath) || Promise.resolve();
   const result = prev.then(fn, fn); // run regardless of the prior op's outcome
-  _manifestTails.set(filePath, result.then(() => {}, () => {}));
-  return result;
+  const tail = result.then(() => {}, () => {});
+  _manifestTails.set(filePath, tail);
+  return result.finally(() => {
+    // Canvas paths are unbounded over a long app session. Remove an idle key
+    // without disturbing a newer operation that queued behind this one.
+    if (_manifestTails.get(filePath) === tail) _manifestTails.delete(filePath);
+  });
 }
 
 async function readManifest(canvasFilePath) {
@@ -114,7 +125,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
   };
   const ok = await withManifestLock(files.manifest, async () => {
     try {
-      await fs.promises.writeFile(files.staging, '', 'utf8'); // truncate prior staging
+      await fs.promises.writeFile(files.staging, '', { encoding: 'utf8', mode: 0o600 }); // truncate prior staging
       await atomicWriteJson(files.manifest, manifest);
       return true;
     } catch (e) {
@@ -143,7 +154,7 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
       if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
       if (Array.isArray(jobs) && jobs.length > 0) {
         const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
-        await fs.promises.appendFile(files.staging, lines, 'utf8');
+        await fs.promises.appendFile(files.staging, lines, { encoding: 'utf8', mode: 0o600 });
       }
       const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
       const q = src.queries[query] || (src.queries[query] = { lastPage: -1 });

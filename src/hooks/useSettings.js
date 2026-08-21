@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 
 const STORAGE_KEY = 'infiniteCanvas.settings';
 
@@ -37,9 +37,8 @@ function persist(settings) {
  * Manages persistent application settings via localStorage.
  * Returns { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration }.
  *
- * NOTE: localStorage writes happen inside state updaters. This is intentional —
- * `persist` uses try/catch and is idempotent (same input → same localStorage state),
- * so React Strict Mode's double-invocation of updaters is harmless here.
+ * Persistence runs outside React state updaters so those updaters remain pure
+ * (concurrent/Strict Mode may invoke an updater more than once).
  */
 export function useSettings() {
   const [settings, setSettings] = useState(() => {
@@ -47,45 +46,50 @@ export function useSettings() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return DEFAULT_SETTINGS;
       const parsed = JSON.parse(saved);
+      const savedSettings = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      const savedShortcuts = savedSettings.shortcuts
+        && typeof savedSettings.shortcuts === 'object'
+        && !Array.isArray(savedSettings.shortcuts)
+        ? savedSettings.shortcuts
+        : {};
       // Deep-merge shortcuts so new keys added to DEFAULT_SHORTCUTS get the default value
       return {
         ...DEFAULT_SETTINGS,
-        ...parsed,
-        shortcuts: { ...DEFAULT_SHORTCUTS, ...(parsed.shortcuts || {}) },
+        ...savedSettings,
+        shortcuts: { ...DEFAULT_SHORTCUTS, ...savedShortcuts },
       };
     } catch {
       return DEFAULT_SETTINGS;
     }
   });
 
-  const updateSetting = useCallback((key, value) => {
-    setSettings(prev => {
-      const next = { ...prev, [key]: value };
-      persist(next);
-      return next;
-    });
+  // Keep an eagerly-updated source of truth for batched same-tick changes.
+  // Persist immediately (rather than in a passive effect) so a setting changed
+  // just before the window closes is not lost.
+  const settingsRef = useRef(settings);
+  const commitSettings = useCallback((updater) => {
+    const next = updater(settingsRef.current);
+    settingsRef.current = next;
+    setSettings(next);
+    persist(next);
   }, []);
+
+  const updateSetting = useCallback((key, value) => {
+    commitSettings(prev => ({ ...prev, [key]: value }));
+  }, [commitSettings]);
 
   /** Update a single shortcut binding. */
   const updateShortcut = useCallback((id, binding) => {
-    setSettings(prev => {
-      const next = {
-        ...prev,
-        shortcuts: { ...prev.shortcuts, [id]: { ...prev.shortcuts[id], ...binding } },
-      };
-      persist(next);
-      return next;
-    });
-  }, []);
+    commitSettings(prev => ({
+      ...prev,
+      shortcuts: { ...prev.shortcuts, [id]: { ...prev.shortcuts[id], ...binding } },
+    }));
+  }, [commitSettings]);
 
   /** Reset all shortcuts back to factory defaults. */
   const resetShortcuts = useCallback(() => {
-    setSettings(prev => {
-      const next = { ...prev, shortcuts: DEFAULT_SHORTCUTS };
-      persist(next);
-      return next;
-    });
-  }, []);
+    commitSettings(prev => ({ ...prev, shortcuts: DEFAULT_SHORTCUTS }));
+  }, [commitSettings]);
 
   const animationDuration = useMemo(() => {
     return ANIMATION_DURATIONS[settings.animationSpeed] || ANIMATION_DURATIONS.balanced;

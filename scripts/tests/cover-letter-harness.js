@@ -1,6 +1,7 @@
 import {
   assert,
   authorCoverLetterEnvelope,
+  formatCoverLetterDate,
   BANNED_GENERIC_PHRASES,
   BANNED_GENERIC_PATTERNS,
   buildResumeDocument,
@@ -18,18 +19,19 @@ import {
   checkPlanGate,
   checkRedundancy,
   checkRequestedWorkSampleLink,
+  checkRoleThesis,
   checkShape,
   checkTopNeedDisposition,
   coverLetterCheckSummary,
+  directArgumentContractObservation,
   evaluateCoverLetterChecks,
-  expectedParagraphCount,
   extractResumeEvidence,
   fs,
   hasUsableCoverLetterParagraphs,
   MAX_LETTER_FIGURES,
-  MAX_LETTER_WORDS,
   MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS,
   normalizeCoverLetterPlan,
+  normalizeDirectLetterArgumentContract,
   path,
   renderResumeEvidenceForPrompt,
   selectBetterCoverLetterPlan,
@@ -58,10 +60,13 @@ const evidence = {
 };
 
 const groundedPlan = {
+  roleThesis: 'Operational judgment under incomplete information is the capability this incident role needs.',
   mappings: [{
     needIndex: 0,
     evidence: 'Triaged incomplete emergency reports under time pressure',
     resumeStatus: 'implied',
+    narrativeRole: 'primary',
+    relationToPrevious: 'This primary proof establishes the thesis by showing judgment under incomplete information.',
   }],
   companyHook: { detail: '' },
 };
@@ -73,6 +78,20 @@ const needs = [{
 }];
 
 export default [
+  {
+    name: 'cover letter harness: role thesis is one specific controlling claim',
+    run: () => {
+      const specific = checkRoleThesis({ roleThesis: 'Making incomplete operational data actionable is the through-line this incident role needs.' });
+      const missing = checkRoleThesis({ roleThesis: '' });
+      const terse = checkRoleThesis({ roleThesis: 'Operational judgment matters.' });
+      const generic = checkRoleThesis({ roleThesis: 'My experience aligns well with the requirements of this role.' });
+      const multiSentence = checkRoleThesis({ roleThesis: 'I prioritize incomplete signals. I also coordinate teams.' });
+      assert(specific.passed, `a specific one-sentence angle must pass: ${specific.detail}`);
+      assert(!missing.passed && !terse.passed && !generic.passed && !multiSentence.passed,
+        'missing, underdeveloped, generic, and multi-sentence theses must request a plan retry');
+      return { specific: specific.detail, missing: missing.detail, terse: terse.detail, generic: generic.detail, multiSentence: multiSentence.detail };
+    },
+  },
   {
     name: 'cover letter harness: plan normalization clears numeric and generic growth hooks without mutating the argument',
     run: () => {
@@ -145,6 +164,41 @@ export default [
     },
   },
   {
+    name: 'cover letter harness: direct fallback contract stays grounded and non-rendered',
+    run: () => {
+      const valid = normalizeDirectLetterArgumentContract({
+        roleThesis: 'Operational judgment under incomplete information is the capability this incident role needs.',
+        primaryEvidence: 'Triaged incomplete emergency reports under time pressure',
+        primaryRelationToThesis: 'The triage work demonstrates the judgment in the thesis.',
+        secondaryNarrativeRole: 'foundation',
+        secondaryEvidence: 'Reduced response backlog by 32% while coordinating field crews across six districts.',
+        secondaryRelationToPrimary: 'This provides an operational foundation for the primary triage proof.',
+      }, evidence);
+      const ungrounded = normalizeDirectLetterArgumentContract({
+        roleThesis: 'A plausible but unsupported thesis.',
+        primaryEvidence: 'Owned an undocumented nationwide command center.',
+        primaryRelationToThesis: 'It proves the thesis.',
+        secondaryNarrativeRole: 'none', secondaryEvidence: '', secondaryRelationToPrimary: '',
+      }, evidence);
+      const document = buildResumeDocument({
+        resumeMainHtml: '<main class="page">Résumé</main>',
+        coverLetter: {
+          ...authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, today: 'August 14, 2026' }),
+          paragraphs: ['The primary argument remains visible only in prose.'],
+        },
+      });
+      assert(valid?.secondaryNarrativeRole === 'foundation' && ungrounded === null,
+        'the host retains only résumé-grounded primary and optional secondary metadata for the fallback audit');
+      assert(directArgumentContractObservation(valid) === ''
+        && directArgumentContractObservation(ungrounded).includes('missing or not grounded'),
+      'an invalid direct fallback contract becomes a revision and human-review observation rather than silently weakening the audit');
+      assert(!document.includes('primaryRelationToThesis') && !document.includes('secondaryRelationToPrimary')
+        && !document.includes('Operational judgment under incomplete information is the capability this incident role needs.'),
+      'fallback argument metadata is never passed into or rendered by the cover-letter document');
+      return { grounded: !!valid, ungroundedRejected: ungrounded === null, rendered: false };
+    },
+  },
+  {
     name: 'cover letter harness: final résumé evidence extractor preserves real design-system structure',
     run: () => {
       const source = fs.readFileSync(path.resolve('Job Application Design System/resume.html'), 'utf8');
@@ -158,7 +212,11 @@ export default [
         && extracted.identity.tagline.includes('B.S. Computer Science')
         && extracted.identity.contact.length === 2,
       'identity and every nested contact item must come from the résumé header');
-      assert(extracted.roles.length === 3 && extracted.bulletTexts.length >= 10
+      // The shipped one-page sample intentionally keeps all three roles but
+      // selects six high-value bullets, rather than preserving the former
+      // two-page sample's ten-plus bullets. This checks the schema contract,
+      // not a superseded density target.
+      assert(extracted.roles.length === 3 && extracted.bulletTexts.length >= 6
         && extracted.skills.length === 3 && extracted.education.length === 1,
       'real design-system role, bullet, skill, and header-credential structures must be preserved');
       assert(extracted.bulletTexts.some(text => text.includes('trade-off:'))
@@ -171,6 +229,21 @@ export default [
         && !/<(?:main|article|strong)\b/i.test(prompt),
       'prompt rendering must be deterministic plain text with no HTML structure');
       return { roles: extracted.roles.length, bullets: extracted.bulletTexts.length, skills: extracted.skills.length };
+    },
+  },
+  {
+    name: 'cover letter harness: résumé receipt extraction is tag-agnostic and ordered',
+    run: () => {
+      const markup = '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Example Co</span><ul class="highlights"><li>Python reduced latency by <span data-achievement-id="span-id">74%</span>, while <em data-achievement-id=\'em-id\'>10 hours</em> of support work remained; <strong data-achievement-id="strong-id">30%</strong> was retained and <span data-achievement-id="span-id">74%</span> was not duplicated.</li></ul></article></main>';
+      const extracted = extractResumeEvidence(markup);
+      const ids = extracted.roles[0].bullets[0].achievementIds;
+      assert(JSON.stringify(ids) === JSON.stringify(['span-id', 'em-id', 'strong-id'])
+        && JSON.stringify(extracted.achievementIds) === JSON.stringify(ids),
+      'receipt IDs must be extracted from any inline element in markup order and deduplicated per bullet');
+      const prompt = renderResumeEvidenceForPrompt(extracted);
+      assert(prompt.includes('achievement ids: span-id, em-id, strong-id'),
+        'tag-neutral receipt IDs must remain available to downstream cover-letter grounding');
+      return { receiptIds: ids.length };
     },
   },
   {
@@ -239,6 +312,26 @@ export default [
       assert(!fail.passed, 'banned generic phrase or first-sentence opener must fail');
       const typographic = checkGenericPhrases(['I am excited to apply—because the role is important.']);
       assert(!typographic.passed, 'a typographic dash must not let a banned opener evade detection');
+      const applicationAnnouncements = [
+        'I am writing to apply for the Senior Engineer role.',
+        "I'm writing to apply for the Senior Engineer role.",
+        'I’m writing to apply for the Senior Engineer role.',
+        'I am applying for the Senior Engineer role.',
+        "I'm applying for the Senior Engineer role.",
+        'I’m applying for the Senior Engineer role.',
+        'Please accept my application for the Senior Engineer role.',
+      ].map(paragraph => checkGenericPhrases([paragraph]));
+      assert(applicationAnnouncements.every(check => !check.passed && check.detail.includes('banned opener')),
+        'expanded and contracted application-announcement openers must all request revision');
+      const apiLoopAnnouncements = [
+        'I am applying for the Senior Engineer role.',
+        'Please accept my application for the Senior Engineer role.',
+      ].map(paragraph => evaluateCoverLetterChecks({
+        plan: { mappings: [], companyHook: { detail: '' } },
+        paragraphs: [paragraph], evidence, researchText: '', companyName: '',
+      }));
+      assert(apiLoopAnnouncements.every(checks => checks.some(check => check.id === 'generic-phrases' && !check.passed)),
+        'the API prose-revision loop must receive application-announcement opener failures');
       const spacedHyphen = checkGenericPhrases(['I thrive in a fast paced environment with explicit constraints.']);
       assert(!spacedHyphen.passed, 'spacing a hyphenated banned phrase must not evade the generic-language check');
       const hendrickOpener = checkGenericPhrases(['The role needs more than basic presence; it demands a professional with a proven three-year track record.']);
@@ -262,7 +355,7 @@ export default [
         'generic-observation detail remains bounded for hostile multi-paragraph output');
       const precise = checkGenericPhrases(['An unproven track record would be a concern, so I rely on documented incident outcomes.']);
       assert(precise.passed, 'word-substring collisions must not falsely revise a specific, non-generic sentence');
-      return { pass: pass.detail, fail: fail.detail, typographic: typographic.detail, spacedHyphen: spacedHyphen.detail, hendrickOpener: hendrickOpener.detail, hendrickMapping: hendrickMapping.detail, allObservations: allObservations.detail, precise: precise.detail };
+      return { pass: pass.detail, fail: fail.detail, typographic: typographic.detail, applicationAnnouncements: applicationAnnouncements.map(check => check.detail), spacedHyphen: spacedHyphen.detail, hendrickOpener: hendrickOpener.detail, hendrickMapping: hendrickMapping.detail, allObservations: allObservations.detail, precise: precise.detail };
     },
   },
   {
@@ -318,25 +411,36 @@ export default [
       const unicode = checkCompanySpecificity(['Votre Équipe Atlas rend cette direction concrète.'], 'Équipe Atlas a étendu son programme régional.', 'Acme');
       assert(unicode.passed && unicode.detail.includes('Équipe Atlas'),
         'Unicode capitalized research details must be recognized rather than rejected by ASCII-only word boundaries');
+      const yearOnly = checkCompanySpecificity(['Acme expanded the program in 2024.'], 'Acme expanded Northstar Dispatch in 2024.', 'Acme');
+      const figureOnly = checkCompanySpecificity(['Acme reported 32% growth.'], 'Acme reported 32% growth for Northstar Dispatch.', 'Acme');
+      assert(!yearOnly.passed && !figureOnly.passed,
+        'a research-sourced year or figure cannot substitute for the required proper-name detail');
+      const plannedMismatch = checkCompanySpecificity(
+        ['The Atlas Program makes this direction concrete.'],
+        'Northstar Dispatch and Atlas Program support distinct operations.',
+        'Acme',
+        'Northstar Dispatch',
+      );
+      assert(!plannedMismatch.passed && plannedMismatch.detail.includes('Northstar Dispatch'),
+        'prose must preserve the planned proper detail, not swap in a different research bigram');
       const skipped = checkCompanySpecificity(['A focused argument.'], '', 'Acme');
       assert(skipped.passed && skipped.detail.includes('skipped'), 'unavailable research must skip rather than fail');
-      return { pass: pass.detail, fail: fail.detail, multiWordCompanyOnly: multiWordCompanyOnly.detail, unicode: unicode.detail, skipped: skipped.detail };
+      return { pass: pass.detail, fail: fail.detail, multiWordCompanyOnly: multiWordCompanyOnly.detail, unicode: unicode.detail, yearOnly: yearOnly.detail, figureOnly: figureOnly.detail, plannedMismatch: plannedMismatch.detail, skipped: skipped.detail };
     },
   },
   {
-    name: 'cover letter harness: argument-derived shape enforces count and word budget',
+    name: 'cover letter harness: prose shape requires body copy without paragraph or word caps',
     run: () => {
-      assert(expectedParagraphCount({ mappings: [{}], companyHook: { detail: '' } }) === 2, 'one mapping without a hook yields thesis plus mapping');
-      assert(expectedParagraphCount({ mappings: [{}], companyHook: { detail: 'Northstar Dispatch' } }) === 3, 'one mapping with hook yields three paragraphs');
-      assert(expectedParagraphCount({ mappings: [{}, {}], companyHook: { detail: 'Northstar Dispatch' } }) === 4, 'two mappings with hook yields four paragraphs');
       const plan = { mappings: [{}], companyHook: { detail: 'Northstar Dispatch' } };
-      const pass = checkShape(plan, ['Thesis sentence.', 'Mapping sentence.', 'Company hook sentence.']);
-      assert(pass.passed, `matching plan shape must pass: ${pass.detail}`);
-      const wrongCount = checkShape(plan, ['Thesis.', 'Mapping.']);
-      assert(!wrongCount.passed, 'wrong paragraph count must fail');
-      const tooLong = checkShape({ mappings: [], companyHook: { detail: '' } }, [Array(MAX_LETTER_WORDS + 2).fill('word').join(' ')]);
-      assert(!tooLong.passed, 'word count over the named budget must fail');
-      return { pass: pass.detail, wrongCount: wrongCount.detail, tooLong: tooLong.detail };
+      const combined = checkShape(plan, ['A single paragraph may combine the complete argument naturally.']);
+      assert(combined.passed, `a plan must not dictate paragraph count: ${combined.detail}`);
+      const split = checkShape(plan, ['Thesis.', 'Evidence.', 'Interpretation.', 'Company relevance.']);
+      assert(split.passed, `the writer may split the argument where clarity warrants it: ${split.detail}`);
+      const longOnePageCandidate = checkShape({ mappings: [], companyHook: { detail: '' } }, [Array(1000).fill('word').join(' ')]);
+      assert(longOnePageCandidate.passed, 'shape checks must not impose a word-count limit; rendered page fit owns length');
+      const empty = checkShape(plan, [' ', '']);
+      assert(!empty.passed, 'cover-letter body must retain at least one usable paragraph');
+      return { combined: combined.detail, split: split.detail, longOnePageCandidate: longOnePageCandidate.detail, empty: empty.detail };
     },
   },
   {
@@ -378,7 +482,14 @@ export default [
       const manyMissing = checkFigureDiscipline([Array.from({ length: 30 }, (_, index) => `${1000 + index}%`).join(' ')], evidence);
       assert(!manyMissing.passed && manyMissing.detail.includes('…') && manyMissing.detail.length < 1000,
         'a hostile number-heavy response must produce bounded revision/diagnostic detail rather than an unbounded payload');
-      return { pass: pass.detail, invented: invented.detail, tooMany: tooMany.detail, currencyMismatch: currencyMismatch.detail, signMismatch: signMismatch.detail, spelledDuration: spelledDuration.detail, malformed: malformed.detail, bounded: manyMissing.detail.length };
+      const unselectedCoincidence = checkFigureDiscipline(
+        ['Acme reported a 32% company result.'],
+        evidence,
+        { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }] },
+      );
+      assert(!unselectedCoincidence.passed && unselectedCoincidence.detail.includes('“32%”'),
+        'a figure elsewhere in the résumé cannot authorize planned prose when no selected mapping carries it');
+      return { pass: pass.detail, invented: invented.detail, tooMany: tooMany.detail, currencyMismatch: currencyMismatch.detail, signMismatch: signMismatch.detail, spelledDuration: spelledDuration.detail, malformed: malformed.detail, unselectedCoincidence: unselectedCoincidence.detail, bounded: manyMissing.detail.length };
     },
   },
   {
@@ -386,11 +497,41 @@ export default [
     run: () => {
       const valid = checkPlanGate(groundedPlan, evidence, needs, 'The role must manage incident escalation.', '');
       assert(!valid.shouldRetry, 'a grounded non-stated mapping must clear the plan gate');
+      const genericThesis = checkPlanGate({ ...groundedPlan, roleThesis: 'My experience aligns well with this role.' }, evidence, needs, 'The role must manage incident escalation.', '');
+      assert(genericThesis.shouldRetry && genericThesis.checks.some(check => check.id === 'role-thesis' && !check.passed),
+        'a generic thesis must enter the existing plan-revision loop');
       const allStated = checkPlanGate({ ...groundedPlan, mappings: [{ ...groundedPlan.mappings[0], resumeStatus: 'stated' }] }, evidence, needs, 'The role must manage incident escalation.', '');
       assert(allStated.shouldRetry && allStated.checks.some(check => check.id === 'plan-redundancy' && !check.passed), 'all stated mappings must request the one retry, not throw');
       const invalidNeedReference = checkPlanGate({ ...groundedPlan, mappings: [{ ...groundedPlan.mappings[0], needIndex: 9 }] }, evidence, needs, 'The role must manage incident escalation.', '');
       assert(invalidNeedReference.shouldRetry && invalidNeedReference.checks.some(check => check.id === 'plan-need-references' && !check.passed),
         'a plan mapping may not silently point outside the ranked needs list');
+      const nonPrimaryFirst = checkPlanGate({
+        ...groundedPlan,
+        mappings: [{ ...groundedPlan.mappings[0], narrativeRole: 'foundation' }],
+      }, evidence, needs, 'The role must manage incident escalation.', '');
+      const secondaryWithoutRelationship = checkPlanGate({
+        ...groundedPlan,
+        mappings: [
+          ...groundedPlan.mappings,
+          { ...groundedPlan.mappings[0], narrativeRole: 'foundation', relationToPrevious: '' },
+        ],
+      }, evidence, needs, 'The role must manage incident escalation.', '');
+      const validFoundation = checkPlanGate({
+        ...groundedPlan,
+        mappings: [
+          ...groundedPlan.mappings,
+          {
+            ...groundedPlan.mappings[0],
+            evidence: 'Reduced response backlog by 32% while coordinating field crews across six districts.',
+            narrativeRole: 'foundation',
+            relationToPrevious: 'This supplies the operational foundation behind the primary judgment example.',
+          },
+        ],
+      }, evidence, needs, 'The role must manage incident escalation.', '');
+      assert(nonPrimaryFirst.shouldRetry
+        && secondaryWithoutRelationship.shouldRetry
+        && !validFoundation.shouldRetry,
+      'the plan gate requires a primary first mapping and an explicit relationship for a legitimate secondary foundation');
       const sourcedLogistics = checkLogisticsGrounding(
         { logistics: 'Available for full-time, evening, overnight, and weekend shifts.' },
         'Available for full-time, evening, overnight, and weekend shifts in security roles.',
@@ -443,6 +584,7 @@ export default [
         { need: 'manage incident escalation', quote: 'manage incident escalation', source: 'posting', kind: 'capability' },
       ];
       const eligibilityPlan = {
+        roleThesis: groundedPlan.roleThesis,
         mappings: [{ ...groundedPlan.mappings[0], needIndex: 1 }],
         companyHook: { detail: '' }, logistics: '',
         droppedNeeds: [{ needIndex: 0, reason: 'The credential is not documented on the résumé.' }],
@@ -458,6 +600,7 @@ export default [
         { need: 'operate secure equipment', quote: 'operate secure equipment', source: 'posting', kind: 'capability' },
       ];
       const nonTopEligibilityPlan = {
+        roleThesis: groundedPlan.roleThesis,
         mappings: [{ ...groundedPlan.mappings[0], needIndex: 0 }], companyHook: { detail: '' }, logistics: '',
         droppedNeeds: [{ needIndex: 1, reason: 'The credential is not documented on the résumé.' }],
       };
@@ -480,18 +623,50 @@ export default [
       );
       assert(selected.plan === firstPlan && selected.gate === firstGate && selected.selected === 'first',
         'a failed plan candidate must preserve the stronger completed plan while convergence continues');
-      const envelope = authorCoverLetterEnvelope({ job: { company: 'Acme', title: 'Incident Lead' }, evidence, today: 'August 14, 2026' });
-      assert(envelope.recipient === 'Hiring Team\nAcme' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields must be code-authored');
+      const leanPlan = { ...groundedPlan, mappings: [{ ...groundedPlan.mappings[0], evidence: 'Triaged incomplete emergency reports under time pressure' }] };
+      const expandedPlan = {
+        ...groundedPlan,
+        mappings: [
+          ...leanPlan.mappings,
+          { ...groundedPlan.mappings[0], needIndex: 0, evidence: 'Reduced response backlog by 32% while coordinating field crews across six districts.' },
+        ],
+      };
+      const equalGate = { checks: [{ passed: true }, { passed: true }] };
+      const leanSelected = selectBetterCoverLetterPlan(leanPlan, equalGate, expandedPlan, equalGate);
+      assert(leanSelected.plan === leanPlan && leanSelected.selected === 'first',
+        'when plan gates are equal, the selector keeps minimum-sufficient evidence instead of rewarding another mapping');
+      const sameCountLongerEvidence = {
+        ...groundedPlan,
+        mappings: [{
+          ...groundedPlan.mappings[0],
+          evidence: 'Reduced response backlog by 32% while coordinating field crews across six districts.',
+        }],
+      };
+      const trueTie = selectBetterCoverLetterPlan(leanPlan, equalGate, sameCountLongerEvidence, equalGate);
+      assert(trueTie.plan === leanPlan && trueTie.selected === 'first',
+        'when gate quality and mapping count tie, evidence length does not bias selection away from the first completed plan');
+      const envelope = authorCoverLetterEnvelope({ job: { company: 'Acme', title: 'Incident Lead' }, evidence, today: formatCoverLetterDate(new Date('2026-08-14T12:00:00Z')) });
+      assert(envelope.recipient === '' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields use the salutation rather than a redundant recipient block');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Sincerely,', 'code-authored closing omits an implied target title');
+      assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
       const contactNormalized = authorCoverLetterEnvelope({
         job: { company: 'Acme' }, evidence: { identity: { contact: [' Toronto, ON ', '   ', '\n', 'maya@example.test'] } },
       });
       assert(JSON.stringify(contactNormalized.contact) === JSON.stringify(['Toronto, ON', 'maya@example.test']),
         'envelope contact normalizes before filtering so whitespace-only entries cannot produce blank letterhead separators');
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
-      assert(fallback.recipient === 'Hiring Team' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without adding a target title');
+      assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
       assert(Array.isArray(proseChecks) && proseChecks.length === 7, 'prose helper returns every non-page deterministic check');
+      const emptyHookWithResearch = evaluateCoverLetterChecks({
+        plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
+        paragraphs: ['Careful prioritization under incomplete reports is the relevant mechanism.'],
+        evidence,
+        researchText: 'Northstar Dispatch supports Acme incident operations.',
+        companyName: 'Acme',
+      }).find(check => check.id === 'company-specificity');
+      assert(emptyHookWithResearch?.passed && emptyHookWithResearch.detail.includes('intentionally omitted'),
+        'available research must not force company padding after the plan intentionally leaves its hook empty');
       const checkNotice = coverLetterCheckSummary([
         { id: 'one', passed: false, detail: 'first factual observation' },
         { id: 'two', passed: false, detail: 'second factual observation' },

@@ -28,7 +28,6 @@ body {
 }
 
 .row { display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap; }
-.col { display: flex; flex-direction: column; gap: 4px; }
 
 .meta {
   font-family: var(--ff-mono);
@@ -40,7 +39,7 @@ body {
 .swatch {
   display: flex;
   align-items: stretch;
-  border: 0.5pt solid rgba(26,24,21,0.10);
+  border: var(--rule-weight) solid var(--bg-rule);
   border-radius: 0;     /* the design has no radii — neither do its cards */
 }
 .swatch .chip { width: 56px; }

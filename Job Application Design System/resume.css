@@ -153,9 +153,12 @@
        once, at the first/last fragment, not per page.) */
     padding: 0 var(--margin-side);
     box-shadow: none;
+    /* Modern property first, legacy alias second — the same pairing the
+       break-inside rules use elsewhere in the system. */
+    break-after: page;
     page-break-after: always;
   }
-  .page:last-child { page-break-after: auto; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
 }
 
 /* =========================================================
@@ -395,6 +398,22 @@
   color: var(--ink-body);
   letter-spacing: var(--tr-tight);
 }
+/* Inherit lock, same shape and same reason as .tagline's above.
+   STYLE.md §9 maps work[].position → .title and work[].name →
+   .company, so both class names are part of the public schema
+   contract even though the line renders as one continuous run set by
+   .role-title-line. Without the lock they render correctly only by
+   inheritance, and a future rule giving `.company` (say) a lighter ink
+   or a smaller size would split the title line in every role at once.
+   Do not add treatment here — the separator carries the division. */
+.role-title-line .title, .role-title-line .company {
+  font-family: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
 .role-dates,
 .role-location {
   /* The date range and the location are the two right-aligned meta
@@ -474,6 +493,26 @@
   color: inherit;
 }
 
+/* -------- no inline emphasis inside bullets --------
+   Decision: bullet body copy renders at one uniform weight. A bolded
+   metric mid-sentence draws the eye to a number instead of the claim,
+   and once one bullet bolds a figure the reader starts scanning for
+   bold instead of reading — the opposite of the quiet-confidence voice
+   (§2.2 elsewhere still uses SemiBold for structural emphasis: name,
+   role title, employer, project name).
+
+   <b>/<strong> stay in the markup — the host app keys off them (and
+   any data-achievement-id attribute they carry) as semantic metadata
+   for individual achievements/metrics — but inside a bullet they are
+   visually inert: same weight, same colour as the surrounding text.
+   Scoped to .highlights li so this does NOT touch role headings,
+   employers, project headings, Skills, or the cover letter, which
+   still bold via the global `b, strong` rule in colors_and_type.css. */
+.highlights li b, .highlights li strong {
+  font-weight: inherit;
+  color: inherit;
+}
+
 /* =========================================================
    Selected Systems / Projects
    Compact tabular block: name · one-line description · metrics.
@@ -548,7 +587,12 @@
    date / metric columns are aligned by their grid cell, not by
    monospaced digits, so nothing visual is lost. Keep this
    `normal`; do not reintroduce tabular-nums. See STYLE.md §2.4 + §8.
+
+   The two numeric cells are named directly. (A `.tnum` utility class
+   used to lead this selector list; it was never applied to any element
+   in either document, and a class named after the feature the system
+   bans was an invitation to misread it as an opt-in.)
    =========================================================*/
-.tnum, .role-dates, .project-metrics {
+.role-dates, .project-metrics {
   font-variant-numeric: normal;
 }

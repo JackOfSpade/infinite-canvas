@@ -19,6 +19,25 @@ const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic h
 const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
 const execFile = promisify(execFileCb);
 
+/**
+ * Wrap an async interval body so a slow tick is skipped rather than overlapped.
+ * setInterval does not await promises; CDP reads and osascript tab discovery can
+ * exceed their cadence and otherwise race shared counters/close decisions.
+ */
+export function createNonOverlappingRunner(fn) {
+  let inFlight = false;
+  return async (...args) => {
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      await fn(...args);
+      return true;
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 // ── Shared-browser handoff watermark ───────────────────────────────────────────
 // A visible captcha-resolve window takes over the shared Chrome profile, which
 // requires first CLOSING the headless stealth browser (one userDataDir = one
@@ -804,7 +823,7 @@ export async function openLoginWindow(platformId, sender = null) {
       await loginBrowserClosePromise;
     };
 
-    autoClosePoll = setInterval(async () => {
+    const runAutoClosePoll = createNonOverlappingRunner(async () => {
       if (isTerminated) return;
       try {
         if (page.isClosed?.()) return;
@@ -920,7 +939,8 @@ export async function openLoginWindow(platformId, sender = null) {
         // next poll tick will retry. Don't tear down the poll on transient
         // errors.
       }
-    }, POLL_INTERVAL_MS);
+    });
+    autoClosePoll = setInterval(runAutoClosePoll, POLL_INTERVAL_MS);
 
     autoCloseTimeout = setTimeout(() => {
       if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
@@ -1072,7 +1092,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       settle(pendingSuccessResult || { result: 'closed', exitCode: code, signal });
     });
 
-    poll = setInterval(async () => {
+    const runNativePoll = createNonOverlappingRunner(async () => {
       if (settled) return;
       const tabs = await getNativeChromeTabs();
       // Match the tab for THIS platform's flow by domain — the platform's own
@@ -1121,6 +1141,11 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         lastHeartbeatLog = now;
         logger.info(`[StealthBrowser] Native ${platformId} auto-close waiting: URL ${matchingTab.url || 'unknown'}; title=${matchingTab.title || 'unknown'}`);
       }
+    });
+    poll = setInterval(() => {
+      void runNativePoll().catch((error) => {
+        logger.warn(`[StealthBrowser] Native ${platformId} login poll failed: ${error?.message || error}`);
+      });
     }, LOGIN_POLL_INTERVAL_MS * 2);
 
     timeout = setTimeout(() => {
@@ -1434,7 +1459,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // goto resolves AND on every setInterval. Without the immediate first
     // run there was a 0-400ms (worst-case full POLL_INTERVAL_MS) delay
     // between goto-completion and the first probe.
-    const runProbe = async () => {
+    const runProbe = createNonOverlappingRunner(async () => {
       if (isTerminated) return;
       try {
         if (page.isClosed?.()) return;
@@ -1742,7 +1767,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       } catch {
         // Page navigation mid-evaluate is fine; next tick retries.
       }
-    };
+    });
 
     // Fire one probe immediately so a captcha-free page is detected on the
     // first tick (saves up to POLL_INTERVAL_MS of perceived latency for the

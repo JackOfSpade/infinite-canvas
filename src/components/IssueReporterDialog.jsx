@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Dialog } from './Dialog';
 import { Clipboard, Save, Sparkles, Copy, AlertTriangle } from 'lucide-react';
 import { EventLogger } from '../utils/EventLogger';
@@ -18,6 +18,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeMode, setActiveMode] = useState(null); // 'clipboard' | 'file'
   const [promptCopied, setPromptCopied] = useState(false);
+  const promptCopiedTimerRef = useRef(null);
 
   // Mirror description to sessionStorage on every change so reopens
   // bring back what the user typed within the same session.
@@ -58,9 +59,17 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     try {
       await navigator.clipboard.writeText(buildAiPrompt(description));
       setPromptCopied(true);
-      setTimeout(() => setPromptCopied(false), 2000);
+      if (promptCopiedTimerRef.current) clearTimeout(promptCopiedTimerRef.current);
+      promptCopiedTimerRef.current = setTimeout(() => {
+        promptCopiedTimerRef.current = null;
+        setPromptCopied(false);
+      }, 2000);
     } catch { /* ignore */ }
   }, [description]);
+
+  useEffect(() => () => {
+    if (promptCopiedTimerRef.current) clearTimeout(promptCopiedTimerRef.current);
+  }, []);
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const submit = useCallback(async (mode) => {

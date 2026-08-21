@@ -42,14 +42,23 @@ export default defineConfig([
     },
   },
   {
-    // The resume PDF build engine + its self-test are plain CommonJS Node scripts
-    // (require/module.exports/Buffer/process), not browser ESM. Lint them as such.
-    files: ['Job Application Design System/build/**/*.js'],
+    // Design-system build gates and handoff checks are plain CommonJS Node
+    // scripts (require/module.exports/Buffer/process), not browser ESM. Their
+    // shared harness destructuring intentionally keeps `ok`/`fail` uniform
+    // even in tests that only use `assert`; retain the checks and exempt only
+    // those conventional aliases.
+    files: [
+      'Job Application Design System/build/**/*.js',
+      'Job Application Design System/handoff/**/*.js',
+    ],
     languageOptions: {
       sourceType: 'commonjs',
       globals: {
         ...globals.node,
       },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^(?:[A-Z_]+|ok|fail)$' }],
     },
   },
 ])

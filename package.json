@@ -36,7 +36,18 @@
     "extraResources": [
       {
         "from": "Job Application Design System",
-        "to": "Job Application Design System"
+        "to": "Job Application Design System",
+        "filter": [
+          "SKILL.md",
+          "readme.md",
+          "STYLE.md",
+          "colors_and_type.css",
+          "resume.css",
+          "cover-letter.css",
+          "resume.html",
+          "cover-letter.html",
+          "build/dual-mode-pdf.js"
+        ]
       },
       {
         "from": "local_ai",

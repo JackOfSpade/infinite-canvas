@@ -320,11 +320,17 @@ entire point of the call.
     source,        // 'posting' | 'research'
     decisiveness,  // 1-100: how much failing this disqualifies a candidate
     kind,          // 'capability' | 'domain' | 'scale' | 'logistics' | 'credential' | 'disposition'
+    emphasisReason,// why the source foregrounds this need; structural signals, not candidate fit
   } ] }
 ```
 
-Rank by **what decides the hire**, not by what is listed first or repeated most. Requirements the
-posting treats as table stakes rank below the ones that distinguish candidates.
+Rank by **what decides the hire**. Read for emphasis as well as enumeration: repetition across
+sections, opening placement, unusual specificity, explicit priority language, broad ownership, and
+hard-screen wording are useful evidence. Record that evidence in `emphasisReason`, but do not treat
+any signal as automatically decisive: boilerplate may repeat, the first bullet may be table stakes,
+and a differentiator may appear only once in unusually specific language. Requirements the posting
+treats as table stakes rank below the ones that distinguish candidates unless they are genuine hard
+screens.
 
 When research is unavailable, `source` may only be `'posting'`. When the posting is empty and research
 is unavailable, return an empty array — do not invent requirements.
@@ -341,7 +347,7 @@ under the logistics-only label (§4.4).
 
 ```
 {
-  roleThesis,          // ONE sentence: the claim this letter argues. Not "I am excited to apply."
+  roleThesis,          // ONE sentence and ONE claim: the angle that organizes the letter.
   mappings: [ {        // 1–2
     needIndex,         // index into the needs array
     need,              // restated in one clause
@@ -358,6 +364,12 @@ under the logistics-only label (§4.4).
 ```
 
 Field notes that are load-bearing:
+
+- **`roleThesis` is the controlling angle.** Derive it from the intersection of an emphasized
+  employer need and a distinctive capability the final résumé supports. Every mapping must support
+  that same claim. A second mapping corroborates, deepens, or transfers the angle; it does not create
+  a second independent reason to hire the candidate. Company and logistics context remain
+  subordinate to it.
 
 - **`resumeStatus`** is the anti-redundancy lever. Forcing the model to declare "the résumé already
   states this" makes the letter's remaining job explicit: supply the interpretation, not the fact.

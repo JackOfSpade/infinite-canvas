@@ -19,12 +19,15 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
   const [index, setIndex] = useState(
     Math.max(0, Math.min(initialIndex, total - 1))
   );
-  const [loading, setLoading] = useState(true);
+  const [settledPath, setSettledPath] = useState(null);
   // The source list can shrink while the lightbox is open. Derive a bounded
   // render index instead of synchronously resetting state in an effect; that
   // keeps the frame valid without causing an extra render. PhotoStrip only
   // mounts this component when the list is non-empty.
   const currentIndex = Math.max(0, Math.min(index, total - 1));
+  const currentPath = total > 0 ? imagePaths[currentIndex] : null;
+  const loading = settledPath !== currentPath;
+  const hasImages = total > 0;
 
   // Register with the global modal stack (the parent only mounts this while
   // open — see PhotoStrip.jsx's `{lightboxIndex !== null && ...}`). The capture-
@@ -32,19 +35,18 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
   // so canvas-level bubble-phase listeners (undo/redo, WASD, tool shortcuts)
   // still receive the same event afterward — this is what actually silences them.
   useEffect(() => {
+    if (!hasImages) return undefined;
     updateModalCount(1);
     return () => updateModalCount(-1);
-  }, []);
+  }, [hasImages]);
 
   const prev = useCallback(() => {
     if (total === 0) return;
-    setLoading(true);
     setIndex(i => (Math.max(0, Math.min(i, total - 1)) - 1 + total) % total);
   }, [total]);
 
   const next = useCallback(() => {
     if (total === 0) return;
-    setLoading(true);
     setIndex(i => (Math.max(0, Math.min(i, total - 1)) + 1) % total);
   }, [total]);
 
@@ -62,8 +64,7 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
   }, [prev, next, total]);
 
   if (total === 0) return null;
-  const currentPath = imagePaths[currentIndex];
-  const fileName = currentPath?.split('/').pop() || '';
+  const fileName = currentPath?.split(/[\\/]/).pop() || '';
 
   return createPortal(
     <div
@@ -122,8 +123,8 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
           src={toLocalFilePreviewUrl(currentPath, { maxDimension: 2400 })}
           alt={`Photo ${currentIndex + 1} of ${total}`}
           className={`max-w-[90vw] max-h-[90vh] object-contain rounded ${loading ? 'hidden' : ''}`}
-          onLoad={() => setLoading(false)}
-          onError={() => setLoading(false)}
+          onLoad={() => setSettledPath(currentPath)}
+          onError={() => setSettledPath(currentPath)}
           decoding="async"
           draggable={false}
         />

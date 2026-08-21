@@ -1115,21 +1115,14 @@ ${rows}
   // diagnosable in any report.
   let activeTasksMarkdown = '';
   try {
-    const tasks = snapshotActiveNodeTasks() || [];
-    // Only show tasks whose nodeId is in THIS canvas. A node from another
-    // canvas window that's actively running is expected and normal — showing
-    // it here makes it look like a stuck/leaked task in this canvas when it
-    // isn't. Deleted-node tasks (nodeId absent from currentNodeIds but still
-    // registered) are the real signal; they're included when they can't be
-    // attributed to a foreign canvas via the pipeline telemetry windowId.
-    const jobTelWindowId = getJobsTelemetry()?.windowId ?? null;
-    const mktTelWindowId = getMarketplaceTelemetry()?.windowId ?? null;
-    const knownForeignNodeIds = new Set([
-      jobTelWindowId != null && jobTelWindowId !== reportWindowId ? getJobsTelemetry()?.nodeId : null,
-      mktTelWindowId != null && mktTelWindowId !== reportWindowId ? getMarketplaceTelemetry()?.nodeId : null,
-    ].filter(Boolean));
-    const localTasks = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
-    const foreignCount = tasks.length - localTasks.length;
+    const allTasks = snapshotActiveNodeTasks() || [];
+    // Task ownership is sender-scoped, so reports can now select this canvas
+    // directly instead of guessing from the most recent global telemetry row.
+    // Keep the all-window count to make expected activity elsewhere explicit.
+    const localTasks = reportWindowId == null
+      ? allTasks
+      : snapshotActiveNodeTasks(reportWindowId);
+    const foreignCount = allTasks.length - localTasks.length;
     // Listing status checks serialize through a global FIFO lock (statusCheckLock)
     // — they do NOT register an AbortController task, so they're invisible above.
     // Surface the queue depth so "two Check-Alls feel stuck behind each other"

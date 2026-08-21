@@ -227,6 +227,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     futureRef.current = [];
     lastFingerprintRef.current = null;
     syncHistoryLen();
+    isStateDirtyRef.current = false;
     setIsStateDirty(false);
   }, [syncHistoryLen]);
 

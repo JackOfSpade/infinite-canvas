@@ -1,12 +1,12 @@
 <!doctype html>
-<!-- @dsCard group="Colors" name="Color · Accent" subtitle="Oxblood #7A1F2B — applied to candidate name only" viewport="700x220" -->
+<!-- @dsCard group="Colors" name="Color · Accent" subtitle="Oxblood — applied to the candidate name only" viewport="700x220" -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="stylesheet" href="../colors_and_type.css">
 <link rel="stylesheet" href="_card.css">
 <style>
   .accent-demo { display: grid; grid-template-columns: 130px 1fr; gap: 18px; align-items: stretch; }
-  .accent-chip { background: #7A1F2B; }
-  .accent-chip-inner { padding: 16px 18px; color: #F7F4ED; font-family: var(--ff-display); font-weight: 600; font-size: 32pt; letter-spacing: -0.012em; line-height: 1; }
+  .accent-chip { background: var(--accent); }
+  .accent-chip-inner { padding: 16px 18px; color: var(--bg); font-family: var(--ff-display); font-weight: 600; font-size: 32pt; letter-spacing: -0.012em; line-height: 1; }
   .accent-meta { padding: 4px 0; font-size: 9.5pt; color: var(--ink-1); line-height: 1.5; }
   .accent-meta .hex { font-family: var(--ff-mono); font-size: 8.5pt; color: var(--ink-3); letter-spacing: -0.005em; display: block; margin-top: 4px; }
   .accent-meta .rule {
@@ -20,8 +20,13 @@
   </div>
   <div class="accent-meta">
     <strong>--accent · oxblood</strong> · used on the candidate name only.
-    <span class="hex">#7A1F2B</span>
+    <span class="hex" data-token="--accent"></span>
     <div class="rule">Add <code>data-mono</code> to the root <code>&lt;html&gt;</code> element for pure monochrome (see <code>variant-monochrome.html</code>). Never apply to headers, links, or role titles.</div>
   </div>
 </div>
+<script>
+for (const el of document.querySelectorAll('[data-token]')) {
+  el.textContent = getComputedStyle(document.documentElement).getPropertyValue(el.dataset.token).trim().toUpperCase();
+}
+</script>
 </body></html>

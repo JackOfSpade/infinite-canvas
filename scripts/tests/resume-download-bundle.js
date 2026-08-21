@@ -1,6 +1,9 @@
 import {
   assert,
+  __captureApplicationSyncWorkspaceIdentityForTests,
   __normaliseApplicationSyncWorkspaceForTests,
+  __readApplicationSyncWorkspaceHtmlForTests,
+  __verifyApplicationSyncWorkspaceIdentityForTests,
   __withApplicationSyncWorkspaceLockForTests,
   buildResumeDocument,
   embedApplicationSyncConfig,
@@ -98,12 +101,13 @@ export default [
       'audit strings and enum/index/boolean fields must be safely normalized');
       const passedAudit = normaliseResumeDownloadBundle({
         coverLetterAudit: {
-          rankedNeeds: [{ need: 'Run incident response', quote: 'Run incident response', source: 'posting', decisiveness: 92, kind: 'capability' }],
+          rankedNeeds: [{ need: 'Run incident response', quote: 'Run incident response', source: 'posting', decisiveness: 92, kind: 'capability', emphasisReason: 'Repeated in the opening and ownership sections.' }],
           finalPlan: { mappings: [{ needIndex: 0, achievementIds: ['receipt-1'] }] },
           checks: [{ id: 'plan-availability', passed: true, detail: 'available' }],
         },
       }).coverLetterAudit;
       assert(passedAudit.readiness === 'checks-passed' && passedAudit.rankedNeeds[0].decisiveness === 92
+        && passedAudit.rankedNeeds[0].emphasisReason === 'Repeated in the opening and ownership sections.'
         && passedAudit.finalPlan.mappings[0].achievementIds[0] === 'receipt-1',
       'valid schema fields must survive normalization and all-passing final checks must be explicit');
       let doc = buildResumeDocument({
@@ -112,11 +116,11 @@ export default [
         coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
         downloadBundle: { company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role', coverLetterAudit: rawAudit },
       });
-      const embeddedBeforeSync = /<script id="ic-application-bundle-data" type="application\/json">([\s\S]*?)<\/script>/.exec(doc)?.[1] || '';
+      const embeddedBeforeSync = /<script id="ic-application-bundle-data" type="application\/json"[^>]*>([\s\S]*?)<\/script>/.exec(doc)?.[1] || '';
       assert(!embeddedBeforeSync.includes('</script>') && embeddedBeforeSync.includes('\\u003c/script\\u003e'),
         'inert audit JSON must escape a script terminator before embedding');
       doc = embedApplicationSyncConfig(doc, { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'd'.repeat(64) });
-      const payload = JSON.parse(/<script id="ic-application-bundle-data" type="application\/json">([\s\S]*?)<\/script>/.exec(doc)?.[1] || '{}');
+      const payload = JSON.parse(/<script id="ic-application-bundle-data" type="application\/json"[^>]*>([\s\S]*?)<\/script>/.exec(doc)?.[1] || '{}');
       assert(payload.coverLetterAudit?.version === 1
         && payload.coverLetterAudit?.finalPlan?.roleThesis === audit.finalPlan.roleThesis
         && payload.sync?.token === 'd'.repeat(64),
@@ -194,6 +198,45 @@ export default [
     },
   },
   {
+    name: 'application workspace: legacy localStorage HTML is sanitized before entering the live editor',
+    run: () => {
+      const docId = 'runtime-sanitizer-test';
+      const doc = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Original</h1><p>Cut debt <span data-achievement-id="a1">74%</span></p></main>',
+        ledger: [{
+          id: 'a1', claim: 'Cut debt', caveats: '', derivation: 'debt $4.2M to $1.1M',
+          computed: { isNumeric: true, display: '74% ($4.2M → $1.1M)' },
+        }],
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Original cover letter.'] },
+      });
+      const dom = new JSDOM(doc, {
+        runScripts: 'dangerously',
+        url: 'https://application-runtime-sanitizer.local/',
+        beforeParse(window) {
+          window.localStorage.setItem(`ic-edit:${docId}`, '<h1 class="name" onclick="window.__owned=1">Restored safely</h1><p><span data-achievement-id="a1" data-derivation="forged local tooltip">74%</span><span data-achievement-id="a1" data-derivation="borrowed tooltip">75%</span></p><img src="https://evil.test/pixel" onerror="window.__owned=2"><script>window.__owned=3</script><a href="javascript:window.__owned=4">bad link</a>');
+        },
+      });
+      try {
+        const main = dom.window.document.querySelector('[data-ic-document-panel="resume"] main.page');
+        assert(main?.textContent.includes('Restored safely') && !main.querySelector('script,img')
+          && !main.querySelector('[onclick],[onerror]') && !main.querySelector('a[href]')
+          && dom.window.__owned === undefined,
+        'saved rich HTML must be cleaned in a detached template before it reaches the connected résumé main');
+        const receipts = main.querySelectorAll('[data-achievement-id="a1"]');
+        assert(receipts[0]?.getAttribute('data-derivation')?.includes('debt $4.2M')
+          && !receipts[0].getAttribute('data-derivation').includes('forged')
+          && !receipts[1]?.hasAttribute('data-derivation'),
+        'localStorage may restore a receipt tooltip only from the initial ledger-authored page with matching id and visible text');
+        assert(doc.includes("target.addEventListener('paste'") && doc.includes("target.addEventListener('drop'"),
+          'the generated contenteditable surface must force paste/drop input through plain text');
+        return { legacyMarkupInert: true, richPasteDisabled: true };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
     name: 'application workspace: review gates résumé Sync but not cover Sync',
     run: () => {
       const doc = buildResumeDocument({
@@ -238,6 +281,7 @@ export default [
         resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Maya</h1></main>',
         variantAttrs: 'data-print="ink-only"',
         coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
+        jobContext: { company: 'Acme', title: 'Platform Engineer' },
         downloadBundle: {
           company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role',
           sync: { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'c'.repeat(64) },
@@ -249,8 +293,9 @@ export default [
       assert(!document.getElementById('ic-print-variant'), 'the manual paper selector must not be present');
       const note = document.getElementById('ic-print-variant-note');
       assert(note && note.textContent.includes('AI paper decision: Flat white PDF'), 'ink-only must be named as the AI-selected flat-white PDF mode');
+      assert(note.textContent.includes('analysis for Acme — Platform Engineer indicates'), 'paper decision must name the company and role it analyzed exactly once (not "for for")');
       assert(note.textContent.includes('white in viewers and print'), 'ink-only must make both resulting PDF states explicit');
-      assert(note.textContent.includes('ATS-heavy, enterprise, regulated, or otherwise conservative'), 'ink-only must explain the inferred recipient-profile rationale');
+      assert(note.textContent.includes('ATS-heavy, enterprise, regulated, or otherwise conservative recipient profile'), 'ink-only must explain the inferred recipient-profile rationale');
       assert(document.documentElement.getAttribute('data-print') === 'ink-only', 'the read-only explanation must not rewrite the selected root variant');
       assert(isDualMode(extractVariantAttrs('<!doctype html>\n' + document.documentElement.outerHTML)) === false, 'the explained ink-only choice must still gate the OCG cream layer OFF');
       dom.window.close();
@@ -264,7 +309,7 @@ export default [
       const dualDom = new JSDOM(dualDoc, { runScripts: 'dangerously', url: 'https://application-variant-dual.local/' });
       const dualNote = dualDom.window.document.getElementById('ic-print-variant-note');
       assert(dualNote && dualNote.textContent.includes('Dual-mode PDF — cream in viewers, white in print'), 'dual-pdf must explain its two visible states');
-      assert(dualNote.textContent.includes('design-conscious, startup-oriented, or craft-focused'), 'dual-pdf must explain the inferred recipient-profile rationale');
+      assert(dualNote.textContent.includes('design-conscious, startup-oriented, or craft-focused recipient profile'), 'dual-pdf must explain the inferred recipient-profile rationale');
       assert(isDualMode(extractVariantAttrs(dualDoc)) === true, 'the explained dual-pdf choice must still gate the OCG cream layer ON');
       dualDom.window.close();
       return { variantsExplained: 2, manualOverride: false };
@@ -363,8 +408,8 @@ export default [
     },
   },
   {
-    name: 'application Sync capabilities reconstruct only canonical sibling paths',
-    run: () => {
+    name: 'application Sync capabilities reconstruct only canonical sibling paths and retain directory identity',
+    run: async () => {
       const workspace = __normaliseApplicationSyncWorkspaceForTests({
         token: 'c'.repeat(64), workspaceDir: '/tmp/company/application',
         applicationPath: '/tmp/attacker.html', resumePdfPath: '/tmp/attacker.pdf',
@@ -373,7 +418,54 @@ export default [
       assert(workspace?.resumePdfPath === '/tmp/company/application/Resume.pdf', 'resume destination must be a canonical sibling');
       assert(workspace?.coverLetterPdfPath === '/tmp/company/application/Cover Letter.pdf', 'cover destination must be a canonical sibling');
       assert(__normaliseApplicationSyncWorkspaceForTests({ token: 'not-a-token', workspaceDir: '/tmp/company/application' }) === null, 'invalid capabilities must be discarded before serving sync');
-      return { fixedWorkspacePaths: true };
+
+      const tempRoot = await fs.promises.mkdtemp('/tmp/infinite-canvas-sync-identity-');
+      // /tmp itself is a platform symlink on macOS. Start from its real path
+      // so the fixture exercises a link introduced *after* capture.
+      const root = await fs.promises.realpath(tempRoot);
+      const trustedParent = path.join(root, 'trusted-parent');
+      const workspaceDir = path.join(trustedParent, 'application');
+      const movedParent = path.join(root, 'moved-parent');
+      const redirectParent = path.join(root, 'redirect-parent');
+      try {
+        await fs.promises.mkdir(workspaceDir, { recursive: true });
+        await fs.promises.writeFile(path.join(workspaceDir, 'Application.html'), '<!doctype html>');
+        const captured = await __captureApplicationSyncWorkspaceIdentityForTests({
+          token: 'd'.repeat(64), workspaceDir,
+        });
+        const verified = await __verifyApplicationSyncWorkspaceIdentityForTests(captured);
+        assert(verified.identity?.dev === captured.identity?.dev && verified.identity?.ino === captured.identity?.ino,
+          'an unchanged regular workspace must retain its captured directory identity');
+        assert(await __readApplicationSyncWorkspaceHtmlForTests(captured) === '<!doctype html>',
+          'Sync must read an unchanged workspace through its identity-bound file handle');
+
+        const applicationPath = path.join(workspaceDir, 'Application.html');
+        const originalApplicationPath = path.join(workspaceDir, 'Application.original.html');
+        const outsideHtmlPath = path.join(root, 'outside.html');
+        await fs.promises.writeFile(outsideHtmlPath, '<!doctype html>outside');
+        await fs.promises.rename(applicationPath, originalApplicationPath);
+        await fs.promises.symlink(outsideHtmlPath, applicationPath);
+        let linkedHtmlRejected = false;
+        try { await __readApplicationSyncWorkspaceHtmlForTests(captured); }
+        catch (error) { linkedHtmlRejected = /regular file|symbolic link|ELOOP/.test(error.message); }
+        assert(linkedHtmlRejected, 'Sync must never follow a swapped Application.html symlink while reading its trusted shell');
+        await fs.promises.unlink(applicationPath);
+        await fs.promises.rename(originalApplicationPath, applicationPath);
+
+        await fs.promises.rename(trustedParent, movedParent);
+        await fs.promises.mkdir(path.join(redirectParent, 'application'), { recursive: true });
+        await fs.promises.writeFile(path.join(redirectParent, 'application', 'Application.html'), '<!doctype html>attacker replacement');
+        await fs.promises.symlink(redirectParent, trustedParent, 'dir');
+        let redirectRejected = false;
+        try { await __verifyApplicationSyncWorkspaceIdentityForTests(captured); }
+        catch (error) { redirectRejected = /symbolic link|replaced/.test(error.message); }
+        assert(redirectRejected,
+          'replacing an ancestor with a symlink must revoke Sync before it reads or writes canonical sibling names');
+        return { fixedWorkspacePaths: true, identityBound: true, linkedHtmlRejected, redirectRejected };
+      } finally {
+        await fs.promises.unlink(trustedParent).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
 ];

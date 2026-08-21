@@ -1,6 +1,33 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, enqueueStatusCheckAction, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckActionQueueDepth, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isSessionExpired, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, enqueueStatusCheckAction, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckActionQueueDepth, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isSessionExpired, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'auth polling: async interval ticks never overlap slow CDP/osascript work',
+    run: async () => {
+      let release;
+      let active = 0;
+      let maxActive = 0;
+      let calls = 0;
+      const gate = new Promise(resolve => { release = resolve; });
+      const poll = createNonOverlappingRunner(async () => {
+        calls += 1;
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (calls === 1) await gate;
+        active -= 1;
+      });
+      const first = poll();
+      await Promise.resolve();
+      const skipped = await poll();
+      assert(skipped === false && calls === 1 && maxActive === 1,
+        'a cadence tick arriving during a slow poll must be skipped');
+      release();
+      assert(await first === true, 'the original poll completes normally');
+      assert(await poll() === true && calls === 2 && maxActive === 1,
+        'the runner admits a later tick after the prior one settles');
+      return { calls, maxActive };
+    },
+  },
 {
     name: 'tagJobLanguages + summarizeJobLanguages: tags non-English, leaves English untouched',
     run: () => {
@@ -764,6 +791,31 @@ export default [
       assert(abErr === 'AbortError', `aborted status check rejects with AbortError — got ${abErr}`);
       const afterAbort = await withStatusCheckLock(async () => 'after-abort');
       assert(afterAbort === 'after-abort', 'an aborted status check does not wedge the queue for the next caller');
+
+      // A real AbortSignal must also reject promptly WHILE queued. Merely
+      // checking `signal.aborted` once the held lock eventually releases leaves
+      // a cancelled IPC pending indefinitely behind a user-held browser flow.
+      let releaseHead;
+      const headGate = new Promise(resolve => { releaseHead = resolve; });
+      const head = withStatusCheckLock(() => headGate);
+      await Promise.resolve();
+      const controller = new AbortController();
+      let ranQueued = false;
+      const queued = withStatusCheckLock(() => { ranQueued = true; }, controller.signal);
+      controller.abort();
+      let timeoutId;
+      const earlyAbort = await Promise.race([
+        queued.then(() => 'resolved', error => error?.name),
+        new Promise(resolve => { timeoutId = setTimeout(() => resolve('timed-out'), 100); }),
+      ]);
+      clearTimeout(timeoutId);
+      assert(earlyAbort === 'AbortError' && ranQueued === false,
+        `a queued caller must abort before the holder releases — got ${earlyAbort}`);
+      const follower = withStatusCheckLock(async () => 'follower');
+      releaseHead();
+      assert(await head === undefined && await follower === 'follower',
+        'an early-aborted queue slot preserves mutual exclusion and does not wedge its follower');
+      assert(ranQueued === false, 'the aborted queue slot must remain skipped after reaching its turn');
       return { ok: true, order: order.join(',') };
     },
   },

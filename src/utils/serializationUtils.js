@@ -458,3 +458,59 @@ export function sanitizeNodesForSave(nodes) {
 
   return changed ? out : nodes;
 }
+
+/**
+ * Deep, persistence-oriented content signature.
+ *
+ * This is intentionally separate from `fingerprint`, which runs on hot render
+ * paths and summarizes nested canvases by counts. Load completion uses this
+ * deeper signature once to decide whether it is still safe to mark a freshly
+ * loaded workspace clean. It must see edits inside nested canvases, while
+ * ignoring ReactFlow-only measurements and selection/drag state that appear
+ * during the first render but are not user content.
+ */
+export function persistenceContentFingerprint(snapshot) {
+  const inputNodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
+  const cleanNodes = sanitizeNodesForSave(inputNodes);
+  const inputEdges = Array.isArray(snapshot?.edges) ? snapshot.edges : [];
+  const cleanEdges = sanitizeEdgesForSave(inputEdges, cleanNodes);
+
+  const projectEdge = (edge) => {
+    if (!edge || typeof edge !== 'object') return edge;
+    const { selected: _selected, ...persisted } = edge;
+    return persisted;
+  };
+
+  const projectNode = (node) => {
+    if (!node || typeof node !== 'object') return node;
+    const {
+      measured: _measured,
+      selected: _selected,
+      dragging: _dragging,
+      resizing: _resizing,
+      positionAbsolute: _positionAbsolute,
+      ...persisted
+    } = node;
+
+    const canvasData = persisted.data?.canvasData;
+    if (!canvasData || typeof canvasData !== 'object') return persisted;
+    return {
+      ...persisted,
+      data: {
+        ...persisted.data,
+        canvasData: {
+          ...canvasData,
+          nodes: Array.isArray(canvasData.nodes) ? canvasData.nodes.map(projectNode) : [],
+          edges: Array.isArray(canvasData.edges) ? canvasData.edges.map(projectEdge) : [],
+          drawings: Array.isArray(canvasData.drawings) ? canvasData.drawings : [],
+        },
+      },
+    };
+  };
+
+  return JSON.stringify({
+    nodes: cleanNodes.map(projectNode),
+    edges: cleanEdges.map(projectEdge),
+    drawings: Array.isArray(snapshot?.drawings) ? snapshot.drawings : [],
+  });
+}

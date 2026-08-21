@@ -6,6 +6,14 @@
    closure (colour, typography, spacing, page geometry, all
    variants).
 
+   Scope note, so this file is not mistaken for a build step: the two
+   shipped documents (`resume.html`, `cover-letter.html`) link
+   `colors_and_type.css` plus their own component sheet directly, and
+   the preview cards do the same. This file exists for *consumers* —
+   one href to get the token closure — and for the project thumbnail.
+   That is its whole job; it deliberately does not pull in the
+   component sheets (see below).
+
    Typography is delivered from the Google Fonts CDN (CSS2 API)
    via a single pinned @import in colors_and_type.css:
      Source Serif 4 (400, 600) · Inter (400, 500, 600) ·

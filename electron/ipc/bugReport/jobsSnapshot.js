@@ -1917,7 +1917,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // visible literally (a real newline shows as \n, a double-escaped one as \\n).
   if (scopedApplication) {
     const a = scopedApplication;
-    const cl = a.coverLetter || {};
+    const cl = a.coverLetter || a.localAi?.coverLetterEnvelope || {};
     const escScan = (s) => /\\[a-z]/.test(String(s ?? '')) ? ' ⚠️ literal backslash-escape present' : '';
     lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
     if (applicationScope?.note) lines.push(applicationScope.note.trimEnd());
@@ -1936,9 +1936,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const round = Number.isFinite(event?.revisionRound) ? ` · revision ${event.revisionRound}` : '';
           const resultHash = event?.resultSha256 ? ` · result ${String(event.resultSha256).slice(0, 16)}` : '';
           const resumePages = resume.pageCount != null ? ` · résumé ${resume.pageCount}/${resume.targetPageCount ?? '?'}p` : '';
+          const resumeUtilization = Number.isFinite(resume?.layout?.utilization)
+            ? ` · résumé type area ${Math.round(resume.layout.utilization * 100)}%`
+            : '';
           const coverPages = cover.pageCount != null ? ` · cover ${cover.pageCount}/${cover.targetPageCount ?? '?'}p` : '';
           const detail = event?.detail ? ` — ${String(event.detail).replace(/\s+/g, ' ').slice(0, 320)}` : '';
-          lines.push(`  - ${event?.at || '?'} · ${event?.type || 'unknown'}${round}${resultHash}${resumePages}${coverPages}${attempts}${detail}`);
+          lines.push(`  - ${event?.at || '?'} · ${event?.type || 'unknown'}${round}${resultHash}${resumePages}${resumeUtilization}${coverPages}${attempts}${detail}`);
           const qualityReview = event?.qualityReview;
           if (qualityReview?.resume || qualityReview?.coverLetter) {
             const formatReview = (label, review) => `${label} ${review?.decision || 'unknown'}${review?.rationale ? ` — ${String(review.rationale).replace(/\s+/g, ' ').slice(0, 320)}` : ''}`;
@@ -2159,6 +2162,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push('- Cover-letter argument plan: unavailable; direct evidence-backed prose degradation path used.');
     }
     lines.push('- Cover-letter fields (JSON.stringify — whitespace/escapes shown literally):');
+    if (cl.tagline) lines.push(`  - tagline: ${JSON.stringify(cl.tagline)}`);
     lines.push(`  - salutation: ${JSON.stringify(cl.salutation || '')}`);
     lines.push(`  - recipient: ${JSON.stringify(cl.recipient || '')}`);
     if (Array.isArray(cl.contact) && cl.contact.length) lines.push(`  - contact: ${JSON.stringify(cl.contact)}`);

@@ -50,14 +50,53 @@ switch to Anthropic Console/API credits for this routine.
    job-board profile, or any other contextual clue. If live research is
    available, use it only to improve company/role context and do not present an
    uncertain claim as fact.
+   Apply this evidence boundary in every document: assert explicit career facts;
+   draw only narrow interpretations that the supplied facts directly support;
+   discuss general domain principles without recasting them as the candidate's
+   personal experience; and omit or verify any plausible-but-unverified step.
 4. Treat page fit as a constraint, never as the reason a draft is good enough.
    Before **every** `result.json` write (first draft and measured revision),
    work through a convergent private quality loop: identify the job's
-   highest-priority requirements; rank the candidate's truthful evidence by
-   how much it improves the chance of an interview; write a complete draft;
+   highest-priority requirements by reading for emphasis as well as enumeration
+   (repetition across sections, opening placement, unusual specificity,
+   explicit priority, broad ownership, and hard-screen wording), without
+   treating any one signal as automatically decisive; rank the candidate's
+   truthful evidence by how much it improves the chance of an interview;
+   choose one controlling throughline at the intersection of an emphasized
+   employer need cluster and a distinctive supported candidate capability;
+   select the minimum sufficient evidence to establish that argument. The
+   résumé owns breadth, so a cover letter must not introduce another employer,
+   project, or tool solely to cover another job requirement. Each additional
+   evidence block must deepen, corroborate, extend, or honestly qualify the
+   same throughline, and must state that relationship before its details. Write
+   a complete draft in which every paragraph advances, demonstrates, deepens,
+   or honestly qualifies the controlling argument, and any second example
+   supports rather than starts a second argument;
    run one adversarial critique for relevance, specificity, factual support,
-   coverage of the priority requirements, redundancy, concision, and any
-   misleading inference; then revise and perform another verification pass.
+   argument continuity, minimum-sufficient evidence, redundancy, concision,
+   grammatical parallelism, and any misleading inference. For the cover letter,
+   explicitly verify that the first sentence adds information beyond the application context and
+   advances the candidate's argument; reject any opening that merely announces
+   the application or the document's purpose. Also reject unclear antecedents,
+   unexplained employer or time-period changes, chronological backtracking
+   unless its purpose is explicit, inventory-style paragraphs, delayed
+   relevance, paragraphs that introduce a second thesis, colon-led evidence
+   dumps, sentences that compress several résumé bullets, repeated organizing
+   metaphors, detached synthesis that broadens one example into a role-wide or
+   career-wide claim, faulty parallelism in coordinated forms such as `from X
+   to/through Y`, and unsolicited admissions of missing experience. A
+   concluding or transitional sentence must name the concrete responsibility,
+   system, decision, or process it synthesizes and remain within that evidence's
+   scope. Treat phrases such as `most of my work` and `throughout my career` as
+   factual breadth claims that require source support. Across paragraph
+   boundaries, replace `this`, `that`, or `it` when more than one antecedent is
+   plausible. Pair noun
+   phrases with noun phrases or actions with actions; do not use bureaucratic
+   padding such as `from the time of` to conceal a mismatch. Honest
+   qualification exists to prevent a misleading claim or answer an explicit
+   application question; otherwise state supported adjacent experience
+   positively and stop at its evidence boundary. Then revise and perform
+   another verification pass.
    Continue while the critique identifies a concrete defect or a specific,
    material improvement in job-specific evidence. Stop when the best remaining
    change is merely stylistic or lower-value than the evidence it would
@@ -84,6 +123,39 @@ switch to Anthropic Console/API credits for this routine.
      a raw note or role summary verbatim. Rewrite supported facts as concise,
      polished employer-facing prose, correcting spelling and grammar without
      changing the factual meaning.
+   - Treat concise career data as compressed evidence. Combine compatible
+     facts only when the data clearly places them in the same role, project, or
+     professional practice, and make the narrow inferences needed to express
+     that work coherently. Turn supported tools, activities, constraints, and
+     stated trade-offs into a concrete action-and-judgment statement, choosing
+     verbs such as applied, evaluated, designed, decided, or balanced only
+     when the evidence supports them. Do not dress up familiarity or
+     self-assessed knowledge (for example, "understood," "formed a view," or
+     "familiar with") as an achievement. Never add an unrecorded outcome,
+     improvement, scale, duration, ownership level, production use, adoption,
+     or causal result, and never move a fact between employers or projects. If
+     the data supports only familiarity and no applied action can be derived,
+     keep it in Skills or omit it from the highlights.
+   - Order each role's highlights by interview value for this target job, not
+     chronology or source order: lead with direct, credible evidence for a hard
+     screen or highest-priority requirement; follow with distinctive outcomes,
+     scale, and corroborating evidence; place the least relevant retained fact
+     last. Preserve chronology only when it is necessary to explain a causal
+     result or career progression.
+   - Keep every `.highlights li` visually uniform: never use `<b>` or
+     `<strong>` inside it. Technologies, tools,
+     metrics, and outcomes remain plain text; front-load the most relevant
+     technology or capability in the sentence so it remains easy to scan
+     without typographic emphasis. If an achievement-ledger figure needs its
+     receipt, use the neutral form
+     `<span data-achievement-id="ID">figure</span>` for that figure only.
+     Preserve the bare receipt id, never author `data-derivation`, and do not
+     use a receipt attribute for a figure quoted directly from career data.
+   - Every top-level résumé category is a peer `section.section` with a
+     `.section-head` and an `h2`, regardless of its label. Use
+     `.subsection-head` only for a genuine grouping within its enclosing parent
+     section; never use it as a peer category heading or nest a peer category
+     inside the preceding role/section.
    - Infinite Canvas owns all root document variants: print mode, paper size,
      monochrome, density, and the cover-letter-only centred treatment. It
      measures a one-page cover letter and sets `data-letter="centered"` only
@@ -103,7 +175,11 @@ switch to Anthropic Console/API credits for this routine.
    because the résumé overflowed. When a prior reduction still overflowed, do
    not spend the next round on mere paraphrasing; make a materially stronger
    structural reduction unless the quality comparison has reached diminishing
-   returns. For the résumé,
+   returns. When the app reports that a one-page résumé is materially
+   underfilled, do the opposite: reassess omitted source-supported evidence
+   and add only distinct, job-relevant facts that improve the candidate's
+   case. Do not use generic filler, repetition, invented detail, or decorative
+   prose to occupy space. For the résumé,
    retain direct matches to the job's highest-priority
    requirements, concrete outcomes/scale, and credible differentiators before
    cutting generic, redundant, weakly related, or low-evidence content. For
@@ -114,10 +190,34 @@ switch to Anthropic Console/API credits for this routine.
    `<main class="page">...</main>` using the existing design-system component
    classes. Do not include scripts, styles, iframes, event attributes, external
    resources, SVG, forms, or inline JavaScript.
-5. Produce a concise, evidence-grounded cover letter. Prefer two or three
-   focused paragraphs over generic enthusiasm. The final cover letter must fit
-   one page when rendered by Infinite Canvas. Every factual candidate claim
-   must be supported by the supplied career data.
+5. Produce an evidence-grounded cover letter. Choose paragraph boundaries for
+   the clearest, most persuasive final letter; there is no prescribed paragraph
+   count or word count. One page is a ceiling, not a space target: a complete,
+   shorter argument does not need filler or another example. The final cover
+   letter must fit one page when rendered by Infinite Canvas. Every factual
+   candidate claim must be supported by the supplied career data, using the
+   evidence boundary in step 3. Write natural connected prose: select one
+   load-bearing proof, summarize related implementation details, and use short
+   causal sentences instead of a colon followed by an inventory. Prefer the
+   concrete system, data flow, responsibility, or decision to an abstract
+   metaphor, and never repeat a metaphor across paragraphs as connective
+   tissue. The first sentence must
+   immediately advance the candidate's argument with a job-specific thesis, a
+   concrete evidence-to-need connection, or a supported observation about the
+   company's work that establishes the candidate's relevant direction. Never
+   announce that the candidate is applying or that the document is a cover
+   letter. Reject openings such as `I am writing to apply`, `I'm writing to
+   apply`, `I’m writing to apply`, `I am applying for`, `I'm applying for`,
+   `I’m applying for`, `I am writing to express my interest`, `Please accept
+   my application`, and equivalent administrative throat-clearing. The
+   company or exact role title may appear when it contributes substantively to
+   the argument, but not merely to identify the application. Respect the
+   recruiter's intelligence: every opening sentence must contain information
+   the application context did not already provide. The host owns the
+   envelope: use the candidate name/contact from the résumé, omit the recipient
+   block, and use `Dear [Company] Hiring Team,` as the salutation. Infinite
+   Canvas reconstructs these deterministic fields at import, so do not make
+   them part of the writing or revision decision.
 6. Write only the UTF-8 `result.json` in the selected job folder. Do not modify
    project source, the routine, any project-memory/knowledge file, the
    input/context files, `fit-feedback.json`, or create HTML/PDF files. Do not
@@ -126,7 +226,7 @@ switch to Anthropic Console/API credits for this routine.
 
 7. Keep this SAME Claude Code run active for the measured handoff. After each
    `result.json` write, wait for Infinite Canvas (which must remain open) to
-   render it. For up to 45 seconds, check the selected job no more than once
+   render it. For up to 6 minutes, check the selected job no more than once
    every 3 seconds; you may read only its app-generated `fit-feedback.json`,
    `manifest.json`, and current `result.json` during this wait. You may also
    read only the app-generated terminal receipt at
@@ -135,7 +235,9 @@ switch to Anthropic Console/API credits for this routine.
      its measured feedback immediately in this same session, revise the
      affected document(s), overwrite only `result.json`, and wait again.
      Treat only fields actually present in `fit-feedback.json` as app
-     measurements. Never claim that the app "confirmed" bullet line counts,
+     measurements. A reported type-area utilization is a measured span from
+     the first to last text line, not a claim that any specific omitted bullet
+     is best. Never claim that the app "confirmed" bullet line counts,
      final-page fullness, or the cause of overflow unless the feedback reports
      that metric. Label conclusions from reading the markup as your own
      diagnosis (for example, "My diagnosis is that several bullets wrap too
@@ -157,7 +259,7 @@ switch to Anthropic Console/API credits for this routine.
      bundle or any post-import artifacts. Report this as acceptance, not as an
      app-confirmed final page count unless that final count was actually
      reported in `fit-feedback.json`.
-   - If no matching feedback or import status appears within 45 seconds, stop
+   - If no matching feedback or import status appears within 6 minutes, stop
      without another rewrite and report that Infinite Canvas did not return a
      measured result while this session was waiting.
 
@@ -178,21 +280,35 @@ effective `OUTPUT_BUNDLE_ROOT` value copied exactly. Write it to
     },
     "coverLetter": {
       "decision": "drafted",
-      "rationale": "Fresh draft passed the convergent argument and factual-quality review."
+      "rationale": "Fresh draft preserves one controlling argument with minimum-sufficient evidence and passed factual-quality review."
     }
   },
   "resumeMainHtml": "<main class=\"page\">...</main>",
   "coverLetter": {
     "name": "Candidate name",
     "contact": ["email@example.com"],
-    "salutation": "Dear Hiring Team,",
-    "recipient": "Company hiring team",
+    "salutation": "Dear Company Hiring Team,",
+    "recipient": "",
     "paragraphs": [
-      "Concise, factual paragraph one.",
+      "Argument-led opening connecting supported candidate evidence to the employer's priority need.",
       "Concise, factual paragraph two."
     ],
     "closing": "Sincerely,",
     "signatureTitle": ""
+  },
+  "coverLetterArgument": {
+    "roleThesis": "One specific controlling claim that organizes the complete letter.",
+    "primaryEvidence": {
+      "evidence": "The source-supported candidate evidence that establishes the thesis.",
+      "evidenceRole": "The role, project, or other source context containing that evidence.",
+      "relationToThesis": "How this primary evidence establishes the controlling thesis."
+    },
+    "secondaryEvidence": {
+      "evidence": "Optional distinct source-supported evidence.",
+      "evidenceRole": "The role, project, or other source context containing it.",
+      "narrativeRole": "corroborates",
+      "relationToPrimary": "Why this evidence corroborates, deepens, extends, qualifies, or provides a foundation for the primary proof."
+    }
   }
 }
 ```
@@ -204,6 +320,16 @@ specific factual or job-relevance improvement, or
 the comparison found no material improvement. Give a concrete, concise
 rationale; page fit alone is not a valid rationale. Infinite Canvas validates
 these decisions against document hashes from the prior measured result.
+
+`coverLetterArgument` is a required, non-rendered argument contract. It is not
+letter copy: use it to state the single controlling thesis, its primary proof,
+and how that proof establishes the thesis. Include `secondaryEvidence` only
+when it has a genuine narrative role
+(`foundation`, `corroborates`, `deepens`, `extends`, or `qualifies`) and states
+its relationship to the primary proof. The cover-letter quality rationale must
+explicitly attest that the final letter preserves **one controlling argument**
+and **minimum-sufficient evidence**. Do not use the contract to add facts that
+are absent from the letter or career data.
 
 Do not write anything except `result.json`. Infinite Canvas watches the job
 folder and will import the result automatically while this same session waits.

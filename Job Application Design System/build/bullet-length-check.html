@@ -1,0 +1,152 @@
+<!doctype html>
+<!--
+  bullet-length-check.html — renderer-verified companion to
+  build/annotation-budget-test.js. Loads the real stylesheets and the
+  real .page > .highlights > li structure, then renders worst-case
+  bullet text at the MAX_BULLET_VISIBLE_CHARS budget (STYLE.md §5.3 /
+  §5.4) across all four supported render configurations — Letter and
+  A4, default and compact density — and measures actual line count.
+
+  This is the render truth the character budgets in STYLE.md / SKILL.md
+  / annotation-budget-test.js are calibrated against: a bullet at or
+  under the budget must set in <= 2 wrapped lines in every one of the
+  four configs, and a bullet past it must not (self-test, so a future
+  edit that quietly breaks the budget shows up here even if nobody
+  changed the char-count constant). Worst-case text uses long,
+  low-breakpoint technical words on purpose — real bullets mixing in
+  short connector words wrap MORE forgivingly, so this is the tight
+  bound. Open in any browser; results print to the page and console.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bullet length — renderer self-test</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+  body { background:#1a1815; color:#e8e3d8; padding:24px; }
+  #out, #summary { font-family: ui-monospace, Menlo, monospace; font-size:13px; line-height:1.5; }
+  .pass { color:#7CCB8E; } .fail { color:#FF8A80; } .hdr { color:#B6AFA2; margin-top:14px; }
+  #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
+  #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
+  #rig { background: var(--bg); color: var(--ink-body); padding:0; margin-bottom:18px; max-width:640px; }
+</style>
+</head>
+<body>
+<!-- Live measurement rig: a real page/section/highlights structure so padding,
+     indent, and column width match the shipped document exactly. -->
+<main class="page" id="rig" role="document"><section class="section"><ul class="highlights">
+<li id="li-plain"></li>
+<li id="li-scope"></li>
+<li id="li-tradeoff"></li>
+<li id="li-overflow"></li>
+</ul></section></main>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script>
+const out = document.getElementById('out'), sumEl = document.getElementById('summary');
+let passed = 0, failed = 0; const failures = [];
+function line(t, cls){ const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = t; out.appendChild(d); }
+function ok(n){ line('  ✓ ' + n, 'pass'); console.log('PASS: ' + n); passed++; }
+function fail(n, m){ line('  ✗ ' + n + ' — ' + m, 'fail'); console.error('FAIL: ' + n + ' — ' + m); failed++; failures.push(n); }
+function header(s){ line(s, 'hdr'); }
+function assert(cond, n, m){ cond ? ok(n) : fail(n, m || 'assertion failed'); }
+
+/* ---- the one coherent budget (STYLE.md §5.3 / §5.4) ------------------ */
+const MAX_BULLET_VISIBLE_CHARS = 180;   // main sentence + label + annotation, ALL bullets
+const MAX_TRADEOFF_TEXT_CHARS  = 100;   // the .tradeoff clause alone, excluding its label
+
+/* Long, low-breakpoint technical filler — deliberately the TIGHTEST
+   realistic wrap case (few short connector words to absorb slack at a
+   line end). Not candidate copy; a synthetic worst-case stand-in. */
+const WORDS = ["Redesigned","multi-region","replication","architecture","across","distributed",
+  "consistent-hashing","infrastructure","supporting","approximately","fourteen","thousand",
+  "concurrent","transactions","engineering","organization","responsible","implementation",
+  "observability","instrumentation","throughout","production","environments","maintaining",
+  "backward-compatible","interfaces"];
+function filler(targetLen){
+  let out = "", i = 0;
+  while (out.length < targetLen) { out += (out ? " " : "") + WORDS[i % WORDS.length]; i++; }
+  return out.slice(0, targetLen);
+}
+
+function lineCountOf(el){
+  const cs = getComputedStyle(el);
+  const lh = parseFloat(cs.lineHeight);
+  return el.getBoundingClientRect().height / lh;
+}
+
+/* Build the three "must comply" fixtures right at the budget, and one
+   deliberately-over fixture — same shape, ~40 chars past budget — that
+   must NOT comply, proving this rig actually discriminates. */
+function buildFixtures(){
+  document.getElementById('li-plain').textContent = filler(MAX_BULLET_VISIBLE_CHARS);
+
+  const scopeLabelLen = ' · '.length;
+  const scopeBodyLen = 46; // representative scope annotation length
+  const scopeMainLen = MAX_BULLET_VISIBLE_CHARS - scopeLabelLen - scopeBodyLen;
+  document.getElementById('li-scope').innerHTML =
+    filler(scopeMainLen) + '<span class="scope"><span class="annotation-label"> · </span>' +
+    filler(scopeBodyLen) + '</span>';
+
+  const tLabel = ' · trade-off: ';
+  const tBodyLen = MAX_TRADEOFF_TEXT_CHARS;
+  const tMainLen = MAX_BULLET_VISIBLE_CHARS - tLabel.length - tBodyLen;
+  document.getElementById('li-tradeoff').innerHTML =
+    filler(tMainLen) + '<span class="tradeoff"><span class="annotation-label">' + tLabel + '</span>' +
+    filler(tBodyLen) + '</span>';
+
+  document.getElementById('li-overflow').textContent = filler(MAX_BULLET_VISIBLE_CHARS + 40);
+}
+
+const CONFIGS = [
+  { name: 'Letter / default', page: null,  density: null },
+  { name: 'Letter / compact', page: null,  density: 'compact' },
+  { name: 'A4 / default',     page: 'a4',  density: null },
+  { name: 'A4 / compact',     page: 'a4',  density: 'compact' }
+];
+
+function applyConfig(cfg){
+  if (cfg.page) document.documentElement.setAttribute('data-page', cfg.page);
+  else document.documentElement.removeAttribute('data-page');
+  if (cfg.density) document.documentElement.setAttribute('data-density', cfg.density);
+  else document.documentElement.removeAttribute('data-density');
+}
+
+function run(){
+  buildFixtures();
+  header('Budget: ' + MAX_BULLET_VISIBLE_CHARS + ' visible chars / bullet (annotated or not), ' +
+    MAX_TRADEOFF_TEXT_CHARS + ' for a .tradeoff clause alone (STYLE.md §5.3 / §5.4)');
+
+  for (const cfg of CONFIGS) {
+    applyConfig(cfg);
+    // eslint-disable-next-line no-unused-expressions
+    document.getElementById('rig').offsetHeight; // force reflow
+    header(cfg.name);
+
+    const plain = lineCountOf(document.getElementById('li-plain'));
+    assert(plain <= 2.05, 'plain bullet at ' + MAX_BULLET_VISIBLE_CHARS + ' chars sets in <= 2 lines',
+      plain.toFixed(2) + ' lines');
+
+    const scope = lineCountOf(document.getElementById('li-scope'));
+    assert(scope <= 2.05, '.scope-annotated bullet at budget sets in <= 2 lines', scope.toFixed(2) + ' lines');
+
+    const tradeoff = lineCountOf(document.getElementById('li-tradeoff'));
+    assert(tradeoff <= 2.05, '.tradeoff-annotated bullet at budget sets in <= 2 lines', tradeoff.toFixed(2) + ' lines');
+
+    const overflow = lineCountOf(document.getElementById('li-overflow'));
+    assert(overflow > 2.05, 'a bullet ~40 chars past budget DOES exceed 2 lines (rig discriminates)',
+      'got ' + overflow.toFixed(2) + ' lines — budget may be too loose for this config');
+  }
+
+  document.documentElement.removeAttribute('data-page');
+  document.documentElement.removeAttribute('data-density');
+
+  sumEl.textContent = passed + ' passed, ' + failed + ' failed';
+  sumEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log('SUMMARY: ' + passed + ' passed, ' + failed + ' failed' + (failures.length ? ' | failures: ' + failures.join(', ') : ''));
+}
+document.fonts.ready.then(run).catch(e => { sumEl.textContent = 'RUNNER CRASHED: ' + e.message; sumEl.className = 'bad'; });
+</script>
+</body>
+</html>

@@ -7,7 +7,6 @@ export const MIN_EVIDENCE_TOKEN_OVERLAP = 0.6;
 export const REDUNDANCY_SHINGLE_WORDS = 8;
 export const MAX_REDUNDANCY_PHRASE_WORDS = 24;
 export const MAX_CHECK_DETAIL_VALUE_CHARS = 160;
-export const MAX_LETTER_WORDS = 400;
 export const MAX_LETTER_FIGURES = 3;
 export const MAX_FIGURE_DETAIL_ITEMS = 12;
 export const MAX_GENERIC_OBSERVATIONS = 12;
@@ -40,6 +39,11 @@ export const BANNED_GENERIC_PATTERNS = Object.freeze([
 
 export const BANNED_OPENERS = Object.freeze([
   'i am writing to express my interest',
+  'i am writing to apply',
+  "i'm writing to apply",
+  'i am applying for',
+  "i'm applying for",
+  'please accept my application',
   'i am excited to apply',
   'i believe i would be a great fit',
 ]);
@@ -71,6 +75,13 @@ function text(value) {
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Cover letters identify their preparation period without implying a
+// day-specific event. Keep the presentation format shared by API and Local AI
+// authoring paths so their envelopes satisfy the same document contract.
+export function formatCoverLetterDate(date = new Date()) {
+  return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
 }
 
 function normalized(value) {
@@ -170,12 +181,71 @@ function bulletTexts(evidence) {
   return Array.isArray(evidence?.bulletTexts) ? evidence.bulletTexts.filter(Boolean).map(text) : [];
 }
 
+const GENERIC_THESIS_PATTERNS = Object.freeze([
+  { label: 'generic fit claim', pattern: /\b(?:strong|great|ideal|excellent|perfect)\s+(?:fit|candidate)\b/iu },
+  { label: 'generic qualification claim', pattern: /\b(?:qualified|well[- ]suited)\s+for\b/iu },
+  { label: 'generic alignment claim', pattern: /\b(?:background|experience|skills|qualifications)\b.{0,60}\b(?:aligns?|matches?|fits?)\b/iu },
+  { label: 'generic blend claim', pattern: /\b(?:unique|strong)\s+blend\s+of\b/iu },
+]);
+
+function sentenceCount(value) {
+  const source = text(value);
+  if (!source) return 0;
+  if (typeof Intl?.Segmenter === 'function') {
+    return Array.from(new Intl.Segmenter('en', { granularity: 'sentence' }).segment(source))
+      .filter(segment => text(segment?.segment)).length;
+  }
+  return source.split(/(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u).filter(Boolean).length;
+}
+
 /**
- * Derives the argument-led prose shape; no padding paragraph is implied.
+ * Enforce only thesis defects code can identify without pretending to judge
+ * semantic persuasiveness. Cohesion between the thesis and mappings remains a
+ * planner responsibility; this gate catches missing, list-like, and clearly
+ * generic output so the existing convergence loop can request one better plan.
  */
-export function expectedParagraphCount(plan = {}) {
+export function checkRoleThesis(plan = {}) {
+  const thesis = text(plan?.roleThesis);
+  if (!thesis) return result('role-thesis', false, 'roleThesis is missing');
+  const count = sentenceCount(thesis);
+  if (count !== 1) return result('role-thesis', false, `roleThesis contains ${count} sentences; exactly one controlling claim is required`);
+  const countWords = wordCount(thesis);
+  if (countWords < 6) return result('role-thesis', false, `roleThesis has only ${countWords} words; it does not establish a specific controlling claim`);
+  const genericLanguage = checkGenericPhrases([thesis]);
+  if (!genericLanguage.passed) return result('role-thesis', false, `roleThesis is generic: ${genericLanguage.detail}`);
+  const genericPattern = GENERIC_THESIS_PATTERNS.find(item => item.pattern.test(thesis));
+  if (genericPattern) return result('role-thesis', false, `roleThesis contains a ${genericPattern.label}`);
+  return result('role-thesis', true, 'roleThesis is one non-generic controlling claim');
+}
+
+const SECONDARY_NARRATIVE_ROLES = new Set(['foundation', 'corroborates', 'deepens', 'extends', 'qualifies']);
+
+/**
+ * The schema makes the relationship visible to the provider; this gate keeps
+ * a malformed or partial response from quietly restoring a two-proof résumé
+ * tour. The first mapping establishes the argument, and any second mapping
+ * must state why it follows rather than becoming another primary claim.
+ */
+export function checkMappingNarrativeStructure(plan = {}) {
   const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
-  return 1 + mappings.length + (text(plan?.companyHook?.detail) ? 1 : 0);
+  if (!mappings.length) return result('mapping-narrative-structure', false, 'plan has no primary mapping');
+  const primary = mappings[0] || {};
+  if (text(primary.narrativeRole) !== 'primary') {
+    return result('mapping-narrative-structure', false, 'first mapping must use narrativeRole “primary”');
+  }
+  if (!text(primary.relationToPrevious)) {
+    return result('mapping-narrative-structure', false, 'primary mapping must state how it establishes the roleThesis');
+  }
+  if (mappings.length < 2) return result('mapping-narrative-structure', true, 'one primary mapping supplies the minimum sufficient evidence');
+  const secondary = mappings[1] || {};
+  const role = text(secondary.narrativeRole);
+  if (!SECONDARY_NARRATIVE_ROLES.has(role)) {
+    return result('mapping-narrative-structure', false, 'second mapping must provide foundation, corroboration, deepening, extension, or qualification—not another primary argument');
+  }
+  if (!text(secondary.relationToPrevious)) {
+    return result('mapping-narrative-structure', false, 'second mapping must state its relationToPrevious');
+  }
+  return result('mapping-narrative-structure', true, `second mapping explicitly ${role}s the primary proof`);
 }
 
 export function checkEvidenceGrounding(plan = {}, evidence = {}) {
@@ -466,37 +536,40 @@ function capitalizedBigrams(value) {
  * `companyName` is optional for unit use, but callers with a job should pass it
  * so a company name alone cannot satisfy the research-detail requirement.
  */
-export function checkCompanySpecificity(paragraphs = [], researchText = '', companyName = '') {
+export function checkCompanySpecificity(paragraphs = [], researchText = '', companyName = '', plannedDetail = '') {
   const research = text(researchText);
   if (!research) return result('company-specificity', true, 'skipped: research unavailable');
   const letter = text((Array.isArray(paragraphs) ? paragraphs : []).join(' '));
   const normalizedResearch = normalized(research);
   const normalizedCompany = normalized(companyName);
-  const researchFigures = new Set(figures(research).map(normalizeFigure));
-  const detailBigram = capitalizedBigrams(letter).find(bigram =>
+  const plannedBigrams = capitalizedBigrams(plannedDetail).filter(bigram =>
     normalizedResearch.includes(normalized(bigram)) && !normalizedCompany.includes(normalized(bigram)));
+  if (text(plannedDetail) && !plannedBigrams.length) {
+    return result('company-specificity', false, 'planned company hook has no research-sourced capitalized detail outside the company name');
+  }
+  const allowedBigrams = plannedBigrams.length ? plannedBigrams : capitalizedBigrams(letter);
+  const detailBigram = allowedBigrams.find(bigram =>
+    normalizedResearch.includes(normalized(bigram))
+      && !normalizedCompany.includes(normalized(bigram))
+      && normalized(letter).includes(normalized(bigram)));
   if (detailBigram) return result('company-specificity', true, `uses research-sourced capitalized detail “${boundedDetailValue(detailBigram)}”`);
-  const sharedYear = figures(letter).find(figure => /^\d{4}$/.test(figure) && researchFigures.has(normalizeFigure(figure)));
-  if (sharedYear) return result('company-specificity', true, `uses research-sourced year “${sharedYear}”`);
-  const sharedFigure = figures(letter).find(figure => researchFigures.has(normalizeFigure(figure)));
-  if (sharedFigure) return result('company-specificity', true, `uses research-sourced figure “${sharedFigure}”`);
-  return result('company-specificity', false, 'no research-sourced capitalized detail, year, or figure appears in the letter');
+  return result('company-specificity', false, plannedBigrams.length
+    ? `planned research detail “${boundedDetailValue(plannedBigrams[0])}” does not appear in the letter`
+    : 'no research-sourced capitalized detail appears in the letter');
 }
 
-export function checkShape(plan = {}, paragraphs = []) {
-  const list = Array.isArray(paragraphs) ? paragraphs.filter(paragraph => text(paragraph)) : [];
-  const expected = expectedParagraphCount(plan);
-  if (list.length !== expected) {
-    return result('shape', false, `letter has ${list.length} paragraph(s); plan requires ${expected}`);
-  }
+export function checkShape(planOrParagraphs = {}, paragraphs = []) {
+  // Keep the established `(plan, paragraphs)` call shape while also allowing
+  // the now-sufficient `(paragraphs)` form. The prose plan no longer dictates
+  // a paragraph or word quota; it remains a semantic-planning input only.
+  const sourceParagraphs = Array.isArray(planOrParagraphs) ? planOrParagraphs : paragraphs;
+  const list = Array.isArray(sourceParagraphs) ? sourceParagraphs.filter(paragraph => text(paragraph)) : [];
+  if (!list.length) return result('shape', false, 'letter has no usable body paragraphs');
   const count = list.reduce((total, paragraph) => total + wordCount(paragraph), 0);
-  if (count > MAX_LETTER_WORDS) {
-    return result('shape', false, `letter has ${count} words; maximum is ${MAX_LETTER_WORDS}`);
-  }
   return result('shape', true, `letter has ${list.length} paragraph(s) and ${count} words`);
 }
 
-export function checkFigureDiscipline(paragraphs = [], evidence = {}) {
+export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = null) {
   const letterFigures = figures((Array.isArray(paragraphs) ? paragraphs : []).join(' '));
   // These checks must remain diagnostic-only. A partially persisted or legacy
   // evidence payload therefore cannot turn a recoverable letter defect into a
@@ -513,7 +586,15 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}) {
     ...skills.flatMap(skill => [skill?.group || '', ...(Array.isArray(skill?.items) ? skill.items : [])]),
     ...education,
   ].join(' ');
-  const résuméFigures = new Set(figures(résuméText).map(normalizeFigure));
+  const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
+  // Planned prose may use figures only from the evidence anchors the planner
+  // selected. Treating every number anywhere in the résumé as permission let
+  // an unrelated/research-only figure pass by coincidence. The direct fallback
+  // has no mappings, so it retains the full fitted-résumé evidence boundary.
+  const permittedFigureText = mappings.length
+    ? mappings.map(mapping => text(mapping?.evidence)).join(' ')
+    : résuméText;
+  const résuméFigures = new Set(figures(permittedFigureText).map(normalizeFigure));
   const missingFigures = [];
   const seenMissing = new Set();
   for (const figure of letterFigures) {
@@ -603,9 +684,11 @@ export function checkLogisticsContainment(plan = {}, paragraphs = []) {
 /** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
 export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '', careerData = '') {
   const checks = [
+    checkRoleThesis(plan),
     checkEvidenceGrounding(plan, evidence),
     checkNeedGrounding(needs, jobText, researchText),
     checkLogisticsGrounding(plan, careerData),
+    checkMappingNarrativeStructure(plan),
   ];
   const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
   if (mappings.length < 1) checks.push(result('plan-mappings', false, 'plan has no mappings'));
@@ -642,13 +725,17 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
 export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, researchText = '', companyName = '' } = {}) {
+  const plannedCompanyDetail = text(plan?.companyHook?.detail);
+  const companySpecificity = researchText && !plannedCompanyDetail
+    ? result('company-specificity', true, 'skipped: argument plan intentionally omitted a company-specific hook')
+    : checkCompanySpecificity(paragraphs, researchText, companyName, plannedCompanyDetail);
   return [
     checkRedundancy(paragraphs, evidence),
     checkGenericPhrases(paragraphs),
     checkExperienceInfinitiveGrammar(paragraphs),
-    checkCompanySpecificity(paragraphs, researchText, companyName),
+    companySpecificity,
     checkShape(plan, paragraphs),
-    checkFigureDiscipline(paragraphs, evidence),
+    checkFigureDiscipline(paragraphs, evidence, plan),
     checkLogisticsContainment(plan, paragraphs),
   ];
 }
@@ -665,7 +752,11 @@ export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '' 
     // separators in the paired cover-letter letterhead.
     contact: Array.isArray(identity.contact) ? identity.contact.map(text).filter(Boolean) : [],
     date: text(today),
-    recipient: company ? `Hiring Team\n${company}` : 'Hiring Team',
+    // The design system deliberately has no recipient address block. The
+    // company belongs in the generic salutation, while a named contact, when
+    // supplied by a future source, belongs in that salutation rather than a
+    // second piece of letterhead.
+    recipient: '',
     salutation: company ? `Dear ${company} Hiring Team,` : 'Dear Hiring Team,',
     closing: 'Sincerely,',
     signatureTitle: '',

@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { useModalStackCount } from '../components/modalStack';
 import { isTextEditingTarget } from '../utils/nativeTextUndo';
+import { matchesShortcut } from '../utils/keyboardShortcuts';
 
 export function useCanvasKeyboardShortcuts({
   placementMode, setPlacementMode, 
@@ -33,11 +34,7 @@ export function useCanvasKeyboardShortcuts({
 
       const isMatch = (binding) => {
         if (!binding) return false;
-        const matched = k === binding.key.toLowerCase() &&
-               !!e.metaKey === !!binding.meta &&
-               !!e.ctrlKey === !!binding.ctrl &&
-               !!e.altKey === !!binding.alt &&
-               !!e.shiftKey === !!binding.shift;
+        const matched = matchesShortcut(e, binding);
         if (matched) {
           EventLogger.log(`Shortcut triggered: ${binding.label || 'unknown'}`);
         }
@@ -75,6 +72,15 @@ export function useCanvasKeyboardShortcuts({
         e.preventDefault();
         EventLogger.log('Shortcut triggered: Paste');
         pasteNodes();
+        return;
+      }
+
+      // Search is configurable in Settings. Route it through a document event
+      // so SearchBar owns its local open/focus state while this single shortcut
+      // listener retains precedence, modal gating, and cross-platform matching.
+      if (isMatch(s.search)) {
+        e.preventDefault();
+        document.dispatchEvent(new CustomEvent('canvas-search-open'));
         return;
       }
 

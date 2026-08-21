@@ -1,7 +1,7 @@
 import { useCallback, useState, useRef, useEffect, useEffectEvent, useLayoutEffect } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
-import { runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
+import { persistenceContentFingerprint, runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { TIMINGS } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
@@ -40,6 +40,8 @@ export function useCanvasPersistence({
   const saveStateTimerRef = useRef(null);
   const loadTimerRef = useRef(null);
   const loadHideTimerRef = useRef(null);
+  const contentRevisionRef = useRef(0);
+  const loadRequestRef = useRef(0);
 
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -50,6 +52,7 @@ export function useCanvasPersistence({
     nodesRef.current = nodes;
     edgesRef.current = edges;
     drawingsRef.current = drawings;
+    contentRevisionRef.current += 1;
   }, [nodes, edges, drawings]);
 
   // Mirror currentFile into a ref so saveCanvas can read it without being recreated
@@ -67,9 +70,29 @@ export function useCanvasPersistence({
   const saveStateRef = useRef(saveState);
   useLayoutEffect(() => { saveStateRef.current = saveState; }, [saveState]);
 
+  // Keep the imperative lock and the rendered status in sync immediately.
+  // Waiting for the next layout effect leaves a same-tick window where a
+  // second Cmd+S (or auto-save) can start another write to the same file.
+  const setSaveStatus = useCallback((nextStatus) => {
+    saveStateRef.current = nextStatus;
+    setSaveState(nextStatus);
+  }, []);
+
   const saveCanvas = useCallback(async () => {
-    if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;
-    setSaveState('saving');
+    const saveStatus = saveStateRef.current;
+    if (!window.electronAPI
+        || saveStatus === 'saving'
+        || saveStatus === 'autosaving'
+        || isAnimatingRef?.current) return false;
+    // A previous success badge may still have a delayed reset pending. Let a
+    // new explicit save proceed, but cancel that stale feedback callback so it
+    // cannot flip this new in-flight write back to idle.
+    if (saveStateTimerRef.current) {
+      clearTimeout(saveStateTimerRef.current);
+      saveStateTimerRef.current = null;
+    }
+    setSaveStatus('saving');
+    let attemptedFilePath = currentFileRef.current;
     try {
       // Shared with the debounced auto-save in useCanvasInitialization (flush
       // any in-progress contenteditable edit, e.g. a text node being typed
@@ -79,40 +102,69 @@ export function useCanvasPersistence({
         flushStack,
         fallbackState: { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current },
       });
-      // Read currentFile via ref to avoid this callback being recreated on every file-path change
-      const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
+      // Capture both identities at the exact serialization boundary. If the
+      // user edits or switches workspaces while disk I/O is in flight, this
+      // completed write is real but it must not mark the newer live state clean.
+      const savedRevision = contentRevisionRef.current;
+      attemptedFilePath = currentFileRef.current;
+      const res = await window.electronAPI.saveWorkspace({ data, filePath: attemptedFilePath });
       if (res?.success && res.filePath) {
         if (!isMountedRef.current) return false;
-        setCurrentFile(res.filePath);
-        updateSetting?.('lastOpenedWorkspace', res.filePath);
+        const sameWorkspace = currentFileRef.current === attemptedFilePath;
+        const snapshotIsCurrent = sameWorkspace && contentRevisionRef.current === savedRevision;
+
+        // Save As still establishes the chosen path when edits landed while the
+        // dialog/write was open. Those later edits remain dirty and will be
+        // written by the next save instead of being silently declared saved.
+        if (sameWorkspace) {
+          currentFileRef.current = res.filePath;
+          setCurrentFile(res.filePath);
+          updateSetting?.('lastOpenedWorkspace', res.filePath);
+        }
+
+        if (!snapshotIsCurrent) {
+          setSaveStatus('idle');
+          addToast({
+            title: 'Earlier Snapshot Saved',
+            description: sameWorkspace
+              ? 'Newer canvas changes are still waiting to be saved.'
+              : 'The open workspace changed before this save completed.',
+            type: 'info',
+          });
+          return false;
+        }
+
         setHasUnsavedChanges(false);
-        setSaveState('saved');
+        setSaveStatus('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
         if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
-        saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, TIMINGS.FEEDBACK_MS);
+        saveStateTimerRef.current = setTimeout(() => {
+          saveStateTimerRef.current = null;
+          setSaveStatus('idle');
+        }, TIMINGS.FEEDBACK_MS);
         return true;
       } else if (res?.canceled) {
         // User dismissed the native save dialog — not an error.
         if (!isMountedRef.current) return false;
-        setSaveState('idle');
+        setSaveStatus('idle');
         return false;
       } else {
         if (!isMountedRef.current) return false;
         const reason = res?.error || 'Could not save the workspace.';
-        EventLogger.recordSaveError(reason, currentFileRef.current);
-        setSaveState('idle');
+        EventLogger.recordSaveError(reason, attemptedFilePath);
+        setSaveStatus('idle');
         addToast({ title: 'Save Failed', description: reason, type: 'error' });
         return false;
       }
     } catch (err) {
       const reason = err?.message || String(err) || 'An error occurred while saving.';
-      EventLogger.recordSaveError(reason, currentFileRef.current);
+      EventLogger.recordSaveError(reason, attemptedFilePath);
       if (!isMountedRef.current) return false;
-      setSaveState('idle');
+      setSaveStatus('idle');
       addToast({ title: 'Save Error', description: reason, type: 'error' });
       return false;
     }
-  }, [addToast, flushStack, isAnimatingRef, updateSetting, isMountedRef]); // currentFile read via ref — omitted intentionally
+  }, [addToast, flushStack, isAnimatingRef, updateSetting, isMountedRef, setSaveStatus]); // currentFile read via ref — omitted intentionally
 
   const handleSaveRequest = useEffectEvent(async () => saveCanvas());
 
@@ -167,11 +219,12 @@ export function useCanvasPersistence({
 
   const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
     if (!window.electronAPI || isAnimatingRef?.current) return;
+    const requestId = ++loadRequestRef.current;
     
     // Security/UX Guard: Prevent overwriting unsaved work
     if (!isSilent) {
       const canProceed = await handleUnsavedChanges('open a different canvas');
-      if (!canProceed) return;
+      if (!canProceed || requestId !== loadRequestRef.current) return;
     }
 
     try {
@@ -184,7 +237,7 @@ export function useCanvasPersistence({
         if (loadHideTimerRef.current) clearTimeout(loadHideTimerRef.current);
         loadHideTimerRef.current = setTimeout(() => {
           loadHideTimerRef.current = null;
-          if (!isMountedRef.current) return;
+          if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
           setLoadState({ active: false, progress: 0, label: '' });
         }, delayMs);
       };
@@ -202,7 +255,7 @@ export function useCanvasPersistence({
       // in flight — loadWorkspace involves a file read plus migrations and
       // can be slow. Bail before touching any state, matching saveCanvas's
       // guard on every post-await write below.
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
       setLoading(0.35, 'Reading workspace...');
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
@@ -214,7 +267,7 @@ export function useCanvasPersistence({
         // free. The on-disk file is untouched until the next save, so a bad
         // migration is recoverable by not saving.
         const fileVersion = res.data.schemaVersion ?? 0;
-        const inputNodes = res.data.nodes || [];
+        const inputNodes = Array.isArray(res.data.nodes) ? res.data.nodes : [];
         const relocatedNodes = runNodeMigrations(inputNodes, fileVersion);
         if (relocatedNodes !== inputNodes) {
           EventLogger.log(`[Migration] Healed canvas from schemaVersion ${fileVersion} → ${CURRENT_SCHEMA_VERSION}`);
@@ -238,10 +291,14 @@ export function useCanvasPersistence({
         // the auto-save debounce to land (which can be delayed indefinitely
         // when the pipeline is actively updating hub state). Pass the
         // sanitized nodes so edges to any dropped ephemeral are pruned too.
-        const cleanEdges = sanitizeEdgesForSave(res.data.edges || [], sanitizedNodes);
+        const inputEdges = Array.isArray(res.data.edges) ? res.data.edges : [];
+        const cleanEdges = sanitizeEdgesForSave(inputEdges, sanitizedNodes);
+        const loadedDrawings = Array.isArray(res.data.drawings) ? res.data.drawings : [];
+        const loadedFingerprint = persistenceContentFingerprint({ nodes: sanitizedNodes, edges: cleanEdges, drawings: loadedDrawings });
         setNodes(sanitizedNodes);
         setEdges(cleanEdges);
-        setDrawings(res.data.drawings || []);
+        setDrawings(loadedDrawings);
+        currentFileRef.current = res.filePath;
         setCurrentFile(res.filePath);
         updateSetting?.('lastOpenedWorkspace', res.filePath);
         setLoading(0.78, 'Rendering canvas...');
@@ -253,12 +310,23 @@ export function useCanvasPersistence({
         if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
         loadTimerRef.current = setTimeout(() => {
           loadTimerRef.current = null;
-          if (!isMountedRef.current) return;
-          setHasUnsavedChanges(false);
+          if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+          // ReactFlow may add runtime measurements during the first render;
+          // the persistence signature intentionally ignores those while deeply
+          // traversing nested canvases. Only clear the dirty flag if persisted
+          // content still matches what was loaded, so a quick user/background
+          // edit at any depth cannot be erased here.
+          const liveFingerprint = persistenceContentFingerprint({
+            nodes: nodesRef.current,
+            edges: edgesRef.current,
+            drawings: drawingsRef.current,
+          });
+          if (liveFingerprint === loadedFingerprint) setHasUnsavedChanges(false);
           const fitDuration = isSilent ? 0 : 800;
           requestAnimationFrame(() => {
+            if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
             requestAnimationFrame(() => {
-              if (!isMountedRef.current) return;
+              if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
               setLoading(0.92, fitDuration > 0 ? 'Fitting workspace...' : 'Framing workspace...');
               customFitView({ duration: fitDuration, reason: isSilent ? 'initial-load' : 'manual-load' });
               setLoading(1, 'Ready');
@@ -275,6 +343,7 @@ export function useCanvasPersistence({
         setLoadState({ active: false, progress: 0, label: '' });
       }
     } catch (err) {
+      if (requestId !== loadRequestRef.current) return;
       EventLogger.error('Failed to load canvas:', err);
       if (!isMountedRef.current) return;
       setLoadState({ active: false, progress: 0, label: '' });

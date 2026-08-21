@@ -47,6 +47,60 @@ const { BrowserWindow } = electronPkg;
 // timeout here actually diagnoses) don't share enough to be worth coupling.
 const RENDER_TIMEOUT_MS = 20_000;
 
+// The screen-preview `.page` box has a fixed minimum paper height, but it
+// expands when its contents overflow. Fit telemetry must compare text against
+// the fixed type area, never against that expanded box.
+export function fixedPageTypeAreaHeight(minPageHeightPx, paddingTopPx, paddingBottomPx) {
+  const minPageHeight = Number(minPageHeightPx);
+  const paddingTop = Number(paddingTopPx);
+  const paddingBottom = Number(paddingBottomPx);
+  if (!Number.isFinite(minPageHeight) || !Number.isFinite(paddingTop) || !Number.isFinite(paddingBottom)) return null;
+  const height = minPageHeight - paddingTop - paddingBottom;
+  return height > 0 ? height : null;
+}
+
+// Keep the browser-side probe self-contained and assemble it without a
+// JavaScript template literal. The previous template contained a backtick in
+// an inline comment; that closed the template early and made Chromium try to
+// invoke `.page` as a function before either document could be measured.
+export function pageTextMeasurementExpression() {
+  return [
+    '(function () {',
+    '  try {',
+    "    var page = document.querySelector('main.page');",
+    '    if (!page) return null;',
+    '    var pageStyle = getComputedStyle(page);',
+    "    var minPageHeight = parseFloat(pageStyle.minHeight || '0');",
+    "    var paddingTop = parseFloat(pageStyle.paddingTop || '0');",
+    "    var paddingBottom = parseFloat(pageStyle.paddingBottom || '0');",
+    '    var typeAreaHeight = minPageHeight - paddingTop - paddingBottom;',
+    '    if (!Number.isFinite(typeAreaHeight) || typeAreaHeight <= 0) return null;',
+    '    var top = Infinity;',
+    '    var bottom = -Infinity;',
+    '    var walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT, {',
+    '      acceptNode: function (node) {',
+    "        return String(node.nodeValue || '').trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;",
+    '      }',
+    '    });',
+    '    var node;',
+    '    while ((node = walker.nextNode())) {',
+    '      var range = document.createRange();',
+    '      range.selectNodeContents(node);',
+    '      Array.prototype.forEach.call(range.getClientRects(), function (rect) {',
+    '        if (!rect.height) return;',
+    '        top = Math.min(top, rect.top);',
+    '        bottom = Math.max(bottom, rect.bottom);',
+    '      });',
+    '    }',
+    '    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return null;',
+    '    return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight };',
+    '  } catch (_) {',
+    '    return null;',
+    '  }',
+    '})()',
+  ].join('\n');
+}
+
 function throwIfAborted(signal) {
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 }
@@ -119,7 +173,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
   try {
     tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-render-'));
     const tempPath = path.join(tempDir, `${crypto.randomUUID()}.html`);
-    await fs.promises.writeFile(tempPath, String(html || ''), 'utf8');
+    await fs.promises.writeFile(tempPath, String(html || ''), { encoding: 'utf8', mode: 0o600 });
     throwIfAborted(signal);
 
     win = new BrowserWindow({
@@ -127,6 +181,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
+        sandbox: true,
         // No preload — this is our own trusted, self-authored HTML (built by
         // resumeHtml.js from the model's markup + the design system's CSS),
         // not a page we need to script the way browserViewMonitor.js does
@@ -137,6 +192,14 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     throwIfAborted(signal);
 
     const wc = win.webContents;
+
+    // Generated application HTML contains model-authored markup and runs only
+    // so its own layout/tab scripts can prepare the print. Keep that content
+    // inside this disposable file: it must not navigate the hidden top-level
+    // window or launch an OS browser through target=_blank/window.open.
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+    wc.on('will-navigate', (event) => event.preventDefault());
+    wc.on('will-redirect', (event) => event.preventDefault());
 
     // did-finish-load AND document.fonts.ready — the design system's own
     // font-load check (resumeHtml.js's injected `ic-font-warning` banner)
@@ -219,32 +282,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     // the cover's screen page has the same token-driven type area, while print
     // drops its screen box and cannot report the available slack directly.
     const layout = await withTimeout(
-      wc.executeJavaScript(`(function () {
-        try {
-          var page = document.querySelector('main.page');
-          if (!page) return null;
-          var pageRect = page.getBoundingClientRect();
-          var pageStyle = getComputedStyle(page);
-          var typeAreaHeight = pageRect.height - parseFloat(pageStyle.paddingTop || '0') - parseFloat(pageStyle.paddingBottom || '0');
-          var top = Infinity;
-          var bottom = -Infinity;
-          var walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT, {
-            acceptNode: function (node) { return String(node.nodeValue || '').trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; }
-          });
-          var node;
-          while ((node = walker.nextNode())) {
-            var range = document.createRange();
-            range.selectNodeContents(node);
-            Array.prototype.forEach.call(range.getClientRects(), function (rect) {
-              if (!rect.height) return;
-              top = Math.min(top, rect.top);
-              bottom = Math.max(bottom, rect.bottom);
-            });
-          }
-          if (!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(typeAreaHeight) || typeAreaHeight <= 0) return null;
-          return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight };
-        } catch (_) { return null; }
-      })()`),
+      wc.executeJavaScript(pageTextMeasurementExpression()),
       RENDER_TIMEOUT_MS,
       'renderPdf: measure page text',
       signal,

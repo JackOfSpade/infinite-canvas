@@ -49,3 +49,22 @@ export function matchesQuery(node, q) {
       return false;
   }
 }
+
+/**
+ * Advance a one-based search-result cursor by `offset` with wraparound.
+ *
+ * `currentIndex === 0` means no result has been visited yet. In that state,
+ * moving forward starts at the first result while moving backward starts at
+ * the last. Keeping this edge case here avoids the easy-to-miss `-2` modulo
+ * bug that made the first Shift+Enter skip the final match.
+ */
+export function nextSearchMatchIndex(currentIndex, offset, matchCount) {
+  if (!Number.isInteger(matchCount) || matchCount <= 0) return 0;
+  const step = Number.isFinite(offset) ? Math.trunc(offset) : 0;
+  if (step === 0) return currentIndex > 0 ? Math.min(currentIndex, matchCount) : 0;
+  const currentZeroBased = currentIndex > 0
+    ? Math.min(currentIndex, matchCount) - 1
+    : (step < 0 ? 0 : -1);
+  const nextZeroBased = ((currentZeroBased + step) % matchCount + matchCount) % matchCount;
+  return nextZeroBased + 1;
+}
