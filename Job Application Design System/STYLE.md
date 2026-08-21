@@ -358,6 +358,33 @@ when the resume is parsed back into the database.
 Every role must include: title, company, dates. The summary line and
 location are optional but recommended.
 
+### 5.2a Role-row length budgets
+
+The role block's two left cells are the highest-frequency single-line
+rows on the page — 3–5 roles × 2 rows — and until 2026-08-21 neither had
+a published length. A `.role-title-line` that wraps costs one line *per
+role*, silently.
+
+| Row | Budget | Measured floor [M] |
+|-----|--------|--------------------|
+| `.role-title-line` (Title · Company) | **56 chars** | 60 |
+| `.role-summary` | **70 chars** | 75 |
+
+[M] Letter/default, the tightest of the four configs. Measured in
+`build/line-yield-check.html` by growing whole words over 8 shuffled
+orders of a low-breakpoint compound vocabulary and taking the tightest
+result; the published budget sits below that floor with margin.
+Enforced statically by `build/fit-estimate-test.js`.
+
+**`min-width: 0` is not the fix, and must not be added.** `.meta-row` is
+`grid-template-columns: 1fr auto` with `.role-dates`/`.role-location`
+set `white-space: nowrap`, which looks like the classic min-content
+overflow trap. It is not: the `1fr` track measures ~518px against a
+~651px content width, so roughly 400px of slack means the min-content
+floor never binds. A/B measured 2026-08-21 — the title budget is
+identical (60–70) with and without `min-width: 0`. The missing budget
+was the bug, not the grid.
+
 ### 5.3 Bullet conventions
 
 - Bullet glyph is **always `•` (U+2022)**, applied via the
@@ -674,7 +701,10 @@ a 1.45 in right column. They stack below the description instead.
 
 The block is a two-column `dl` (`--col-meta-w` label + `1fr` keywords),
 so each `dd` gets ~5.17in of measure. **Budget: 3 rows, one line each,
-16–20 terms.** The shipped `resume.html` sample is exactly that — 3
+16–20 terms, and no `dd` over 64 characters** (measured one-line floor
+70 [M], Letter/default — `build/line-yield-check.html`). Terms are the
+authoring unit; the character budget is what `build/fit-estimate-test.js`
+can actually enforce. The shipped `resume.html` sample is exactly that — 3
 rows, 16 terms (Languages 5, Data & Storage 5, Infrastructure 6). Rows
 are the unit to count; a fourth row is already buying page space with
 the weakest content on the page.
@@ -767,10 +797,11 @@ Rules:
   &amp; storage infrastructure", "driving growth through data" — all
   forbidden. The subtitle states what the candidate *is* and what
   they *completed*; the bullets carry the specialisation as evidence.
-- **One line.** Keep it under ~70 characters so it sets on one line
-  at 11pt inside the type area; abbreviate the degree (`B.S.`,
-  `M.S.`, `Ph.D.`) rather than the institution. `text-wrap: pretty`
-  handles the rare unavoidable wrap.
+- **One line. Budget 78 characters** (measured one-line floor 84 [M],
+  Letter/default — `build/line-yield-check.html`; enforced by
+  `build/fit-estimate-test.js`). An earlier "~70" here was asserted, not
+  measured. Abbreviate the degree (`B.S.`, `M.S.`, `Ph.D.`) rather than
+  the institution. `text-wrap: pretty` handles the rare unavoidable wrap.
 - Certifications, coursework, bootcamps, honours, GPA, and graduation
   dates do **not** appear anywhere. "Highest completed degree" means
   completed; an in-progress degree is not rendered.

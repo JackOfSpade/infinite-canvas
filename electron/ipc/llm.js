@@ -713,7 +713,7 @@ export async function cancelLLMTextBatch(batchId) {
  * responseSchema — which is exactly why this path is free-text.
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  const { signal, task, hints, grounding, cachedPrefix } = normalizeOpts(opts);
+  const { signal, task, hints, grounding, cachedPrefix, excludeModels } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
@@ -734,14 +734,14 @@ export async function callLLMRaw(prompt, opts = {}) {
     // Gemini: prepend the cacheable prefix into the prompt (implicit prefix
     // caching picks up the repeated content); mirrors callLLMText.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
-    return await callGeminiTextRaw(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta });
+    return await callGeminiTextRaw(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta, excludeModels });
   } catch (err) {
     throw enhanceLLMError(err, provider);
   }
 }
 
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
-  const { signal, task, hints, responseSchema } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, excludeModels } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
@@ -760,7 +760,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
       if (meta) meta.model = model;
       return parseAiJson(raw);
     }
-    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
+    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta, excludeModels });
   } catch (err) {
     throw enhanceLLMError(err, provider);
   }
@@ -775,7 +775,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   if (isSensitivePath(path.resolve(String(filePath || '')))) {
     throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
   }
-  const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels } = normalizeOpts(opts);
   // Word docs (.docx / legacy .doc) can't be sent as inline data — Gemini 400s on
   // the OOXML MIME and Claude reads the ZIP bytes as garbage. Extract the text via
   // macOS textutil and route through the normal TEXT path, which every provider
@@ -784,7 +784,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   if (isWordDoc(filePath)) {
     const text = await extractWordText(filePath);
     return callLLMText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${text}`,
-      { signal, task, hints, responseSchema, cachedPrefix });
+      { signal, task, hints, responseSchema, cachedPrefix, excludeModels });
   }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
@@ -800,7 +800,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
       const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       return parseAiJson(raw);
     }
-    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task });
+    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, excludeModels });
   } catch (err) {
     throw enhanceLLMError(err, provider);
   }
@@ -883,10 +883,13 @@ function enhanceLLMError(error, provider) {
   // structured status (429) directly in addition to message substrings — relying
   // on the message alone is fragile if a provider changes its error-string format.
   const msg = error.message?.toLowerCase() || '';
+  // \b429\b (not a substring test) so digit runs like "4291 visible tokens"
+  // can't masquerade as an HTTP 429 — gemini.js's hasRateLimit uses the same
+  // boundary match; keep the two in lockstep.
   if (
     error.status === 429 ||
     msg.includes('rate limit') ||
-    msg.includes('429') ||
+    /\b429\b/.test(msg) ||
     msg.includes('insufficient funds') ||
     msg.includes('quota')
   ) {

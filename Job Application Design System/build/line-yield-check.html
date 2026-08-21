@@ -1,0 +1,424 @@
+<!doctype html>
+<!--
+  build/line-yield-check.html — the renderer derivation behind the
+  LINE-YIELD model (STYLE.md §6.2) and behind every single-line character
+  budget the system publishes (§5.2a role rows, §5.4 bullets, §5.6 skills,
+  §5.8 tagline).
+
+  Why this file exists: the system publishes budgets in CHARACTERS and
+  TERMS, but its automated consumer (a host that renders, measures, and
+  hands back pixels) has no way to act on them. The bridge is one number
+  per render config — the BASELINE — plus the type area expressed in
+  baselines. Everything else is a line count. This fixture measures all of
+  it in a real layout engine across all four supported configs.
+
+  METHOD. Budgets are derived by growing a WHOLE-WORD string one word at a
+  time until it exceeds the target line count, then recording the visible
+  length of the longest string that still fit. That is repeated over N
+  shuffles of the vocabulary, and the spread is reported as min / median /
+  max — word-mix variance is real and the published budget is set below
+  the MINIMUM. (A character-truncating bisection is unsound here: cutting
+  mid-word makes the fitted length non-monotone in n, so a bisection
+  converges on a word-boundary plateau and under-reports.)
+
+  RIG WIDTH. `.page` renders at its real --page-w with NO max-width clamp.
+  An earlier fixture clamped its rig to `max-width:640px` AND cancelled the
+  page padding with `padding:0` on the same ID selector, giving a 625.65px
+  bullet measure against the real 651.65px — 3.99% narrow (measured
+  2026-08-21; the same figure appears in bullet-length-check.html and
+  annotation-budget-test.js). That narrow rig, combined with growing a
+  mid-word-truncated string, is where the retracted "~195-206 characters"
+  ceiling came from. Do not add a max-width or a padding override here.
+
+  Open in Chrome. Results print to the page; the full JSON logs to console
+  in chunks.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>line yield + single-line budgets — renderer derivation</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../resume.css">
+<style>
+/* CRITICAL: this fixture's own chrome must NOT style `body`, or its font
+   cascades into the measured page and every number below is measured in
+   the WRONG family and size. Report typography is scoped to the report
+   elements only; #rig and the mounted sample inherit from `html`, which is
+   where the system's own tokens live. */
+body{background:#1a1815;padding:24px}
+#out,#status{color:#e8e3d8;font:13px/1.55 ui-monospace,Menlo,monospace}
+#out table{border-collapse:collapse;margin:0 0 18px;font-size:12.5px}
+#out th,#out td{border:1px solid #3a352e;padding:4px 9px;text-align:right}
+#out th{color:#B6AFA2;font-weight:600}
+#out th:first-child,#out td:first-child{text-align:left}
+#out caption{text-align:left;color:#B6AFA2;padding:10px 0 6px;font-weight:600}
+#rig,#sample-host{background:var(--bg);color:var(--ink-body);position:absolute;left:-9999px;top:0}
+#status{padding:9px 13px;border-radius:5px;background:#2a2620;margin-bottom:16px}
+#status.bad{background:#3a1517;color:#FF8A80}#status.ok{background:#16301d;color:#7CCB8E}
+#out table.bad caption{color:#FF8A80}#out table.ok caption{color:#7CCB8E}
+</style>
+</head>
+<body>
+<div id="status">measuring…</div>
+<div id="out"></div>
+
+<!-- Measurement rig: the real page structure at the real page width.
+     Off-canvas rather than display:none, so layout is actually performed. -->
+<main class="page" id="rig" role="document">
+<header class="resume-header"><h1 class="name" id="m-name">Anya R. Castellanos</h1>
+<p class="tagline" id="m-tagline"></p>
+<p class="contact"><a href="mailto:a@b.dev">a@b.dev</a></p></header>
+<section class="section"><div class="section-head"><h2>Experience</h2><span class="rule"></span></div>
+<article class="role">
+<div class="role-header meta-row" id="m-hdr"><p class="role-title-line" id="m-title"></p>
+<p class="role-dates" id="m-dates"><time datetime="2022-03">Mar 2022</time> – <time>Present</time></p></div>
+<div class="role-meta meta-row"><p class="role-summary" id="m-summary"></p>
+<p class="role-location">San Francisco, CA</p></div>
+<ul class="highlights"><li id="m-b1"></li><li id="m-b2"></li></ul>
+</article></section>
+<section class="section" id="m-sys"><div class="section-head"><h2>Selected Systems</h2><span class="rule"></span></div>
+<div class="subsection-head" id="m-subhead"><h3>Open Source</h3><span class="rule"></span></div>
+<div class="project" id="m-proj"><p><span class="project-name">shardmap</span> <span class="project-desc">Consistent-hash range map with tenant-aware rebalancing.</span>
+<span class="project-metrics">19 PB<span class="sep sep-loose">·</span>1.4M QPS</span></p></div>
+<div class="project" id="m-proj2"><p><span class="project-name">arrow-rs</span> <span class="project-desc">Columnar interchange.</span></p></div>
+</section>
+<section class="section"><div class="section-head"><h2>Skills</h2><span class="rule"></span></div>
+<dl class="skills"><dt class="nowrap">Data &amp; Storage</dt><dd id="m-dd"></dd></dl></section>
+</main>
+
+<script>
+const out = document.getElementById('out'), status = document.getElementById('status');
+const TRIALS = 8;
+
+/* Long, low-breakpoint technical words: the TIGHT bound. */
+const WORST = ["Redesigned","multi-region","replication","architecture","distributed",
+  "consistent-hashing","infrastructure","approximately","concurrent","transactions",
+  "engineering","organization","responsible","implementation","observability",
+  "instrumentation","throughout","production","environments","maintaining",
+  "backward-compatible","interfaces","orchestration","provisioning"];
+/* Realistic résumé-bullet mix: short connectors, units, figures. */
+const MIXED = ["Designed","the","sharding","strategy","for","write","path","at","1.4M","QPS",
+  "and","p99","38 ms","across","19 PB","replaced","prior","scheme","after","it","misbalanced",
+  "under","tenant","skew","while","cutting","cost","by","a","third","in","two","quarters"];
+/* Role-title vocabulary: how a title line is actually built. */
+const TITLEWORDS = ["Principal","Software","Engineer","Distributed","Systems","Platform",
+  "Infrastructure","Tessera","Laboratories","International","Technologies"];
+
+function xorshift(seed){ let s = seed>>>0 || 1;
+  return () => { s^=s<<13; s>>>=0; s^=s>>>17; s^=s<<5; s>>>=0; return s/4294967296; }; }
+function shuffled(a, rnd){ a = a.slice();
+  for (let i=a.length-1;i>0;i--){ const j=Math.floor(rnd()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; }
+  return a; }
+
+/* Line count by clustering the vertical centres of a Range's client rects.
+   Inline children (`<code>` at 0.92em, `<strong>`, `.nowrap`) each emit
+   their own rect on the SAME line, so raw distinct-tops overcounts.
+   height / line-height is not usable either: a stretched grid item
+   (`.skills dd`) reports its ROW's height, not its own. */
+function lines(el){
+  const lh = parseFloat(getComputedStyle(el).lineHeight) || 12;
+  const r = document.createRange(); r.selectNodeContents(el);
+  const mids = [];
+  for (const rect of r.getClientRects()) {
+    if (rect.width < 0.5 || rect.height < 0.5) continue;
+    mids.push(rect.top + rect.height / 2);
+  }
+  if (!mids.length) return 0;
+  mids.sort((a,b) => a-b);
+  let n = 1;
+  for (let i=1;i<mids.length;i++) if (mids[i]-mids[i-1] > lh*0.5) n++;
+  return n;
+}
+
+/* Grow whole words until the target line count is exceeded; record the
+   visible length of the longest string that still fit. Repeated over
+   TRIALS shuffles so word-mix variance is measured, not hidden. */
+function ceiling(el, vocab, maxLines){
+  const rnd = xorshift(20260821), lens = [];
+  for (let t=0;t<TRIALS;t++){
+    const words = shuffled(vocab, rnd);
+    let s = '', best = 0, i = 0, guard = 0;
+    while (guard++ < 300) {
+      const next = s ? s + ' ' + words[i % words.length] : words[i % words.length];
+      el.textContent = next; void el.offsetHeight;
+      if (lines(el) > maxLines) break;
+      best = next.length; s = next; i++;
+    }
+    lens.push(best);
+  }
+  el.textContent = '';
+  lens.sort((a,b)=>a-b);
+  return { min: lens[0], med: lens[lens.length>>1], max: lens[lens.length-1] };
+}
+const px = v => Math.round(v*10)/10;
+function tokenPx(expr){
+  const p = document.createElement('div');
+  p.style.cssText = 'position:absolute;visibility:hidden;height:'+expr;
+  document.body.appendChild(p);
+  const h = p.getBoundingClientRect().height; p.remove(); return h;
+}
+function table(caption, head, rows, cls){
+  const t = document.createElement('table');
+  const cap = document.createElement('caption'); cap.textContent = caption; t.appendChild(cap);
+  const tr = document.createElement('tr');
+  head.forEach(h => { const th=document.createElement('th'); th.textContent=h; tr.appendChild(th); });
+  t.appendChild(tr);
+  rows.forEach(r => { const x=document.createElement('tr');
+    r.forEach(c => { const td=document.createElement('td'); td.textContent=c; x.appendChild(td); });
+    t.appendChild(x); });
+  if (cls) t.className = cls;
+  out.appendChild(t);
+}
+const span = r => r.min + '–' + r.max + ' (med ' + r.med + ')';
+
+const CONFIGS = [
+  { name:'Letter / default', page:null, density:null },
+  { name:'Letter / compact', page:null, density:'compact' },
+  { name:'A4 / default',     page:'a4', density:null },
+  { name:'A4 / compact',     page:'a4', density:'compact' }
+];
+function applyConfig(c){
+  const r = document.documentElement;
+  c.page ? r.setAttribute('data-page', c.page) : r.removeAttribute('data-page');
+  c.density ? r.setAttribute('data-density', c.density) : r.removeAttribute('data-density');
+}
+
+async function run(){
+  await document.fonts.ready;
+
+  /* Font provenance. Every budget is only meaningful if the real CDN
+     families loaded: a fallback has different advance widths and would
+     silently move every number below. fonts.check() needs sample text —
+     Google's CSS2 API splits each family into unicode-range subsets, so a
+     text-less check reports false for subsets that were never requested.
+     The width probes are the decisive evidence: a fallback would measure
+     EXACTLY Arial or Helvetica Neue. */
+  const SAMPLE = 'Designed the sharding strategy for the timeseries write path';
+  function widthOf(family, weight, size){
+    const s = document.createElement('span');
+    s.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:'+weight+' '+size+'/1 '+family;
+    s.textContent = SAMPLE; document.body.appendChild(s);
+    const w = s.getBoundingClientRect().width; s.remove();
+    return Math.round(w*100)/100;
+  }
+  const fonts = {
+    inter_check:  document.fonts.check('400 10.25pt Inter', SAMPLE),
+    serif_check:  document.fonts.check('600 28pt "Source Serif 4"', 'Anya R. Castellanos'),
+    mono_check:   document.fonts.check('400 9pt "IBM Plex Mono"', 'v8::SnapshotCreator'),
+    w_inter: widthOf('Inter', 400, '10.25pt'),
+    w_arial: widthOf('Arial', 400, '10.25pt'),
+    w_helv:  widthOf('"Helvetica Neue"', 400, '10.25pt'),
+    viewportW: window.innerWidth,
+    nameFontSize: getComputedStyle(document.getElementById('m-name')).fontSize
+  };
+  fonts.inter_is_real = Math.abs(fonts.w_inter - fonts.w_arial) > 0.5 &&
+                        Math.abs(fonts.w_inter - fonts.w_helv) > 0.5;
+
+  const results = { _fonts: fonts }, geometry = [], budgets = [], b2 = [];
+
+  for (const cfg of CONFIGS) {
+    applyConfig(cfg);
+    void document.getElementById('rig').offsetHeight;
+
+    const pageH = tokenPx('var(--page-h)'), mTop = tokenPx('var(--margin-top)'),
+          mBot = tokenPx('var(--margin-bot)'), baseline = tokenPx('calc(var(--fs-body) * var(--lh-body))'),
+          typeArea = pageH - mTop - mBot,
+          contentW = document.getElementById('rig').getBoundingClientRect().width - 2*tokenPx('var(--margin-side)');
+
+    const b = {
+      bullet_1line_worst: ceiling(document.getElementById('m-b1'), WORST, 1),
+      bullet_1line_mixed: ceiling(document.getElementById('m-b1'), MIXED, 1),
+      bullet_2line_worst: ceiling(document.getElementById('m-b1'), WORST, 2),
+      bullet_2line_mixed: ceiling(document.getElementById('m-b1'), MIXED, 2),
+      title_1line:        ceiling(document.getElementById('m-title'), TITLEWORDS, 1),
+      title_1line_worst:  ceiling(document.getElementById('m-title'), WORST, 1),
+      summary_1line:      ceiling(document.getElementById('m-summary'), WORST, 1),
+      tagline_1line:      ceiling(document.getElementById('m-tagline'), WORST, 1),
+      skills_dd_1line:    ceiling(document.getElementById('m-dd'), WORST, 1)
+    };
+
+    /* Is `min-width: 0` on the .meta-row 1fr track the fix for a long
+       title line, as it would be in a flex/overflow bug? A/B it. */
+    const titleEl = document.getElementById('m-title');
+    titleEl.style.minWidth = '0';
+    const titleWithMinWidth0 = ceiling(titleEl, TITLEWORDS, 1);
+    titleEl.style.minWidth = '';
+    const leftTrackPx = px(document.getElementById('m-hdr').getBoundingClientRect().width -
+      document.getElementById('m-dates').getBoundingClientRect().width - tokenPx('var(--col-gap)'));
+
+    /* Components the shipped sample does not contain, measured in the rig
+       so the cost model covers every documented block. */
+    const rigCost = (id) => {
+      const el = document.getElementById(id), c = getComputedStyle(el);
+      return +((el.getBoundingClientRect().height + (parseFloat(c.marginTop)||0) +
+        (parseFloat(c.marginBottom)||0)) / baseline).toFixed(3);
+    };
+    const extra = { subsectionHead: rigCost('m-subhead'), project2line: rigCost('m-proj'),
+                    project1line: rigCost('m-proj2') };
+
+    results[cfg.name] = {
+      extra: extra,
+      pageHeightPx: px(pageH), typeAreaPx: px(typeArea), baselinePx: px(baseline),
+      linesPerPage: +(typeArea/baseline).toFixed(2), linesPerPageFloor: Math.floor(typeArea/baseline),
+      contentWidthPx: px(contentW), metaRowLeftTrackPx: leftTrackPx,
+      budgets: b, title_1line_with_min_width_0: titleWithMinWidth0
+    };
+    geometry.push([cfg.name, px(pageH), px(typeArea), px(baseline),
+      (typeArea/baseline).toFixed(2), Math.floor(typeArea/baseline), px(contentW), leftTrackPx]);
+    budgets.push([cfg.name, span(b.bullet_1line_worst), span(b.bullet_1line_mixed),
+      span(b.bullet_2line_worst), span(b.bullet_2line_mixed)]);
+    b2.push([cfg.name, span(b.title_1line), span(b.title_1line_worst), span(titleWithMinWidth0),
+      span(b.summary_1line), span(b.tagline_1line), span(b.skills_dd_1line)]);
+  }
+  applyConfig(CONFIGS[0]);
+
+  /* ---- the shipped sample, measured in every config ---- */
+  const samples = {};
+  let sample = null;
+  /* Chrome refuses fetch() on file:, and this line sits before every table()
+     call and outside any try — so opening the fixture the documented way
+     produced "CRASHED: Failed to fetch" and ZERO tables. The four tables that
+     need no network (font provenance, page geometry, bullet budgets,
+     single-line row budgets) are exactly the ones STYLE.md §5.2a/§5.6/§5.8 and
+     fit-estimate-test.js cite, so they must survive. Serve over http (any
+     static server) to also get the shipped-sample tables. */
+  let srcHtml = null;
+  try {
+    srcHtml = await (await fetch('../resume.html')).text();
+  } catch (fetchError) {
+    console.warn('resume.html could not be fetched (' + fetchError.message +
+      '). Serve this fixture over http:// to include the shipped-sample tables.');
+  }
+  for (const cfg of (srcHtml ? CONFIGS : [])) {
+  applyConfig(cfg);
+  try {
+    const doc = new DOMParser().parseFromString(srcHtml, 'text/html');
+    const page = doc.querySelector('main.page');
+    const host = document.createElement('div');
+    host.id = 'sample-host';
+    host.appendChild(page); document.body.appendChild(host);
+    await document.fonts.ready; void page.offsetHeight;
+
+    const cs = getComputedStyle(page);
+    const padT = parseFloat(cs.paddingTop), padB = parseFloat(cs.paddingBottom),
+          pageH = parseFloat(cs.minHeight), typeArea = pageH - padT - padB,
+          baseline = tokenPx('calc(var(--fs-body) * var(--lh-body))');
+    const pr = page.getBoundingClientRect(),
+          first = page.firstElementChild.getBoundingClientRect(),
+          last = page.lastElementChild.getBoundingClientRect();
+    const fixtureNum = (last.bottom - pr.top) + padB, inkSpan = last.bottom - first.top;
+
+    const rows = [];
+    const probe = (sel, label) => page.querySelectorAll(sel).forEach((el, i) => {
+      const t = el.textContent.replace(/\s+/g,' ').trim();
+      rows.push([label+' #'+(i+1), t.length, lines(el), t.slice(0,40)]);
+    });
+    probe('.tagline','tagline'); probe('.role-title-line','role-title-line');
+    probe('.role-summary','role-summary'); probe('.highlights li','bullet');
+    probe('.skills dd','skills dd');
+
+    /* Per-element LINE COST: (own height + own bottom margin) / baseline,
+       plus leading margin where the block owns one. This is the table the
+       static fit estimator (build/fit-estimate-test.js) is built from, so
+       it has to be measured, not assumed. */
+    const costs = [];
+    const costOf = (sel, label) => page.querySelectorAll(sel).forEach((el, i) => {
+      const c = getComputedStyle(el);
+      const own = el.getBoundingClientRect().height;
+      const mt = parseFloat(c.marginTop) || 0, mb = parseFloat(c.marginBottom) || 0;
+      costs.push([label + (i ? '#' + (i+1) : ''),
+        +(own/baseline).toFixed(3), +(mt/baseline).toFixed(3), +(mb/baseline).toFixed(3),
+        +((own+mt+mb)/baseline).toFixed(3)]);
+    });
+    costOf('.resume-header','header'); costOf('.resume-header .name','name');
+    costOf('.resume-header .tagline','tagline'); costOf('.resume-header .contact','contact');
+    costOf('.section','section'); costOf('.section-head','section-head');
+    costOf('.role','role'); costOf('.role-header','role-header');
+    costOf('.role-meta','role-meta'); costOf('.highlights','highlights');
+    costOf('.highlights li','li'); costOf('.skills','skills-dl');
+
+    sample = {
+      typeAreaPx: px(typeArea), baselinePx: px(baseline), inkSpanPx: px(inkSpan),
+      util_ink_over_typeArea: +(inkSpan/typeArea*100).toFixed(1),
+      util_fixture_over_pageH: +(fixtureNum/pageH*100).toFixed(1),
+      util_fixture_on_empty_page: +((padT+padB)/pageH*100).toFixed(1),
+      inkSpanLines: +(inkSpan/baseline).toFixed(2), typeAreaLines: +(typeArea/baseline).toFixed(2),
+      rows: rows, costs: costs
+    };
+    samples[cfg.name] = sample;
+    host.remove();
+  } catch (e) { sample = { error: e.message }; samples[cfg.name] = sample; }
+  }
+  applyConfig(CONFIGS[0]);
+  sample = samples['Letter / default'];
+
+  table('Font provenance — every budget below depends on this', ['probe','value'],
+    Object.keys(fonts).map(k => [k, String(fonts[k])]), fonts.inter_is_real ? 'ok' : 'bad');
+  table('Page geometry and line yield, per render config',
+    ['config','page h px','type area px','baseline px','lines/page','floor','content w px','meta-row 1fr px'], geometry);
+  table('Bullet budgets — longest whole-word string that fits, min–max over ' + TRIALS + ' word orders',
+    ['config','1 line (worst vocab)','1 line (mixed vocab)','≤2 lines (worst)','≤2 lines (mixed)'], budgets);
+  table('Single-line row budgets — same method',
+    ['config','.role-title-line','…worst vocab','…+min-width:0','.role-summary','.tagline','skills dd'], b2);
+  if (sample && !sample.error) {
+    table('Shipped resume.html — the two utilization formulas', ['metric','value'], [
+      ['type area px', sample.typeAreaPx], ['baseline px', sample.baselinePx],
+      ['type area in lines', sample.typeAreaLines],
+      ['ink span px (first ink → last ink)', sample.inkSpanPx],
+      ['ink span in lines', sample.inkSpanLines],
+      ['CANONICAL — inkSpan / typeArea', sample.util_ink_over_typeArea + '%'],
+      ['old fixture — (last.bottom − page.top + padB) / page-h', sample.util_fixture_over_pageH + '%'],
+      ['old fixture formula on an EMPTY page', sample.util_fixture_on_empty_page + '%']
+    ]);
+    table('Shipped resume.html — every real row: visible chars vs rendered lines',
+      ['row','chars','lines','text'], sample.rows);
+    table('Shipped resume.html — per-element LINE COST in baselines',
+      ['element','own','margin-top','margin-bottom','total'], sample.costs);
+  }
+
+  status.textContent = 'done — full JSON in console';
+  /* Terse, so no console truncates a chunk. */
+  const r = v => v.min + '-' + v.max;
+  const geoLine = CONFIGS.map(c => { const x = results[c.name];
+    return [c.name, x.typeAreaPx, x.baselinePx, x.linesPerPage, x.contentWidthPx, x.metaRowLeftTrackPx].join(','); });
+  const budLine = CONFIGS.map(c => { const x = results[c.name], b = x.budgets;
+    return [c.name, r(b.bullet_1line_worst), r(b.bullet_1line_mixed), r(b.bullet_2line_worst),
+      r(b.bullet_2line_mixed), r(b.title_1line), r(x.title_1line_with_min_width_0),
+      r(b.summary_1line), r(b.tagline_1line), r(b.skills_dd_1line)].join(','); });
+  const emit = (tag, arr) => arr.forEach((s, i) => console.log(tag + i + ' ' + s));
+  console.log('FONTS ' + [fonts.inter_is_real, fonts.w_inter, fonts.w_arial, fonts.viewportW, fonts.nameFontSize].join(','));
+  console.log('GEOHDR config,typeAreaPx,baselinePx,linesPerPage,contentWpx,metaLeftTrackPx');
+  emit('GEO', geoLine);
+  console.log('BUDHDR config,b1worst,b1mixed,b2worst,b2mixed,title,title+mw0,summary,tagline,skillsdd');
+  emit('BUD', budLine);
+  emit('XTRA', CONFIGS.map(c => { const x = results[c.name].extra;
+    return c.name + ' subsectionHead=' + x.subsectionHead + ' project(2line)=' + x.project2line +
+      ' project(1line)=' + x.project1line; }));
+  if (sample && !sample.error) {
+    console.log('SAMPLE ' + [sample.typeAreaPx, sample.baselinePx, sample.inkSpanPx,
+      sample.util_ink_over_typeArea, sample.util_fixture_over_pageH, sample.util_fixture_on_empty_page,
+      sample.inkSpanLines, sample.typeAreaLines].join(','));
+    emit('ROW', sample.rows.map(x => x.slice(0,3).join(',')));
+    /* Per-config block costs: only the totals, keyed by element, so the
+       estimator's table can be config-aware. */
+    CONFIGS.forEach((c, ci) => {
+      const s = samples[c.name];
+      if (!s || s.error) return;
+      console.log('CFG' + ci + ' ' + c.name + ' util=' + s.util_ink_over_typeArea +
+        ' inkLines=' + s.inkSpanLines + ' capLines=' + s.typeAreaLines +
+        ' bulletLines=' + s.rows.filter(r => /^bullet/.test(r[0])).map(r => r[2]).join(''));
+      const keep = ['header','name','tagline','contact','section-head','role-header','role-meta','li','skills-dl','role','section#2'];
+      const picked = s.costs.filter(x => keep.indexOf(x[0]) !== -1);
+      console.log('CST' + ci + ' ' + picked.map(x => x[0] + '=' + x[4]).join(' '));
+      console.log('GAP' + ci + ' roleGap=' + (s.costs.filter(x=>x[0]==='role')[0]||[])[3] +
+        ' liGap=' + (s.costs.filter(x=>x[0]==='li')[0]||[])[3] +
+        ' secGap=' + (s.costs.filter(x=>x[0]==='section#2')[0]||[])[2] +
+        ' headGap=' + (s.costs.filter(x=>x[0]==='header')[0]||[])[3] +
+        ' shGap=' + (s.costs.filter(x=>x[0]==='section-head')[0]||[])[3]);
+    });
+  }
+}
+run().catch(e => { status.textContent = 'CRASHED: '+e.message; status.className='bad'; console.error(e); });
+</script>
+</body>
+</html>

@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } fr
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims, getNodesBounds } from '../utils/constants';
 
-import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
+import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements, collectNodesDeep } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 
@@ -232,6 +232,31 @@ export function useCanvasNavigation({
   }, []);
 
   /**
+   * Read-only global node listing: the active level first (freshest), then
+   * each navigation-stack level from deepest to root. Nested group contents
+   * are included. Duplicate ids keep their first (freshest) occurrence — a
+   * stack level's embedded copy of the branch currently being edited is stale
+   * by design and must not shadow the live active-level node. Unlike
+   * flushStack this never clones, so it is cheap enough for a poll tick;
+   * callers must treat the result as read-only.
+   */
+  const enumerateAllNodes = useCallback(() => {
+    const seen = new Set();
+    const out = [];
+    collectNodesDeep(nodesRef.current, out, seen);
+    const stack = stackRef.current;
+    // Each stack entry's `nodeId` is the group the user dived INTO at that
+    // level — its embedded canvasData is a snapshot from dive-in time, and the
+    // live contents are the next level (or the active arrays). Descending into
+    // it would resurrect ghosts of nodes edited or deleted since (e.g. a
+    // dismissed job card driven to a full import). List the group node itself,
+    // never its stale embedded branch.
+    const divedInto = new Set(stack.map((level) => level?.nodeId).filter(Boolean));
+    for (let i = stack.length - 1; i >= 0; i--) collectNodesDeep(stack[i]?.nodes, out, seen, divedInto);
+    return out;
+  }, []);
+
+  /**
    * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
   const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
@@ -391,6 +416,7 @@ export function useCanvasNavigation({
     diveOut,
     jumpTo,
     flushStack,
+    enumerateAllNodes,
     extractToParent: extractToLevel,
     updateNodeDataGlobally,
     addElementsGlobally,
@@ -401,7 +427,7 @@ export function useCanvasNavigation({
     animPhase,
     stateSwapRef,
   }), [
-    diveIn, diveOut, jumpTo, flushStack, extractToLevel,
+    diveIn, diveOut, jumpTo, flushStack, enumerateAllNodes, extractToLevel,
     updateNodeDataGlobally, addElementsGlobally, resetStack,
     breadcrumbs, depth, isAnimating, animPhase, stateSwapRef,
   ]);

@@ -29,7 +29,15 @@
   .pass { color:#7CCB8E; } .fail { color:#FF8A80; } .hdr { color:#B6AFA2; margin-top:14px; }
   #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
   #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
-  #rig { background: var(--bg); color: var(--ink-body); padding:0; margin-bottom:18px; max-width:640px; }
+  /* The rig MUST render at the real page width with the real .page padding.
+     Two earlier bugs here invalidated every budget derived from this file:
+     `max-width:640px` clamped the border box below the real 816px page, and
+     `padding:0` (an ID selector, so it beat .page) removed the side margins
+     the shipped document actually has. Measured 2026-08-21: the clamped rig
+     gave a 625.65px bullet measure against the real 651.65px — 3.99% narrow,
+     which is where the retracted "~195-206 characters" ceiling came from.
+     Do not reintroduce either declaration. */
+  #rig { background: var(--bg); color: var(--ink-body); margin-bottom:18px; }
 </style>
 </head>
 <body>

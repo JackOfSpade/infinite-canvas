@@ -19,6 +19,7 @@ export function useIssueReporter({
   navigationDepth,
   snapToGrid,
   addToast,
+  enumerateAllNodes,
 }) {
   const { getViewport } = useReactFlow();
   const isMountedRef = useIsMountedRef();
@@ -193,6 +194,23 @@ export function useIssueReporter({
       });
       const nodeComponentStates = EventLogger.getNodeStates();
 
+      // Local AI job state lives on job cards, and the fallback manager drives
+      // cards the active React Flow arrays cannot see (collapsed groups,
+      // parent navigation levels). Collect it from the GLOBAL node graph as
+      // its own payload field so it (a) covers every card the manager acts on
+      // and (b) survives filter codes that drop the `nodes` section — the
+      // HANDOFF lens excludes `nodes` yet exists precisely for this state.
+      const allNodesDeep = typeof enumerateAllNodes === 'function' ? enumerateAllNodes() : nodes;
+      const localApplications = (allNodesDeep || []).flatMap((n) => {
+        const localApplication = n?.type === 'jobcard' ? n?.data?.localApplication : null;
+        return localApplication?.id ? [{
+          nodeId: n.id,
+          title: n?.data?.title || '',
+          company: n?.data?.company || '',
+          localApplication,
+        }] : [];
+      });
+
       // Build the full payload, then drop sections excluded by the filter code.
       const fullPayload = {
         description,
@@ -211,6 +229,7 @@ export function useIssueReporter({
         nodes: reportNodes,
         edges,
         drawings,
+        localApplications,
         mediaState,
         imageState,
         issueReporterDraft,

@@ -611,6 +611,12 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
             fontsLoaded: true,
             renderError: null,
             centered: true,
+            // Report the layout of the document these bytes came from. Centring
+            // only adds `align-content: safe center` over the same fixed type
+            // area, so the ink span is unchanged — but the reported measurement
+            // must still describe the render that shipped.
+            layout: centered.layout || null,
+            contentUtilization: resumeTypeAreaUtilization(centered.layout || null),
           };
         }
       } catch (error) {
@@ -624,12 +630,19 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
       fontsLoaded,
       renderError: fontsLoaded ? null : 'Web fonts were unavailable while rendering the cover-letter PDF.',
       centered: false,
+      // The letter prints onto the same `main.page` surface as the résumé, so
+      // the renderer's probe reports the letter's OWN type area and the shared
+      // ratio helper applies unchanged. Utilization is reported for the letter,
+      // never enforced: a short letter is a supported outcome (it is what earns
+      // the centred variant above), so there is no minimum here.
+      layout: rendered.layout || null,
+      contentUtilization: resumeTypeAreaUtilization(rendered.layout || null),
     };
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
     const renderError = error?.message || String(error);
     logger.warn(`[LocalAI] Cover-letter PDF render failed: ${renderError}`);
-    return { bytes: null, pageCount: null, fontsLoaded: null, renderError, centered: false };
+    return { bytes: null, pageCount: null, fontsLoaded: null, renderError, centered: false, layout: null, contentUtilization: null };
   }
 }
 
@@ -671,6 +684,11 @@ function localAiHandoffEvent({ type, resultRaw, revisionRound = null, resumeFit 
       targetPageCount: Number.isFinite(coverLetterFit.targetPageCount) ? coverLetterFit.targetPageCount : null,
       fontsLoaded: coverLetterFit.fontsLoaded === false ? false : coverLetterFit.fontsLoaded === true ? true : null,
       error: coverLetterFit.renderError ? cleanText(coverLetterFit.renderError, 280) : null,
+      layout: coverLetterFit.layout ? {
+        contentHeightPx: Number.isFinite(coverLetterFit.layout.contentHeightPx) ? coverLetterFit.layout.contentHeightPx : null,
+        typeAreaHeightPx: Number.isFinite(coverLetterFit.layout.typeAreaHeightPx) ? coverLetterFit.layout.typeAreaHeightPx : null,
+        utilization: Number.isFinite(coverLetterFit.contentUtilization) ? coverLetterFit.contentUtilization : null,
+      } : null,
     } : null,
     qualityReview: qualityReview ? {
       resume: {
@@ -707,6 +725,72 @@ async function readLocalFitFeedback(root, dir) {
     // result.json. The next render/import will replace it if feedback is needed.
     logger.warn(`[LocalAI] Ignoring unreadable fit feedback: ${error?.message || error}`);
     return null;
+  }
+}
+
+// A HARD validation failure writes nothing at all today: no bundle, no fit
+// feedback, no receipt, no manifest event. The error reaches only the
+// renderer, but per local_ai/CLAUDE_CODE_ROUTINE.md step 7 the waiting Claude
+// Code session may read only fit-feedback.json, manifest.json, result.json and
+// the handoff receipt — so a rejected result is indistinguishable from an app
+// that never ran, and the session can only burn its 6-minute wait.
+//
+// This record is deliberately NOT a measurement. The routine acts on
+// 'revision-required' and 'revision-exhausted'; 'invalid' plus `measured:
+// false` sits outside both, and the record carries no page counts, layout,
+// utilization, or revision instruction that could be mistaken for one.
+//
+// `documentSha256` and `revisionRound` are copied forward from whatever
+// feedback this overwrites. The rejected result was never rendered, so the
+// last MEASURED document hashes are still the ones a later valid result must
+// be compared against; dropping them would make
+// assertLocalAiQualityReviewConsistency expect 'drafted' from a session that
+// has genuinely revised, and that mismatch would throw forever. Overwriting a
+// stale measured record is otherwise safe: the routine trusts feedback only
+// while its resultSha256 equals the hash of the CURRENT result.json bytes, and
+// those bytes are exactly the rejected ones recorded here.
+async function writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, error }) {
+  try {
+    const resultSha256 = contentHash(resultRaw);
+    const prior = await readLocalFitFeedback(root, dir);
+    // Both drivers poll a job parked on 'invalid' every 2.5s ('invalid' is in
+    // neither idle set). Rewriting the identical record each tick would churn
+    // the exact file the waiting session is hashing, so re-record only a
+    // genuinely different rejection.
+    if (prior?.jobId === jobId && prior?.status === 'invalid' && prior?.resultSha256 === resultSha256) return;
+    // Never overwrite a measured verdict that still describes the bytes on
+    // disk. A transient rejection — a poll catching result.json mid-rewrite,
+    // or one unreadable fit-feedback.json — would otherwise replace a live
+    // 'revision-required' record with 'invalid', and the job could never
+    // recover: the same bytes then fail the quality-review assert forever.
+    // The advisory is worth less than the measurement it would destroy.
+    if (prior?.jobId === jobId && prior?.resultSha256 === resultSha256
+      && ['revision-required', 'revision-exhausted'].includes(prior?.status)) {
+      logger.warn(`[LocalAI] Keeping the measured ${prior.status} record for job ${jobId}; not recording a transient rejection over it.`);
+      return;
+    }
+    const priorDocumentSha256 = prior?.documentSha256 && typeof prior.documentSha256 === 'object' && !Array.isArray(prior.documentSha256)
+      ? prior.documentSha256
+      : null;
+    await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), {
+      version: 1,
+      jobId,
+      status: 'invalid',
+      measured: false,
+      resultSha256,
+      // Untrusted: a validation message can quote model-authored prose (the
+      // generic-language check embeds the offending phrase verbatim). Bound and
+      // strip it exactly like every other echoed string in this module.
+      error: cleanText(error?.message || error, 500).replace(/\s+/g, ' ').trim(),
+      rejectedAt: new Date().toISOString(),
+      documentSha256: priorDocumentSha256,
+      revisionRound: Number.isFinite(prior?.revisionRound) ? prior.revisionRound : 0,
+      message: 'Infinite Canvas rejected this result.json during validation. Nothing was rendered, saved, or measured. Correct the reported problem and overwrite only result.json.',
+    });
+  } catch (writeError) {
+    // The advisory must never turn a clean 'invalid' status into an IPC
+    // failure — the renderer's own message stays the authoritative report.
+    logger.warn(`[LocalAI] Could not record the result rejection for job ${jobId}: ${writeError?.message || writeError}`);
   }
 }
 
@@ -807,19 +891,46 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
   const manifest = await loadManifest(dir);
   const input = JSON.parse(await readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }));
   assertManifestCanvasOwnership(manifest, input, canvas);
+  if (manifestImportFreshlySettling(manifest)) {
+    return {
+      id: jobId, status: 'importing', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath,
+      createdAt: manifest.createdAt, resultSha256: null,
+      // Attribution-neutral: the stalled save may be THIS caller's own (a
+      // card whose save-application step failed) or another driver's active
+      // one — the poller cannot tell, so the message must not claim either.
+      message: 'Result imported — waiting for the bundle save to settle.',
+    };
+  }
   let status = 'queued'; let message = 'Awaiting result.json from Claude Code.'; let resultSha256 = null;
   try {
     const rawText = await readOwnedFile(root, path.join(dir, 'result.json'));
     resultSha256 = contentHash(rawText);
-    const raw = JSON.parse(rawText);
-    const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job);
-    const feedback = await readLocalFitFeedback(root, dir);
-    const matchingFeedback = feedback?.jobId === jobId && feedback?.resultSha256 === resultSha256;
-    if (!matchingFeedback) assertLocalAiQualityReviewConsistency(validated, feedback);
-    status = 'completed'; message = 'Validated result.json is ready to import.';
-    if (matchingFeedback) {
-      status = feedback.status === 'revision-exhausted' ? 'revision-exhausted' : 'revision-required';
-      message = String(feedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
+    try {
+      const raw = JSON.parse(rawText);
+      const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job);
+      const feedback = await readLocalFitFeedback(root, dir);
+      // Only the two MEASURED verdicts may hold a valid result back. The
+      // rejection record shares this file and matches on hash, so the
+      // fall-through ternary below must never see it: without this allow-list
+      // an 'invalid' record would be reported to the renderer — and, through
+      // the card, to the user — as a revision request the app never measured.
+      const measuredFeedback = feedback?.jobId === jobId && feedback?.resultSha256 === resultSha256
+        && ['revision-required', 'revision-exhausted'].includes(feedback.status);
+      if (!measuredFeedback) assertLocalAiQualityReviewConsistency(validated, feedback);
+      status = 'completed'; message = 'Validated result.json is ready to import.';
+      if (measuredFeedback) {
+        status = feedback.status === 'revision-exhausted' ? 'revision-exhausted' : 'revision-required';
+        message = String(feedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
+      }
+    } catch (error) {
+      // HARD rejection: nothing is rendered, saved, or measured, and the error
+      // otherwise reaches only the renderer. Record it in the one job-folder
+      // file the waiting Claude Code session is allowed to read, then rethrow
+      // into the outer catch, which still owns the user-facing status message.
+      // Mirror that catch's ENOENT rule so a stray missing-file error can never
+      // leave a rejection record on a job still reported as 'queued'.
+      if (error?.code !== 'ENOENT') await writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw: rawText, error });
+      throw error;
     }
   } catch (error) {
     if (error?.code !== 'ENOENT') { status = 'invalid'; message = String(error?.message || error); }
@@ -834,29 +945,94 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
   };
 }
 
-export async function importLocalApplicationJob({ jobId, canvasFilePath, senderId, signal, expectedResultSha256 = '' }) {
+// A measured import renders PDFs and ends by mutating (or, after the follow-up
+// save, deleting) the job directory. Two concurrent imports of the same job —
+// e.g. the canvas-level fallback manager and a card that remounted mid-import —
+// would double-render and race that cleanup. Serialize per job id: the loser
+// gets a typed, retriable rejection and its next poll observes the winner's
+// terminal state instead.
+const importsInFlight = new Set();
+
+// The in-flight Set only covers the import IPC itself, but the winner's job
+// directory stays on disk (manifest status 'imported') until its FOLLOW-UP
+// save-application IPC deletes it — a window in which result.json still
+// validates and a settled second driver would otherwise re-import in full.
+// While the manifest reports a fresh 'imported', status reports the job as
+// settling and import refuses to re-enter. The window is time-bounded so a
+// crashed save never wedges the job: after it lapses, the still-valid
+// result.json imports again normally.
+const LOCAL_AI_IMPORTED_SAVE_WINDOW_MS = 90_000;
+function manifestImportFreshlySettling(manifest, now = Date.now()) {
+  if (manifest?.status !== 'imported') return false;
+  const importedAt = Date.parse(manifest?.importedAt || '');
+  return Number.isFinite(importedAt) && now - importedAt < LOCAL_AI_IMPORTED_SAVE_WINDOW_MS;
+}
+
+export async function importLocalApplicationJob(request) {
+  const jobId = String(request?.jobId || '');
+  if (importsInFlight.has(jobId)) {
+    const error = new Error('A Local AI import for this job is already in progress. Waiting for it to finish.');
+    error.code = 'LOCAL_AI_IMPORT_IN_FLIGHT';
+    throw error;
+  }
+  importsInFlight.add(jobId);
+  try {
+    return await importLocalApplicationJobUnlocked(request);
+  } finally {
+    importsInFlight.delete(jobId);
+  }
+}
+
+async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, senderId, signal, expectedResultSha256 = '' }) {
   const { root, dir, ...canvas } = await assertRealJobDirectory(jobId, canvasFilePath);
-  const [manifest, inputRaw, resultRaw] = await Promise.all([
-    loadManifest(dir), readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }), readOwnedFile(root, path.join(dir, 'result.json')),
+  const [manifest, inputRaw] = await Promise.all([
+    loadManifest(dir), readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }),
   ]);
   const input = JSON.parse(inputRaw);
   if (manifest.id !== jobId || input?.jobId !== jobId || input?.version !== LOCAL_AI_APPLICATION_VERSION) throw new Error('Local AI job input is invalid.');
   assertManifestCanvasOwnership(manifest, input, canvas);
+  // Gate on the manifest BEFORE touching result.json: during the save window
+  // the settling verdict must not depend on the result file's presence.
+  if (manifestImportFreshlySettling(manifest)) {
+    const error = new Error('This result was already imported and its bundle save is finishing. Waiting for it to complete.');
+    error.code = 'LOCAL_AI_IMPORT_IN_FLIGHT';
+    throw error;
+  }
+  const resultRaw = await readOwnedFile(root, path.join(dir, 'result.json'));
   if (expectedResultSha256 && contentHash(resultRaw) !== expectedResultSha256) {
     const error = new Error('Claude Code saved a newer result while the prior result was settling. Waiting for the final save before import.');
     error.code = 'LOCAL_AI_RESULT_CHANGED';
     throw error;
   }
-  const result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job);
+  let result;
+  try {
+    result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job);
+  } catch (error) {
+    // The poll path normally rejects first — an import only ever begins from
+    // status 'completed' — so this covers the narrow race where result.json is
+    // rewritten to rejectable bytes that still satisfy expectedResultSha256.
+    // Recording here too means no rejection route leaves the job folder silent.
+    await writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, error });
+    throw error;
+  }
   const priorFeedback = await readLocalFitFeedback(root, dir);
   const matchingPriorFeedback = priorFeedback?.jobId === jobId && priorFeedback?.resultSha256 === contentHash(resultRaw);
+  // Only a MEASURED verdict may stand in for the quality-review check below.
+  // fit-feedback.json now has a second writer — writeLocalAiRejectionFeedback —
+  // whose 'invalid' record carries, by construction, the hash of the CURRENT
+  // result.json. Matching on jobId+hash alone would let that record satisfy
+  // `matchingPriorFeedback` and skip assertLocalAiQualityReviewConsistency, so
+  // a result the status poll just rejected would import cleanly on a Retry
+  // click. Same allow-list the status path uses.
+  const measuredPriorFeedback = matchingPriorFeedback
+    && ['revision-required', 'revision-exhausted'].includes(priorFeedback?.status);
   // A renderer can retry an IPC request after a slow render, and Claude Code
   // can leave the card mounted while it is reading the app's feedback. Once a
   // particular result has already produced trusted measured feedback, never
   // render it again: doing so would inflate revision rounds and overwrite the
   // original observation with an identical one. A changed result has a new
   // hash and intentionally continues below for a fresh measurement.
-  if (matchingPriorFeedback && ['revision-required', 'revision-exhausted'].includes(priorFeedback?.status)) {
+  if (measuredPriorFeedback) {
     const revisionExhausted = priorFeedback.status === 'revision-exhausted';
     const targetPageCount = Number.isFinite(priorFeedback.targetPageCount) && priorFeedback.targetPageCount > 0
       ? priorFeedback.targetPageCount
@@ -866,6 +1042,7 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
     const resumePageCount = Number.isFinite(priorFeedback?.resume?.pageCount) ? priorFeedback.resume.pageCount : null;
     const coverLetterPageCount = Number.isFinite(priorFeedback?.coverLetter?.pageCount) ? priorFeedback.coverLetter.pageCount : null;
     const resumeLayout = priorFeedback?.resume?.layout || null;
+    const coverLetterLayout = priorFeedback?.coverLetter?.layout || null;
     const resumeUnderfilled = resumeIsMateriallyUnderfilled({ pageCount: resumePageCount, targetPageCount, layout: resumeLayout });
     const targetMet = resumePageCount != null && resumePageCount <= targetPageCount && !resumeUnderfilled;
     const coverLetterTargetMet = coverLetterPageCount != null && coverLetterPageCount <= 1;
@@ -879,12 +1056,12 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
       id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required',
       company: input.job?.company || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
-      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet },
+      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
       localJob: { id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
   }
-  const documentSha256 = matchingPriorFeedback
+  const documentSha256 = measuredPriorFeedback
     ? localAiDocumentHashes(result)
     : assertLocalAiQualityReviewConsistency(result, priorFeedback);
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
@@ -965,10 +1142,10 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
       requestedAt: new Date().toISOString(),
       targetPageCount,
       resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null },
-      coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1 },
+      coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null },
       instruction: revisionExhausted
         ? `Stop this measured revision loop. The app verified that the unsatisfied ${diminishingReturnsDocuments.join(' and ')} is byte-for-byte unchanged and its quality review explicitly recorded diminishing returns.`
-        : `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique. Page fit is a constraint, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep that document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
+        : `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique. Page fit is a constraint, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep that document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. The cover letter's reported type-area utilization is informational only: a short letter is a supported outcome with no minimum utilization, so never lengthen it to fill its page. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
       message: fitMessage,
     };
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), feedback);
@@ -995,7 +1172,7 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
     return {
       id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization },
-      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet },
+      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, contentUtilization: coverLetterFit.contentUtilization },
       fitIssues, fitMessage,
       revisionRound,
       localJob: { id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
@@ -1085,6 +1262,10 @@ export async function importLocalApplicationJob({ jobId, canvasFilePath, senderI
     },
   });
   await atomicJson(path.join(dir, 'manifest.json'), { ...importedManifest, status: 'imported', importedAt: new Date().toISOString() });
+  // The only success-path log for an import: handleSafe logs failures only, so
+  // without this a clean run leaves no import entry in the main-process log a
+  // HANDOFF bug report could show.
+  logger.info(`[LocalAI] Imported job ${jobId}: résumé ${resumeFit.pageCount}/${targetPageCount} page(s), cover letter ${coverLetterFit.pageCount}/1 — awaiting bundle save`);
   return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, company: input.job?.company || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
 }
 

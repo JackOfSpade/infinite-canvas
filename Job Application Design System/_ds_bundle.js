@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"3f2a992c8c5e","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"9c0abdf3c4ee","build/synthesis-scope-gate-doc-test.js":"e8725ba140f6","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"9c0abdf3c4ee","build/synthesis-scope-gate-doc-test.js":"e8725ba140f6","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -82,13 +82,27 @@ var targets = process.argv.slice(2);
 if (targets.length === 0) targets = ['resume.html', 'cover-letter.html'];
 
 /* Budgets. See build/bullet-length-check.html for the render measurement
-   these are calibrated against: at Letter, default density (the
-   tightest of the four supported configs), worst-case bullet text
-   holds 2 wrapped lines up to ~195-206 visible characters depending on
-   word mix; compact density and A4 are each a little more forgiving.
-   180 leaves ~15-25 characters of margin below that floor. Keep these
-   numbers in sync with STYLE.md §5.4 if either changes, and re-run the
-   .html render check before raising them. */
+   these are calibrated against: at Letter, default density (the tightest
+   of the four supported configs), a bullet holds 2 wrapped lines up to a
+   MEASURED FLOOR of 176 visible characters — the tightest of 8 shuffled
+   orders of a low-breakpoint compound vocabulary. Ordinary mixed prose
+   reaches 184-200. Compact density and A4 are each a little more
+   forgiving. Measured 2026-08-21 by growing whole words at the real
+   651.65px bullet measure.
+
+   RETRACTED: an earlier note here claimed "~195-206 visible characters"
+   and read 180 as leaving 15-25 characters of margin. That figure came
+   from a rig clamped to max-width:640px with padding:0, i.e. a 625.65px
+   measure — 3.99% narrow — and it also grew a mid-word-truncated string,
+   which packs a line more tightly than whole words do. Both are fixed.
+
+   180 therefore sits ABOVE the 176 floor, not below it: a compound-dense
+   bullet at 180 can take a third line. The budget is kept at 180 because
+   it is what the shipped documents are authored against and the fixture's
+   own self-test still passes there, but treat 170 as the safe ceiling for
+   a bullet heavy in long hyphenated technical terms. Keep these numbers in
+   sync with STYLE.md §5.4, and re-run the .html render check before
+   raising them. */
 var MAX_BULLET_VISIBLE_CHARS = 180; // one budget, every bullet, annotated or not
 var MAX_TRADEOFF_TEXT_CHARS = 100; // the .tradeoff clause alone, excluding its label
 var MAX_ANNOTATIONS_PER_BULLET = 1; // .scope + .tradeoff combined

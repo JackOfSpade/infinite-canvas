@@ -54,6 +54,29 @@ export function getCanvasData(node) {
 }
 
 /**
+ * Read-only deep traversal: collects every node in the given array, including
+ * nodes nested inside group canvasData, without cloning anything (unlike
+ * syncStackUpward/flushStack). Duplicate ids keep their FIRST occurrence, so
+ * callers can layer sources freshest-first. Callers must treat the returned
+ * nodes as read-only.
+ */
+export function collectNodesDeep(nodes, out = [], seen = new Set(), skipDescendIds = null) {
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (!node?.id || seen.has(node.id)) continue;
+    seen.add(node.id);
+    out.push(node);
+    // skipDescendIds: the node itself is real, but its embedded canvasData is a
+    // stale snapshot (a navigation-stack entry's dived-into branch) — the live
+    // contents come from a fresher source, so descending would surface ghosts
+    // of nodes that were since edited or deleted at the active level.
+    if (skipDescendIds?.has(node.id)) continue;
+    const nested = node.data?.canvasData?.nodes;
+    if (Array.isArray(nested)) collectNodesDeep(nested, out, seen, skipDescendIds);
+  }
+  return out;
+}
+
+/**
  * Recursively finds and updates a node deep within nested canvasData.
  */
 export function deepUpdateNode(nodes, id, dataUpdate) {
@@ -61,9 +84,13 @@ export function deepUpdateNode(nodes, id, dataUpdate) {
   let anyUpdated = false;
   const newNodes = nodes.map(n => {
     if (n.id === id) {
-      anyUpdated = true;
       const patch = typeof dataUpdate === 'function' ? dataUpdate(n) : dataUpdate;
-      return { ...n, data: { ...n.data, ...(patch || {}) } };
+      // A function patch may inspect the live node and decline (null/undefined):
+      // keep the exact same node identity and report nothing updated, so a
+      // guarded no-op write cannot dirty the workspace or churn React state.
+      if (patch == null) return n;
+      anyUpdated = true;
+      return { ...n, data: { ...n.data, ...patch } };
     }
     if (n.data?.canvasData?.nodes) {
       const { updated, nodes: childNodes } = deepUpdateNode(n.data.canvasData.nodes, id, dataUpdate);

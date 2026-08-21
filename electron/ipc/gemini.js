@@ -863,7 +863,9 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   // Gemini API field, so pull them out so they never leak into generationConfig
   // (which would 400 the call). `grounding` is also ours — it lifts to a
   // top-level `tools` entry (Google Search), NOT a generationConfig field.
-  const { signal, responseSchema, task, formulaSeed: _formulaSeed, meta: _meta, grounding: _grounding, ...restGenConfig } = genConfig;
+  // `excludeModels` is consumed by the fallback loop's model ordering (callGemini)
+  // and must likewise never reach the wire.
+  const { signal, responseSchema, task, formulaSeed: _formulaSeed, meta: _meta, grounding: _grounding, excludeModels: _excludeModels, ...restGenConfig } = genConfig;
   const formulaSeed = _formulaSeed ?? null;
 
   const generationConfig = {
@@ -1069,7 +1071,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         throw abortErr;
       }
       try {
-        logger.info(`[Gemini] Attempting call with model: ${currentModel}`);
+        logger.info(`[Gemini] Attempting call with model: ${currentModel}${genConfig.task ? ` task=${genConfig.task}` : ''}`);
         lastAttemptedModel = currentModel;
 
         const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
@@ -1248,19 +1250,30 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
   const noQuotaCount = attemptedErrors.filter((e) => e.classification === 'no-quota').length;
   const dailyQuotaCount = attemptedErrors.filter((e) => e.classification === 'daily-quota').length;
+  // Tag as rate limit if any of the errors were rate limits. \b429\b (not a
+  // substring test) so digit runs like "wrote 4291 visible tokens" in a
+  // truncation message can't masquerade as an HTTP 429 — enhanceLLMError
+  // (llm.js) uses the same boundary match; keep the two in lockstep.
+  const hasRateLimit = attemptedErrors.some(e =>
+    e.classification === 'rate-limit' ||
+    /\b429\b/.test(e.error) ||
+    e.error.toLowerCase().includes('rate limit') ||
+    e.error.toLowerCase().includes('quota')
+  );
+  // Only suggest quotas when some attempt actually looked quota/rate-limit
+  // shaped. When every model rejected the request itself (e.g. a 400 on a
+  // malformed payload), a quota-flavored header is not just wrong — the word
+  // "quota" trips enhanceLLMError's message sniff downstream, falsely tagging
+  // isRateLimit and titling the hub banner "Usage Limit Reached". The non-quota
+  // wording below must therefore avoid "quota"/"429"/"rate limit" substrings.
   const quotaSummary = noQuotaCount > 0
     ? `${noQuotaCount} model(s) have no quota allocated for this credential/project`
     : dailyQuotaCount > 0
       ? `${dailyQuotaCount} model(s) exhausted their daily quota`
-      : 'Usage limits or quotas may have been exceeded on the fallback models';
+      : hasRateLimit
+        ? 'Usage limits or quotas may have been exceeded on the fallback models'
+        : 'Every model rejected the request itself (no usage-limit failures were seen) — this points at a malformed request or an API change, not exhausted limits';
   const finalError = new Error(`All Gemini models failed. ${quotaSummary}.\n\nDetails:\n${errorDetails}`);
-
-  // Tag as rate limit if any of the errors were rate limits
-  const hasRateLimit = attemptedErrors.some(e => 
-    e.error.includes('429') || 
-    e.error.toLowerCase().includes('rate limit') || 
-    e.error.toLowerCase().includes('quota')
-  );
   if (hasRateLimit) {
     finalError.isRateLimit = true;
     finalError.provider = 'gemini';

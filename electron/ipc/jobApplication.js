@@ -448,12 +448,22 @@ export function applicationVariantAttrsForJob(job = {}) {
 // pruning that strands several supported bullets off the page.
 export const MIN_RESUME_TYPE_AREA_UTILIZATION = 0.90;
 
+// Deliberately UNBOUNDED above. A value over 1 is the overflow MAGNITUDE —
+// the text spans 1.37 type areas — and it is the only size signal the fit
+// feedback, the handoff trace, and the bug report have; `pdf-lib` reports a
+// page count, never final-page occupancy. Clamping to 1 made every
+// overflowing résumé report exactly 100% and threw that signal away.
+// It is a text-span ratio, NOT a page count: the screen preview flows
+// continuously, so it omits the @page margins a real second page adds and
+// therefore UNDERSTATES the printed overrun. The only comparison this value
+// is defined for is the underfill test against
+// MIN_RESUME_TYPE_AREA_UTILIZATION (always < 1) — never derive pages from it.
 export function resumeTypeAreaUtilization(layout) {
   const contentHeight = Number(layout?.contentHeightPx);
   const typeAreaHeight = Number(layout?.typeAreaHeightPx);
   if (!Number.isFinite(contentHeight) || !Number.isFinite(typeAreaHeight)
     || contentHeight <= 0 || typeAreaHeight <= 0) return null;
-  return Math.min(1, contentHeight / typeAreaHeight);
+  return contentHeight / typeAreaHeight;
 }
 
 export function resumeIsMateriallyUnderfilled({ pageCount, targetPageCount, layout }) {
@@ -863,14 +873,50 @@ Now produce the single \`<main class="page">…</main>\` block for THIS job, gro
   return neutralizeHighlightTextEmphasis(await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix, meta }));
 }
 
-// Rough estimate only — the revision prompt needs a DIRECTION and a rough
-// MAGNITUDE ("cut about N lines"), not a precise target. This is a generic
-// single-column résumé page at the design system's default body type
-// (colors_and_type.css: ~10.25pt / 1.45 leading over a ~9in content height)
-// and doesn't need to be exact for that purpose — it only steers how
-// aggressively the model trims, and the fit loop re-measures with a real
-// render afterward regardless of how close this guess was.
-const LINES_PER_PAGE_ESTIMATE = 45;
+// How many body lines one résumé page holds, per paper × density. The
+// revision prompt needs a DIRECTION and a rough MAGNITUDE ("cut about N
+// lines"); one literal cannot supply the magnitude, because a compact A4 page
+// holds ~24% more lines than a default Letter page, so the same page overflow
+// costs a different number of lines to close.
+//
+// Each entry is (type area ÷ baseline) in points, straight from the design
+// system's page-geometry and type tokens (colors_and_type.css):
+//   type area = --page-h - --margin-top - --margin-bot
+//   baseline  = --fs-body * --lh-body
+// Letter base: 11in - 2×0.72in = 688.32pt over 10.25pt × 1.45 = 14.8625pt.
+// A4 (:root[data-page="a4"]): 297mm - 2×18mm = 739.84pt.
+// Compact (:root[data-density="compact"]) rewrites BOTH the margins (0.6in)
+// and the type (9.75pt × 1.35 = 13.1625pt); being declared after the A4 block
+// at equal specificity, its margins win on A4 too — hence 755.49pt, which is
+// what resume.css's `@page a4-compact { margin: 15.24mm 0 }` prints (15.24mm
+// is 0.6in).
+//
+// This is still an ESTIMATE — it counts baseline-height body lines and ignores
+// section/role margins and larger headings, so a real page carries fewer
+// content lines than the table says. It only steers how aggressively the model
+// trims; the fit loop re-measures with a real render afterward.
+//
+// These four are COPIES of token-derived values and would drift silently, so
+// scripts/tests/job-diagnostics.js re-derives all four from colors_and_type.css
+// (the design system's own build/token-sync-test.js cannot reach this file).
+const RESUME_LINES_PER_PAGE = {
+  letter: { default: 688.32 / 14.8625, compact: 705.60 / 13.1625 },
+  a4:     { default: 739.84 / 14.8625, compact: 755.49 / 13.1625 },
+};
+
+/**
+ * Lines per page for a resolved root variant string — the same
+ * `data-print/data-mono/data-page/data-density` attrs the measured render used.
+ * An unrecognised or absent string falls back to Letter/default, the smallest
+ * of the four: an unknown variant should under-ask for cuts rather than
+ * over-cut a résumé that was never that far over.
+ */
+export function resumeLinesPerPage(variantAttrs = '') {
+  const attrs = String(variantAttrs || '');
+  const paper = /data-page\s*=\s*["']?a4\b/i.test(attrs) ? 'a4' : 'letter';
+  const density = /data-density\s*=\s*["']?compact\b/i.test(attrs) ? 'compact' : 'default';
+  return RESUME_LINES_PER_PAGE[paper][density];
+}
 
 // Repeat this in each dynamic revision/repair prompt as well as the cached
 // generation prefix: a revision receives existing markup and must correct
@@ -1191,16 +1237,24 @@ export function enforceOnePageRevisionStructure(mainHtml, targetPageCount) {
  */
 export function buildResumeLengthRevisionPrompt({
   mainHtml, pageCount, targetPageCount, compactApplied, job = null,
-  revisionAttempt = 1,
+  revisionAttempt = 1, variantAttrs = '',
 }) {
   const overflowPages = pageCount - targetPageCount;
+  // Line capacity depends on paper AND density, so the magnitude has to be read
+  // off the variant the measured render actually used. renderResumeWithFit
+  // passes its resolved attrs. A caller holding only the job record still gets
+  // the right paper — applicationVariantAttrsForJob is the host's single source
+  // of truth for it — plus the density this same call already reports; a caller
+  // with neither lands on resumeLinesPerPage's Letter/default floor.
+  const measuredVariantAttrs = variantAttrs
+    || `${applicationVariantAttrsForJob(job || {})}${compactApplied ? ' data-density="compact"' : ''}`;
   // A one-page count overrun is ambiguous: its final page may contain only a
   // handful of lines (the common underfilled-page case) or be nearly full.
   // After compact has already failed, twelve lines is a useful minimum while
   // the markup itself tells the editor whether more weak content must go.
   const estimatedLinesToCut = overflowPages === 1 && compactApplied
     ? 12
-    : Math.max(12, Math.round(overflowPages * LINES_PER_PAGE_ESTIMATE));
+    : Math.max(12, Math.round(overflowPages * resumeLinesPerPage(measuredVariantAttrs)));
   const fitContext = compactApplied
     ? 'even WITH data-density="compact" applied'
     : 'without trying data-density="compact", because the page count is more than one whole page beyond the target';
@@ -1233,7 +1287,14 @@ ${mainHtml}`;
 export function buildResumeUnderfillRevisionPrompt({
   mainHtml, contentUtilization, targetPageCount, job = null, revisionAttempt = 1,
 }) {
-  const measuredPercent = Number.isFinite(contentUtilization) ? Math.round(contentUtilization * 100) : null;
+  // Only an underfill number belongs in an underfill prompt. The utilization
+  // ratio is no longer clamped to 1, so a caller that ever handed this builder
+  // an overflow measurement would otherwise tell the model its résumé "spans
+  // only 137%" of the page. Every reachable caller today is gated on the
+  // < 0.90 underfill verdict, so this only closes a latent trap.
+  const measuredPercent = Number.isFinite(contentUtilization) && contentUtilization < 1
+    ? Math.round(contentUtilization * 100)
+    : null;
   const retryContext = applicationConvergenceInstruction({
     revisionAttempt,
     unchangedSignal: 'return the CURRENT <main> block byte-for-byte unchanged',
@@ -1257,11 +1318,11 @@ CURRENT <main> BLOCK TO REVISE:
 ${mainHtml}`;
 }
 
-async function reviseResumeForLength({ careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied, job, revisionAttempt, underfilled = false, contentUtilization = null }, signal, meta = null) {
+async function reviseResumeForLength({ careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied, job, revisionAttempt, underfilled = false, contentUtilization = null, variantAttrs = '' }, signal, meta = null) {
   const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
   const prompt = underfilled
     ? buildResumeUnderfillRevisionPrompt({ mainHtml, contentUtilization, targetPageCount, job, revisionAttempt })
-    : buildResumeLengthRevisionPrompt({ mainHtml, pageCount, targetPageCount, compactApplied, job, revisionAttempt });
+    : buildResumeLengthRevisionPrompt({ mainHtml, pageCount, targetPageCount, compactApplied, job, revisionAttempt, variantAttrs });
   return neutralizeHighlightTextEmphasis(await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix, meta }));
 }
 
@@ -1413,6 +1474,10 @@ async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, 
         careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied: compactTried, job,
         revisionAttempt: revisionAttempts, underfilled,
         contentUtilization: resumeTypeAreaUtilization(layout),
+        // The attrs this iteration's render was measured with (line 1356).
+        // Paper and density both change how many lines a page holds, so the
+        // requested cut magnitude must be computed from them, not a literal.
+        variantAttrs,
       }, signal);
       const editorOutput = summarizeResumeMarkup(revised);
       assertRetainedResumeRoleIdentity(mainHtml, revised);

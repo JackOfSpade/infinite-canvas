@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, buildCoverLetterDocument, ensureDirectoryWithinRoot, fs, os, path, LOCAL_AI_APPLICATION_VERSION, localApplicationStatus, queueLocalApplicationJob, readRegisteredApplicationArtifact, resolveLocalOutputBundleRoot, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, buildCoverLetterDocument, ensureDirectoryWithinRoot, fs, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, readRegisteredApplicationArtifact, registerMountedJobCard, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
 
 async function createCanvasProject() {
   const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-canvas-')));
@@ -85,8 +85,11 @@ export default [
         && localSource.includes('assertCoverLetterReviewAttestsToArgument')
         && localSource.includes('primaryEvidence.relationToThesis')
         && localSource.includes('coverLetterArgument.secondaryEvidence.narrativeRole is invalid')
+        && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
+        && localSource.includes("contentUtilization: resumeTypeAreaUtilization(rendered.layout || null)")
+        && localSource.includes('type-area utilization is informational only')
         && localSource.includes('missingArtifacts.length === 0'),
-      'Local AI measures both final documents, keeps Local AI cover-letter revisions argument-led and fact-bounded rather than a requirement checklist, requests evidence-led revision for a materially underfilled one-page résumé, records an auditable quality/fit trace, treats an unchanged measured revision as idempotent, continues without a fixed revision cap until diminishing returns, and never saves when layout verification is unavailable');
+      'Local AI measures both final documents, keeps Local AI cover-letter revisions argument-led and fact-bounded rather than a requirement checklist, requests evidence-led revision for a materially underfilled one-page résumé, reports the cover letter\'s measured type-area layout without imposing a fill minimum on it, records an auditable quality/fit trace, treats an unchanged measured revision as idempotent, continues without a fixed revision cap until diminishing returns, and never saves when layout verification is unavailable');
       assert(localSource.includes('applicationConvergenceInstruction')
         && apiSource.includes('applicationConvergenceInstruction')
         && apiSource.includes('createApplicationConvergenceTracker')
@@ -538,6 +541,33 @@ export default [
       const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
       await fs.promises.writeFile(path.join(queued.folder, 'result.json'), '{bad json', 'utf8');
       const status = await localApplicationStatus(queued.id, project.canvasFilePath);
+      // A hard rejection must leave a trace in the ONE job-folder file the
+      // waiting Claude Code session is allowed to read. Without this the
+      // session cannot tell a rejected result from an app that never ran, and
+      // can only burn its 6-minute wait (local_ai/CLAUDE_CODE_ROUTINE.md §7).
+      const rejection = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+      // REGRESSION GUARD. The rejection record's resultSha256 is, by
+      // construction, the hash of the CURRENT result.json — so a consumer that
+      // matches feedback on jobId+hash alone would treat it as a measured
+      // verdict. importLocalApplicationJobUnlocked did exactly that, which let
+      // a Retry-import click walk past assertLocalAiQualityReviewConsistency on
+      // a result the status poll had just rejected. Both consumers must gate on
+      // the measured-status allow-list, not on the hash match alone.
+      const importSource = await fs.promises.readFile(path.join(process.cwd(), 'electron', 'ipc', 'localAiApplication.js'), 'utf8');
+      assert(/const measuredPriorFeedback = matchingPriorFeedback\s*\n?\s*&& \['revision-required', 'revision-exhausted'\]\.includes\(priorFeedback\?\.status\)/.test(importSource)
+        && /const documentSha256 = measuredPriorFeedback/.test(importSource)
+        && !/const documentSha256 = matchingPriorFeedback/.test(importSource),
+        'the import path gates the quality-review assert on a MEASURED prior verdict, so an invalid rejection record cannot skip it');
+      assert(rejection.status === 'invalid' && rejection.measured === false
+        && rejection.jobId === queued.id
+        && typeof rejection.resultSha256 === 'string' && rejection.resultSha256.length === 64
+        // Assert the ERROR field, not `message`: `message` is fixed boilerplate
+        // that contains the literal "result.json", so a /JSON/i test against it
+        // passes even when the real reason was never recorded.
+        && /JSON|Unexpected/i.test(String(rejection.error || ''))
+        && rejection.error.length > 0 && rejection.error.length <= 500
+        && rejection.resume === undefined && rejection.coverLetter === undefined,
+        'a hard validation rejection writes a non-measured invalid record carrying the rejected bytes\' hash, and no page/layout data that could read as a measurement');
       assert(status.status === 'invalid' && /JSON|Unexpected/i.test(status.message),
         'bad result JSON is surfaced as an actionable invalid state');
       const linkedResultTarget = path.join(project.root, 'outside-result.json');
@@ -576,8 +606,9 @@ export default [
     name: 'Local AI application: corrected invalid results remain eligible for automatic status recovery',
     run: async () => {
       const source = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      const pollingGuard = source.match(/if \(!jobId \|\| !window\.electronAPI\?\.getLocalApplicationStatus \|\| \[([^\]]+)\]\.includes\(localApplication\.status\)\) return undefined;/);
-      assert(pollingGuard && !/['"]invalid['"]/.test(pollingGuard[1]),
+      assert(/LOCAL_AI_CARD_POLL_IDLE_STATUSES\.includes\(localApplication\.status\)\) return undefined;/.test(source),
+        "the card's poll gate consumes the shared idle-status constant — one source of truth with the fallback manager, so the two drivers' idle sets cannot silently diverge");
+      assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('invalid'),
         'invalid results remain eligible for status polling after Claude Code corrects result.json');
       return { invalidRecoveryPolling: true };
     },
@@ -653,6 +684,149 @@ export default [
       assert(revised.status === 'completed', 'a materially changed résumé and unchanged diminishing-returns cover letter clear stale feedback and return to import-ready state');
       await fs.promises.rm(project.root, { recursive: true, force: true });
       return { held: revisionRequired.status, exhausted: exhausted.status, revised: revised.status };
+    },
+  },
+  {
+    // The canvas-level fallback manager and a just-remounted card can both
+    // reach for the same completed result. The per-job lock makes the loser's
+    // request a typed, retriable rejection instead of a double render racing
+    // the winner's directory cleanup.
+    name: 'Local AI import: concurrent imports of one job serialize behind the per-job lock',
+    run: async () => {
+      const project = await createCanvasProject();
+      const queued = await queueLocalApplicationJob({
+        job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
+        canvasFilePath: project.canvasFilePath,
+      });
+      // No result.json exists, so the winning import fails on the missing
+      // file — the point is WHICH error each concurrent caller receives.
+      const first = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+      const second = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+      const [firstErr, secondErr] = await Promise.all([
+        first.then(() => null, (e) => e),
+        second.then(() => null, (e) => e),
+      ]);
+      assert(firstErr && firstErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        'the first import enters the job body and fails on the missing result.json, not on the lock');
+      assert(secondErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        'a concurrent second import of the same job is rejected by the per-job lock');
+      const thirdErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+        .then(() => null, (e) => e);
+      assert(thirdErr && thirdErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        'the lock is released once the first import settles — later imports run normally');
+      await fs.promises.rm(project.root, { recursive: true, force: true });
+      return { firstError: String(firstErr?.message || '').slice(0, 60), secondCode: secondErr?.code };
+    },
+  },
+  {
+    // 2026-08-21 regression: the Local AI poll lived only in JobCardNode, and
+    // hidden cards unmount — a board hiding stale results killed the poll, so
+    // Claude Code's finished result.json was never imported. The fallback
+    // manager's discovery is pure and covered here: deep traversal over the
+    // whole graph plus the mounted-card ownership handoff.
+    name: 'Local AI fallback: deep node discovery and unmounted-card job selection',
+    run: async () => {
+      const nested = { id: 'card-nested', type: 'jobcard', data: { localApplication: { id: 'job-n', status: 'queued' } } };
+      const group = { id: 'group-1', type: 'group', data: { canvasData: { nodes: [nested] } } };
+      const staleCopy = { id: 'card-active', type: 'jobcard', data: { localApplication: { id: 'job-a', status: 'saved' } } };
+      const fresh = { id: 'card-active', type: 'jobcard', data: { localApplication: { id: 'job-a', status: 'completed' } } };
+      const all = collectNodesDeep([fresh, group], []);
+      collectNodesDeep([staleCopy], all, new Set(all.map((n) => n.id)));
+      assert(all.some((n) => n.id === 'card-nested'), 'traversal reaches cards nested inside group canvasData');
+      const activeCopies = all.filter((n) => n.id === 'card-active');
+      assert(activeCopies.length === 1 && activeCopies[0].data.localApplication.status === 'completed',
+        'duplicate ids keep the first (freshest) occurrence — a stale stack copy never shadows the live node');
+
+      const cards = [
+        { id: 'c-queued', type: 'jobcard', data: { localApplication: { id: 'j1', status: 'queued' } } },
+        { id: 'c-completed', type: 'jobcard', data: { localApplication: { id: 'j2', status: 'completed' } } },
+        { id: 'c-importing', type: 'jobcard', data: { localApplication: { id: 'j3', status: 'importing' } } },
+        { id: 'c-revision', type: 'jobcard', data: { localApplication: { id: 'j4', status: 'revision-required' } } },
+        { id: 'c-saved', type: 'jobcard', data: { localApplication: { id: 'j5', status: 'saved' } } },
+        { id: 'c-failed', type: 'jobcard', data: { localApplication: { id: 'j6', status: 'failed' } } },
+        { id: 'c-render-retry', type: 'jobcard', data: { localApplication: { id: 'j7', status: 'render-retry-required' } } },
+        { id: 'c-exhausted', type: 'jobcard', data: { localApplication: { id: 'j8', status: 'revision-exhausted' } } },
+        { id: 'c-no-job', type: 'jobcard', data: {} },
+        { id: 'c-not-card', type: 'jobgroup', data: { localApplication: { id: 'j9', status: 'queued' } } },
+        { id: 'c-mounted', type: 'jobcard', data: { localApplication: { id: 'j10', status: 'queued' } } },
+      ];
+      const selected = selectFallbackLocalAiJobs(cards, (id) => id === 'c-mounted').map((n) => n.id);
+      assert(JSON.stringify(selected) === JSON.stringify(['c-queued', 'c-completed', 'c-importing', 'c-revision']),
+        `the manager drives pending jobs on unmounted cards only — including an orphaned 'importing' (dead driver) — never terminal, manual-retry, mounted, or non-card nodes (got: ${selected.join(', ')})`);
+
+      registerMountedJobCard('reg-1');
+      assert(isJobCardMounted('reg-1'), 'a mounted card registers as the owner of its job');
+      unregisterMountedJobCard('reg-1');
+      assert(!isJobCardMounted('reg-1'), 'unmounting releases ownership to the fallback manager');
+      assert(LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('importing') && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('importing'),
+        "the card's own poll ignores 'importing' (it holds it mid-import) while the manager resumes an orphaned one");
+      return { selected };
+    },
+  },
+  {
+    // Verification round-1 findings: (a) a stack level's dived-into group
+    // embeds a stale canvasData snapshot — descending into it resurrected
+    // dismissed cards as drivable ghosts; (b) deepUpdateNode marked nodes
+    // updated even for guard-declined writes, so every 2.5s manager tick
+    // dirtied the canvas and could starve autosave indefinitely.
+    name: 'Local AI fallback: ghost branches are skipped and guarded no-op writes preserve identity',
+    run: async () => {
+      const dismissedGhost = { id: 'card-ghost', type: 'jobcard', data: { localApplication: { id: 'job-g', status: 'queued' } } };
+      const stackLevelNodes = [
+        { id: 'group-dived', type: 'group', data: { canvasData: { nodes: [dismissedGhost] } } },
+        { id: 'group-other', type: 'group', data: { canvasData: { nodes: [{ id: 'card-live', type: 'jobcard', data: { localApplication: { id: 'job-l', status: 'queued' } } }] } } },
+      ];
+      const skipped = collectNodesDeep(stackLevelNodes, [], new Set(), new Set(['group-dived']));
+      assert(skipped.some((n) => n.id === 'group-dived') && !skipped.some((n) => n.id === 'card-ghost'),
+        'a dived-into group is listed but its stale embedded branch is never descended — a dismissed card cannot resurface as a drivable ghost');
+      assert(skipped.some((n) => n.id === 'card-live'),
+        'sibling groups that were never dived into still contribute their nested cards');
+
+      const nodes = [{ id: 'card-1', type: 'jobcard', data: { localApplication: { id: 'j1', status: 'saved' }, other: 1 } }];
+      const declined = deepUpdateNode(nodes, 'card-1', (node) =>
+        node.data.localApplication.status === 'saved' ? null : { localApplication: { id: 'j1', status: 'failed' } });
+      assert(declined.updated === false && declined.nodes[0] === nodes[0],
+        'a guard-declined functional patch preserves node identity and reports nothing updated — no dirty flag, no autosave churn');
+      const applied = deepUpdateNode(nodes, 'card-1', (node) =>
+        node.data.localApplication.status === 'saved' ? { touched: true } : null);
+      assert(applied.updated === true && applied.nodes[0] !== nodes[0] && applied.nodes[0].data.touched === true,
+        'a returned patch still applies normally with a fresh identity');
+      return { skippedGhost: true, identityPreserved: true };
+    },
+  },
+  {
+    // Verification round-1 finding: the per-job lock only covered the import
+    // IPC, but the winner's job dir persists (manifest 'imported') until the
+    // FOLLOW-UP save deletes it — a settled second driver could re-import in
+    // full during that window. The manifest now gates both status and import,
+    // time-bounded so a crashed save self-heals.
+    name: 'Local AI import: a fresh manifest ‘imported’ holds pollers and rejects re-import until the save window lapses',
+    run: async () => {
+      const project = await createCanvasProject();
+      const queued = await queueLocalApplicationJob({
+        job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
+        canvasFilePath: project.canvasFilePath,
+      });
+      const manifestPath = path.join(queued.folder, 'manifest.json');
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date().toISOString() }), 'utf8');
+      const settling = await localApplicationStatus(queued.id, project.canvasFilePath);
+      assert(settling.status === 'importing' && /bundle save to settle/.test(settling.message) && settling.resultSha256 === null,
+        'a fresh imported manifest reports the save window instead of a completed, re-importable result');
+      const reimportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+        .then(() => null, (e) => e);
+      assert(reimportErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        're-import during the save window is rejected with the typed retriable code');
+      await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date(Date.now() - 10 * 60_000).toISOString() }), 'utf8');
+      const lapsed = await localApplicationStatus(queued.id, project.canvasFilePath);
+      assert(lapsed.status === 'queued',
+        'a lapsed save window falls through to normal status — a crashed save never permanently wedges the job');
+      const lapsedImportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+        .then(() => null, (e) => e);
+      assert(lapsedImportErr && lapsedImportErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        'after the window lapses, import proceeds into the job body again (fails only on the missing result.json)');
+      await fs.promises.rm(project.root, { recursive: true, force: true });
+      return { settling: settling.status, lapsed: lapsed.status };
     },
   },
 ];

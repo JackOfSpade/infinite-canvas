@@ -1,7 +1,7 @@
 import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
-import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
+import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
@@ -633,6 +633,92 @@ export default [
       return { letterCompact: true, a4Compact: true, onlyChildSpan: true };
   },
 },
+{
+    name: 'Résumé line-capacity table stays derived from the design-system tokens',
+    run: () => {
+      // jobApplication.js's RESUME_LINES_PER_PAGE is a COPY of token-derived
+      // values, and the design system's own build/token-sync-test.js guards
+      // only the copies inside that folder — it cannot reach electron/ipc/.
+      // This is that guard, from the host side.
+      const css = fs.readFileSync(path.join(process.cwd(), 'Job Application Design System', 'colors_and_type.css'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        // Strip statement at-rules BEFORE block matching. Without this the
+        // first `selector { … }` the flat regex captures is the whole
+        // `@charset …; @import url("…"); :root` run, and the `:root` test
+        // below then passes only because that Google Fonts URL happens to
+        // contain no `[`. One bracketed font param upstream and this throws.
+        .replace(/@(?:charset|import)[^;]*;/g, '');
+      // Every `selector { … }` pair, in SOURCE ORDER. Order is load-bearing:
+      // the A4 and compact blocks have equal specificity, so whichever is
+      // declared later wins on the margins they both set.
+      const blocks = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+        .map(match => ({ selector: match[1].replace(/\s+/g, ' ').trim(), body: match[2] }));
+      const TOKENS = ['--page-h', '--margin-top', '--margin-bot', '--fs-body', '--lh-body'];
+      const toPt = (value) => {
+        const match = /^\s*(-?[\d.]+)\s*(pt|in|mm)\s*$/.exec(String(value));
+        assert(!!match, `design-system page/type lengths must stay absolute pt/in/mm — got ${value}`);
+        return Number(match[1]) * { pt: 1, in: 72, mm: 72 / 25.4 }[match[2]];
+      };
+      const capacity = (scopes) => {
+        const resolved = {};
+        for (const block of blocks) {
+          const isBase = /:root$/.test(block.selector) && !block.selector.includes('[');
+          const applies = isBase
+            ? scopes.includes(':root')
+            : scopes.some(scope => scope !== ':root' && block.selector.includes(scope));
+          if (!applies) continue;
+          for (const token of TOKENS) {
+            const hits = [...block.body.matchAll(new RegExp(`(?:^|;)\\s*${token}\\s*:\\s*([^;]+)`, 'g'))];
+            if (hits.length) resolved[token] = hits[hits.length - 1][1].trim();
+          }
+        }
+        for (const token of TOKENS) assert(resolved[token] != null, `${token} must resolve for ${scopes.join(' + ')}`);
+        const typeArea = toPt(resolved['--page-h']) - toPt(resolved['--margin-top']) - toPt(resolved['--margin-bot']);
+        return { typeArea, lines: typeArea / (toPt(resolved['--fs-body']) * Number(resolved['--lh-body'])) };
+      };
+
+      const A4 = 'data-page="a4"';
+      const COMPACT = 'data-density="compact"';
+      assert(blocks.findIndex(block => block.selector.includes(COMPACT)) > blocks.findIndex(block => block.selector.includes(A4)),
+        'the compact block must stay declared after the A4 block — the A4 + compact margins depend on that source order');
+
+      const table = [
+        [[':root'], 'data-print="dual-pdf"', 688.32, 46.31],
+        [[':root', COMPACT], `data-print="dual-pdf" ${COMPACT}`, 705.60, 53.61],
+        [[':root', A4], `data-print="dual-pdf" ${A4}`, 739.84, 49.78],
+        [[':root', A4, COMPACT], `data-print="dual-pdf" ${A4} ${COMPACT}`, 755.49, 57.40],
+      ];
+      for (const [scopes, variantAttrs, typeAreaPt, linesPerPage] of table) {
+        const derived = capacity(scopes);
+        assert(Math.abs(derived.typeArea - typeAreaPt) < 0.01,
+          `${scopes.join(' + ')} type area must be ${typeAreaPt}pt — tokens give ${derived.typeArea.toFixed(2)}pt`);
+        assert(Math.abs(derived.lines - linesPerPage) < 0.01,
+          `${scopes.join(' + ')} must hold ${linesPerPage} lines — tokens give ${derived.lines.toFixed(2)}`);
+        assert(Math.abs(resumeLinesPerPage(variantAttrs) - derived.lines) < 0.01,
+          `resumeLinesPerPage('${variantAttrs}') must match the token-derived ${derived.lines.toFixed(2)}`);
+      }
+      // An unrecognised or absent variant must land on the SMALLEST of the four
+      // so a caller that never threaded the attrs under-asks for cuts instead
+      // of over-cutting a résumé that was never that far over.
+      assert(resumeLinesPerPage('') === resumeLinesPerPage('data-print="ink-only" data-mono')
+        && Math.abs(resumeLinesPerPage('') - Math.min(...table.map(([scopes]) => capacity(scopes).lines))) < 1e-9,
+      'an unrecognised variant must fall back to the Letter/default floor');
+
+      // The magnitude the prompt actually asks for has to move with the variant.
+      const cutLines = (extra) => Number(/cut at least (\d+) line/.exec(buildResumeLengthRevisionPrompt({
+        mainHtml: '<main class="page"></main>', pageCount: 3, targetPageCount: 1, ...extra,
+      }))?.[1]);
+      assert(cutLines({ compactApplied: false, variantAttrs: 'data-print="dual-pdf"' }) === 93
+        && cutLines({ compactApplied: true, variantAttrs: `data-print="dual-pdf" ${A4} ${COMPACT}` }) === 115,
+      'a two-page overflow must ask for more lines on a compact A4 page than on a default Letter page');
+      assert(cutLines({ compactApplied: false, job: { company: 'Acme', location: 'Toronto, Canada' } }) === 100,
+        'a caller that passes only the job record must still get A4 capacity via applicationVariantAttrsForJob');
+      assert(cutLines({ compactApplied: false }) === 93,
+        'a caller with neither variant attrs nor a job must get the Letter/default floor');
+
+      return { letter: 46.31, letterCompact: 53.61, a4: 49.78, a4Compact: 57.40 };
+    },
+  },
 {
     name: 'Résumé inline annotations preserve the owning bullet typography',
     run: () => {
@@ -4350,6 +4436,18 @@ export default [
       'a materially underfilled one-page résumé requests evidence-led enrichment instead of shipping unused space');
       const twoPageLayout = decideFitStep({ pageCount: 1, target: 2, compactTried: false, layout: underfilledLayout });
       assert(twoPageLayout.action === 'ship', 'the utilization check never pads a multi-page target');
+
+      // Overflow magnitude must survive measurement. A clamp at 1 made every
+      // overflowing résumé report exactly 100%, erasing the only size signal
+      // the fit feedback and handoff trace carry. The underfill verdict is
+      // defined strictly below 0.90, so an unbounded ratio cannot move it.
+      const overflowingLayout = { contentHeightPx: 1240, typeAreaHeightPx: 917.76 };
+      assert(resumeTypeAreaUtilization(overflowingLayout) > 1
+        && Math.round(resumeTypeAreaUtilization(overflowingLayout) * 100) === 135
+        && !resumeIsMateriallyUnderfilled({ pageCount: 2, targetPageCount: 1, layout: overflowingLayout })
+        && !resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: overflowingLayout })
+        && decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: overflowingLayout }).action === 'ship',
+      'type-area utilization reports overflow magnitude unclamped, and a value above 1 never reads as underfilled');
 
       // A screen-preview page grows when its text overflows; the measurable
       // type area must remain the fixed minimum paper height minus padding.

@@ -1,13 +1,14 @@
 {
   "type": "commonjs",
   "scripts": {
-    "test": "node test.js && node token-sync-test.js && node annotation-typography-test.js && node education-placement-test.js && node ats-parse-test.js && node annotation-budget-test.js && node fixture-safety-test.js && node page-policy-doc-test.js && node parallelism-gate-doc-test.js && node synthesis-scope-gate-doc-test.js",
+    "test": "node test.js && node token-sync-test.js && node annotation-typography-test.js && node education-placement-test.js && node ats-parse-test.js && node annotation-budget-test.js && node fit-estimate-test.js && node fixture-safety-test.js && node page-policy-doc-test.js && node parallelism-gate-doc-test.js && node synthesis-scope-gate-doc-test.js",
     "test:parse": "node ats-parse-test.js",
     "test:pdf": "node test.js",
     "test:tokens": "node token-sync-test.js",
     "test:typography": "node annotation-typography-test.js",
     "test:education": "node education-placement-test.js",
     "test:budget": "node annotation-budget-test.js",
-    "test:prose": "node parallelism-gate-doc-test.js && node synthesis-scope-gate-doc-test.js"
+    "test:prose": "node parallelism-gate-doc-test.js && node synthesis-scope-gate-doc-test.js",
+    "test:fit": "node fit-estimate-test.js"
   }
 }

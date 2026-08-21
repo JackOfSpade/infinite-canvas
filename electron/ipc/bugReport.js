@@ -1672,15 +1672,22 @@ ${(aiConfig.geminiWarnings || []).length > 0
   // Local AI status is persisted on job cards rather than the main-process
   // telemetry singleton. Include it in HANDOFF/FULL so a validation rejection
   // after a Claude Code rewrite is not mistaken for a missed file poll.
-  const localApplications = (nodes || []).flatMap((node) => {
-    const localApplication = node?.type === 'jobcard' ? node?.data?.localApplication : null;
-    return localApplication?.id ? [{
-      nodeId: node.id,
-      title: node?.data?.title || '',
-      company: node?.data?.company || '',
-      localApplication,
-    }] : [];
-  });
+  // Prefer the renderer's dedicated deep collection (payload.localApplications,
+  // gathered via enumerateAllNodes): it covers cards in collapsed groups and
+  // parent navigation levels — exactly the cards the fallback manager drives —
+  // and survives filter codes that exclude the `nodes` section (HANDOFF does).
+  // The top-level-nodes scan remains as a fallback for older payloads.
+  const localApplications = Array.isArray(payload?.localApplications)
+    ? payload.localApplications
+    : (nodes || []).flatMap((node) => {
+      const localApplication = node?.type === 'jobcard' ? node?.data?.localApplication : null;
+      return localApplication?.id ? [{
+        nodeId: node.id,
+        title: node?.data?.title || '',
+        company: node?.data?.company || '',
+        localApplication,
+      }] : [];
+    });
 
   const canvasFilePath = frontEndState?.currentFile || frontEndState?.settings?.lastOpenedWorkspace || null;
   let jobsPipelineMarkdown = '';

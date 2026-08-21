@@ -12,6 +12,7 @@ import { computeJobTreeView } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -31,8 +32,8 @@ const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
 // Claude Code often makes a sequence of atomic edits while composing one
 // revision. Import only after the same complete result has survived a few poll
 // cycles, otherwise a valid intermediate JSON document can be measured as if
-// it were the author's final revision.
-const LOCAL_AI_RESULT_SETTLE_MS = 6_000;
+// it were the author's final revision. (LOCAL_AI_RESULT_SETTLE_MS lives in
+// utils/localAiFallback.js — the canvas-level fallback manager shares it.)
 
 /**
  * JobCardNode — a transient, scored job result on the canvas.
@@ -90,10 +91,39 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   useEffect(() => { idRef.current = id; }, [id]);
   const isMountedRef = useIsMountedRef();
 
+  // While mounted, this card is the sole driver of its Local AI job — the
+  // canvas-level fallback manager (useLocalAiFallbackManager) consults this
+  // registry and stands down. Registration must span the whole mounted
+  // lifetime, not just phases with a pending job.
+  useEffect(() => {
+    registerMountedJobCard(id);
+    return () => unregisterMountedJobCard(id);
+  }, [id]);
+
   const localApplicationKey = JSON.stringify(localApplication);
   useEffect(() => {
     if (JSON.stringify(data.localApplication || null) !== localApplicationKey) {
-      updateGlobal(id, { localApplication: localApplication || null });
+      // Ownership handover: if the fallback manager finished a save while this
+      // card was unmounted-or-racing, the terminal 'saved' state arrives via
+      // data. Adopt it — clobbering it back would resurrect a job whose
+      // directory the completed save already removed.
+      const external = data.localApplication;
+      if (external?.status === 'saved' && external?.id && external.id === localApplication?.id && localApplication?.status !== 'saved') {
+        setLocalApplication(external);
+        return;
+      }
+      // Functional patch: this effect runs after paint, so `data` here is
+      // commit-stale — the manager's terminal 'saved' can land in the gap and
+      // both writes batch on the same store. Deciding against the LIVE node
+      // (deepUpdateNode runs function patches at apply time; null = no-op)
+      // makes the clobber impossible; the adoption branch above then picks the
+      // 'saved' up on the next effect pass.
+      const cardState = localApplication || null;
+      updateGlobal(id, (node) => {
+        const live = node?.data?.localApplication;
+        if (live?.status === 'saved' && live?.id && live.id === cardState?.id && cardState?.status !== 'saved') return null;
+        return { localApplication: cardState };
+      });
     }
   }, [id, data.localApplication, localApplication, localApplicationKey, updateGlobal]);
 
@@ -141,6 +171,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // ensures a completed local result is imported exactly once.
   const localImportingRef = useRef(new Set());
   const localResultSettlingRef = useRef(new Map());
+  // jobId → consecutive status-poll failures. Terminal 'failed' is idle for
+  // BOTH drivers (the fallback manager never resumes it), so a single
+  // transient status error here would permanently orphan a pending handoff.
+  const localStatusErrorStreakRef = useRef(new Map());
   // React state does not disable a button until the next render. Keep a
   // synchronous latch too, so two click events in the same render frame cannot
   // enqueue duplicate applications for this one card.
@@ -337,6 +371,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Claude Code saved a newer result — waiting briefly for the final save…' } : current);
         return;
       }
+      if (error?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT') {
+        // The canvas-level fallback manager (or an earlier request) already
+        // holds the per-job import lock in the main process. Wait quietly —
+        // its terminal 'saved' state arrives through data and is adopted.
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' } : current);
+        return;
+      }
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
@@ -347,7 +388,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
-    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || ['saved', 'failed', 'importing', 'render-retry-required', 'revision-exhausted'].includes(localApplication.status)) return undefined;
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplication.status)) return undefined;
     const canvasFilePath = localApplication?.canvasFilePath
       || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;
@@ -356,7 +397,18 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         const result = await window.electronAPI.getLocalApplicationStatus({ jobId, canvasFilePath });
         if (cancelled || !isMountedRef.current) return;
         if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
+        localStatusErrorStreakRef.current.delete(jobId);
         const next = result.localJob;
+        if (next.status === 'importing') {
+          // Manifest reports a fresh 'imported': another driver's import
+          // finished and its bundle save is in its time-bounded window. Keep
+          // polling in a waiting state — adopting 'importing' into card state
+          // would stop this poll — until the terminal 'saved' arrives via data
+          // adoption or the window resolves the status.
+          localResultSettlingRef.current.delete(jobId);
+          setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: next.message || 'Another import of this result is finishing — waiting…' } : current);
+          return;
+        }
         if (next.status === 'completed') {
           const resultSha256 = String(next.resultSha256 || '');
           // Status always supplies the exact file hash. Without it, stay in a
@@ -387,7 +439,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           setLocalApplication((current) => current?.id === jobId ? { ...current, ...next } : current);
         }
       } catch (error) {
-        if (!cancelled && isMountedRef.current) setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'failed', message: error?.message || String(error) } : current);
+        if (cancelled || !isMountedRef.current) return;
+        // Same transient tolerance as the fallback manager: one status hiccup
+        // (e.g. a canvas re-save renaming files under the resolver) must not
+        // park the handoff on terminal 'failed'.
+        const streak = (localStatusErrorStreakRef.current.get(jobId) || 0) + 1;
+        localStatusErrorStreakRef.current.set(jobId, streak);
+        if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
+        localStatusErrorStreakRef.current.delete(jobId);
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'failed', message: error?.message || String(error) } : current);
       }
     };
     check();

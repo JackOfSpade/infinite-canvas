@@ -60,6 +60,7 @@ import { useCanvasInitialization } from './hooks/useCanvasInitialization';
 import { useCanvasActions } from './hooks/useCanvasActions';
 import { useCanvasContextMenu } from './hooks/useCanvasContextMenu';
 import { useCanvasNavigation } from './hooks/useCanvasNavigation';
+import { useLocalAiFallbackManager } from './hooks/useLocalAiFallbackManager';
 import { useSettings } from './hooks/useSettings';
 import { useToast } from './components/ToastProvider';
 import { useCanvasWASD } from './hooks/useCanvasWASD';
@@ -307,6 +308,25 @@ export function Canvas() {
     () => ({ ...navigation, currentFile, getCurrentFile }),
     [navigation, currentFile, getCurrentFile]
   );
+
+  // Keeps pending Local AI application handoffs alive when their JobCardNode
+  // is unmounted (hidden cascade, collapsed group, a parent canvas level) —
+  // the card's own poll dies with the component. See useLocalAiFallbackManager.
+  // nudgePersistence: a manager write that lands only in navigation-stack
+  // state (card on a parent level) never passes the dirty-flag effect, which
+  // watches active nodes only — an identity-preserving touch of the active
+  // array routes the change into the normal dirty + autosave pipeline so a
+  // terminal 'saved' cannot miss the canvas file. setHasUnsavedChanges is ALSO
+  // set directly: the identity touch alone can be defeated when the active
+  // level is empty (the dirty effect ignores an all-empty level) or when the
+  // commit coincides with a dive swap consuming the navigationStateSwapRef
+  // one-shot — the direct flag keeps the quit handshake honest either way, so
+  // a clean-quit cannot silently drop the state change.
+  const nudgeLocalAiPersistence = useCallback(() => {
+    setNodes((prev) => (prev.length ? prev.slice() : prev));
+    setHasUnsavedChanges(true);
+  }, [setNodes, setHasUnsavedChanges]);
+  useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence: nudgeLocalAiPersistence });
 
   // ── Initial canvas population on mount ──────────────────────────────────
   // Each window is told what to show via the loaded URL's `init` query param,
@@ -618,7 +638,7 @@ export function Canvas() {
   const { handleIssueSubmit } = useIssueReporter({
     nodes, edges, drawings, activeTool, placementMode, eraserType,
     settings, currentFile, hasUnsavedChanges, navigationDepth: navigation.depth,
-    snapToGrid, addToast
+    snapToGrid, addToast, enumerateAllNodes: navigation.enumerateAllNodes
   });
 
   // ── Animation overlay style ──────────────────────────────────────────────

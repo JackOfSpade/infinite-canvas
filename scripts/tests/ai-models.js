@@ -332,6 +332,88 @@ export default [
     },
   },
 {
+    // 2026-08-21 regression: excludeModels was consumed for fallback ordering
+    // but never stripped before the wire payload, so every callLLMText Gemini
+    // call sent generationConfig.excludeModels and Google 400'd the entire
+    // cascade ("Unknown name \"excludeModels\" at 'generation_config'").
+    name: 'Gemini cascade: internal options (excludeModels/task/meta) never leak into the wire generationConfig',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const bodies = [];
+      const calledModels = [];
+      globalThis.fetch = async (url, init) => {
+        const target = String(url);
+        const calledModel = /models\/([^:]+):generateContent/.exec(target)?.[1] || null;
+        if (!calledModel || !GEMINI_MODEL_FALLBACKS.includes(calledModel)) {
+          // Ancillary call (the background Pro-entitlement probe) — irrelevant here.
+          return new Response(JSON.stringify({ error: { code: 429, message: 'ignore' } }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        calledModels.push(calledModel);
+        bodies.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'clean payload' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 4, thoughtsTokenCount: 0 },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      };
+      try {
+        const meta = {};
+        const text = await callGeminiTextRaw('Adversarial refute pass.', 'payload-hygiene-test-key', 'gemini-3.7-flash', null, {
+          maxOutputTokens: 128, formulaSeed: 64, task: 'career-achievement-refute', meta,
+          excludeModels: ['gemini-3.7-flash'],
+        });
+        assert(text === 'clean payload', 'the mocked call succeeds on the first non-excluded model');
+        assert(calledModels.length === 1 && calledModels[0] === 'gemini-3.6-flash',
+          `excludeModels steers the cascade off the excluded author model (called: ${calledModels.join(', ') || 'none'})`);
+        const genCfg = bodies[0]?.generationConfig || {};
+        for (const key of ['excludeModels', 'task', 'meta', 'formulaSeed', 'signal', 'grounding']) {
+          assert(!(key in genCfg), `internal option "${key}" must never reach the wire generationConfig — Google rejects unknown fields with a 400`);
+        }
+        assert(genCfg.maxOutputTokens === 128 && genCfg.responseMimeType === 'text/plain',
+          'real generationConfig fields still reach the wire');
+      } finally {
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { calledModels };
+    },
+  },
+{
+    // Companion to the leak test above: when every model rejects the request
+    // itself, the aggregate header must not claim "usage limits or quotas" —
+    // that wording tripped enhanceLLMError's 'quota' message sniff, falsely
+    // tagged isRateLimit, and titled the hub banner "Usage Limit Reached".
+    name: 'Gemini cascade: an all-models payload rejection reports a request bug, not a usage limit',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        if (!target.includes(':generateContent')) throw new Error(`Unexpected Gemini payload-rejection test URL: ${target}`);
+        return new Response(JSON.stringify({
+          error: { code: 400, message: 'Invalid JSON payload received. Unknown name "excludeModels" at \'generation_config\': Cannot find field.' },
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      };
+      try {
+        let failure = null;
+        try {
+          await callGeminiTextRaw('Trigger the aggregate failure.', 'payload-bug-header-test-key', 'gemini-3.7-flash', null, { maxOutputTokens: 128 });
+        } catch (err) {
+          failure = err;
+        }
+        assert(/All Gemini models failed/.test(failure?.message || ''), 'exhausted cascade still surfaces the aggregate failure');
+        assert(/malformed request or an API change/.test(failure.message),
+          'header names a request/API-contract problem when no failure was limit-shaped');
+        assert(!/quota|rate limit|429/i.test(failure.message),
+          'header avoids limit-flavored words that would falsely trip enhanceLLMError or the hub banner');
+        assert(failure.isRateLimit !== true, 'a payload rejection is never tagged as a rate limit');
+      } finally {
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { ok: true };
+    },
+  },
+{
     // Finding 7 (gemini.js): a real run burned the entire ladder in ~850ms —
     // every model 429'd on a recoverable per-minute quota — then threw and the
     // caller silently degraded, even though the SAME model succeeded 4 seconds
