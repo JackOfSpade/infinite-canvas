@@ -222,6 +222,35 @@ export function migrateJobHubPageCeiling(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Clear a stranded jobhub preflight drop lock (v5).
+ *
+ * `inputLocked` is set the moment a career-file drop is accepted, before
+ * parsing yields a profile. Saving during that window rewrote hubState to
+ * 'empty' but persisted the lock, leaving a hub that refuses new drops, claims
+ * "Career files retained" with nothing retained, and hides its Re-run button
+ * because `hasReusableCareerProfile` is false. The only escape was deleting the
+ * module. The key is stripped on save now; this heals canvases already written.
+ *
+ * Shape-gated on a lock with NO career input behind it, so a hub that really
+ * did accept files keeps its lock. Idempotent: once cleared the node no longer
+ * matches.
+ */
+export function migrateStaleJobHubInputLock(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    if (n.type !== 'jobhub' || !n.data?.inputLocked) return n;
+    const d = n.data;
+    const hasItem = (v) => Array.isArray(v) && v.some(Boolean);
+    if (d.careerData || d.resumeProfile || d.filePath || hasItem(d.filePaths) || hasItem(d.careerFilePaths)) return n;
+    changed = true;
+    const { inputLocked: _stranded, ...rest } = d;
+    return { ...n, data: rest };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -249,6 +278,7 @@ const MIGRATIONS = [
   { version: 2, name: 'legacy-jobhub→scoredJobs', migrate: migrateLegacyJobHubResults, selfRecursive: false },
   { version: 3, name: 'marketplacecard+createdAt', migrate: migrateMarketplaceCardCreatedAt, selfRecursive: false },
   { version: 4, name: 'jobhub-page-ceiling→all',  migrate: migrateJobHubPageCeiling,   selfRecursive: false },
+  { version: 5, name: 'jobhub-stranded-input-lock', migrate: migrateStaleJobHubInputLock, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

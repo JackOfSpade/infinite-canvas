@@ -15,7 +15,7 @@ import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 
 // Human label for a connected Job Search Module, from its search params.
 function moduleLabel(d) {
-  const loc = String(d?.preferredLocation || d?.canonicalLocation?.display || '').trim();
+  const loc = String(d?.preferredLocation || d?.canonicalLocation || '').trim();
   const role = String(d?.targetRole || '').trim();
   return [role, loc].filter(Boolean).join(' · ') || 'Job Search';
 }
@@ -263,7 +263,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
         mergeStats: {
           totalIncoming: 0, unique: 0, duplicatesRemoved: 0,
-          collisions: 0, collisionUpgrades: 0, modules: completedModules.length, perModule,
+          collisions: 0, collisionUpgrades: 0, collisionAssessmentUpgrades: 0, modules: completedModules.length, perModule,
         },
         combineSignature: combineSignature(completedModules), stale: false, staleReason: null,
       });
@@ -300,7 +300,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         `[JobBoard] Combined ${completedModules.length} completed module(s): ` +
         `${perModule.map((p) => p.count).join('+')}=${mergeStats.totalIncoming} → ` +
         `${mergeStats.unique} unique (${mergeStats.duplicatesRemoved} dup removed, ` +
-        `${mergeStats.collisionUpgrades} score-upgrade(s))`
+        `${mergeStats.collisionUpgrades} score-upgrade(s), ` +
+        `${mergeStats.collisionAssessmentUpgrades} assessment-upgrade(s))`
       );
       if (union.length === 0) {
         addToast({ title: 'No jobs to combine', description: 'The connected modules have no scored jobs.', type: 'error' });

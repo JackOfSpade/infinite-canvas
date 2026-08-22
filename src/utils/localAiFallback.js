@@ -16,10 +16,9 @@ export const LOCAL_AI_RESULT_SETTLE_MS = 6_000;
 export const LOCAL_AI_POLL_INTERVAL_MS = 2_500;
 
 // A transient status-IPC failure (a canvas re-save renaming files under the
-// resolver, a momentary FS error) must not park a handoff on terminal
-// 'failed' — 'failed' is idle for BOTH drivers, so a single hiccup would
-// permanently orphan the job. Both the mounted card's poll and the fallback
-// manager give up only after this many consecutive failing polls.
+// resolver, a momentary FS error) is surfaced only after this many consecutive
+// failing polls. Drivers label it `status-error`, which remains pollable, so a
+// later successful check reconnects the handoff automatically.
 export const LOCAL_AI_STATUS_ERROR_STREAK_LIMIT = 3;
 
 // Statuses the MOUNTED CARD's poll loop leaves alone (JobCardNode's effect).

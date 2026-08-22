@@ -12,18 +12,24 @@ function hasItems(value) {
   return Array.isArray(value) && value.some(Boolean);
 }
 
+// The jobhub fields that, on their own, mean "this hub already took its career
+// files". Exported so the READER below and the tests that guard it against
+// drifting from buildJobHubCareerClearPatch (the WRITER) share one list instead
+// of two hand-maintained copies. `inputLocked` is deliberately NOT here: it is
+// hub-type-agnostic and handled ahead of every per-type branch.
+export const JOBHUB_CAREER_IDENTITY_FIELDS = ['careerData', 'resumeProfile', 'filePath', 'filePaths', 'careerFilePaths'];
+
+// Arrays count only when they hold something; scalars count on truthiness.
+function hasIdentityValue(value) {
+  return Array.isArray(value) ? hasItems(value) : !!value;
+}
+
 export function hubHasAcceptedInitialDrop(hub) {
   const data = hub?.data || {};
   if (data.inputLocked) return true;
 
   if (hub?.type === 'jobhub') {
-    return !!(
-      data.careerData ||
-      data.resumeProfile ||
-      data.filePath ||
-      hasItems(data.filePaths) ||
-      hasItems(data.careerFilePaths)
-    );
+    return JOBHUB_CAREER_IDENTITY_FIELDS.some(field => hasIdentityValue(data[field]));
   }
 
   if (hub?.type === 'sellhub') {
@@ -31,6 +37,49 @@ export function hubHasAcceptedInitialDrop(hub) {
   }
 
   return false;
+}
+
+// WRITER dual of hubHasAcceptedInitialDrop's jobhub reader field set — i.e.
+// inputLocked + JOBHUB_CAREER_IDENTITY_FIELDS — plus the caches derived from
+// those files. Applied as a data patch, it must make hubHasAcceptedInitialDrop
+// return false again so the hub re-opens for a fresh initial drop.
+// migrateStaleJobHubInputLock (serializationUtils.js) checks the same identity
+// fields, so keep all three in sync. The keys stay spelled out literally here
+// because this list IS the writer contract (a test asserts it covers every
+// exported identity field); deriving it would make it agree with the reader by
+// construction and stop catching drift.
+//   • First 9 keys — the drop-lock identity itself.
+//   • achievements / achievementsMining — the mined accomplishment ledger and
+//     its in-flight fencing marker. NEITHER is fingerprint-keyed (JobCardNode's
+//     mineAllowed is just `!cachedAchievements && !markerFresh`), so a surviving
+//     ledger would silently write new résumés from the OLD files' figures.
+//   • queries / queryCacheKey / queryModel / queryCount — LLM search queries
+//     generated from the old profile.
+//   • canonicalLocation — inferred FROM the profile whenever preferredLocation
+//     is blank.
+// Deliberately NOT cleared: targetRole, preferredLocation, searchLocation,
+// remoteResidences, maxAgeDays, collectionLimits, enabledSourceIds — the search settings the
+// user is keeping when they swap career files.
+export function buildJobHubCareerClearPatch() {
+  return {
+    inputLocked: false,
+    resumeProfile: null,
+    careerData: null,
+    resumeSummary: null,
+    resumeFingerprint: null,
+    resumeContext: null,
+    filePath: null,
+    filePaths: null,
+    careerFilePaths: null,
+    achievements: null,
+    achievementsMining: null,
+    queries: null,
+    queryCacheKey: null,
+    queryModel: null,
+    queryCount: null,
+    canonicalLocation: null,
+    locationSnapshot: null,
+  };
 }
 
 export function canSellHubReplaceFailedInitialPhotos(hub) {

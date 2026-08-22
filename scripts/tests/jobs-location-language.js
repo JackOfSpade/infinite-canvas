@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -485,6 +485,130 @@ export default [
       assert(a.offTarget === 1 && /Toronto/.test(a.offSamples[0] || ''),
         `only the Canadian leak stays off-target, got ${a.offTarget}`);
       return { ok: true, adherence: a };
+    },
+  },
+{
+    // Who produced the in-area count decides what it is worth: a source that
+    // received no location parameter renders its location strings relative to the
+    // search, so its agreement is an echo. And the off-target check can only
+    // recognize countries whose subdivisions we enumerate, which bounds what
+    // "0 off-target" is evidence of.
+    name: 'summarizeLocationAdherence: in-area jobs are attributed per source and cross-border reach is enumerable',
+    run: () => {
+      const country = summarizeLocationAdherence([
+        { title: 'Data Engineer', location: 'Toronto, ON', source: 'google' },
+        { title: 'DBA', location: 'Montreal, QC', source: 'google' },
+        { title: 'Architect', location: 'Halifax, Nova Scotia', source: 'glassdoor' },
+        { title: 'Sales Mgr', location: 'Houston, TX', source: 'indeed' },       // cross-border leak
+        { title: 'Coordinator', location: 'Newmarket', source: 'google' },       // unclear
+        { title: 'Remote role', location: 'Austin, TX', source: 'weworkremotely' }, // remote board
+      ], 'Canada');
+      assert(country.matched === 3, `3 Canadian jobs in-area, got ${country.matched}`);
+      assert(country.matchedBySource.google === 2 && country.matchedBySource.glassdoor === 1,
+        `in-area jobs are tallied per source, got ${JSON.stringify(country.matchedBySource)}`);
+      assert(!country.matchedBySource.indeed && !country.matchedBySource.weworkremotely,
+        'off-target, unclear and remote jobs never enter the in-area tally');
+      assert(country.foreignDetectable.join(', ') === 'United States',
+        `a Canada target can only detect US tokens, got ${JSON.stringify(country.foreignDetectable)}`);
+      const us = summarizeLocationAdherence([{ title: 'CSR', location: 'Denver, CO', source: 'indeed' }], 'United States');
+      assert(us.foreignDetectable.join(', ') === 'Canada' && us.matchedBySource.indeed === 1,
+        `a US target detects Canada only, got ${JSON.stringify(us.foreignDetectable)}`);
+      // The USAJobs US-by-construction shortcut is a match like any other and must
+      // be attributed, or a hard-param source's contribution disappears from the tally.
+      const federal = summarizeLocationAdherence([
+        { title: 'CSR', location: 'Location Negotiable After Selection', source: 'usajobs' },
+      ], 'United States');
+      assert(federal.matched === 1 && federal.matchedBySource.usajobs === 1,
+        `the USAJobs placeless shortcut is attributed, got ${JSON.stringify(federal.matchedBySource)}`);
+      // City / subdivision mode: same tally, and no cross-border claim at all —
+      // the foreign detector only runs on a lone-country target.
+      const region = summarizeLocationAdherence([
+        { title: 'Brand Manager', location: 'Denver, CO', source: 'indeed' },
+        { title: 'Marketing Lead', location: 'Boulder, CO', source: 'dice' },
+        { title: 'Sr. Brand Mgr', location: 'Miami, FL', source: 'linkedin' },
+      ], 'Denver, CO');
+      assert(region.matchedBySource.indeed === 1 && region.matchedBySource.dice === 1 && !region.matchedBySource.linkedin,
+        `region mode tallies in-area per source, got ${JSON.stringify(region.matchedBySource)}`);
+      assert(Array.isArray(region.foreignDetectable) && region.foreignDetectable.length === 0,
+        `a city target claims no cross-border reach, got ${JSON.stringify(region.foreignDetectable)}`);
+      return { ok: true, country: country.matchedBySource, region: region.matchedBySource };
+    },
+  },
+{
+    // The adherence line is read by a person deciding whether a location filter
+    // worked, so its WORDING is the product. Driven through the real report
+    // renderer: the label and both caveats must stay tied to the tallies.
+    name: 'bug report: adherence line says remote-by-location, states detector reach, and caveats a keyword-only in-area figure',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const prior = {
+        nodeId: telemetry.nodeId,
+        boardNodeId: telemetry.boardNodeId,
+        windowId: telemetry.windowId,
+        bucketing: telemetry.bucketing,
+        search: telemetry.search,
+        pipeline: telemetry.pipeline,
+      };
+      const renderCanada = (jobs, perSource) => {
+        recordJobsSourceScope('location-adherence-diagnostics', 903);
+        telemetry.pipeline = null;
+        telemetry.search = {
+          ts: Date.now(),
+          queries: 1,
+          raw: jobs.length,
+          deduped: jobs.length,
+          ageDropped: 0,
+          historyDropped: 0,
+          kept: jobs.length,
+          location: {
+            rawInput: 'Canada',
+            canonical: 'Canada',
+            perSource,
+            adherence: summarizeLocationAdherence(jobs, 'Canada'),
+          },
+        };
+        const report = buildJobsPipelineSnapshot(new Set(['location-adherence-diagnostics']), 903, null);
+        return report.split('\n');
+      };
+      try {
+        const keywordOnly = renderCanada([
+          { title: 'Data Engineer', location: 'Espanola, ON', source: 'google' },
+          { title: 'Data Engineer', location: 'Wawa, ON', source: 'google' },
+          { title: 'Analyst', location: 'Canada', source: 'google' },
+          { title: 'DBA', location: 'Montreal, QC', source: 'google' },
+        ], { google: LOCATION_TREATMENT.google });
+        const line = keywordOnly.find(l => l.startsWith('- Location adherence')) || '';
+        assert(/0 remote-by-location,/.test(line),
+          `the remote bucket is labelled by what it measures (location fields), got: ${line}`);
+        assert(!/\d+ remote,/.test(line), `the bare "remote" census wording is gone, got: ${line}`);
+        const reach = keywordOnly.find(l => l.includes('Cross-border detection covers')) || '';
+        assert(/covers United States only/.test(reach) && /not "no foreign listings"/.test(reach),
+          `a Canada target states that its off-target check only recognizes US tokens, got: ${reach}`);
+        const caveat = keywordOnly.find(l => l.includes('rests entirely on keyword-only source(s)')) || '';
+        assert(/100% in-area/.test(caveat) && /\[google\]/.test(caveat) && /carried a Canada token/.test(caveat),
+          `a 100% in-area figure from keyword-only sources is presented as unconfirmed, got: ${caveat}`);
+
+        // Negative control: one real-param source in the in-area tally means the
+        // figure is no longer only the provider's own rendering.
+        const withParamSource = renderCanada([
+          { title: 'Data Engineer', location: 'Espanola, ON', source: 'google' },
+          { title: 'Data Engineer', location: 'Wawa, ON', source: 'google' },
+          { title: 'Analyst', location: 'Canada', source: 'google' },
+          { title: 'DBA', location: 'Montreal, QC', source: 'indeed' },
+        ], { google: LOCATION_TREATMENT.google, indeed: 'param: location=Canada' });
+        assert(!withParamSource.some(l => l.includes('rests entirely on keyword-only source(s)')),
+          'the keyword-only caveat must not fire when a location-param source contributed to the in-area count');
+        assert(withParamSource.some(l => l.includes('Cross-border detection covers United States only')),
+          'the detector-reach note is a property of the target, not of the sources');
+        return { ok: true, line };
+      } finally {
+        telemetry.nodeId = prior.nodeId;
+        telemetry.boardNodeId = prior.boardNodeId;
+        telemetry.windowId = prior.windowId;
+        telemetry.bucketing = prior.bucketing;
+        telemetry.search = prior.search;
+        telemetry.pipeline = prior.pipeline;
+      }
     },
   },
 {

@@ -1,41 +1,60 @@
 import {
   assert,
+  assertCandidateDashPunctuation,
   authorCoverLetterEnvelope,
   formatCoverLetterDate,
   BANNED_GENERIC_PHRASES,
   BANNED_GENERIC_PATTERNS,
   buildResumeDocument,
+  checkAdditiveSeam,
   checkAllNeedDisposition,
+  checkAnchorRelevance,
+  checkClaimedEquivalence,
   checkCompanySpecificity,
+  checkCompoundHyphenation,
   checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
   checkExperienceInfinitiveGrammar,
   checkFigureDiscipline,
   checkGenericPhrases,
+  checkLegalStatus,
   checkLogisticsContainment,
   checkLogisticsGrounding,
+  checkLogisticsLegalStatus,
   checkNeedGrounding,
   checkNeedsPortfolio,
+  checkOpeningDemonstrative,
+  checkPlainRegister,
   checkPlanGate,
+  checkPostingReference,
+  checkPunctuationStyle,
   checkRedundancy,
+  checkSalientPhraseEcho,
   checkRequestedWorkSampleLink,
   checkRoleThesis,
+  checkSentenceLength,
   checkShape,
   checkTopNeedDisposition,
+  COMPOUND_HYPHENATION_RULES,
   coverLetterCheckSummary,
   directArgumentContractObservation,
   evaluateCoverLetterChecks,
   extractResumeEvidence,
   fs,
   hasUsableCoverLetterParagraphs,
+  MAX_HYPHENATION_OBSERVATIONS,
   MAX_LETTER_FIGURES,
   MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS,
+  MAX_SENTENCE_WORDS,
+  MIN_ANCHOR_RELEVANCE_CORPUS_WORDS,
   normalizeCoverLetterPlan,
   normalizeDirectLetterArgumentContract,
   path,
   renderResumeEvidenceForPrompt,
   selectBetterCoverLetterPlan,
   selectBetterLetterNeeds,
+  sentences,
+  STACK_TOOL_LEXICON,
 } from '../test-dependencies.js';
 
 function loadFixture(name) {
@@ -303,6 +322,18 @@ export default [
     },
   },
   {
+    name: 'cover letter harness: distinctive short source wording is paraphrased across documents',
+    run: () => {
+      const source = { bulletTexts: ['Built from scratch a Django hub for retained internal tools.'] };
+      const repeated = checkSalientPhraseEcho(['I built from scratch a Django application for the district.'], source);
+      const paraphrased = checkSalientPhraseEcho(['I designed and implemented a Django application for the district.'], source);
+      assert(!repeated.passed && repeated.detail.includes('built from scratch'),
+        'a distinctive three-word résumé phrase must be revision work even below the general eight-word threshold');
+      assert(paraphrased.passed, `a fact-preserving natural paraphrase must pass: ${paraphrased.detail}`);
+      return { repeated: repeated.detail, paraphrased: paraphrased.detail };
+    },
+  },
+  {
     name: 'cover letter harness: generic phrases and banned openers are detected',
     run: () => {
       const pass = checkGenericPhrases(['The role needs careful escalation decisions when reports are incomplete.']);
@@ -355,6 +386,14 @@ export default [
         'generic-observation detail remains bounded for hostile multi-paragraph output');
       const precise = checkGenericPhrases(['An unproven track record would be a concern, so I rely on documented incident outcomes.']);
       assert(precise.passed, 'word-substring collisions must not falsely revise a specific, non-generic sentence');
+      const hollowDoublet = checkGenericPhrases(['I gave the board a clear view of the downsides and trade-offs of that approach.']);
+      const namedJudgement = [
+        'The migration surfaced limitations in the vendor tooling as well as strengths in our own.',
+        'I documented the benefits of the migration as well as its limitations.',
+      ].map(paragraph => checkGenericPhrases([paragraph]));
+      assert(!hollowDoublet.passed && hollowDoublet.detail.includes('downsides and trade-offs')
+        && namedJudgement.every(check => check.passed),
+      'only the fixed hollow doublet is banned: this id is a hard gate on the Local AI path, so a sentence naming a specific judgment must never reject a completed run');
       return { pass: pass.detail, fail: fail.detail, typographic: typographic.detail, applicationAnnouncements: applicationAnnouncements.map(check => check.detail), spacedHyphen: spacedHyphen.detail, hendrickOpener: hendrickOpener.detail, hendrickMapping: hendrickMapping.detail, allObservations: allObservations.detail, precise: precise.detail };
     },
   },
@@ -490,6 +529,387 @@ export default [
       assert(!unselectedCoincidence.passed && unselectedCoincidence.detail.includes('“32%”'),
         'a figure elsewhere in the résumé cannot authorize planned prose when no selected mapping carries it');
       return { pass: pass.detail, invented: invented.detail, tooMany: tooMany.detail, currencyMismatch: currencyMismatch.detail, signMismatch: signMismatch.detail, spelledDuration: spelledDuration.detail, malformed: malformed.detail, unselectedCoincidence: unselectedCoincidence.detail, bounded: manyMissing.detail.length };
+    },
+  },
+  {
+    name: 'cover letter harness: compound hyphenation flags a missing hyphen and leaves bare adverbial and noun forms alone',
+    run: () => {
+      const fail = checkCompoundHyphenation([
+        'We kept the scheduling core in house and gave one team end to end ownership of the district wide rollout, its third party integrations, and its real time dashboards.',
+        'The desk ran a check in and check out process for loaner hardware, and we published the open source tools behind it.',
+      ]);
+      assert(!fail.passed && fail.id === 'compound-hyphenation'
+        && fail.detail.includes('paragraph 1 writes “in house”; write “in-house” (hyphenate the compound modifier)')
+        && fail.detail.includes('write “end-to-end ownership”')
+        && fail.detail.includes('write “district-wide”')
+        && fail.detail.includes('write “third-party integrations”')
+        && fail.detail.includes('write “real-time dashboards”')
+        && fail.detail.includes('paragraph 2 writes “check in and check out process”; write “check-in / check-out process”')
+        && fail.detail.includes('write “open-source tools”'),
+      'every covered compound must name its paragraph, the written form, and the concrete hyphenated replacement');
+      const legal = checkCompoundHyphenation([
+        'My experience to date is in-house work, so I own end-to-end ownership of the full stack.',
+        'We placed the loaner laptops end to end on the counter while students checked in devices at the desk.',
+      ]);
+      assert(legal.passed,
+        `already-hyphenated modifiers, the bare adverbial, the noun “the full stack”, and conjugated check-in verbs are defensible register: ${legal.detail}`);
+      const oneDirection = checkCompoundHyphenation(['I ran the check out kiosk for loaner hardware.']);
+      assert(!oneDirection.passed
+        && oneDirection.detail.includes('paragraph 1 writes “check out kiosk”; write “check-out kiosk”')
+        && !oneDirection.detail.includes('check-in'),
+      'the suggestion names only the direction the letter wrote: the revision prompt applies a hyphenation suggestion verbatim, so the paired form would add a duty the résumé never evidenced');
+      const overflow = checkCompoundHyphenation(Array.from({ length: 12 }, () => 'The team kept the roster in house.'));
+      assert(!overflow.passed && overflow.detail.includes('additional observation(s) omitted')
+        && MAX_HYPHENATION_OBSERVATIONS === 8 && overflow.detail.length < 2400,
+      'hyphenation detail remains bounded for hostile multi-paragraph output');
+      assert(COMPOUND_HYPHENATION_RULES.length >= 8
+        && COMPOUND_HYPHENATION_RULES.every(rule => rule.label && rule.pattern && rule.suggestion),
+      'the hyphenation rules stay an explicit, auditable closed list rather than a general orthography scorer');
+      return { fail: fail.detail, legal: legal.detail, rules: COMPOUND_HYPHENATION_RULES.length };
+    },
+  },
+  {
+    name: 'cover letter harness: anchor relevance licenses posting-named tools and flags an off-posting stack tour',
+    run: () => {
+      const posting = [
+        'Cedar Ridge Learning is hiring an engineer to extend the React interface that school registrars use every day.',
+        'The work sits between the registrar desk and the district office, so you will follow a signed form from the desk where it is handed in to the record that proves it was filed.',
+        'You will own the Postgres data model that carries attendance, permission, and transfer records for eleven schools.',
+        'We care about how you find the failure point in that path, not about the length of a tool list.',
+      ].join(' ');
+      const dump = checkAnchorRelevance(['I rebuilt the reporting service around Django, Nginx, Gunicorn, and Docker Compose behind a TypeScript client.'], posting, '');
+      assert(!dump.passed && dump.id === 'anchor-relevance'
+        && dump.detail.includes('paragraph 1 names 5 stack tools the posting and research never mention')
+        && dump.detail.includes('“Docker Compose”') && !dump.detail.includes('“Docker”,')
+        && dump.detail.includes('letter names 5 stack tools the posting and research never mention'),
+      'an unlicensed stack list is reported per paragraph and letter-wide, and longest-first matching counts “Docker Compose” once');
+      const licensedPair = checkAnchorRelevance(['I extended the React interface against the Postgres schema that carried attendance records.'], posting, '');
+      const singleAnchor = checkAnchorRelevance(['I moved the nightly aggregation onto a Kubernetes cluster after the cron host kept losing runs.'], posting, '');
+      assert(licensedPair.passed && singleAnchor.passed,
+        'two posting-named tools and one off-posting concrete anchor both stay inside the letter budget');
+      const tour = checkAnchorRelevance([
+        'The scheduler runs on Kubernetes.',
+        'The queue runs on Kafka.',
+        'The cache runs on Redis.',
+      ], posting, '');
+      assert(!tour.passed && tour.detail.includes('letter names 3 stack tools') && !tour.detail.includes('paragraph 1 names'),
+        'a stack tour spread one name per paragraph still fails letter-wide with no paragraph-level observation');
+      const dockerPosting = [
+        'Brightpath District runs its student services platform on a small internal team and deploys every service with Docker.',
+        'You would take over the nightly aggregation that reconciles attendance against transport records, and you would own the release path from a merged branch to a running container.',
+        'The platform serves nine schools, and a failed release is felt at the front desk within minutes, so we ask for a clear account of how you keep releases boring.',
+      ].join(' ');
+      const flavour = checkAnchorRelevance(['The service ships under Docker Compose and a Kubernetes cron job.'], dockerPosting, '');
+      assert(flavour.passed, `a posting naming “Docker” licenses the “Docker Compose” flavour of it: ${flavour.detail}`);
+      const researchCorpus = [
+        'The Cedar Ridge platform team publishes engineering notes describing a Django application served behind Nginx.',
+        'Their most recent note walks through the registrar import path, the queue that retries a failed import, and the review step a district administrator performs before records become visible to a school.',
+        'The team describes itself as small, long-tenured, and responsible for the whole path from intake form to filed record.',
+      ].join(' ');
+      const research = checkAnchorRelevance(['I rebuilt the reporting service around Django and Nginx.'], '', researchCorpus);
+      const skipped = checkAnchorRelevance(['I rebuilt the reporting service around Django, Nginx, and Gunicorn.'], '', '');
+      assert(research.passed && skipped.passed && skipped.detail.includes('skipped: no posting or research text supplied'),
+        'research text licenses a name too, and a missing corpus skips rather than rewriting the whole letter');
+      // An unscraped job description is a supported state, and the deterministic
+      // corpus still carries title/company/location/salary. That metadata can
+      // license a name it happens to contain, but it can never show that the
+      // employer does not want one, so the check must skip rather than report
+      // every résumé-grounded anchor in the letter as off-posting.
+      const metadataOnly = checkAnchorRelevance([
+        'I rebuilt the reporting service with Django after the nightly export kept losing rows.',
+        'I put Redis behind the intake form so a resubmitted application could not create a second record.',
+        'I shipped a React dashboard that showed the registrar which forms were still unfiled.',
+      ], 'Data Engineer\nAcme Analytics\nAustin, TX\n$140,000 to $180,000 a year', '');
+      assert(metadataOnly.passed && metadataOnly.detail.includes('skipped: posting and research text supply only')
+        && MIN_ANCHOR_RELEVANCE_CORPUS_WORDS > 25,
+      'a metadata-only corpus is not evidence of absence: the floor must stay above the words a title, company, location, and salary contribute');
+      assert(!STACK_TOOL_LEXICON.some(entry => ['Go', 'Swift', 'R', 'C', 'D'].includes(entry))
+        && STACK_TOOL_LEXICON.includes('React') && STACK_TOOL_LEXICON.includes('Docker Compose'),
+      'tokens that are ordinary English words or common names stay out of the case-sensitive lexicon');
+      return { dump: dump.detail, licensedPair: licensedPair.detail, tour: tour.detail, flavour: flavour.detail, skipped: skipped.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: additive seams, advertisement references, and asserted equivalences request an argumentative repair',
+    run: () => {
+      const seam = checkAdditiveSeam([
+        'I built an internal scheduling tool from scratch. I also wrote a grading assistant for the same district.',
+        'I built a parent notification tool too.',
+      ]);
+      assert(!seam.passed && seam.id === 'additive-seam'
+        && seam.detail.includes('paragraph 1 appends evidence with a bare additive connective (“I also wrote a grading assistant for the …”)')
+        && seam.detail.includes('paragraph 2 appends evidence with a bare additive connective (“I built a parent notification tool too.”)')
+        && seam.detail.includes('state the gap or need this evidence answers before naming the artifact'),
+      'the additive opener and the trailing “too” seam are both quoted and repaired argumentatively rather than lexically');
+      const adjacentBuild = checkAdditiveSeam([
+        'Additionally, I built the rostering service the registrar runs every morning.',
+        'I also personally built the parent notification path.',
+      ]);
+      assert(!adjacentBuild.passed
+        && adjacentBuild.detail.includes('paragraph 1 appends evidence with a bare additive connective (“Additionally, I built the rostering service')
+        && adjacentBuild.detail.includes('paragraph 2 appends evidence with a bare additive connective (“I also personally built the parent notification'),
+      'the seam still fires when the build verb follows the connective subject directly or behind a single -ly adverb');
+      const midSentenceTrailer = checkAdditiveSeam([
+        'I built the intake system from scratch too, in modern tooling, covering every site.',
+      ]);
+      assert(!midSentenceTrailer.passed
+        && midSentenceTrailer.detail.includes('paragraph 1 appends evidence with a bare additive connective (“I built the intake system from scratch too,'),
+      'an additive “too” followed by a comma is the same appended proof as one that ends the sentence');
+      const connective = checkAdditiveSeam([
+        'I also learned to read incomplete incident reports quickly.',
+        'I built the scheduler because the paper process kept losing signed forms.',
+        'In addition, I supported the staff who wrote the policy.',
+        'I also saw how a poorly designed intake process created rework for the front office.',
+        'I built dashboards that were too slow to ship at first, then fixed them.',
+        'I built the intake flow as well as the reporting layer.',
+      ]);
+      assert(connective.passed,
+        `an additive opener without adjacent build evidence, build evidence without a seam, a build verb buried in a subordinate clause, a degree “too” followed by the word it modifies, and a mid-sentence “as well as” comparative are ordinary connective prose: ${connective.detail}`);
+      const posting = checkPostingReference([
+        'Owning the rollout end-to-end is what your posting wants sped up.',
+        'The job ad asks for the same repair work, as advertised.',
+      ]);
+      assert(!posting.passed && posting.id === 'posting-reference'
+        && posting.detail.includes('paragraph 1 addresses the advertisement itself (“your posting”)')
+        && posting.detail.includes('paragraph 2 addresses the advertisement itself (“job ad”)')
+        && posting.detail.includes('(“as advertised”)'),
+      'each advertisement-object noun is reported once per paragraph with the phrase that produced it');
+      const workNouns = checkPostingReference([
+        'The role requires steady prioritization when reports arrive incomplete.',
+        'This position sits between the field crews and the district office.',
+        'Your listing quality team ships the ranking model.',
+        'The listing page I rebuilt cut abandoned carts.',
+        'I rewrote the job description parser your team maintains.',
+      ]);
+      assert(workNouns.passed, `“the role” and “this position” name the work itself, and “listing” and “job description” are marketplace and job-board product vocabulary rather than references to this advertisement: ${workNouns.detail}`);
+      const equivalence = checkClaimedEquivalence([
+        'The way the district core-and-integrations work maps onto your platform is the part I would bring first.',
+        'That responsibility translates directly into this team, and it is exactly what the work needs.',
+        'The same failure pattern translates directly to your intake queue.',
+      ]);
+      assert(!equivalence.passed && equivalence.id === 'claimed-equivalence'
+        && equivalence.detail.includes('paragraph 1 asserts a cross-domain equivalence (“maps onto”)')
+        && equivalence.detail.includes('(“translates directly into”)')
+        && equivalence.detail.includes('(“is exactly what”)')
+        && equivalence.detail.includes('(“translates directly to”)')
+        && equivalence.detail.includes('explain the shared mechanism (constraints, data flow, failure modes)'),
+      'every asserted-equivalence formula is quoted and redirected to the arguable shared mechanism');
+      const argued = checkClaimedEquivalence([
+        'I translated the intake requirements into a build plan, and the dashboard mirrored the incident feed.',
+        'Our dashboard mirrors production latency within a second.',
+        'That volume translates to about two hundred tickets a week.',
+      ]);
+      assert(argued.passed, `past-tense uses outside the closed formula family, literal replication, and unit restatement are not asserted analogies: ${argued.detail}`);
+      return { seam: seam.detail, posting: posting.detail, equivalence: equivalence.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: runaway sentences, semicolons, dash splices, and bureaucratic register carry plain repairs',
+    run: () => {
+      const long = checkSentenceLength(['The scheduling rewrite began when the paper intake process kept losing signed permission forms, so I mapped every handoff between the front desk, the classroom, and the district office in order to find the point where a form could vanish without anyone noticing it had gone missing at all.']);
+      assert(!long.passed && long.id === 'sentence-length'
+        && long.detail.includes('paragraph 1 contains a 49-word sentence beginning “The scheduling rewrite began when the paper intake …”')
+        && long.detail.includes('split it into short causal sentences') && MAX_SENTENCE_WORDS === 40,
+      'a runaway sentence reports its exact word count and opening words for the split');
+      const measured = checkSentenceLength(['The scheduling rewrite began when the paper intake process kept losing signed permission forms, so I mapped every handoff between the front desk, the classroom, and the district office.']);
+      assert(measured.passed, `a well-built 29-word sentence is a runaway-clause near miss, not revision work: ${measured.detail}`);
+      const punctuation = checkPunctuationStyle([
+        'The rollout had two halves; one was the scheduling core.',
+        'The rollout had two halves — the scheduling core and the reporting service.',
+      ]);
+      assert(!punctuation.passed && punctuation.id === 'punctuation-style'
+        && punctuation.detail.includes('paragraph 1 uses a semicolon; split the clause into two short sentences')
+        && punctuation.detail.includes('paragraph 2 uses a dash as a clause splice'),
+      'the semicolon escape hatch and the em-dash splice are both read off the raw paragraph string');
+      const dateRange = checkPunctuationStyle(['I led that work from 2019–2022 without a gap in coverage.']);
+      assert(dateRange.passed, `an en dash between two digits is a range, not a clause splice: ${dateRange.detail}`);
+      const spacedRanges = checkPunctuationStyle([
+        'I worked there from 2019 – 2022 without a break.',
+        'I led that team from May 2023 – June 2026 without a gap.',
+      ]);
+      assert(spacedRanges.passed,
+        `a spaced numeric range and a month-name range both ship past the document gate, so flagging them would spend a revision round damaging correct copy: ${spacedRanges.detail}`);
+      // Parity with the design-system hard gate (assertCandidateDashPunctuation).
+      // Anything that gate throws on must arrive here as a revisable
+      // observation instead: a spaced hyphen used to pass this check, fail the
+      // build, and surface as a page-count error that never mentioned a dash.
+      const gateCorpus = [
+        'I ran the desk - the queue never backed up.',
+        'The core - the scheduler - shipped.',
+        'The rollout had two halves — the scheduling core and the reporting service.',
+        'The registrar signed the form – the office filed it.',
+        'I led that work from 2019–2022 without a gap in coverage.',
+        'I worked there from 2019 – 2022 without a break.',
+        'I led that team from May 2023 – June 2026 without a gap.',
+      ];
+      const parity = gateCorpus.map(copy => {
+        let gateRejected = false;
+        try {
+          assertCandidateDashPunctuation({ coverLetter: { paragraphs: [copy] } });
+        } catch {
+          gateRejected = true;
+        }
+        return { copy, gateRejected, spliceFlagged: checkPunctuationStyle([copy]).detail.includes('uses a dash as a clause splice') };
+      });
+      assert(parity.filter(item => item.gateRejected).length === 4
+        && parity.every(item => item.gateRejected === item.spliceFlagged),
+      'every dash form the document gate rejects must become a revisable observation, and no form it blesses may be sent back for revision');
+      const register = checkPlainRegister([
+        'I am in possession of a valid driver licence for the district fleet.',
+        'I possess a valid first aid certificate for the site.',
+      ]);
+      assert(!register.passed && register.id === 'plain-register'
+        && register.detail.includes('paragraph 1 uses bureaucratic register (“in possession of”)')
+        && register.detail.includes('(“possess a valid”)'),
+      'the fixed bureaucratic formulas ask for plain first-person English');
+      const plain = checkPlainRegister(['I have a valid driver licence, and I can work weekends in the district.']);
+      assert(plain.passed, `plain first-person logistics facts must never become revision work: ${plain.detail}`);
+      const awkwardGap = checkPlainRegister(['I answered that gap with a native overlay.']);
+      assert(!awkwardGap.passed && awkwardGap.detail.includes('use “closed the gap” or “addressed the gap”'),
+        'unnatural gap wording must receive a plain contemporary repair');
+      assert(sentences('The desk logged forms at 9 a.m. for Cedar Ridge Inc. and closed at noon.').length === 1
+        && sentences('').length === 0,
+      'the shared segmenter keeps abbreviations in one sentence so every sentence-level check counts the same units');
+      return { long: long.detail, punctuation: punctuation.detail, register: register.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: a synthetic register-defect letter fails every appended deterministic check',
+    run: () => {
+      // Every construction here paraphrases a real generation defect with
+      // invented employers and projects. The fixture deliberately contains no
+      // copied letter text and no personal data.
+      const paragraphs = [
+        'Owning the rollout end to end is what your posting wants, and that is the work I kept in house at Brightpath District through a rebuild that began when the paper intake process lost signed permission forms, continued through every handoff between the front desk, the classroom, and the registrar, and ended only once each form had one named owner.',
+        'I rebuilt the shared in-house core with React, Django, Nginx, Gunicorn, and Docker Compose behind a TypeScript client; one piece was Rosterly — the scheduling service the registrar now runs every morning.',
+        'I built Rosterly from scratch. I also wrote Chalkline, a grading assistant for the same district. I built a parent notification tool too.',
+        'That evaluation practice gives me a clear view of that approach’s downsides and trade-offs as well as its upsides. The way the district core-and-integrations work maps onto your brand-agnostic platform is the part I would bring first. I hold Canadian citizenship and am in possession of a valid driver licence.',
+      ];
+      const checks = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs,
+        evidence: { bulletTexts: ['Rebuilt a district intake path so every permission form carried one named owner.'] },
+        // A posting-sized corpus (the check treats anything smaller as metadata)
+        // that names exactly one of the six tools the letter lists.
+        jobText: [
+          'Cedar Ridge Learning is hiring an engineer to extend the React interface that school registrars use every day.',
+          'The role sits between the front desk and the district office, so you will follow a signed form from the moment it is handed in to the record that proves it was filed.',
+          'We care about how you find the failure point in that path, not about the length of a tool list.',
+          'Tell us what broke, what you changed, and how you knew the change held.',
+        ].join(' '),
+        researchText: '',
+        companyName: 'Cedar Ridge Learning',
+      });
+      const failed = new Map(checks.filter(check => !check.passed).map(check => [check.id, check.detail]));
+      const expected = ['generic-phrases', 'compound-hyphenation', 'anchor-relevance', 'additive-seam',
+        'posting-reference', 'claimed-equivalence', 'sentence-length', 'punctuation-style', 'plain-register',
+        'legal-status', 'opening-demonstrative'];
+      assert(expected.every(id => failed.has(id)),
+        `the synthetic defect letter must fail every register check: ${expected.filter(id => !failed.has(id)).join(', ') || 'none missing'}`);
+      assert(failed.get('generic-phrases').includes('downsides and trade-offs')
+        && failed.get('compound-hyphenation').includes('write “in-house”')
+        && failed.get('anchor-relevance').includes('paragraph 2 names 5 stack tools')
+        && failed.get('additive-seam').includes('paragraph 3 appends evidence with a bare additive connective')
+        && failed.get('posting-reference').includes('(“your posting”)')
+        && failed.get('claimed-equivalence').includes('(“maps onto”)')
+        && failed.get('sentence-length').includes('60-word sentence')
+        && failed.get('punctuation-style').includes('paragraph 2 uses a semicolon')
+        && failed.get('punctuation-style').includes('paragraph 2 uses a dash as a clause splice')
+        && failed.get('plain-register').includes('(“in possession of”)')
+        && failed.get('legal-status').includes('paragraph 4 states citizenship (“Canadian citizenship”)')
+        && failed.get('legal-status').includes('application form')
+        && failed.get('opening-demonstrative').includes('paragraph 4 opens with')
+        && failed.get('opening-demonstrative').includes('“evaluation”'),
+      'each failure quotes the specific defective construction the one revision attempt has to repair');
+      assert(checks.every(check => typeof check.id === 'string' && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
+        'the register checks keep the result(id, passed, detail) contract the audit line and revision prompt consume');
+      const hostile = [checkCompoundHyphenation, checkAnchorRelevance, checkAdditiveSeam, checkPostingReference,
+        checkClaimedEquivalence, checkSentenceLength, checkPunctuationStyle, checkPlainRegister,
+        checkLegalStatus, checkOpeningDemonstrative]
+        .map(check => check(['', null, undefined, 42, { toString: () => 'in house' }], null, undefined));
+      assert(hostile.every(check => check && typeof check.passed === 'boolean' && typeof check.detail === 'string'),
+        'a malformed or partially persisted paragraph array must yield a check result, never a thrown application-generation failure');
+      return { failed: [...failed.keys()] };
+    },
+  },
+  {
+    name: 'cover letter harness: legal status is removal work and opening demonstratives must anchor in the previous paragraph',
+    run: () => {
+      const flagged = checkLegalStatus([
+        'I am a Canadian citizen and hold a U.S. work permit.',
+        'I am authorized to work in Canada and hold permanent residency there.',
+        'I would not require visa sponsorship for this position.',
+      ]);
+      assert(!flagged.passed && flagged.id === 'legal-status'
+        && flagged.detail.includes('paragraph 1 states citizenship (“Canadian citizen”)')
+        && flagged.detail.includes('paragraph 2 states work authorization (“authorized to work”)')
+        && flagged.detail.includes('paragraph 3 states visa status')
+        && flagged.detail.includes('application form'),
+      'every legal-status family member asks for deletion, never a rephrasing');
+      const cleanLegal = checkLegalStatus([
+        'The city runs a citizen feedback portal, and I built the intake queue behind it.',
+        'I can relocate to Toronto in June and start within two weeks.',
+      ]);
+      assert(cleanLegal.passed, `common-noun “citizen” uses and plain logistics facts are not legal-status statements: ${cleanLegal.detail}`);
+      const planLegal = checkLogisticsLegalStatus({ logistics: 'I am a Canadian citizen based in Toronto.' });
+      assert(!planLegal.passed && planLegal.id === 'logistics-legal-status'
+        && planLegal.detail.includes('plan logistics states citizenship'),
+      'the plan-side twin catches the fact before prose exists');
+      const planClean = checkLogisticsLegalStatus({ logistics: 'Based in Toronto and available from June.' });
+      assert(planClean.passed, `availability and location logistics stay in the plan lane: ${planClean.detail}`);
+      const legalGate = checkPlanGate({ ...groundedPlan, logistics: 'I am a Canadian citizen.' }, evidence, needs,
+        'The role must manage incident escalation.', '', 'Logistics: I am a Canadian citizen.');
+      assert(legalGate.shouldRetry && legalGate.checks.some(check => check.id === 'logistics-legal-status' && !check.passed),
+        'citizenship in plan logistics must request the plan retry that removes it');
+      const unanchored = checkOpeningDemonstrative([
+        'I built the Python data integration between the district information system and its third-party platforms.',
+        'That evaluation practice already covers AI products.',
+      ]);
+      assert(!unanchored.passed && unanchored.id === 'opening-demonstrative'
+        && unanchored.detail.includes('paragraph 2 opens with “That evaluation practice already …”')
+        && unanchored.detail.includes('“evaluation” or “practice”'),
+      'a paragraph-opening demonstrative must find its referent in the paragraph the reader just finished');
+      const anchored = checkOpeningDemonstrative([
+        'I ran the third-party product evaluations behind the district adoption decisions.',
+        'That evaluation practice already covers AI products.',
+      ]);
+      assert(anchored.passed, `a stemmed referent in the previous paragraph anchors the demonstrative: ${anchored.detail}`);
+      const fixedPhrase = checkOpeningDemonstrative([
+        'The integration reached both directions.',
+        'That is why the district kept the contract.',
+      ]);
+      assert(fixedPhrase.passed, `pronoun and fixed-phrase demonstratives are out of scope: ${fixedPhrase.detail}`);
+      const firstParagraph = checkOpeningDemonstrative(['That evaluation practice is the subject of this letter and needs no anchor.']);
+      assert(firstParagraph.passed, 'the first paragraph has no previous paragraph to anchor to and is never flagged');
+      return { flagged: flagged.detail, planGate: legalGate.checks.find(check => check.id === 'logistics-legal-status').detail, unanchored: unanchored.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: a clean synthetic letter clears every register and style check',
+    run: () => {
+      const groundedRange = 'Led a district intake rebuild from 2019–2022 so every permission form carried one named owner.';
+      const checks = evaluateCoverLetterChecks({
+        plan: { mappings: [{ evidence: groundedRange }], companyHook: { detail: '' } },
+        paragraphs: [
+          'The registrar at Brightpath District kept losing signed permission forms because intake ran on paper. The role requires someone who can find that failure point and close it. My experience to date is in that kind of repair work.',
+          'I rebuilt the intake path against the React interface and the Postgres schema the registrar already trusted. The rebuild kept one in-house core, so a single team owned end-to-end delivery. I led that work from 2019–2022 without a gap.',
+          'Paper forms vanished between three desks, so I gave every form a single owner record. The same gap explained why grading feedback arrived late, which is why the second tool answered a need the first one had exposed.',
+          'I have a valid driver licence for the district fleet. I can say what the rebuild cost in review time and what it saved at the front desk, and I would rather argue the mechanism than the resemblance.',
+        ],
+        evidence: { bulletTexts: [groundedRange] },
+        jobText: [
+          'Cedar Ridge Learning is hiring an engineer to extend the React interface that school registrars use every day.',
+          'The work sits between the registrar desk and the district office, so you will follow a signed form from the desk where it is handed in to the record that proves it was filed.',
+          'You will own the Postgres data model that carries attendance, permission, and transfer records for eleven schools.',
+          'We care about how you find the failure point in that path, not about the length of a tool list.',
+        ].join(' '),
+        researchText: '',
+        companyName: 'Cedar Ridge Learning',
+      });
+      const failed = checks.filter(check => !check.passed);
+      assert(!failed.length,
+        `a letter already written in the target register must produce no revision work: ${failed.map(check => `${check.id}: ${check.detail}`).join('; ')}`);
+      return { checks: checks.length };
     },
   },
   {
@@ -657,7 +1077,10 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 7, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 18, 'prose helper returns every non-page deterministic check');
+      assert(proseChecks.slice(8).map(check => check.id).join(',')
+        === 'compound-hyphenation,anchor-relevance,additive-seam,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,legal-status,opening-demonstrative',
+      'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
         paragraphs: ['Careful prioritization under incomplete reports is the relevant mechanism.'],

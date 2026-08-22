@@ -13,11 +13,11 @@ import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { formatOriginalJobListingMarkdown } from './applicationBundle.js';
-import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, isShortCoverLetterLayout, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml, withCenteredLetterVariant } from './resumeHtml.js';
+import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, extractResumeEvidence, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
-import { authorCoverLetterEnvelope, checkGenericPhrases, formatCoverLetterDate } from './coverLetterChecks.js';
+import { authorCoverLetterEnvelope, checkGenericPhrases, checkLegalStatus, formatCoverLetterDate } from './coverLetterChecks.js';
 import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
 
@@ -33,7 +33,7 @@ const MAX_LOCAL_AI_UNFINISHED_JOBS = 20;
 const LOCAL_AI_FIT_FEEDBACK_FILE = 'fit-feedback.json';
 const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 const MAX_LOCAL_AI_HANDOFF_EVENTS = 12;
-const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. A new evidence block is justified only when it deepens, corroborates, extends, or honestly qualifies that same throughline, with its relationship clear before the details. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Reject unclear antecedents, unexplained employer or time-period shifts, unjustified chronological backtracking, inventory-style paragraphs, colon-led evidence dumps, sentences that compress several résumé bullets, repeated organizing metaphors, delayed relevance, and a second thesis. Assert explicit career facts; make only narrow interpretations directly supported by those facts; keep general domain principles distinct from personal experience; omit or verify plausible-but-unverified steps.';
+const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. A new evidence block is justified only when it deepens, corroborates, extends, or honestly qualifies that same throughline, with its relationship clear before the details. Never follow a thesis with a standalone background fact whose relevance arrives later. Name an ordinary prior employer once, then use the role, system, project, organization, or “there” when unambiguous. Preserve facts while varying repeated source wording across the résumé and letter; avoid “built from scratch” when a natural supported alternative such as “designed and implemented,” “created,” “developed,” or “delivered” says the same thing. Use temporal contrast words such as “now,” “still,” “again,” “before,” or “after” only when the contrasted state or sequence is already explicit. Prefer common contemporary wording: close or address a gap, never answer a gap. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Reject unclear antecedents, unexplained employer or time-period shifts, unjustified chronological backtracking, inventory-style paragraphs, evidence dumps unloaded after a colon, semicolon, or dash, sentences that compress several résumé bullets, repeated organizing metaphors, delayed relevance, and a second thesis. Assert explicit career facts and use narrow evidence-derived connective or causal language when it improves flow; never add a candidate fact, outcome, scope, tool, sequence, or motivation. Keep general domain principles distinct from personal experience; omit or verify plausible-but-unverified steps.';
 
 function cleanText(value, max = 20_000) {
   return Array.from(String(value ?? ''), char => {
@@ -135,6 +135,22 @@ async function writeLocalAiTerminalReceipt({ canvasRoot, jobId, resultRaw, resum
   };
   await atomicJson(path.join(receiptsRoot, `${jobId}.json`), receipt);
   return receipt;
+}
+
+async function readLocalAiTerminalReceipt(canvasRoot, jobId) {
+  const receiptsRoot = path.resolve(localAiHandoffReceiptsRoot(canvasRoot));
+  try {
+    const raw = await readOwnedFile(receiptsRoot, path.join(receiptsRoot, `${jobId}.json`), { maxBytes: 64_000 });
+    let receipt;
+    try { receipt = JSON.parse(raw); }
+    catch { return null; }
+    return receipt?.version === 1 && receipt?.jobId === jobId && receipt?.status === 'imported'
+      ? receipt
+      : null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 // The job folder intentionally holds private career context while Claude Code
@@ -491,6 +507,13 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
   if (!proseCheck.passed) {
     throw new Error(`Local AI cover letter failed the generic-language check: ${proseCheck.detail}`);
   }
+  // Legal work status is application-form data; a letter stating it is a
+  // policy violation, not a style observation, so it rejects the run the same
+  // way generic phrases do and the local agent removes it and resubmits.
+  const legalStatusCheck = checkLegalStatus(coverLetter.paragraphs);
+  if (!legalStatusCheck.passed) {
+    throw new Error(`Local AI cover letter failed the legal-status check: ${legalStatusCheck.detail}`);
+  }
   assertCandidateDashPunctuation({ resumeMainHtml, coverLetter });
   return {
     resumeMainHtml,
@@ -594,36 +617,6 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
     const rendered = await renderPdf(buildCoverLetterDocument({ letter, variantAttrs, docId }), { signal });
     const fontsLoaded = rendered.fontsLoaded !== false;
     const pageCount = Number.isFinite(rendered.pageCount) ? rendered.pageCount : null;
-    // Keep the baseline unless a second, centred render is also verified. The
-    // design system permits this cover-only variant only after a measured
-    // short-letter result, and never for a multi-page letter.
-    if (fontsLoaded && pageCount === 1 && isShortCoverLetterLayout(rendered.layout)) {
-      try {
-        const centered = await renderPdf(buildCoverLetterDocument({
-          letter,
-          variantAttrs: withCenteredLetterVariant(variantAttrs, true),
-          docId,
-        }), { signal });
-        if (centered.fontsLoaded !== false && centered.pageCount === 1) {
-          return {
-            bytes: centered.bytes,
-            pageCount: centered.pageCount,
-            fontsLoaded: true,
-            renderError: null,
-            centered: true,
-            // Report the layout of the document these bytes came from. Centring
-            // only adds `align-content: safe center` over the same fixed type
-            // area, so the ink span is unchanged — but the reported measurement
-            // must still describe the render that shipped.
-            layout: centered.layout || null,
-            contentUtilization: resumeTypeAreaUtilization(centered.layout || null),
-          };
-        }
-      } catch (error) {
-        if (error?.name === 'AbortError') throw error;
-        logger.warn(`[LocalAI] Could not apply short-letter centring — keeping the verified baseline: ${error?.message || error}`);
-      }
-    }
     return {
       bytes: fontsLoaded ? rendered.bytes : null,
       pageCount,
@@ -633,8 +626,7 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
       // The letter prints onto the same `main.page` surface as the résumé, so
       // the renderer's probe reports the letter's OWN type area and the shared
       // ratio helper applies unchanged. Utilization is reported for the letter,
-      // never enforced: a short letter is a supported outcome (it is what earns
-      // the centred variant above), so there is no minimum here.
+      // never enforced: a short letter is a supported top-aligned outcome.
       layout: rendered.layout || null,
       contentUtilization: resumeTypeAreaUtilization(rendered.layout || null),
     };
@@ -874,6 +866,23 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
   try {
     trustedJob = await assertRealJobDirectory(jobId, canvasFilePath);
   } catch (error) {
+    if (error?.code === 'ENOENT') {
+      const receipt = await readLocalAiTerminalReceipt(requestedCanvas.canvasRoot, jobId);
+      if (receipt) {
+        return {
+          id: jobId,
+          status: 'saved',
+          folder: null,
+          canvasFilePath: requestedCanvas.canonicalCanvasFilePath,
+          createdAt: receipt.importedAt || null,
+          resultSha256: null,
+          message: receipt.message
+            ? `The Local AI application bundle was saved successfully. ${String(receipt.message)}`
+            : 'The Local AI application bundle was saved successfully.',
+          receipt,
+        };
+      }
+    }
     if (error?.code === 'ENOENT' && jobRootExists) {
       return {
         id: jobId,
@@ -1061,9 +1070,8 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
       localJob: { id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
   }
-  const documentSha256 = measuredPriorFeedback
-    ? localAiDocumentHashes(result)
-    : assertLocalAiQualityReviewConsistency(result, priorFeedback);
+  // measuredPriorFeedback always returns above, so this always runs the assert.
+  const documentSha256 = assertLocalAiQualityReviewConsistency(result, priorFeedback);
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
   const docId = crypto.randomUUID();
   const ledger = Array.isArray(input?.achievements?.ledger) ? input.achievements.ledger : null;
@@ -1188,7 +1196,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   // Printing the tabbed workspace makes PDF production depend on injected tab
   // controls that are irrelevant to the document itself.
   const jobListingMarkdown = formatOriginalJobListingMarkdown(input.job);
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, coverLetterCentered: coverLetterFit.centered, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobMarkdown: jobListingMarkdown } });
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobMarkdown: jobListingMarkdown } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
   if (!resumePdf) {
@@ -1219,16 +1227,6 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
     coverLetterFit: coverLetterHandoffFit, qualityReview: result.qualityReview,
     detail: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
   }));
-  try {
-    await writeLocalAiTerminalReceipt({
-      canvasRoot: canvas.canvasRoot, jobId, resultRaw, resumeFit,
-      coverLetterFit, targetPageCount,
-    });
-  } catch (error) {
-    // The receipt improves Claude Code's terminal audit, but a filesystem
-    // failure here must not strand an otherwise verified application import.
-    logger.warn(`[LocalAI] Could not write terminal handoff receipt: ${error?.message || error}`);
-  }
   recordApplicationTelemetry({
     source: 'local-ai', status: 'completed', phase: 'imported', attemptId: `local-${jobId}`,
     jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
@@ -1254,6 +1252,15 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
     // Keep a partial bundle's source job so the card can repair its missing
     // PDFs. Fully complete bundles use the default cleanup path.
     cleanupOnDiscard: missingArtifacts.length === 0,
+    // A failed destination transaction must never erase the only result/context
+    // available for retry, even when both staged PDFs were complete.
+    cleanupOnSaveFailure: false,
+    onSuccessfulSave: async () => {
+      await writeLocalAiTerminalReceipt({
+        canvasRoot: canvas.canvasRoot, jobId, resultRaw, resumeFit,
+        coverLetterFit, targetPageCount,
+      });
+    },
     artifactData: {
       resumeHtml: applicationHtml,
       resumePdf,

@@ -60,9 +60,17 @@ export async function replaceApplicationBundleAtomically(entries, { fileOps = fs
       }
     }
     // Read/copy callers prepare every `data` value before this helper, so a
-    // missing source cannot disturb the destination. Stage writes in parallel.
-    await Promise.all(normalized.filter(entry => entry.data != null)
+    // missing source cannot disturb the destination. Stage writes in
+    // parallel, but wait for every attempt to settle rather than short-
+    // circuiting on the first rejection: Promise.all would move on to the
+    // catch/finally blocks while sibling writes are still in flight, and the
+    // finally block's unlink-every-.tmp pass could then run before a slower
+    // sibling's 'wx' open creates its file — leaving an orphaned hidden temp
+    // file beside the saved application with nothing left to remove it.
+    const staged = await Promise.allSettled(normalized.filter(entry => entry.data != null)
       .map(entry => fileOps.writeFile(entry.temporary, entry.data, { mode: entry.mode, flag: 'wx' })));
+    const firstStagingFailure = staged.find(result => result.status === 'rejected');
+    if (firstStagingFailure) throw firstStagingFailure.reason;
 
     for (const entry of normalized) {
       if (entry.hadOriginal) await fileOps.rename(entry.destination, entry.backup);

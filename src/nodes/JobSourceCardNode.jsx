@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useContext } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
-import { Loader2, CheckCircle2, Filter, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
+import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
@@ -25,8 +25,6 @@ import { normalizeExternalHttpUrl } from '../utils/urlSafety';
  *   - Subscribes to `job-source-progress` events filtered by its sourceId.
  *   - Falls back to the hub's `data.finalSourceCounts` between runs so the
  *     last-known count is still visible after Electron restart.
- *   - Clicking the card dispatches `job-source-filter-toggle` so the hub can
- *     toggle its source filter (the same UX the old ring icons offered).
  *
  * data shape:
  *   {
@@ -298,19 +296,16 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
 
   // Hub state via reactive store selectors, not a plain getNode() snapshot —
   // getNode() only reflects the hub's CURRENT data when read, and this card
-  // has no other reason to re-render on a hub-only change (filter toggle,
-  // lock, hubState) since that doesn't touch this card's own `data` prop.
-  // Wrapped in React.memo, a plain snapshot would go stale until some
-  // unrelated re-render happened to refresh it (mirrors JobGroupNode.jsx).
-  const isFiltered = useStore(
-    useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.sourceFilter === data.sourceId, [data.hubId, data.sourceId])
-  );
+  // has no other reason to re-render on a hub-only change (lock, hubState)
+  // since that doesn't touch this card's own `data` prop. Wrapped in
+  // React.memo, a plain snapshot would go stale until some unrelated
+  // re-render happened to refresh it (mirrors JobGroupNode.jsx).
   const hubBusy = useStore(
     useCallback((s) => ['queued', 'parsing', 'querying', 'searching', 'scoring'].includes(s.nodeLookup.get(data.hubId)?.data?.hubState), [data.hubId])
   );
   // Hub-cascading lock: when the owning Job Search Module is locked, the source card's
-  // interactive controls (filter toggle, Solve, Skip) become no-ops. The
-  // card itself stays visible and informational.
+  // interactive controls (Solve, Skip) become no-ops. The card itself stays
+  // visible and informational.
   const hubLocked = useStore(
     useCallback((s) => !!s.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
   );
@@ -397,31 +392,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       ? '#f59e0b'
       : data.color;
 
-  const handleClick = (e) => {
-    e.stopPropagation();
-    if (hubLocked) return;
-    document.dispatchEvent(new CustomEvent('job-source-filter-toggle', {
-      detail: { hubId: data.hubId, sourceId: data.sourceId },
-    }));
-  };
-
   return (
     // Outer wrapper is draggable: no `nodrag`, no pointer-down stopPropagation.
-    // ReactFlow distinguishes click from drag by movement, so the whole-card
-    // `onClick` filter toggle still fires on stationary clicks while the card
-    // can also be dragged. Matches MarketplaceCardNode / CompSourceCardNode.
+    // Matches MarketplaceCardNode / CompSourceCardNode.
     <div
-      onClick={handleClick}
-      className={`w-[140px] rounded-xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden transition-all ${
-        hubLocked ? 'cursor-default' : 'cursor-pointer hover:brightness-110'
-      } ${isFiltered ? 'ring-2 ring-offset-1 ring-offset-black' : ''}`}
+      className="w-[140px] rounded-xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden transition-all"
       style={{
         borderColor: `${accentColor}55`,
-        ...(isFiltered ? { '--tw-ring-color': accentColor } : {}),
       }}
-      title={hubLocked
-        ? 'Hub is locked'
-        : `Click to ${isFiltered ? 'show all sources' : `filter to ${data.name} only`}`}
     >
       <NodeHandles className="!w-2 !h-2 !bg-white/30 !border-white/10" />
 
@@ -436,7 +414,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         <div className="flex-1 min-w-0">
           <div className="text-white text-[11px] font-semibold truncate flex items-center gap-1">
             {data.name}
-            {isFiltered && <Filter size={8} className="text-white/60 shrink-0" />}
           </div>
           <div className="flex items-center gap-1 mt-0.5">
             {isSearching && <Loader2 size={9} className="text-white/40 animate-spin shrink-0" />}

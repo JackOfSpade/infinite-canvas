@@ -64,6 +64,168 @@ const DEFAULT_RANGES = [
   { label: 'Unspecified', minSalary: 0,     maxSalary: 0 },
 ];
 
+// Salary research is additive metadata on a scored job, not part of its
+// interview-likelihood score or hierarchy placement. Keep the compatibility
+// boundary here (rather than in JobCardNode) so every path that creates a card
+// can preserve a single, safe representation. A missing/unknown assessment is
+// deliberately a neutral legacy state: opening an old canvas must never imply
+// that new compensation research was run.
+const COMPENSATION_STATUSES = new Set(['competitive', 'below_market', 'uncertain', 'not_evaluated']);
+// These records are renderer-facing, potentially persisted AI output. Keep an
+// absurd value from becoming a very long disclosure (or, worse, supporting a
+// semantic green/red result). This is the same generous annual-cash ceiling
+// used by the offer parser; it still accommodates unusually high executive
+// and contractor pay in the currencies this feature supports.
+const MAX_CREDIBLE_ANNUAL_CASH = 10_000_000;
+const MAX_COMPENSATION_TEXT_LENGTH = 2_400;
+const MAX_SOURCE_LABEL_LENGTH = 240;
+const MAX_SOURCE_DETAILS_LENGTH = 500;
+const MAX_LOCATION_LABEL_LENGTH = 300;
+
+function textValue(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function positiveNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 && numeric <= MAX_CREDIBLE_ANNUAL_CASH ? numeric : null;
+}
+
+function normalizedPayPeriod(value) {
+  const raw = textValue(value).toLowerCase().replace(/[\s/_-]+/g, '');
+  if (['annual', 'annually', 'year', 'yearly', 'yr', 'peryear', 'peryr', 'annum'].includes(raw)) return 'annual';
+  return raw;
+}
+
+function normalizedRange(value, fallback = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const min = positiveNumber(source.min ?? source.low ?? source.minimum ?? fallback.min);
+  const max = positiveNumber(source.max ?? source.high ?? source.maximum ?? fallback.max);
+  const currency = textValue(source.currency ?? source.currencyCode ?? fallback.currency).toUpperCase();
+  const period = normalizedPayPeriod(source.period ?? source.payPeriod ?? source.unit ?? fallback.period);
+  const resolvedMin = min ?? max;
+  const resolvedMax = max ?? min;
+  // Do not silently reorder a malformed offer or research range. A reversed
+  // range is incomplete evidence, not a safe basis for a coloured card.
+  const isOrdered = resolvedMin === null || resolvedMax === null || resolvedMin <= resolvedMax;
+  return {
+    min: isOrdered ? resolvedMin : null,
+    max: isOrdered ? resolvedMax : null,
+    currency,
+    period,
+  };
+}
+
+function normalizedLocation(value) {
+  if (typeof value === 'string') return textValue(value).slice(0, MAX_LOCATION_LABEL_LENGTH);
+  if (!value || typeof value !== 'object') return '';
+  const explicit = textValue(value.display ?? value.label ?? value.displayName ?? value.name);
+  if (explicit) return explicit.slice(0, MAX_LOCATION_LABEL_LENGTH);
+  return [value.city, value.subdivision ?? value.state ?? value.province ?? value.region, value.country]
+    .map(textValue)
+    .filter(Boolean)
+    .join(', ')
+    .slice(0, MAX_LOCATION_LABEL_LENGTH);
+}
+
+function normalizedSourceLinks(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((source) => {
+    if (typeof source === 'string') return { label: textValue(source).slice(0, MAX_SOURCE_LABEL_LENGTH), url: source };
+    if (!source || typeof source !== 'object') return null;
+    const url = textValue(source.url ?? source.href ?? source.link);
+    if (!url) return null;
+    return {
+      label: (textValue(source.title ?? source.name ?? source.label) || 'Research source').slice(0, MAX_SOURCE_LABEL_LENGTH),
+      url,
+      details: textValue(source.details ?? source.note ?? source.summary).slice(0, MAX_SOURCE_DETAILS_LENGTH),
+      range: normalizedRange(source.range ?? source.competitiveRange ?? source),
+    };
+  }).filter(Boolean).slice(0, 5);
+}
+
+function normalizedCompensationStatus(value) {
+  const raw = textValue(value).toLowerCase().replace(/[\s-]+/g, '_');
+  if (COMPENSATION_STATUSES.has(raw)) return raw;
+  if (['above_market', 'at_market', 'worth_it'].includes(raw)) return 'competitive';
+  if (['belowmarket', 'not_worth_it', 'under_market'].includes(raw)) return 'below_market';
+  if (['unknown', 'unavailable', 'not_applicable'].includes(raw)) return 'uncertain';
+  return '';
+}
+
+/**
+ * Coerce current and older salary-research payloads into a render-safe shape.
+ * This must fail open: only an explicit, recognized verdict can colour a card.
+ */
+export function normalizeCompensationAssessment(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  if (!source) {
+    return {
+      schemaVersion: 0,
+      status: 'not_evaluated',
+      reasonCode: 'legacy_unresearched',
+      justification: 'Compensation research was not run for this saved result. Re-run its Job Search module to evaluate the advertised cash salary.',
+      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', sourceLinks: [],
+      isLegacy: true,
+    };
+  }
+
+  const schemaVersion = Number.isFinite(Number(source.schemaVersion)) ? Number(source.schemaVersion) : 0;
+  const status = normalizedCompensationStatus(source.status ?? source.verdict ?? source.result);
+  const normalized = {
+    schemaVersion,
+    status: status || 'not_evaluated',
+    reasonCode: textValue(source.reasonCode ?? source.reason),
+    offered: normalizedRange(source.offered ?? source.advertisedCash ?? source.advertisedSalary ?? source.offer, source),
+    competitiveRange: normalizedRange(source.competitiveRange ?? source.marketRange ?? source.researchedMarketRange, source),
+    comparisonLocation: normalizedLocation(source.comparisonLocation ?? source.marketLocation ?? source.evaluatedLocation),
+    justification: textValue(source.justification ?? source.reasoning ?? source.explanation ?? source.summary).slice(0, MAX_COMPENSATION_TEXT_LENGTH),
+    researchedAt: textValue(source.researchedAt ?? source.researchDate ?? source.researchedOn).slice(0, 100),
+    sourceLinks: normalizedSourceLinks(source.sourceLinks ?? source.sources ?? source.evidence),
+    isLegacy: false,
+  };
+
+  // A future/partial schema must never inherit a red or green visual treatment
+  // just because a similarly named field happened to be present.
+  if (schemaVersion !== 1) {
+    normalized.status = 'not_evaluated';
+    normalized.reasonCode = 'unsupported_assessment_schema';
+    normalized.justification = 'This saved compensation assessment uses an unsupported or incomplete format, so no cash-pay conclusion is shown.';
+  } else if (!status) {
+    normalized.reasonCode = normalized.reasonCode || 'unreadable_assessment';
+    normalized.justification = normalized.justification || 'Compensation research could not be read safely, so no cash-pay conclusion is shown.';
+  } else if (['competitive', 'below_market'].includes(normalized.status)
+    && (!(normalized.offered.min > 0) || !(normalized.offered.max > 0)
+      || !(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0))) {
+    normalized.status = 'uncertain';
+    normalized.reasonCode = 'incomplete_comparison_data';
+    normalized.justification = 'Compensation research did not retain a complete cash-pay comparison, so no green or red conclusion is shown.';
+  } else if (['competitive', 'below_market'].includes(normalized.status)
+    && (!normalized.offered.currency || !normalized.competitiveRange.currency
+      || normalized.offered.currency !== normalized.competitiveRange.currency)) {
+    // Values without an explicit shared currency cannot be compared. The
+    // backend always normalizes a valid assessment to one currency, but
+    // saved/partial data must fail open in the renderer rather than infer it.
+    normalized.status = 'uncertain';
+    normalized.reasonCode = 'incompatible_comparison_currency';
+    normalized.justification = 'Compensation research retained cash figures in different currencies without a reliable conversion, so no green or red conclusion is shown.';
+  } else if (['competitive', 'below_market'].includes(normalized.status)
+    && (normalized.offered.period !== 'annual' || normalized.competitiveRange.period !== 'annual')) {
+    normalized.status = 'uncertain';
+    normalized.reasonCode = 'incompatible_comparison_period';
+    normalized.justification = 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.';
+  } else if (!normalized.justification) {
+    normalized.justification = normalized.status === 'competitive'
+      ? 'The advertised guaranteed cash salary reaches the researched competitive range for this role and location.'
+      : normalized.status === 'below_market'
+        ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
+        : normalized.status === 'uncertain'
+          ? 'The available salary evidence was not comparable enough to make a reliable cash-pay conclusion.'
+          : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';
+  }
+  return normalized;
+}
+
 function formatSalaryShort(value) {
   const n = Math.round(Number(value) || 0);
   if (n >= 1000 && n % 1000 === 0) return `$${Math.round(n / 1000)}k`;
@@ -661,6 +823,10 @@ export function buildJobTreeNodes({
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
+        // Preserve the compensation research verbatim. JobCardNode normalizes
+        // it defensively for legacy/future schemas, but it must travel through
+        // both the grouped and flat fallback trees.
+        compensationAssessment: job.compensationAssessment,
         source: job.source, url: job.url, posted: job.posted, language: job.language,
         // The ORIGIN search module's id (the board merges cards from several
         // modules, each with its own career data) — the card's "Generate
@@ -770,6 +936,7 @@ export function buildJobTreeNodes({
             title: job.title, company: job.company, location: job.location,
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
             reasoning: job.reasoning, careerDirection: job.careerDirection,
+            compensationAssessment: job.compensationAssessment,
             source: job.source, url: job.url, posted: job.posted, language: job.language,
             originHubId: job.originHubId || null, isNew: false,
           },

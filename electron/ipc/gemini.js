@@ -218,12 +218,32 @@ async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = RETRY.
       const backoff = RETRY.BASE_DELAY_MS * Math.pow(RETRY.BACKOFF_FACTOR, attempt - 1);
       const delay = Math.min(RETRY.MAX_BACKOFF_MS, retryAfter ?? backoff);
       logger.warn(`[${label}] HTTP ${res.status} (transient) — retrying in ${delay}ms${retryAfter != null ? ' (honoring Retry-After)' : ''} (attempt ${attempt}/${maxAttempts})`);
+      // Buffer the error body NOW, while the stream is still live. If the request
+      // deadline (or a caller cancel) fires during the backoff below, undici tears
+      // the response stream down and the caller's `await response.text()` would
+      // reject with a status-less TimeoutError — destroying the one fact worth
+      // reporting: that the endpoint answered HTTP <status>. Reading it here also
+      // returns the socket to the pool; on the normal retry path this Response is
+      // discarded anyway.
+      let bufferedBody = '';
+      try { bufferedBody = await res.text(); } catch { /* stream already torn down */ }
       await abortableSleep(delay, init?.signal);
-      if (init?.signal?.aborted) return res;  // aborted during backoff — stop retrying
+      if (init?.signal?.aborted) {
+        // Replay the observed failure as a readable Response so the caller's
+        // existing !response.ok path works verbatim: status, body, and Retry-After
+        // all survive. Copy only the headers that path consumes.
+        const replayHeaders = new Headers();
+        for (const h of ['retry-after', 'content-type']) {
+          const v = res.headers.get(h);
+          if (v) replayHeaders.set(h, v);
+        }
+        return new Response(bufferedBody, { status: res.status, statusText: res.statusText, headers: replayHeaders });
+      }
     } catch (err) {
       lastErr = err;
       // Don't retry aborts — caller/timeout explicitly stopped us.
-      if (err?.name === 'AbortError' || init?.signal?.aborted || attempt === maxAttempts) throw err;
+      // AbortSignal.timeout() rejects with name 'TimeoutError', not 'AbortError'.
+      if (err?.name === 'AbortError' || err?.name === 'TimeoutError' || init?.signal?.aborted || attempt === maxAttempts) throw err;
       const delay = Math.min(RETRY.MAX_BACKOFF_MS, RETRY.BASE_DELAY_MS * Math.pow(RETRY.BACKOFF_FACTOR, attempt - 1));
       logger.warn(`[${label}] network error: ${err?.message || String(err)} — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
       await abortableSleep(delay, init?.signal);
@@ -494,6 +514,38 @@ function geminiProbeBody(model) {
 }
 
 /**
+ * Shared post-fetch shaping for probeGemini/probeGeminiVertex: both endpoints
+ * must fold into the identical {ok,status,...} shape since they feed the same
+ * suppression/entitlement state (runGeminiAvailabilityCheck), so a fix to
+ * failure classification here can't drift between AI Studio and Vertex.
+ * Always drains the body (success included) — an unread Response pins its
+ * keep-alive socket until GC, same concern fetchWithRetry's comment above
+ * documents for the retry path.
+ */
+async function shapeGeminiProbeResult(res, model, quotaStats) {
+  if (res.ok) {
+    await res.text().catch(() => {});
+    return { ok: true, status: res.status, model, quotaStats };
+  }
+  let body = '';
+  try { body = await res.text(); } catch { /* ignore */ }
+  const error = extractGeminiErr(body, res.status);
+  const errorDetails = extractGeminiErrorDetails(body);
+  const classification = classifyGeminiFailure(res.status, `${error}\n${errorDetails}`);
+  return {
+    ok: false,
+    status: res.status,
+    model,
+    error,
+    errorDetails,
+    classification,
+    diagnostic: describeGeminiFailure(classification, error),
+    retryAfterMs: parseGeminiRetryMs(res, body),
+    quotaStats,
+  };
+}
+
+/**
  * Availability probe for the AI Studio key path: a tiny generateContent ping.
  * NEVER throws — returns {ok,status,...}. Unlike Claude, Gemini exposes NO
  * remaining-quota on success (only a retry hint on 429), so there is no
@@ -518,23 +570,7 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quota
   }
   // Attach quota stats for this model if we fetched them from Cloud Monitoring.
   const quotaStats = quotaStatsMap?.[model] ?? null;
-  if (res.ok) return { ok: true, status: res.status, model, quotaStats };
-  let body = '';
-  try { body = await res.text(); } catch { /* ignore */ }
-  const error = extractGeminiErr(body, res.status);
-  const errorDetails = extractGeminiErrorDetails(body);
-  const classification = classifyGeminiFailure(res.status, `${error}\n${errorDetails}`);
-  return {
-    ok: false,
-    status: res.status,
-    model,
-    error,
-    errorDetails,
-    classification,
-    diagnostic: describeGeminiFailure(classification, error),
-    retryAfterMs: parseGeminiRetryMs(res, body),
-    quotaStats,
-  };
+  return shapeGeminiProbeResult(res, model, quotaStats);
 }
 
 /**
@@ -568,23 +604,7 @@ export async function probeGeminiVertex(model = VERTEX_GEMINI_MODEL_FALLBACKS[0]
     return { ok: false, status: null, model, error: e?.message || String(e) };
   }
   const quotaStats = quotaStatsMap?.[model] ?? null;
-  if (res.ok) return { ok: true, status: res.status, model, quotaStats };
-  let body = '';
-  try { body = await res.text(); } catch { /* ignore */ }
-  const error = extractGeminiErr(body, res.status);
-  const errorDetails = extractGeminiErrorDetails(body);
-  const classification = classifyGeminiFailure(res.status, `${error}\n${errorDetails}`);
-  return {
-    ok: false,
-    status: res.status,
-    model,
-    error,
-    errorDetails,
-    classification,
-    diagnostic: describeGeminiFailure(classification, error),
-    retryAfterMs: parseGeminiRetryMs(res, body),
-    quotaStats,
-  };
+  return shapeGeminiProbeResult(res, model, quotaStats);
 }
 
 /**
@@ -654,11 +674,15 @@ export async function fetchGeminiQuotaStats() {
       fetch(`${monBase}?${usageParams}`, { headers: authHeader }),
       fetch(`${monBase}?${limitParams}`, { headers: authHeader }),
     ]);
-    if (!usageRes.ok && !limitRes.ok) return null;
-    [usageData, limitData] = await Promise.all([
-      usageRes.ok ? usageRes.json().catch(() => null) : null,
-      limitRes.ok ? limitRes.json().catch(() => null) : null,
-    ]);
+    // A losing response's body must still be drained (not just left null) —
+    // an unread stream pins its keep-alive socket until GC, and this call
+    // fires on every availability sweep.
+    if (!usageRes.ok && !limitRes.ok) {
+      await Promise.all([usageRes.text().catch(() => {}), limitRes.text().catch(() => {})]);
+      return null;
+    }
+    const readJsonOrDrain = (res) => (res.ok ? res.json().catch(() => null) : res.text().catch(() => null).then(() => null));
+    [usageData, limitData] = await Promise.all([readJsonOrDrain(usageRes), readJsonOrDrain(limitRes)]);
   } catch {
     return null;
   }
@@ -814,6 +838,11 @@ async function runGeminiAvailabilityCheck(settings) {
   // isn't being used) but deliberately excluded from the `ok` rollup below — a
   // denied Pro tier is the expected free-tier state, not a provider outage.
   for (const g of gatedResults) {
+    // No HTTP status means the probe never reached the server (network fault,
+    // or no credential) — not evidence about the credential, so don't let a
+    // blip overwrite a real cached verdict with a week-long "denied" (mirrors
+    // the same guard in refreshEntitlementInBackground, geminiEntitlement.js).
+    if (!g.result?.ok && g.result?.status == null) continue;
     recordEntitlement(scope, g.tier, !!g.result?.ok,
       g.result?.ok ? `HTTP ${g.result.status}` : `HTTP ${g.result?.status ?? '?'} ${g.result?.error || ''}`.trim());
   }
@@ -908,12 +937,25 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   }, { label: endpointName });
 
   if (!response.ok) {
-    const errText = await response.text();
+    // Capture the status BEFORE touching the body: if the deadline tore the
+    // stream down, the read below throws and the HTTP status is the only fact
+    // left. The thrown message must stay free of 'abort'/'quota'/'rate limit'/
+    // '429' so classification lands on the status-based 'server' branch instead
+    // of being mislabelled a cancellation or a quota problem.
+    const status = response.status;
+    let errText;
+    try {
+      errText = await response.text();
+    } catch {
+      const e = new Error(`${endpointName} error ${status}: request deadline elapsed while retrying; response body unavailable`);
+      e.status = status;
+      throw e;
+    }
     let errMsg;
     try { errMsg = JSON.parse(errText)?.error?.message || errText; }
     catch { errMsg = errText; }
-    const error = new Error(`${endpointName} error ${response.status}: ${errMsg}`);
-    error.status = response.status;
+    const error = new Error(`${endpointName} error ${status}: ${errMsg}`);
+    error.status = status;
     error.retryAfterMs = parseGeminiRetryMs(response, errText);
     // Carry the structured quota/retry details so the suppression policy can see
     // quotaValue:"0" / per-day quotas that the flat message drops (Finding 3).
@@ -968,7 +1010,11 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     const note = thoughts > visible
       ? ` Most of that budget (${thoughts} tok) went to thinking — disable it via thinkingConfig or raise the cap.`
       : '';
-    throw new Error(`AI response was truncated — hit the ${cap}-token output cap (model wrote ${visible} visible tokens + ${thoughts} thinking tokens before being cut off).${note} Raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
+    const err = new Error(`AI response was truncated — hit the ${cap}-token output cap (model wrote ${visible} visible tokens + ${thoughts} thinking tokens before being cut off).${note} Raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
+    // Machine-readable tag: callers retry truncation on a raised cap by code, not
+    // by matching the prose above.
+    err.code = 'MAX_TOKENS';
+    throw err;
   }
   // SAFETY / RECITATION / OTHER
   if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
@@ -1156,7 +1202,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         // Request-specific failure (truncation/server/timeout/malformed): record an
         // EXPIRING warning, never a permanent suppression (Finding 6).
         rememberGeminiModelFailure(scope, currentModel, classification, errMsg);
-        logger.warn(`[Gemini] Proceeding to fallback after non-transient failure: ${errMsg}`);
+        logger.warn(`[Gemini] ${currentModel}: ${classification} failure — falling through to the next model: ${errMsg}`);
       }
     }
     return undefined;

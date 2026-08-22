@@ -2,6 +2,14 @@
 // labels an explicitly stated currency first. An ambiguous value may use the
 // job location as a clearly marked fallback; it never converts amounts.
 
+import { US_STATES, CA_PROVINCES } from './jobLocation.js';
+
+// Subdivision NAMES from the same canonical tables the code alternations below
+// use, so a spelled-out "Tamuning, Guam" infers USD for the same reason
+// "Tamuning, GU" does. Country-level tokens stay hand-written next to each
+// entry — they are not subdivisions and carry their own spelling variants.
+const US_STATE_NAMES = Object.values(US_STATES).join('|');
+
 const EXPLICIT_CURRENCIES = [
   ['CAD', /(?:\bCAD\b|CA\$|C\$)/i],
   ['USD', /(?:\bUSD\b|US\$)/i],
@@ -31,7 +39,7 @@ const EXPLICIT_CURRENCIES = [
 
 const LOCATION_CURRENCIES = [
   ['CAD', /\b(?:canada|ontario|quebec|british columbia|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland(?: and labrador)?|prince edward island|northwest territories|nunavut|yukon)\b/i],
-  ['USD', /\b(?:united states(?: of america)?|u\.?s\.?a?\.?|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)\b/i],
+  ['USD', new RegExp(`\\b(?:united states(?: of america)?|u\\.?s\\.?a?\\.?|${US_STATE_NAMES})\\b`, 'i')],
   ['GBP', /\b(?:united kingdom|great britain|england|scotland|wales|northern ireland)\b/i],
   ['EUR', /\b(?:ireland|germany|deutschland|france|spain|italy|netherlands|belgium|austria|portugal|finland|greece|luxembourg|estonia|latvia|lithuania|slovakia|slovenia|croatia|cyprus|malta)\b/i],
   ['AUD', /\b(?:australia|new south wales|queensland|victoria,? australia|western australia|south australia|tasmania|australian capital territory)\b/i],
@@ -45,8 +53,13 @@ const LOCATION_CURRENCIES = [
 
 // These are accepted only after a comma so normal words such as "in" and
 // "or" cannot be mistaken for U.S. state abbreviations.
-const CANADIAN_PROVINCE_CODE_RE = /,\s*(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)\b/i;
-const US_STATE_CODE_RE = /,\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY|DC)\b/i;
+const CANADIAN_PROVINCE_CODE_RE = new RegExp(`,\\s*(?:${Object.keys(CA_PROVINCES).map((code) => code.toUpperCase()).join('|')})\\b`, 'i');
+// Alternation built from jobLocation.js's US_STATES rather than hand-typed
+// here a second time — that table already documents why a second copy is a
+// correctness hazard (two tables drifting apart silently breaks matching),
+// and already carries the USPS territory codes (AS/GU/MP/PR/VI) a plain
+// 50-states-plus-DC list would miss.
+const US_STATE_CODE_RE = new RegExp(`,\\s*(?:${Object.keys(US_STATES).map((code) => code.toUpperCase()).join('|')})\\b`, 'i');
 
 /** Return an explicitly stated salary currency, or null when the listing is ambiguous. */
 export function explicitSalaryCurrency(salary) {

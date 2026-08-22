@@ -383,9 +383,17 @@ function checkEvidence(item, sections, fullText) {
 
     evidenceOk = false;
     if (normalizeQuoteText(fullText).includes(quote)) {
-      // Real quote, wrong document — a mis-derivation worth catching, which is
-      // what makes `file` load-bearing rather than decorative (design §3.4.2).
-      flags.push('evidence-wrong-file');
+      if (fileName) {
+        // Real quote, wrong document — a mis-derivation worth catching, which
+        // is what makes `file` load-bearing rather than decorative (design
+        // §3.4.2).
+        flags.push('evidence-wrong-file');
+      } else {
+        // Real quote, but no file was named at all — distinct from the case
+        // above: nothing was actually asserted wrong, so don't accuse a
+        // specific (nonexistent) document of being the wrong one.
+        flags.push('evidence-file-missing');
+      }
     } else {
       flags.push('evidence-miss');
       hasMiss = true;

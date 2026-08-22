@@ -911,19 +911,6 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
     }
   }, [isExpanded, isMedia, data.filePath]);
 
-  // Effect 2: Release media resources only when transitioning expanded → collapsed.
-  // Separated from Effect 1 so this destructive teardown never runs on a normal
-  // resize re-render (deps are stable during resize; only isExpanded flip triggers it).
-  const prevExpandedRef = useRef(isExpanded);
-  useEffect(() => {
-    const wasExpanded = prevExpandedRef.current;
-    prevExpandedRef.current = isExpanded;
-    if (wasExpanded && !isExpanded && isMedia) {
-      const el = mediaRef.current;
-      if (el) { el.pause(); el.removeAttribute('src'); el.load(); }
-    }
-  }); // no deps — runs every render; guard does the heavy lifting
-
   // ── Interactions ───────────────────────────────────────────────────────────
   const handleDoubleClick = useCallback(async () => {
     if (data.locked) return;
@@ -935,7 +922,14 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
 
   const handleCollapse = useCallback((e) => {
     e.stopPropagation();
-    if (mediaRef.current) mediaRef.current.pause();
+    // Must release synchronously here, before the collapsed-branch render
+    // unmounts the <video>/<audio> element — React detaches mediaRef during
+    // commit, strictly before any useEffect could observe the isExpanded flip.
+    if (mediaRef.current) {
+      mediaRef.current.pause();
+      mediaRef.current.removeAttribute('src');
+      mediaRef.current.load();
+    }
     setNodes((nds) => nds.map((n) => {
       if (n.id !== id) return n;
       return {

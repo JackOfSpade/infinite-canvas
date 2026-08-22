@@ -330,10 +330,13 @@ function buildCompTasks(query) {
       extractorJS: EBAY_ACTIVE_EXTRACTOR,
       options: EBAY_ACTIVE_CONFIG,
     },
-    // Tier 2 — Supplementary sold (Mercari: use %20 not + for cleaner sold results)
+    // Tier 2 — Supplementary sold (Mercari: use %20 not + for cleaner sold
+    // results — encodeURIComponent already emits %20, and unlike the bare
+    // whitespace swap it also escapes &, #, = and + in the product title,
+    // which would otherwise truncate the keyword or inject a query param)
     {
       id: 'mercari', category: 'sold',
-      url: `https://www.mercari.com/search/?keyword=${query.replace(/\s+/g, '%20')}&status=sold_out`,
+      url: `https://www.mercari.com/search/?keyword=${encodeURIComponent(query)}&status=sold_out`,
       extractorJS: MERCARI_SOLD_EXTRACTOR,
       options: MERCARI_CONFIG,
     },
@@ -460,6 +463,12 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
   const allTasks = buildCompTasks(query);
   const taskCategoryMap = buildTaskCategoryMap(allTasks);
   const task = allTasks.find(t => t.id === sourceId);
+  // Same classifier the multi-source path uses (see classifyCompScrapeFailure) —
+  // a hand-rolled SITE_CHANGED-only test here would mislabel a rescrape timeout
+  // as 'task-failed' (sending the reader to chase a profile-lock bug that isn't
+  // there) and would miss promoting a SITE_CHANGED+LOGIN-WALL failure to the
+  // block-severity 'login-required' the multi-source path gives it.
+  const sessionCache = getStatusCacheSync();
 
   const send = (status, count, warning = null, url = null) => {
     if (sender && !sender.isDestroyed()) {
@@ -473,32 +482,16 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
     const results = await scrapeMultiple([task], (res) => {
       if (sender && !sender.isDestroyed()) {
         const items = Array.isArray(res.data) ? res.data : [];
-        // Mirror the SITE_CHANGED detection from the multi-source path — when
-        // page.evaluate() throws SITE_CHANGED the BrowserPool returns success:false
-        // with error='SITE_CHANGED:...' and warning:null (anti-bot detector never
-        // ran). Without this, the card receives warning:null → hasWarn:false →
-        // Solve button reappears even though the extractor needs a code fix.
-        const cbWarning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
-          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 1400), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
-          : null);
+        const cbWarning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
         send(res.success ? 'done' : 'error', items.length, cbWarning, task.url);
       }
     }, signal);
     const r = results[0];
     if (!r?.success) {
-      const isSiteChanged = /SITE_CHANGED/i.test(r?.error || '');
       return {
         sourceId,
         items: [],
-        warning: isSiteChanged ? {
-          code: 'stale-selectors', severity: 'warn',
-          evidence: String(r?.error || '').slice(0, 1400), // see classifyCompScrapeFailure — 700 clipped the card0=[…] skeleton mid-token
-          suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
-        } : {
-          code: 'task-failed', severity: 'block',
-          evidence: r?.error || 'unknown',
-          suggestion: 'Scrape threw before completing.',
-        },
+        warning: classifyCompScrapeFailure(r?.error, sourceId, sessionCache),
         category: taskCategoryMap[sourceId] || 'sold',
       };
     }
@@ -553,6 +546,17 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
   }
 
   throw new Error(`Unknown sourceId: ${sourceId}`);
+}
+
+// The three API-based (non-Puppeteer) comp sources. Single source of truth for
+// `enabledApiCompSourceIds` below — the login-preflight-blocked telemetry path
+// (which never calls fetchApiMarketplaceSources) still needs this same count to
+// keep marketplaceTelemetry.scrape.sources consistent between a blocked and an
+// unblocked run of the same configuration.
+const API_COMP_SOURCE_IDS = ['reverb', 'pricecharting', 'aptdeco-active'];
+
+function enabledApiCompSourceIds() {
+  return API_COMP_SOURCE_IDS.filter(isCompSourceEnabledInScope);
 }
 
 /**
@@ -625,7 +629,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
     });
   }, signal);
 
-  const apiSourceIds = ['reverb', 'pricecharting', 'aptdeco-active'].filter(isCompSourceEnabledInScope);
+  const apiSourceIds = enabledApiCompSourceIds();
   for (const sourceId of apiSourceIds) emit(sourceId, { status: 'searching', count: 0 });
   const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit, category);
 
@@ -852,7 +856,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         ts: Date.now(),
         nodeId,
         sold: 0, active: 0,
-        sources: allTasks.length + ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope).length,
+        sources: allTasks.length + enabledApiCompSourceIds().length,
         warnings: allTasks.length,
         blocked: 0, errored: 0, timedOut: 0,
         loginRequired: Object.values(sourceWarnings).filter(w => w.code === 'login-required').length,

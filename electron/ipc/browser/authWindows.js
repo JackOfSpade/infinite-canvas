@@ -362,6 +362,13 @@ const authWindowHistory = [];
  */
 export function buildAuthAttemptRecord(diag = {}) {
   const title = String(diag.title || '').replace(/\|/g, '\\|').replace(/`/g, "'").slice(0, 120);
+  // How long the window stayed open. A window that auto-detected login within a
+  // couple of seconds cannot have hosted a typed sign-in, so the duration is the
+  // fact that separates "the user logged in here" from "the session was already
+  // live when the window opened".
+  const startedAt = diag.startedAt || null;
+  const finishedAt = diag.finishedAt || new Date().toISOString();
+  const openMs = startedAt ? Math.max(0, new Date(finishedAt) - new Date(startedAt)) : null;
   return {
     platformId: diag.platformId || null,
     result: diag.result || null, // auto-detected | closed | timeout | launch-error | …
@@ -370,7 +377,9 @@ export function buildAuthAttemptRecord(diag = {}) {
     mode: diag.mode || null, // puppeteer-visible | native-chrome
     url: (String(diag.currentUrl || diag.loginUrl || '').replace(/`/g, "'").slice(0, 180)) || null,
     title: title || null,
-    finishedAt: diag.finishedAt || new Date().toISOString(),
+    startedAt,
+    finishedAt,
+    openMs,
   };
 }
 
@@ -487,9 +496,13 @@ export function isNativeLoginSuccess(platformId, url, title = '') {
 /** Known platform login URLs */
 export const PLATFORM_LOGIN_URLS = {
   // Job platforms
-  // Navigate to myaccount directly — unauthenticated users are redirected to
-  // accounts.google.com/signin?continue=myaccount; after login Google redirects
-  // to google.com/account/about/ (PLATFORM_AUTH_GATED_URLS fires → auto-closes).
+  // Navigate to myaccount directly — a LOGGED-IN session STAYS on
+  // myaccount.google.com, while an anonymous one is sent AWAY from it (to
+  // accounts.google.com/signin?continue=myaccount, and google.com/account/about
+  // is part of that signed-out marketing path, NOT proof of login). So Google has
+  // no auth-gated URL marker: the window confirms login via the DOM signal below
+  // and the post-close HTTP verify (connectedFinalUrlMustContain:
+  // 'myaccount.google.com').
   google:        'https://myaccount.google.com/',
   linkedin:      'https://www.linkedin.com/login',
   indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fwww.indeed.com%2Fjobs%3Fq%3Dsoftware%2520engineer%26fromage%3D1',
@@ -568,9 +581,17 @@ export const PLATFORM_AUTH_COOKIES = {
  *
  * Only add entries here for pages that are genuinely auth-required (return a
  * login redirect for anonymous users, not just empty content).
+ *
+ * A marker here must also be CO-SATISFIABLE with that platform's verify-side
+ * connectedFinalUrlMustContain (JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS):
+ * one URL has to be able to satisfy both, or the window auto-closes on a URL the
+ * HTTP verify then reads as logged-OUT. Google has no entry for exactly that
+ * reason — google.com/account/about is on the SIGNED-OUT path, while a logged-in
+ * session stays on myaccount.google.com (the verify marker). Do not re-point it
+ * at myaccount.google.com either: that is the login window's START url, so the
+ * first poll tick would auto-close a still-logged-out window.
  */
 export const PLATFORM_AUTH_GATED_URLS = {
-  google:       'google.com/account/about',  // logged-in: myaccount.google.com → google.com/account/about/?hl=…; anonymous → accounts.google.com/signin
   ziprecruiter: '/jobseeker/',               // post-login landing /jobseeker/home; anonymous → redirected to /user/login
 };
 
@@ -730,57 +751,70 @@ export async function openLoginWindow(platformId, sender = null) {
     ignoreHTTPSErrors: true,
   }, 'login-window', url);
 
-  const pages = await loginBrowser.pages();
-  const page = pages[0] || await loginBrowser.newPage();
-  updateAuthWindowDiagnostic(platformId, {
-    mode: 'puppeteer-visible',
-    loginUrl: url,
-    currentUrl: page.url(),
-    executable: executablePath,
-    userDataDir: await getUserDataDir(),
-  });
-
-  // Clear stale service worker registrations AND cache storage for the login
-  // origin via CDP. SWs are origin-scoped and can only be unregistered from
-  // within that origin — so page.evaluate() from about:blank does nothing.
-  // CDP's Storage.clearDataForOrigin bypasses that restriction and works from
-  // any page context. This matters for Glassdoor: the headless scraping browser
-  // visits glassdoor.com during startup verification, which activates and
-  // caches Glassdoor's SW in the shared userDataDir. When the login window
-  // opens on the same profile, that stale SW intercepts the navigation and
-  // serves a cached SPA shell that never renders — resulting in about:blank.
-  // cache_storage is included so a stale SW cache can't re-serve the shell.
-  // Cookies are intentionally excluded so login state isn't lost.
+  // pages()/newPage() and everything through the navigate below can throw
+  // (transient CDP protocol error right after launch) while loginBrowser is
+  // alive and still holds the one shared userDataDir — with no handle to it
+  // yet, an uncaught throw here leaks a visible Chrome that locks every
+  // subsequent scrape/login launch until the user quits it manually. Same
+  // guard as openCaptchaResolveWindow's setup-error path.
+  let page;
   try {
-    const cdp = await page.createCDPSession();
-    await cdp.send('Storage.clearDataForOrigin', {
-      origin: new URL(url).origin,
-      storageTypes: 'service_workers,cache_storage',
+    const pages = await loginBrowser.pages();
+    page = pages[0] || await loginBrowser.newPage();
+    updateAuthWindowDiagnostic(platformId, {
+      mode: 'puppeteer-visible',
+      loginUrl: url,
+      currentUrl: page.url(),
+      executable: executablePath,
+      userDataDir: await getUserDataDir(),
     });
-    await cdp.detach();
-  } catch { /* CDP unavailable or URL unparseable — proceed anyway */ }
 
-  // Navigate via window.location.href rather than page.goto().
-  //
-  // page.goto() uses CDP's Page.navigate command under the hood. Cloudflare's
-  // bot-mitigation layer detects the CDP navigation timing signature and
-  // silently hangs the TCP connection — it never sends an HTTP response —
-  // so domcontentloaded never fires and the page stays at about:blank until
-  // the 30 s timeout fires (by which point the user has been staring at a
-  // blank window for half a minute).
-  //
-  // Assigning window.location.href from within the page's JS context triggers
-  // a native browser navigation that is indistinguishable from a user typing
-  // the URL into the address bar. Chrome handles the request through its
-  // normal network stack without any CDP Page.navigate fingerprint, and
-  // Cloudflare serves the page normally. The evaluate() resolves as soon as
-  // the assignment executes; page-context destruction mid-navigate is expected
-  // and caught below.
-  await page.evaluate((targetUrl) => {
-    window.location.href = targetUrl;
-  }, url).catch((err) => {
-    logger.warn(`[StealthBrowser] Login window navigate ${url} failed: ${err?.message || String(err)}`);
-  });
+    // Clear stale service worker registrations AND cache storage for the login
+    // origin via CDP. SWs are origin-scoped and can only be unregistered from
+    // within that origin — so page.evaluate() from about:blank does nothing.
+    // CDP's Storage.clearDataForOrigin bypasses that restriction and works from
+    // any page context. This matters for Glassdoor: the headless scraping browser
+    // visits glassdoor.com during startup verification, which activates and
+    // caches Glassdoor's SW in the shared userDataDir. When the login window
+    // opens on the same profile, that stale SW intercepts the navigation and
+    // serves a cached SPA shell that never renders — resulting in about:blank.
+    // cache_storage is included so a stale SW cache can't re-serve the shell.
+    // Cookies are intentionally excluded so login state isn't lost.
+    try {
+      const cdp = await page.createCDPSession();
+      await cdp.send('Storage.clearDataForOrigin', {
+        origin: new URL(url).origin,
+        storageTypes: 'service_workers,cache_storage',
+      });
+      await cdp.detach();
+    } catch { /* CDP unavailable or URL unparseable — proceed anyway */ }
+
+    // Navigate via window.location.href rather than page.goto().
+    //
+    // page.goto() uses CDP's Page.navigate command under the hood. Cloudflare's
+    // bot-mitigation layer detects the CDP navigation timing signature and
+    // silently hangs the TCP connection — it never sends an HTTP response —
+    // so domcontentloaded never fires and the page stays at about:blank until
+    // the 30 s timeout fires (by which point the user has been staring at a
+    // blank window for half a minute).
+    //
+    // Assigning window.location.href from within the page's JS context triggers
+    // a native browser navigation that is indistinguishable from a user typing
+    // the URL into the address bar. Chrome handles the request through its
+    // normal network stack without any CDP Page.navigate fingerprint, and
+    // Cloudflare serves the page normally. The evaluate() resolves as soon as
+    // the assignment executes; page-context destruction mid-navigate is expected
+    // and caught below.
+    await page.evaluate((targetUrl) => {
+      window.location.href = targetUrl;
+    }, url).catch((err) => {
+      logger.warn(`[StealthBrowser] Login window navigate ${url} failed: ${err?.message || String(err)}`);
+    });
+  } catch (err) {
+    finishAuthWindowDiagnostic(platformId, { result: 'setup-error', error: err?.message || String(err) });
+    await closeLoginBrowserSafely(loginBrowser, platformId).catch(() => {});
+    throw err;
+  }
 
   // Wait for the user to close the browser window or the app window to be destroyed
   return await new Promise((resolve) => {

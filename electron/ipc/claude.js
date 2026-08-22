@@ -256,7 +256,12 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     // Censored signal: real demand exceeded the cap. Record it so effectiveCap
     // provisions past this cap on the next call (bypasses MIN_SAMPLES).
     recordTruncation(task, maxTokens, formulaSeed);
-    throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
+    const err = new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
+    // Structured tag (gemini.js sets the same one) so the llm.js caller can act
+    // on the raised cap recordTruncation just persisted without pattern-matching
+    // a human-readable message that is free to change.
+    err.code = 'MAX_TOKENS';
+    throw err;
   }
 
   // Backstop for the preflight (checkPromptFits): on Claude 4.5+ an oversized
@@ -449,35 +454,10 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
   return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
 }
 
-// ── Message Batches API (async, ~50% cheaper) ──────────────────────────────
-// The batch request shape comes from the SAME buildAnthropicMessageParams the
-// synchronous path uses (see anthropicRequest.js), so a batched scoring request
-// is structurally guaranteed to score identically to a live one — no
-// hand-mirrored copy to drift. Grounding/streaming is live-only and not used
-// for batched scoring, so the shared builder covers the batch path exactly.
-
-/**
- * Submit a Message Batch. `requests` = [{ customId, userContent, model,
- * maxTokens, responseSchema, cachedPrefix, expectJson }]. Returns the batch id +
- * status; results are fetched later via getClaudeBatchResults.
- */
-export async function createClaudeBatch(apiKey, requests) {
-  const anthropic = getAnthropicClient(apiKey);
-  const body = {
-    requests: requests.map(r => ({
-      custom_id: r.customId,
-      params: buildAnthropicMessageParams(r.userContent, {
-        model: r.model, maxTokens: r.maxTokens, responseSchema: r.responseSchema,
-        cachedPrefix: r.cachedPrefix, expectJson: r.expectJson,
-      }),
-    })),
-  };
-  const batch = await anthropic.messages.batches.create(body);
-  logger.info(`[Claude] Created message batch ${batch.id} (${requests.length} request(s)) — status=${batch.processing_status}`);
-  return { id: batch.id, status: batch.processing_status, counts: batch.request_counts };
-}
-
-/** Poll a batch's processing status (no result download). */
+// ── Legacy Message Batches recovery ───────────────────────────────────────
+// Submission was removed with economy scoring. These readers remain only so
+// previously paid work can finish safely after an app update.
+/** Poll a legacy batch's processing status (no result download). */
 export async function getClaudeBatch(apiKey, batchId) {
   const anthropic = getAnthropicClient(apiKey);
   const batch = await anthropic.messages.batches.retrieve(batchId);
@@ -502,8 +482,15 @@ export async function cancelClaudeBatch(apiKey, batchId) {
  * throws rather than returning a partial tool_use.input/text; this path must
  * match, or a truncated score/ledger/etc. silently reconciles as a complete
  * result instead of the caller's null/placeholder fallback.
+ *
+ * `task` + `capsByCustomId` ({ [customId]: { cap, seed } }) feed the SAME
+ * self-calibrating budget the live path feeds. They must come from the caller's
+ * PERSISTED record of the submit, not from re-resolving here: a batch can end up
+ * to 24h later and across an app restart, so the cap each item was actually sent
+ * with no longer exists in memory. Both are optional — the tokenBudget helpers
+ * no-op on a falsy task, so a sidecar written before this existed stays inert.
  */
-export async function getClaudeBatchResults(apiKey, batchId) {
+export async function getClaudeBatchResults(apiKey, batchId, { task = null, capsByCustomId = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   const out = {};
   const results = await anthropic.messages.batches.results(batchId);
@@ -515,11 +502,29 @@ export async function getClaudeBatchResults(apiKey, batchId) {
       continue;
     }
     const msg = result.message;
+    // Mirrors createMessage's ordering: the usage sample is recorded BEFORE the
+    // truncation check, so a batch that hit its cap is itself a sample at the
+    // cap. Batched items never pass through createMessage, so without this an
+    // legacy batch contributes zero samples and keeps truncating at the
+    // identical cap on every run.
+    recordTokenUsage(task, msg?.usage?.output_tokens || 0);
     // Same two stop reasons createMessage() treats as fatal on the live path
     // (see its comments above) — a batched item can "succeed" at the
     // batch-request level while its own generation was cut short.
-    if (msg?.stop_reason === 'max_tokens' || msg?.stop_reason === 'model_context_window_exceeded') {
-      out[customId] = { ok: false, text: null, error: `${msg.stop_reason} (truncated)` };
+    if (msg?.stop_reason === 'max_tokens') {
+      // Censored signal, exactly as on the live path. The cap comes from the
+      // submit record because output_tokens only reports what was produced
+      // before the cut-off, which understates the cap for a thinking-heavy item.
+      const rec = capsByCustomId?.[customId];
+      recordTruncation(task, rec?.cap || msg?.usage?.output_tokens || 0, rec?.seed ?? null);
+      out[customId] = { ok: false, text: null, error: 'max_tokens (truncated)' };
+      continue;
+    }
+    if (msg?.stop_reason === 'model_context_window_exceeded') {
+      // Deliberately NO recordTruncation: the INPUT plus its reserved output
+      // overran the window. Raising the output cap shrinks the input budget
+      // further, so treating this as cap-too-low evidence makes it worse.
+      out[customId] = { ok: false, text: null, error: 'model_context_window_exceeded (truncated)' };
       continue;
     }
     const toolBlock = msg?.content?.find(b => b.type === 'tool_use');

@@ -7,8 +7,6 @@ import {
   __withApplicationSyncWorkspaceLockForTests,
   buildResumeDocument,
   embedApplicationSyncConfig,
-  createApplicationBundle,
-  createZipBuffer,
   extractVariantAttrs,
   fs,
   formatOriginalJobListingMarkdown,
@@ -19,34 +17,7 @@ import {
   path,
   PDFLib,
   sanitizeApplicationBundlePart,
-  zlib,
 } from '../test-dependencies.js';
-
-function readZipEntries(input) {
-  const bytes = Buffer.from(input);
-  const entries = new Map();
-  let offset = 0;
-  while (offset + 4 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
-    const method = bytes.readUInt16LE(offset + 8);
-    const compressedSize = bytes.readUInt32LE(offset + 18);
-    const expectedSize = bytes.readUInt32LE(offset + 22);
-    const nameLength = bytes.readUInt16LE(offset + 26);
-    const extraLength = bytes.readUInt16LE(offset + 28);
-    const nameStart = offset + 30;
-    const dataStart = nameStart + nameLength + extraLength;
-    const name = bytes.subarray(nameStart, nameStart + nameLength).toString('utf8');
-    const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
-    const data = method === 0 ? Buffer.from(compressed)
-      : method === 8 ? zlib.inflateRawSync(compressed)
-        : (() => { throw new Error(`Unexpected ZIP method ${method}`); })();
-    assert(data.length === expectedSize, `${name} uncompressed size must match its ZIP header`);
-    entries.set(name, data);
-    offset = dataStart + compressedSize;
-  }
-  assert(entries.size > 0, 'ZIP must contain local file records');
-  assert(bytes.includes(Buffer.from([0x50, 0x4b, 0x05, 0x06])), 'ZIP must contain an end-of-central-directory record');
-  return entries;
-}
 
 export default [
   {
@@ -129,40 +100,6 @@ export default [
     },
   },
   {
-    name: 'application bundle: real ZIP round-trip has one HTML plus byte-exact résumé and cover PDFs',
-    run: () => {
-      const applicationHtml = '<!doctype html><title>Application</title><main>Résumé</main><main>Cover letter</main>';
-      const resumePdf = Buffer.from('%PDF-1.4\nresume-bytes');
-      const coverLetterPdf = Buffer.from('%PDF-1.7\ncover-letter-bytes');
-      const jobMarkdown = '# Role\n\n```text\nOriginal listing\n```\n';
-      const bundle = createApplicationBundle({
-        company: 'Café / North', candidateName: 'Zoë', applicationHtml, resumePdf, coverLetterPdf, jobListingMarkdown: jobMarkdown,
-        modifiedAt: new Date('2026-08-14T12:00:00Z'),
-      });
-      assert(bundle.fileName === 'Café North.zip', `unexpected bundle name ${bundle.fileName}`);
-      const entries = readZipEntries(bundle.buffer);
-      const expected = [
-        'Café North/Application.html',
-        'Café North/Resume.pdf',
-        'Café North/Cover Letter.pdf',
-        'Café North/Original Job Listing.md',
-      ];
-      assert(JSON.stringify([...entries.keys()]) === JSON.stringify(expected), 'ZIP layout must be exact and UTF-8 safe');
-      assert([...entries.keys()].filter(name => name.endsWith('.html')).length === 1, 'bundle must contain exactly one HTML workspace');
-      assert(entries.get(expected[0]).toString('utf8') === applicationHtml, 'combined application HTML changed in ZIP');
-      assert(entries.get(expected[1]).equals(resumePdf), 'résumé PDF bytes changed in ZIP');
-      assert(entries.get(expected[2]).equals(coverLetterPdf), 'cover-letter PDF bytes changed in ZIP');
-      assert(entries.get(expected[3]).toString('utf8') === jobMarkdown, 'job Markdown changed in ZIP');
-      let missingCoverRejected = false;
-      try { createApplicationBundle({ company: 'Acme', candidateName: 'Maya', applicationHtml, resumePdf, jobListingMarkdown: jobMarkdown }); } catch { missingCoverRejected = true; }
-      assert(missingCoverRejected, 'a ZIP without Cover Letter.pdf must be rejected instead of silently creating a three-file bundle');
-      let unsafeRejected = false;
-      try { createZipBuffer([{ name: '../escape.txt', data: 'nope' }]); } catch { unsafeRejected = true; }
-      assert(unsafeRejected, 'ZIP traversal entry must be rejected');
-      return { entries: entries.size, zipBytes: bundle.buffer.length };
-    },
-  },
-  {
     name: 'application workspace: Sync replaces download and submits only the selected document to its saved bridge',
     run: async () => {
       let doc = buildResumeDocument({
@@ -210,11 +147,19 @@ export default [
         }],
         coverLetter: { name: 'Maya Chen', paragraphs: ['Original cover letter.'] },
       });
+      // Autosaved edits only restore against the revision they were typed over,
+      // so the saved entry has to carry this file's stamp to reach the editor at
+      // all. Without it the payload is dropped as stale and this test would pass
+      // for the wrong reason, never exercising the sanitizer.
+      const savedFingerprint = /var RESUME_MARKUP_FINGERPRINT = "([^"]*)"/.exec(doc)?.[1] || '';
+      assert(savedFingerprint, 'the generated workspace must stamp a résumé markup fingerprint');
+      const hostileMarkup = '<h1 class="name" onclick="window.__owned=1">Restored safely</h1><p><span data-achievement-id="a1" data-derivation="forged local tooltip">74%</span><span data-achievement-id="a1" data-derivation="borrowed tooltip">75%</span></p><img src="https://evil.test/pixel" onerror="window.__owned=2"><script>window.__owned=3</script><a href="javascript:window.__owned=4">bad link</a>';
       const dom = new JSDOM(doc, {
         runScripts: 'dangerously',
         url: 'https://application-runtime-sanitizer.local/',
         beforeParse(window) {
-          window.localStorage.setItem(`ic-edit:${docId}`, '<h1 class="name" onclick="window.__owned=1">Restored safely</h1><p><span data-achievement-id="a1" data-derivation="forged local tooltip">74%</span><span data-achievement-id="a1" data-derivation="borrowed tooltip">75%</span></p><img src="https://evil.test/pixel" onerror="window.__owned=2"><script>window.__owned=3</script><a href="javascript:window.__owned=4">bad link</a>');
+          window.localStorage.setItem(`ic-edit:${docId}`, hostileMarkup);
+          window.localStorage.setItem(`ic-edit:${docId}:fingerprint`, savedFingerprint);
         },
       });
       try {
@@ -230,10 +175,164 @@ export default [
         'localStorage may restore a receipt tooltip only from the initial ledger-authored page with matching id and visible text');
         assert(doc.includes("target.addEventListener('paste'") && doc.includes("target.addEventListener('drop'"),
           'the generated contenteditable surface must force paste/drop input through plain text');
-        return { legacyMarkupInert: true, richPasteDisabled: true };
+        // An entry saved before this stamp existed cannot be shown to belong to
+        // this revision, so it is dropped rather than sanitized-and-restored.
+        const legacy = new JSDOM(doc, {
+          runScripts: 'dangerously',
+          url: 'https://application-runtime-sanitizer.local/',
+          beforeParse(window) { window.localStorage.setItem(`ic-edit:${docId}`, hostileMarkup); },
+        });
+        try {
+          const legacyMain = legacy.window.document.querySelector('[data-ic-document-panel="resume"] main.page');
+          assert(!legacyMain?.textContent.includes('Restored safely') && legacyMain?.textContent.includes('Original')
+            && legacy.window.__owned === undefined,
+          'an unstamped localStorage entry must be discarded, leaving the generated markup in place');
+          assert(legacy.window.localStorage.getItem(`ic-edit:${docId}`) === null,
+            'a discarded entry must be purged so it cannot be replayed on the next load');
+          assert(legacy.window.localStorage.getItem(`ic-edit:${docId}:superseded`) === hostileMarkup,
+            'a superseded entry must be moved aside, not destroyed: this slot is only written by a real edit, and an unsynced one exists nowhere else');
+        } finally {
+          legacy.window.close();
+        }
+        return { legacyMarkupInert: true, richPasteDisabled: true, unstampedDiscarded: true };
       } finally {
         dom.window.close();
       }
+    },
+  },
+  {
+    // Regression: a regenerated application reused its docId, so the browser
+    // replayed the PREVIOUS generation's cover letter over the new one. The
+    // reader saw a superseded draft that appeared nowhere in the file, and Sync
+    // would have written that draft back over the freshly generated letter.
+    name: 'application workspace: a regenerated document beats a stale autosaved draft',
+    run: () => {
+      const docId = 'regenerated-application';
+      const build = (paragraph) => buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: [paragraph] },
+      });
+      const first = build('The letter this application originally shipped with.');
+      const second = build('The letter the generator produced on the second run.');
+      const fingerprintOf = (doc) => /var COVER_MARKUP_FINGERPRINT = "([^"]*)"/.exec(doc)?.[1] || '';
+      const firstStamp = fingerprintOf(first);
+      const secondStamp = fingerprintOf(second);
+      assert(firstStamp && secondStamp, 'both generations must stamp a cover fingerprint');
+      assert(firstStamp !== secondStamp, 'regenerating with a different letter must change the cover fingerprint');
+      assert(/var RESUME_MARKUP_FINGERPRINT = "([^"]*)"/.exec(first)?.[1]
+        === /var RESUME_MARKUP_FINGERPRINT = "([^"]*)"/.exec(second)?.[1],
+      'an unchanged résumé must keep its fingerprint so a letter edit cannot discard résumé edits');
+
+      const staleDraft = '<div class="letter-body"><p>A superseded draft the reader kept editing.</p></div>';
+      const open = (doc) => new JSDOM(doc, {
+        runScripts: 'dangerously',
+        url: 'https://application-regenerated.local/',
+        beforeParse(window) {
+          window.localStorage.setItem(`ic-edit:${docId}:cover`, staleDraft);
+          window.localStorage.setItem(`ic-edit:${docId}:cover:fingerprint`, firstStamp);
+        },
+      });
+
+      const sameRevision = open(first);
+      try {
+        const letter = sameRevision.window.document.querySelector('[data-ic-document-panel="cover"] main');
+        assert(letter?.textContent.includes('superseded draft'),
+          'reopening the same generated file must still restore the reader\u2019s own edits');
+      } finally {
+        sameRevision.window.close();
+      }
+
+      const regenerated = open(second);
+      try {
+        const letter = regenerated.window.document.querySelector('[data-ic-document-panel="cover"] main');
+        assert(letter?.textContent.includes('second run'),
+          'a regenerated letter must render the markup the generator just wrote');
+        assert(!letter?.textContent.includes('superseded draft'),
+          'the previous generation\u2019s draft must not mask the regenerated letter');
+        assert(regenerated.window.localStorage.getItem(`ic-edit:${docId}:cover`) === null,
+          'the superseded draft must be purged, not left to reappear on the next load');
+        assert(regenerated.window.localStorage.getItem(`ic-edit:${docId}:cover:superseded`) === staleDraft,
+          'the superseded draft must remain recoverable: it may be unsynced work that exists nowhere else');
+      } finally {
+        regenerated.window.close();
+      }
+      return { staleDraftDiscarded: true, sameRevisionRestored: true };
+    },
+  },
+  {
+    // Regression: the decision replay ran BEFORE the autosave restore, and the
+    // restore replaces the whole résumé main with a payload carrying its own
+    // hidden-attribute state. Because a decision persists the decision map but
+    // never schedules a markup save, the two drift apart — so a skill the user
+    // rejected came back visible (and a verified one vanished) on reopen, while
+    // the card and the review status said the opposite. Sync then wrote that
+    // résumé, and its PDF, to disk.
+    name: 'application workspace: skill decisions govern a restored résumé, not the payload',
+    run: () => {
+      const docId = 'skill-decision-reconcile';
+      const doc = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><dl class="skills"><dt>Core</dt><dd>Node.js</dd></dl></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover copy.'] },
+        skillInsights: { items: [{ id: 'skill-1', kind: 'verify', canonicalSkillName: 'Django', suggestedResumeText: 'Django ORM', resumeCategory: 'Core' }] },
+      });
+      const stamp = /var RESUME_MARKUP_FINGERPRINT = "([^"]*)"/.exec(doc)?.[1] || '';
+      assert(stamp, 'the workspace must stamp a résumé fingerprint');
+      const editKey = `ic-edit:${docId}`;
+      const skillKey = `ic-skill-review:${docId}`;
+      const open = (seed) => new JSDOM(doc, {
+        runScripts: 'dangerously',
+        url: 'https://skill-reconcile.local/',
+        beforeParse(window) { seed(window.localStorage); },
+      });
+      const resumeMainOf = (dom) => dom.window.document.querySelector('[data-ic-document-panel="resume"] main');
+      const inferredOf = (dom) => resumeMainOf(dom).querySelector('[data-ic-inferred-skill="skill-1"]');
+
+      // Capture the two payloads the way a user actually produces them: the
+      // résumé markup as it stands before any decision, and as it stands after
+      // clicking Verified. Neither is written by a decision — only by typing.
+      const base = open(() => {});
+      const payloadHidden = resumeMainOf(base).innerHTML;
+      base.window.document.querySelector('[data-ic-skill-action="verified"]').click();
+      const payloadVisible = resumeMainOf(base).innerHTML;
+      base.window.close();
+      assert(/data-ic-inferred-skill="skill-1"[^>]*hidden/.test(payloadHidden)
+        && !/data-ic-inferred-skill="skill-1"[^>]*hidden/.test(payloadVisible),
+      'the two payloads must differ in the inferred skill visibility this test turns on');
+
+      // Rejected after the last keystroke: the payload still shows the skill.
+      const rejected = open((ls) => {
+        ls.setItem(editKey, payloadVisible);
+        ls.setItem(`${editKey}:fingerprint`, stamp);
+        ls.setItem(skillKey, JSON.stringify({ 'skill-1': 'not_mine' }));
+      });
+      try {
+        assert(rejected.window.document.getElementById('ic-restore-note').hidden === false,
+          'the restore must actually have run, or this test proves nothing');
+        assert(inferredOf(rejected)?.hidden === true,
+          'a skill the user marked Not mine must stay out of the résumé even when the restored payload shows it');
+      } finally {
+        rejected.window.close();
+      }
+
+      // Verified after the last keystroke: the payload still hides the skill.
+      const verified = open((ls) => {
+        ls.setItem(editKey, payloadHidden);
+        ls.setItem(`${editKey}:fingerprint`, stamp);
+        ls.setItem(skillKey, JSON.stringify({ 'skill-1': 'verified' }));
+      });
+      try {
+        assert(verified.window.document.getElementById('ic-restore-note').hidden === false,
+          'the restore must actually have run, or this test proves nothing');
+        assert(inferredOf(verified)?.hidden === false,
+          'a skill the user marked Verified must be present when the review status says it is included');
+        assert(verified.window.document.getElementById('ic-review-status').textContent.includes('1 verified skill'),
+          'the review status must agree with what the résumé actually shows');
+      } finally {
+        verified.window.close();
+      }
+      return { rejectedStaysOut: true, verifiedStaysIn: true };
     },
   },
   {

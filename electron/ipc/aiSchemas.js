@@ -448,7 +448,7 @@ export const LETTER_PLAN_SCHEMA = {
         whyItMattersToCandidate: { type: 'string', description: 'Why the detail matters given the candidate trajectory; empty when no hook applies.' },
       },
     },
-    logistics: { type: 'string', description: 'The only field allowed to use career-data facts: explicit logistics or stated motivation. Empty when not applicable.' },
+    logistics: { type: 'string', description: 'The only field allowed to use career-data facts: explicit availability, location/relocation intent, or stated motivation. Never citizenship, work authorization, residency, or visa status — those are application-form facts, not letter material. Empty when not applicable.' },
     droppedNeeds: {
       type: 'array',
       items: {
@@ -491,7 +491,7 @@ export const LETTER_GROUNDING_AUDIT_SCHEMA = {
         type: 'object',
         required: ['kind', 'claim', 'reason', 'repair'],
         properties: {
-          kind: { type: 'string', enum: ['unclear-antecedent', 'unexplained-shift', 'chronological-backtracking', 'inventory-paragraph', 'overloaded-sentence', 'faulty-parallelism', 'repeated-metaphor', 'detached-synthesis', 'volunteered-gap', 'delayed-relevance', 'second-thesis', 'unnecessary-evidence'], description: 'The cohesion, grammar, or persuasive-prose defect found in the letter.' },
+          kind: { type: 'string', enum: ['unclear-antecedent', 'unexplained-shift', 'chronological-backtracking', 'unmoored-temporal-contrast', 'inventory-paragraph', 'overloaded-sentence', 'faulty-parallelism', 'repeated-metaphor', 'awkward-register', 'unnecessary-employer-repetition', 'detached-synthesis', 'volunteered-gap', 'delayed-relevance', 'second-thesis', 'unnecessary-evidence', 'dangling-transition', 'unearned-causal', 'literalized-frame'], description: 'The cohesion, grammar, or persuasive-prose defect found in the letter.' },
           claim: { type: 'string', description: 'Exact verbatim span from the cover-letter paragraphs containing the cohesion defect.' },
           reason: { type: 'string', description: 'Why this span weakens clarity, grammatical flow, or the reader’s ability to follow one controlling argument.' },
           repair: { type: 'string', description: 'Concise editorial action: make coordinated syntax parallel, replace an unclear reference, ground a synthesis in the preceding evidence, establish the relationship before details, consolidate, cut, or explicitly tie the span to the thesis.' },
@@ -660,6 +660,63 @@ export const JOB_SCORING_SCHEMA = {
           matchScore:      { type: 'integer', description: '0-100 fit score' },
           reasoning:       { type: 'string', description: 'Complete, specific justification of the fit — as long as it needs to be (usually 2-4 sentences), citing concrete signals from both the JD and the candidate. No filler.' },
           careerDirection: { type: 'string', description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
+          // Optional so a provider that returns an older scoring shape never
+          // loses an otherwise-valid interview-fit result. Compensation falls
+          // back to a neutral, explained state when this is absent.
+          compensationContext: {
+            type: 'object',
+            properties: {
+              roleFamily: { type: 'string' },
+              seniority: { type: 'string', enum: ['entry', 'mid', 'senior', 'lead', 'manager', 'director', 'executive', 'unspecified'] },
+              requiredYears: { type: 'string' },
+              employmentType: { type: 'string', enum: ['employee', 'contract', 'temporary', 'internship', 'unspecified'] },
+              workMode: { type: 'string', enum: ['onsite', 'hybrid', 'remote', 'unknown'] },
+              remoteRegion: { type: 'string', enum: ['usa', 'canada', 'other', 'unknown'] },
+              remoteCountry: { type: 'string', description: 'For remoteRegion=other, the permitted worker country when the posting states one; "worldwide" for global roles; otherwise empty.' },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+// Converts grounded salary research into compact, auditable numeric evidence.
+// The code—not the model—unions comparable ranges and applies the final
+// below-market threshold, so this schema intentionally contains evidence only.
+export const JOB_COMPENSATION_EVIDENCE_SCHEMA = {
+  type: 'object',
+  required: ['assessments'],
+  properties: {
+    assessments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'comparableRanges', 'justification', 'sourceLinks'],
+        properties: {
+          index: { type: 'integer' },
+          comparableRanges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              // Comparable=true evidence is only accepted by the code when
+              // these provenance fields contain a direct http(s) source. They
+              // remain required for false entries too (empty strings are fine)
+              // so providers cannot omit provenance accidentally.
+              required: ['min', 'max', 'currency', 'comparable', 'sourceName', 'sourceUrl'],
+              properties: {
+                min: { type: 'number' },
+                max: { type: 'number' },
+                currency: { type: 'string' },
+                comparable: { type: 'boolean', description: 'False for evidence which must be excluded (wrong market, seniority, type, or total compensation).' },
+                sourceName: { type: 'string' },
+                sourceUrl: { type: 'string' },
+                note: { type: 'string' },
+              },
+            },
+          },
+          justification: { type: 'string' },
+          sourceLinks: { type: 'array', items: { type: 'string' } },
         },
       },
     },

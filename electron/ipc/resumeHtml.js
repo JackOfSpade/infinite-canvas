@@ -97,7 +97,6 @@ const SAFE_ARIA_ATTRS = new Set(['aria-hidden', 'aria-label', 'aria-labelledby']
 const HOST_EDITABLE_DATA_ATTRS = new Set([
   'data-ic-inferred-skill', 'data-ic-inferred-separator',
   'data-ic-inferred-label', 'data-ic-inferred-group', 'data-ic-inferred-section',
-  'data-ic-letter-centered',
 ]);
 const MAX_DOCUMENT_MAIN_CHARS = 1024 * 1024;
 
@@ -366,34 +365,6 @@ function stripMainVariantAttrs(mainHtml) {
  */
 export function isDualMode(variantAttrs) {
   return /data-print="dual-pdf"/.test(String(variantAttrs || ''));
-}
-
-/**
- * Add the design system's cover-letter-only short-letter treatment to a set
- * of resolved root attributes. This deliberately lives apart from
- * extractVariantAttrs(): print/paper/mono/density are a matched-pair contract,
- * while data-letter is valid only for a standalone cover-letter surface.
- */
-export function withCenteredLetterVariant(variantAttrs, centered = false) {
-  const base = String(variantAttrs || '')
-    .replace(/\s*data-letter\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/ig, '')
-    .trim();
-  return centered ? `${base}${base ? ' ' : ''}data-letter="centered"` : base;
-}
-
-/**
- * Whether a renderer's text-ink measurement meets the design system's
- * short-letter threshold (STYLE.md §11.5). Page count remains a separate
- * caller check: centring is strictly a one-page cover-letter treatment.
- */
-export function isShortCoverLetterLayout(layout) {
-  const contentHeight = Number(layout?.contentHeightPx);
-  const typeAreaHeight = Number(layout?.typeAreaHeightPx);
-  return Number.isFinite(contentHeight)
-    && Number.isFinite(typeAreaHeight)
-    && contentHeight > 0
-    && typeAreaHeight > 0
-    && contentHeight <= typeAreaHeight * (2 / 3);
 }
 
 // Candidate copy may use hyphens within a word/value and en dashes in date or
@@ -1659,6 +1630,19 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
 }
 
 /**
+ * Identity of one generated document revision. Autosaved browser edits carry
+ * this value so a regenerated application can tell markup it actually shipped
+ * from a superseded draft still sitting in localStorage. Truncated SHA-256: this
+ * is a staleness check, not a security boundary — the restored markup is still
+ * put through the full editable-markup sanitizer either way.
+ */
+function documentMarkupFingerprint(markup) {
+  const text = String(markup || '');
+  if (!text.trim()) return '';
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 32);
+}
+
+/**
  * Build the toolbar/banner markup + behavior script injected into `<body>`.
  *
  * Edit mode (§5.5): `Job Application Design System/readme.md:15-19` documents the
@@ -1679,16 +1663,22 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
  * design system loads these faces from Google Fonts, so the message directs
  * the user to connectivity/content blocking rather than package repair.
  */
-function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle, scriptNonce }) {
+function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle, scriptNonce, resumeFingerprint = '', coverFingerprint = '' }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const bundleJson = JSON.stringify(bundle).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   const isResumeBundle = kind === 'resume';
+  // The interactive edit/autosave/Sync chrome is shared by the résumé's own
+  // main.page and a standalone cover letter's main.page. Sanitizing a letter
+  // through the résumé's class allowlist would strip every letter-* class on
+  // a restore, so the kind fed to the sanitizer must track what this
+  // document actually is, not the résumé slot the storage key reuses.
+  const standaloneSanitizeKind = kind === 'cover-letter' ? 'cover' : 'resume';
   const syncHint = 'Sync re-renders the PDF with the same engine that produced the originals \u2014 use it instead of your browser\u2019s print dialog.';
 
   const chromeMarkup = workspace ? '' : `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
   <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
-  <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
+  <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary"${isResumeBundle ? '' : ' hidden'}>${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
   ${PRINT_VARIANT_INDICATOR}
   ${isResumeBundle ? '<span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>' : ''}
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
@@ -1727,7 +1717,63 @@ ${editableRuntimeSanitizerSource()}
   // invalidate a still-current cover-letter PDF (and vice versa).
   var pdfStale = { resume: false, cover: false };
   var syncMessage = '';
+  // Keystrokes, skill-decision clicks, and tab switches all funnel into
+  // updateSync(). Without this flag one of those firing mid-fetch re-enables
+  // the button and overwrites the 'Syncing…' state while the POST is still
+  // in flight, inviting a second concurrent sync request.
+  var syncInFlight = false;
   var initialResumeMarkup = resumeMain ? resumeMain.innerHTML : '';
+  // The generated file is the source of truth. Browser-saved edits are only
+  // meaningful against the revision they were typed over, so each autosave slot
+  // is stamped with the fingerprint the GENERATOR computed for the markup this
+  // file shipped with. Regenerating the application changes that fingerprint and
+  // the superseded copy is dropped rather than replayed over fresh content — the
+  // failure mode being an old draft silently masking (and, through Sync,
+  // overwriting) a newer document the generator had just written to disk.
+  // Stamped at generation rather than hashed here so the value is a property of
+  // the file, inspectable without executing it, and independent of how a given
+  // browser round-trips innerHTML.
+  //
+  // Sync deliberately does NOT recompute these. It merges the edited main back
+  // into the file, so afterwards the stamp describes markup the file no longer
+  // has — that looks like a bug and is not one. The stamp identifies the
+  // GENERATION, not the current bytes. Recomputing it on Sync would strand every
+  // edit typed after that Sync: those autosave under the old stamp, and the next
+  // load would move them to :superseded, which nothing can read. That is the
+  // exact data loss this guard exists to prevent.
+  var RESUME_MARKUP_FINGERPRINT = ${jsStringLiteral(resumeFingerprint)};
+  var COVER_MARKUP_FINGERPRINT = ${jsStringLiteral(coverFingerprint)};
+  // A standalone cover letter's only main.page binds to main/resumeMain
+  // below (there is no separate cover panel to route it through), so this
+  // tracks what the DOCUMENT actually is rather than always assuming resume.
+  var MAIN_SANITIZE_KIND = ${jsStringLiteral(standaloneSanitizeKind)};
+  function icReadAutosave(key, fingerprint) {
+    if (!fingerprint) return null;
+    var saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) { return null; }
+    if (!saved) return null;
+    var stamped = null;
+    try { stamped = localStorage.getItem(key + ':fingerprint'); } catch (e) {}
+    if (stamped === fingerprint) return saved;
+    // Unstamped entries predate this guard and cannot be shown to match, so
+    // they are treated as superseded for the same reason a mismatch is.
+    // Superseded is not the same as worthless: this slot is only ever written by
+    // a real edit, and an edit that was never Synced exists nowhere else. Move it
+    // aside instead of deleting it so it stays recoverable. If the stash throws
+    // (quota), the removes never run and the payload is left where it was.
+    try {
+      localStorage.setItem(key + ':superseded', saved);
+      localStorage.removeItem(key);
+      localStorage.removeItem(key + ':fingerprint');
+    } catch (e) {}
+    return null;
+  }
+  function icWriteAutosave(key, markup, fingerprint) {
+    try {
+      localStorage.setItem(key, markup);
+      localStorage.setItem(key + ':fingerprint', fingerprint);
+    } catch (e) {}
+  }
   var trustedResumeDerivations = icTrustedDerivationMap(resumeMain);
   icInstallPlainTextEditing(resumeMain);
   icInstallPlainTextEditing(coverMain);
@@ -1745,7 +1791,7 @@ ${editableRuntimeSanitizerSource()}
     }
   }
   function updateSync() {
-    if (!syncBtn || !HAS_APPLICATION_BUNDLE) return;
+    if (!syncBtn || !HAS_APPLICATION_BUNDLE || syncInFlight) return;
     var reviewBlocked = skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
     var configured = !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
     var locationBlocked = !!locationCard && !locationConfirmed;
@@ -1792,16 +1838,6 @@ ${editableRuntimeSanitizerSource()}
     stopEditing();
     activeDocument = kind;
     main = kind === 'cover' ? coverMain : resumeMain;
-    // data-letter is root-only in the design system, but Application.html
-    // contains both surfaces and therefore also inlines cover-letter.css.
-    // Toggle the root attribute only while its marked cover panel is active so
-    // it can never centre the résumé (including a PDF render that switches
-    // tabs programmatically).
-    if (kind === 'cover' && coverMain && coverMain.hasAttribute('data-ic-letter-centered')) {
-      document.documentElement.setAttribute('data-letter', 'centered');
-    } else {
-      document.documentElement.removeAttribute('data-letter');
-    }
     Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel]')).forEach(function (panel) {
       panel.hidden = panel.getAttribute('data-ic-document-panel') !== kind;
     });
@@ -1965,12 +2001,12 @@ ${editableRuntimeSanitizerSource()}
   // (and different applications generated from the same hub) never collide. ----
   if (main) {
     try {
-      var saved = localStorage.getItem(STORAGE_KEY);
+      var saved = icReadAutosave(STORAGE_KEY, RESUME_MARKUP_FINGERPRINT);
       if (saved) {
         // Parse/sanitize in a detached template first. Assigning legacy rich
         // HTML directly to a connected main can fire an image/event payload
         // before any later cleanup gets a chance to run.
-        main.innerHTML = icSanitizeEditableMarkup(saved, 'resume', trustedResumeDerivations);
+        main.innerHTML = icSanitizeEditableMarkup(saved, MAIN_SANITIZE_KIND, trustedResumeDerivations);
         if (restoreNote) restoreNote.hidden = false;
         markPdfStale('resume');
       }
@@ -1982,7 +2018,7 @@ ${editableRuntimeSanitizerSource()}
         // The main variable follows the selected tab. Capture the stable résumé node so
         // switching to the cover tab during the debounce cannot save cover
         // markup into the résumé's storage slot.
-        try { localStorage.setItem(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, 'resume', trustedResumeDerivations)); } catch (e) {}
+        icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT);
       }, 500);
     }
     main.addEventListener('input', function () {
@@ -1993,9 +2029,13 @@ ${editableRuntimeSanitizerSource()}
   }
   if (coverMain) {
     try {
-      var savedCover = localStorage.getItem(STORAGE_KEY + ':cover');
+      var savedCover = icReadAutosave(STORAGE_KEY + ':cover', COVER_MARKUP_FINGERPRINT);
       if (savedCover) {
         coverMain.innerHTML = icSanitizeEditableMarkup(savedCover, 'cover');
+        // Same disclosure the resume path makes. Swapping the letter out from
+        // under the reader with no notice is how a stale draft passes for the
+        // generated one.
+        if (restoreNote) restoreNote.hidden = false;
         markPdfStale('cover');
       }
     } catch (e) {}
@@ -2003,12 +2043,35 @@ ${editableRuntimeSanitizerSource()}
     coverMain.addEventListener('input', function () {
       if (coverSaveTimer) clearTimeout(coverSaveTimer);
       coverSaveTimer = setTimeout(function () {
-        try { localStorage.setItem(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover')); } catch (e) {}
+        icWriteAutosave(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover'), COVER_MARKUP_FINGERPRINT);
       }, 500);
       markPdfStale('cover');
       if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
     });
   }
+
+  // Reconcile inferred-skill visibility with the decision map AFTER the restores
+  // above, because a restored payload replaces the whole resume main and brings
+  // its own hidden-attribute state with it.
+  //
+  // Those two records drift apart by design: applySkillDecision persists the
+  // decision (skillStorageKey) but never schedules a markup save — scheduleSave
+  // fires only from the resume input handler — so every decision made after
+  // the last keystroke is missing from the saved markup. The earlier replay at
+  // the skillCards wiring pass therefore governs a DOM that :2025 then throws
+  // away, and nothing re-asserts it.
+  //
+  // The decision map is what the person actually clicked; the payload is only
+  // where the resume happened to be when they last typed. The map wins. Left
+  // unreconciled this ships a rejected skill into the resume and its PDF (or
+  // drops a verified one) while the card and the review status say otherwise.
+  // persist:false — this writes nothing and marks nothing stale; the restore
+  // already called markPdfStale, and applySkillDecision ends in
+  // updateSkillReviewStatus so the status line re-derives from the map.
+  skillCards.forEach(function (card) {
+    var id = card.getAttribute('data-ic-insight');
+    applySkillDecision(id, skillDecisions[id], false);
+  });
 
   function stopEditing() {
     if (!main) return;
@@ -2040,6 +2103,7 @@ ${editableRuntimeSanitizerSource()}
       if (main) main.innerHTML = icSanitizeEditableMarkup(main.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
       syncMessage = '';
       var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;
+      syncInFlight = true;
       syncBtn.disabled = true;
       syncBtn.textContent = 'Syncing…';
       if (pdfBundleNote) pdfBundleNote.textContent = 'Rendering a fresh ' + documentLabel(documentToSync) + ' PDF…';
@@ -2059,7 +2123,7 @@ ${editableRuntimeSanitizerSource()}
         if (!message || /fetch|network|load failed/i.test(message)) message = 'Infinite Canvas is not running or its Sync service is unavailable. Launch it, then try Sync again.';
         syncMessage = message;
         if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
-      }).finally(function () { updateSync(); });
+      }).finally(function () { syncInFlight = false; updateSync(); });
     });
   }
 
@@ -2143,7 +2207,7 @@ ${editableRuntimeSanitizerSource()}
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter, coverLetterCentered = false } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, modelProvenance, showAllVerifySkills = false, downloadBundle, coverLetter } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: accept a fenced response, but let the DOM-based sanitizer find
   // the one real <main> element. Regex extraction is unsafe here: a script or
@@ -2176,12 +2240,13 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   let coverMain = coverStart >= 0 && coverEnd >= 0
     ? suppliedCoverText.slice(coverStart, coverEnd + '</main>'.length)
     : '<main class="page" role="document"><p>Cover letter was unavailable when this application was generated.</p></main>';
-  if (coverLetterCentered) {
-    coverMain = coverMain.replace(/<main\b/i, '<main data-ic-letter-centered');
-  }
   const css = inlineStylesheets(CSS_FILES);
   const scriptNonce = createDocumentScriptNonce();
-  const chrome = buildInjectedChrome({ docId, kind: 'resume', workspace: true, downloadBundle, scriptNonce });
+  const chrome = buildInjectedChrome({
+    docId, kind: 'resume', workspace: true, downloadBundle, scriptNonce,
+    resumeFingerprint: documentMarkupFingerprint(main),
+    coverFingerprint: documentMarkupFingerprint(coverMain),
+  });
 
   return `<!doctype html>
 <html lang="en" ${attrs}>
@@ -2354,7 +2419,7 @@ ${chrome}
     }
     window.addEventListener('resize', scheduleRecompute);
     new MutationObserver(scheduleRecompute).observe(document.documentElement, {
-      attributes: true, attributeFilter: ['data-page', 'data-density', 'data-mono', 'data-print', 'data-letter'],
+      attributes: true, attributeFilter: ['data-page', 'data-density', 'data-mono', 'data-print'],
     });
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleRecompute).catch(function () {});
     scheduleRecompute();
@@ -2424,24 +2489,10 @@ export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId
 
   const css = inlineStylesheets(CSS_FILES);
   const scriptNonce = createDocumentScriptNonce();
-  const chrome = buildInjectedChrome({ docId, kind: 'cover-letter', scriptNonce });
-
-  return `<!doctype html>
-<html lang="en" ${variantAttrs}>
-<head>
-<meta charset="utf-8">
-${contentSecurityPolicyMeta(scriptNonce)}
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cover Letter</title>
-<style>
-${css}
-
-${INJECTED_CHROME_CSS}
-</style>
-</head>
-<body>
-${chrome}
-<main class="page" role="document" itemscope itemtype="https://schema.org/Person">
+  // Assembled before the chrome so the letter can be fingerprinted: the
+  // standalone document edits this main through the same autosave slot the
+  // workspace uses for its resume panel.
+  const letterMain = `<main class="page" role="document" itemscope itemtype="https://schema.org/Person">
   <header class="resume-header letter-letterhead">
     <h1 class="name" itemprop="name">${name}</h1>
     ${tagline ? `<p class="tagline" itemprop="jobTitle">${tagline}</p>` : ''}
@@ -2466,7 +2517,28 @@ ${paragraphs}
     <p class="signature" itemprop="name">${name}</p>
     ${signatureTitle ? `<p class="signature-title">${signatureTitle}</p>` : ''}
   </div>
-</main>
+</main>`;
+  const chrome = buildInjectedChrome({
+    docId, kind: 'cover-letter', scriptNonce,
+    resumeFingerprint: documentMarkupFingerprint(letterMain),
+  });
+
+  return `<!doctype html>
+<html lang="en" ${variantAttrs}>
+<head>
+<meta charset="utf-8">
+${contentSecurityPolicyMeta(scriptNonce)}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cover Letter</title>
+<style>
+${css}
+
+${INJECTED_CHROME_CSS}
+</style>
+</head>
+<body>
+${chrome}
+${letterMain}
 </body>
 </html>`;
 }

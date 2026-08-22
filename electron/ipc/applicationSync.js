@@ -33,7 +33,7 @@ const STATE_FILE = 'application-sync-workspaces.json';
 const workspaces = new Map();
 const workspaceSyncQueues = new Map();
 let server = null;
-let stateLoaded = false;
+let loadPromise = null;
 let persistenceQueue = Promise.resolve();
 let lastServerError = null;
 let lastSyncAttempt = null;
@@ -235,27 +235,35 @@ function persistWorkspacesSerialized() {
   return write;
 }
 
-async function loadWorkspaces() {
-  if (stateLoaded) return;
-  stateLoaded = true;
-  try {
-    const parsed = JSON.parse(await fs.promises.readFile(statePath(), 'utf8'));
-    let migratedIdentity = false;
-    for (const raw of Array.isArray(parsed?.workspaces) ? parsed.workspaces : []) {
-      const normalized = normalizeWorkspace(raw);
-      if (!normalized) continue;
-      try {
-        const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
-        if (!normalized.identity) migratedIdentity = true;
-        workspaces.set(workspace.token, workspace);
-      } catch (error) {
-        logger.warn(`[ApplicationSync] Ignoring unsafe saved workspace: ${error?.message || error}`);
+// registerApplicationSyncWorkspace and startApplicationSyncServer can both run
+// this close together at launch. A boolean "already loading" flag lets a
+// second caller proceed against a still-empty `workspaces` map, and its later
+// `workspaces.set(...)` replays a token the first caller's dedup just deleted.
+// Memoizing the in-flight promise itself means every caller awaits the SAME
+// completed load.
+function loadWorkspaces() {
+  if (loadPromise) return loadPromise;
+  loadPromise = (async () => {
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(statePath(), 'utf8'));
+      let migratedIdentity = false;
+      for (const raw of Array.isArray(parsed?.workspaces) ? parsed.workspaces : []) {
+        const normalized = normalizeWorkspace(raw);
+        if (!normalized) continue;
+        try {
+          const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
+          if (!normalized.identity) migratedIdentity = true;
+          workspaces.set(workspace.token, workspace);
+        } catch (error) {
+          logger.warn(`[ApplicationSync] Ignoring unsafe saved workspace: ${error?.message || error}`);
+        }
       }
+      if (migratedIdentity) await persistWorkspaces();
+    } catch (error) {
+      if (error?.code !== 'ENOENT') logger.warn(`[ApplicationSync] Could not read saved workspace capabilities: ${error?.message || error}`);
     }
-    if (migratedIdentity) await persistWorkspaces();
-  } catch (error) {
-    if (error?.code !== 'ENOENT') logger.warn(`[ApplicationSync] Could not read saved workspace capabilities: ${error?.message || error}`);
-  }
+  })();
+  return loadPromise;
 }
 
 function corsHeaders(origin) {

@@ -17,7 +17,6 @@ import { primeClaudeModels } from './ipc/modelResolver.js';
 import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
-import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
 import { closeAllPages } from './ipc/browserPool.js';
 import { closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
@@ -82,6 +81,10 @@ const marketplacePreviewCache = new Map();
 let marketplacePreviewCacheBytes = 0;
 
 function clampNumber(value, fallback, min, max) {
+  // Number(null) === 0 (finite), so a missing query param must be rejected
+  // before the Number() coercion — otherwise an absent maxBytes/maxDimension
+  // silently clamps to `min` instead of using `fallback`.
+  if (value == null || value === '') return fallback;
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
@@ -211,12 +214,9 @@ process.on('unhandledRejection', (reason, promise) => {
 // ── Multi-window state ─────────────────────────────────────────────────────
 // The app supports several canvas windows open at once (File ▸ New Canvas,
 // File ▸ Open Canvas, or relaunching the app). Each window is an independent
-// canvas; shared resources (browser pool, stealth browser, monitors,
-// electron-store, localStorage) live once in this single main process and are
-// deliberately shared — running multiple OS processes would fight over those.
-//
-// `canvasWindows` tracks only the user-facing canvas windows; it excludes the
-// hidden BrowserWindows the monitor module spins up (see browserViewMonitor.js).
+// canvas; shared resources (browser pool, stealth browser, electron-store,
+// localStorage) live once in this single main process and are deliberately
+// shared — running multiple OS processes would fight over those.
 const canvasWindows = new Set();
 // Most-recently focused canvas window — menu actions target this so File ▸ Save
 // etc. act on the window the user is actually looking at.
@@ -837,7 +837,6 @@ if (!gotTheLock) {
     registerAppliedJobsHandlers();
     registerMarketplaceHandlers();
     registerAccountsHandlers();
-    registerMonitorHandlers();
     registerGeminiHandlers();
     registerBugReportHandlers();
     registerNetworkHandlers();
@@ -947,7 +946,6 @@ app.on('before-quit', async (event) => {
     try {
       const cleanup = async () => {
         await Promise.allSettled([
-          closeAllMonitors(),
           closeAllPages(),
           closeStealthBrowser(true),
           stopApplicationSyncServer(),

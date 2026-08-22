@@ -436,13 +436,17 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
     return v;
   })() : null;
 
-  /** Render a single quota stat cell: "6 / 5" with amber when over limit. */
-  const QuotaCell = ({ used, limit }) => {
+  /** Render a single quota stat cell: "6 / 5" with amber when over limit.
+   *  Comparison always runs on the raw numbers — `format` only affects display,
+   *  so a K-formatted limit can't defeat the `>=` check (NaN) or get compared
+   *  lexicographically as a string. */
+  const QuotaCell = ({ used, limit, format }) => {
     if (used == null || limit == null) return <span className="text-white/30">—</span>;
     const over = limit > 0 && used >= limit;
+    const display = format || ((n) => n.toLocaleString());
     return (
       <span className={over ? 'text-amber-400 font-semibold' : 'text-white/60'}>
-        {used.toLocaleString()} / {limit.toLocaleString()}
+        {display(used)} / {display(limit)}
         {over && <span className="ml-0.5">⚠️</span>}
       </span>
     );
@@ -512,7 +516,7 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
                     )}
                     {qs.tpm && (
                       <span className="text-white/40">
-                        TPM: <QuotaCell used={fmtK(qs.tpm.used)} limit={fmtK(qs.tpm.limit)} />
+                        TPM: <QuotaCell used={qs.tpm.used} limit={qs.tpm.limit} format={fmtK} />
                       </span>
                     )}
                     {/* These figures are project-wide, not model-specific — say so

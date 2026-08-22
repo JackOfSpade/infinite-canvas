@@ -913,7 +913,11 @@ export function registerFilesystemHandlers() {
     await fs.promises.access(filePath);
 
     const watcher = fs.watch(filePath, (eventType) => {
-      if (eventType === 'change') {
+      // Atomic saves (tmp-write + rename over the target — how this app's own
+      // writeValidatedTextFile saves, and how most editors save) surface as
+      // 'rename', not 'change'. Forward those too whenever the path still
+      // resolves, so an external atomic save isn't silently missed.
+      if (eventType === 'change' || (eventType === 'rename' && fs.existsSync(filePath))) {
         const entry = activeWatchers.get(filePath);
         if (!entry) return;
         for (const [clientSender] of entry.clients) {
@@ -966,16 +970,6 @@ export function registerFilesystemHandlers() {
 
   handleSafe('write-text-file', async (event, { filePath, content }) => {
     await writeValidatedTextFile(filePath, content, { sender: event.sender });
-  });
-
-  handleSafe('save-file-dialog', async (_event, { defaultFilename, content, filters }) => {
-    const { filePath, canceled } = await dialog.showSaveDialog({
-      defaultPath: defaultFilename || 'export.txt',
-      filters: filters || [{ name: 'Text Files', extensions: ['txt'] }],
-    });
-    if (canceled || !filePath) return { saved: false };
-    await atomicWriteFile(filePath, content);
-    return { saved: true, filePath };
   });
 }
 

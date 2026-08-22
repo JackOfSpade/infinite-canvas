@@ -294,8 +294,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         statusErrorStreakRef.current.set(jobId, streak);
         if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
         statusErrorStreakRef.current.delete(jobId);
-        EventLogger.log(`[LocalAI] fallback poll failed ${LOCAL_AI_STATUS_ERROR_STREAK_LIMIT}x job=${jobId} card=${nodeId}: ${error?.message || error}`);
-        writeState(nodeId, jobId, { status: 'failed', message: error?.message || String(error) });
+        EventLogger.log(`[LocalAI] fallback poll failed ${LOCAL_AI_STATUS_ERROR_STREAK_LIMIT}x job=${jobId} card=${nodeId}; retrying: ${error?.message || error}`);
+        writeState(nodeId, jobId, { status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` });
       }
     };
 

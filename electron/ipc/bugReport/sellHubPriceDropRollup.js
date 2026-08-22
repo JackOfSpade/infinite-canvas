@@ -49,23 +49,43 @@ export function buildSellHubPriceDropRollup(nodes) {
   });
   if (planned.length === 0) return '';
 
+  // One predicate set, read by both the canvas-wide tallies and the per-row
+  // flag strings, so a row can never disagree with the summary above it.
+  const planFlags = (d) => {
+    const target = d.priceDropTargetPrice != null ? Number(d.priceDropTargetPrice) : null;
+    const start = d.priceDropPlanStartingPrice != null ? Number(d.priceDropPlanStartingPrice) : null;
+    return {
+      target,
+      start,
+      isFree: target === 0,
+      dateNoTarget: !!d.priceDropMustSellDate && target == null,
+      targetTooHigh: target != null && Number.isFinite(target) && Number.isFinite(start) && target >= start,
+    };
+  };
+
+  // Tally over EVERY planned hub, not just the rendered slice — these lines are
+  // stated as canvas-wide counts, so computing them inside the truncated
+  // slice(0, 30) below would silently under-report on a large canvas.
   let freeTargets = 0;
   let missingTarget = 0;
   let targetTooHigh = 0;
+  for (const node of planned) {
+    const f = planFlags(node.data || {});
+    if (f.isFree) freeTargets += 1;
+    if (f.dateNoTarget) missingTarget += 1;
+    if (f.targetTooHigh) targetTooHigh += 1;
+  }
+
   const rows = planned.slice(0, 30).map((node) => {
     const d = node.data || {};
-    const target = d.priceDropTargetPrice != null ? Number(d.priceDropTargetPrice) : null;
-    const start = d.priceDropPlanStartingPrice != null ? Number(d.priceDropPlanStartingPrice) : null;
-    if (target === 0) freeTargets += 1;
-    if (d.priceDropMustSellDate && target == null) missingTarget += 1;
-    if (target != null && Number.isFinite(target) && Number.isFinite(start) && target >= start) targetTooHigh += 1;
+    const { target, start, isFree, dateNoTarget, targetTooHigh: rowTargetTooHigh } = planFlags(d);
 
     const flags = [
       d.priceDropApplyAllExcluded ? 'apply-all excluded' : '',
       d.locked ? 'locked' : '',
-      target === 0 ? 'free target' : '',
-      d.priceDropMustSellDate && target == null ? 'date without target' : '',
-      target != null && Number.isFinite(target) && Number.isFinite(start) && target >= start ? 'target >= start' : '',
+      isFree ? 'free target' : '',
+      dateNoTarget ? 'date without target' : '',
+      rowTargetTooHigh ? 'target >= start' : '',
     ].filter(Boolean).join(', ') || '—';
     const cards = cardCounts.get(node.id) || 0;
     const due = dueCounts.get(node.id) || 0;
@@ -80,7 +100,7 @@ export function buildSellHubPriceDropRollup(nodes) {
   if (freeTargets > 0) summary.push(`- ${freeTargets} plan(s) target **$0** — this is treated as a valid free-listing target, not as an empty value.`);
   if (missingTarget > 0) summary.push(`- ⚠️ ${missingTarget} plan(s) have a must-sell date without a target price, so the deadline plan is incomplete.`);
   if (targetTooHigh > 0) summary.push(`- ⚠️ ${targetTooHigh} plan(s) have a target at or above the starting price.`);
-  if (planned.length > rows.length) summary.push(`- Showing first ${rows.length} planned hub(s); ${planned.length - rows.length} more omitted to keep the report compact.`);
+  if (planned.length > rows.length) summary.push(`- The table below shows the first ${rows.length} planned hub(s); ${planned.length - rows.length} more are omitted to keep the report compact. The counts above cover all ${planned.length}.`);
 
   return `
 ## SellHub Price-Drop Plans

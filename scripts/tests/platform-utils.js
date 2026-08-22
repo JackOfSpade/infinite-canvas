@@ -1458,6 +1458,13 @@ export default [
             metric: { isNumeric: true, baselineValue: 1, baselineLabel: '2019', endpointValue: 2, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
             evidence: [{ file: 'balance-sheet-2019.txt', quote: 'Total   debt outstanding:  $4.2M   as of Mar 2019.' }],
           },
+          { // Real quote, but no `file` field at all — must not be mislabeled
+            // evidence-wrong-file, which asserts a specific document was wrong.
+            id: 'a7', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 15, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Missing-file evidence case', derivation: 'quote real but no file named at all',
+            metric: { isNumeric: true, baselineValue: 1, baselineLabel: '2019', endpointValue: 2, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
+            evidence: [{ quote: 'Total debt outstanding: $4.2M as of Mar 2019.' }],
+          },
         ],
         gaps: [{ roleAnchor: 'CFO, Acme', note: 'No evidence of headcount growth found.' }],
       };
@@ -1496,8 +1503,15 @@ export default [
       assert(byId.a6.computed.checks.evidenceOk === true, 'whitespace-only difference between quote and source still matches (normalizeQuoteText)');
       assert(!byId.a6.flags.includes('evidence-miss') && !byId.a6.flags.includes('evidence-wrong-file'), 'whitespace-normalized match carries no evidence flag');
 
-      assert(stats.mined === 6, 'stats.mined counts every item that survived (nothing gates, nothing is deleted)');
-      assert(stats.directionMisses === 1 && stats.evidenceMisses === 1, 'stats tally exactly the direction mismatch and the one genuine evidence miss (not the wrong-file case)');
+      // Missing `file` entirely is a distinct case from a named-but-wrong file:
+      // no specific document was asserted wrong, so it must not share that flag.
+      assert(byId.a7.computed.checks.evidenceOk === false, 'missing-file evidence → evidenceOk is false');
+      assert(byId.a7.flags.includes('evidence-file-missing'), 'a quote real elsewhere but with no file named at all is flagged evidence-file-missing');
+      assert(!byId.a7.flags.includes('evidence-wrong-file'), 'missing-file case must not be mislabeled evidence-wrong-file');
+      assert(byId.a7.confidence === 'high', 'evidence-file-missing alone does not demote confidence, same as evidence-wrong-file');
+
+      assert(stats.mined === 7, 'stats.mined counts every item that survived (nothing gates, nothing is deleted)');
+      assert(stats.directionMisses === 1 && stats.evidenceMisses === 1, 'stats tally exactly the direction mismatch and the one genuine evidence miss (not the wrong-file or missing-file cases)');
       assert(gaps.length === 1 && gaps[0].note.includes('headcount'), 'gaps pass through untouched (advisory, never gating)');
       return { ok: true, stats };
     },

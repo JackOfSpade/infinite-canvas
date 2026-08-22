@@ -1,4 +1,4 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -81,7 +81,7 @@ export default [
         && JSON.stringify(groundingViolation.items.required) === JSON.stringify(['claim', 'reason'])
         && cohesionObservation.maxItems === 8
         && JSON.stringify(cohesionObservation.items.required) === JSON.stringify(['kind', 'claim', 'reason', 'repair'])
-        && cohesionObservation.items.properties.kind.enum.join(',') === 'unclear-antecedent,unexplained-shift,chronological-backtracking,inventory-paragraph,overloaded-sentence,faulty-parallelism,repeated-metaphor,detached-synthesis,volunteered-gap,delayed-relevance,second-thesis,unnecessary-evidence',
+        && cohesionObservation.items.properties.kind.enum.join(',') === 'unclear-antecedent,unexplained-shift,chronological-backtracking,unmoored-temporal-contrast,inventory-paragraph,overloaded-sentence,faulty-parallelism,repeated-metaphor,awkward-register,unnecessary-employer-repetition,detached-synthesis,volunteered-gap,delayed-relevance,second-thesis,unnecessary-evidence,dangling-transition,unearned-causal,literalized-frame',
       'final audit separates bounded factual violations from exact-span cohesion observations');
       const faultyParallelismFixture = {
         kind: 'faulty-parallelism',
@@ -794,7 +794,7 @@ export default [
       const geminiQualityTasks = [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
         'resume-parse', 'career-file-extract', 'job-query-generation',
-        'job-scoring', 'job-bucketing', 'company-research',
+        'job-scoring', 'job-bucketing', 'job-compensation-research', 'job-compensation-assessment', 'company-research',
         'application-resume', 'application-letter-needs', 'application-letter-plan',
         'application-cover-letter', 'application-letter-revise', 'application-skill-opportunity',
         'career-achievement-mining', 'default',
@@ -849,6 +849,8 @@ export default [
         'job-query-generation':      SONNET,
         'job-scoring':               SONNET,
         'job-bucketing':             SONNET,
+        'job-compensation-research': SONNET,
+        'job-compensation-assessment': SONNET,
         'default':                   SONNET,
         'platform-fit-assessment':   HAIKU,
         'page-status-classify':      HAIKU,
@@ -1419,6 +1421,81 @@ export default [
       assert(placeholderCount === 0 && failedBatches === 0, 'clean results → no placeholders/failures');
       assert(scoredJobs.every((j) => typeof j.title === 'string' && j.matchScore >= 50), 'each job kept its fields + a real local-index score');
       return { ok: true, subBatchSizes: subBatches.map((b) => b.length) };
+    },
+  },
+{
+    name: 'Batch results feed the token budget: max_tokens records the submitted cap+seed, a window overflow does not, and a pre-upgrade sidecar stays inert',
+    run: async () => {
+      // The batch path never reaches createMessage(), so it is the only place
+      // that can truncate WITHOUT teaching the self-calibrating budget anything.
+      // Stubbing globalThis.fetch (same technique as the Gemini cascade tests
+      // above) exercises the real getClaudeBatchResults over the SDK: the
+      // results() call is a batch retrieve followed by a JSONL results GET.
+      const RESULTS_URL = 'https://api.anthropic.com/v1/messages/batches/mb_test/results';
+      const succeeded = (customId, stopReason, outputTokens, content = []) => ({
+        custom_id: customId,
+        result: { type: 'succeeded', message: { stop_reason: stopReason, usage: { output_tokens: outputTokens }, content } },
+      });
+      const originalFetch = globalThis.fetch;
+      const withBatchEntries = async (entries, fn) => {
+        globalThis.fetch = async (url) => (
+          /\/results$/.test(String(url))
+            ? new Response(entries.map((e) => JSON.stringify(e)).join('\n'), { status: 200, headers: { 'content-type': 'application/binary' } })
+            : new Response(JSON.stringify({ id: 'mb_test', type: 'message_batch', processing_status: 'ended', results_url: RESULTS_URL }),
+              { status: 200, headers: { 'content-type': 'application/json' } })
+        );
+        try { return await fn(); } finally { globalThis.fetch = originalFetch; }
+      };
+
+      // (i) max_tokens → truncation recorded at the cap the item was SUBMITTED
+      // with (9000, from the persisted sidecar), not the 700 tokens it managed
+      // to emit before the cut-off, plus its formula seed for diagnostics.
+      const truncated = await withBatchEntries([succeeded('b0', 'max_tokens', 700)], () =>
+        getClaudeBatchResults('batch-budget-test-key', 'mb_test', {
+          task: 'tb-batch-truncate', capsByCustomId: { b0: { cap: 9000, seed: 2500 } },
+        }));
+      assert(truncated.b0.ok === false && truncated.b0.error === 'max_tokens (truncated)',
+        'a truncated item is still refused, so reconciliation applies its placeholder');
+      const truncSnap = getTokenBudgetSnapshot()['tb-batch-truncate'];
+      assert(truncSnap?.truncatedAt === 9000 && truncSnap.formulaSeedAtTruncation === 2500,
+        'the sidecar cap + seed are what get recorded (output_tokens understates the cap on a thinking-heavy item)');
+      assert(truncSnap.samples === 1 && truncSnap.max === 700,
+        'the truncated call is also a usage sample — batch runs used to contribute none at all');
+      assert(effectiveCap('tb-batch-truncate', 2500) === Math.round(9000 * 1.2),
+        'the next run provisions past the cap that truncated instead of truncating identically forever');
+
+      // (ii) A window overflow is an INPUT-size problem: raising the output cap
+      // shrinks the input budget, so it must never raise the truncation floor.
+      const overflowed = await withBatchEntries([succeeded('b0', 'model_context_window_exceeded', 5000)], () =>
+        getClaudeBatchResults('batch-budget-test-key', 'mb_test', {
+          task: 'tb-batch-window', capsByCustomId: { b0: { cap: 9000, seed: 2500 } },
+        }));
+      assert(overflowed.b0.ok === false && overflowed.b0.error === 'model_context_window_exceeded (truncated)',
+        'a window overflow is refused under its own stop reason');
+      assert(getTokenBudgetSnapshot()['tb-batch-window']?.truncatedAt === 0,
+        'no truncation floor from a context-window overflow');
+      assert(effectiveCap('tb-batch-window', 1000) === 1000,
+        'the cap for that task is left exactly where the formula put it');
+
+      // (iii) A sidecar written before this existed carries neither field. Both
+      // tokenBudget helpers no-op on a falsy task, so reconciliation of an
+      // in-flight pre-upgrade batch must behave exactly as it did before.
+      const before = Object.keys(getTokenBudgetSnapshot()).sort().join(',');
+      const legacy = await withBatchEntries(
+        [succeeded('b0', 'max_tokens', 700), succeeded('b1', 'end_turn', 42, [{ type: 'text', text: 'hi' }])],
+        () => getClaudeBatchResults('batch-budget-test-key', 'mb_test'));
+      assert(legacy.b0.error === 'max_tokens (truncated)' && legacy.b1.ok === true && legacy.b1.text === 'hi',
+        'results still classify correctly with no budget metadata');
+      assert(Object.keys(getTokenBudgetSnapshot()).sort().join(',') === before,
+        'a task-less reconcile records nothing and throws nothing');
+
+      // (iv) A caps record missing this item (e.g. a customId that was never
+      // submitted) falls back to what the model did emit rather than recording 0.
+      await withBatchEntries([succeeded('b9', 'max_tokens', 700)], () =>
+        getClaudeBatchResults('batch-budget-test-key', 'mb_test', { task: 'tb-batch-nocaps', capsByCustomId: {} }));
+      assert(getTokenBudgetSnapshot()['tb-batch-nocaps']?.truncatedAt === 700,
+        'no caps entry → the observed output tokens are still a usable cap-too-low signal');
+      return { ok: true };
     },
   },
 {

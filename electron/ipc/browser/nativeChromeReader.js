@@ -158,19 +158,21 @@ export function nativeReadToFetchResult({ requestedUrl, finalUrl, title, html, e
   const landedLower = landed.toLowerCase();
   // eBay's anti-bot splash/captcha (/splashui/…) is served ON-host (ebay.com), so it
   // would otherwise slip past the login-bounce + CF-content checks and get scanned as
-  // hub content. Treat it as a challenge (blocked source, not scanned): the user can
-  // solve it once in the visible Chrome window, then re-run.
+  // hub content. Treat it as a challenge (blocked source, not scanned): this window
+  // closes (readNativeChromeHubs's finally always SIGTERMs it, so the NEXT platform's
+  // spawn gets a free profile) — the user solves it in the fresh window the next
+  // Check All run opens.
   if (/\/splashui\b/.test(landedLower)) {
-    return { ...base, ok: false, challenged: true, error: `Native Chrome hit eBay's anti-bot splash/captcha at ${landed} — solve it once in the visible Chrome window for eBay, then re-run Check All.` };
+    return { ...base, ok: false, challenged: true, error: `Native Chrome hit eBay's anti-bot splash/captcha at ${landed} — this window will close; re-run Check All and solve it in the fresh window that opens.` };
   }
   if (isLoginUrlPath(landedLower)) {
     return { ...base, ok: false, loginBounce: true, error: `Native Chrome was redirected to a login page (${landed}) — even without CDP the session is logged out or anti-bot bounced it; log in via Settings → Marketplace Login.` };
   }
   if (nativeReadLooksChallenged(html)) {
-    return { ...base, ok: false, challenged: true, error: `Native Chrome still hit an anti-bot challenge at ${landed} — solve it once in a visible Chrome window for this site, then retry.` };
+    return { ...base, ok: false, challenged: true, error: `Native Chrome still hit an anti-bot challenge at ${landed} — this window will close; re-run Check All and solve it in the fresh window that opens.` };
   }
   if (nativeReadLooksLoggedOut(html)) {
-    return { ...base, ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; sign in via the open Chrome window, then re-run Check All.` };
+    return { ...base, ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; this window will close, sign in when Check All reopens a fresh one.` };
   }
   if (!html || html.length < 200) {
     return { ...base, ok: false, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
@@ -656,13 +658,15 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
         // (appleEventsDisabled). Each further navigateAndRead just reloads the same
         // wall and resets its challenge/reCAPTCHA (the reported "going to same url
         // repeatedly without giving time for human verification to load"). Mark the
-        // rest and leave the window open so the user can sign in / solve it, then
-        // re-run Check All. (waitForHubLogin's title guard normally catches a
+        // rest and stop — this window still closes (the finally below always
+        // SIGTERMs it so the NEXT platform's spawn gets a free profile), so the
+        // user signs in / solves it in the FRESH window the next Check All run
+        // opens, not this one. (waitForHubLogin's title guard normally catches a
         // logged-out/challenge state first; this stops a session that drops mid-read.)
         if (r.loggedOut || r.appleEventsDisabled || r.challenged || r.loginBounce) {
           const restFlags = r.loggedOut ? { loggedOut: true } : r.appleEventsDisabled ? { appleEventsDisabled: true } : r.challenged ? { challenged: true } : { loginBounce: true };
           for (const rest of urls) if (!results.has(rest)) results.set(rest, { ok: false, ...restFlags, error: r.error, ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}), ...(r.title ? { title: r.title } : {}) });
-          logger.info(`[NativeRead] ${platformId} stopping read — ${r.loggedOut ? 'inline login form (logged out); awaiting sign-in' : r.appleEventsDisabled ? 'Apple Events JavaScript is disabled; remaining URLs would fail the same way' : r.challenged ? 'anti-bot challenge is showing; remaining URLs would keep refreshing it' : 'session bounced to a login page; remaining URLs would keep refreshing it — sign in, then re-run Check All'}`);
+          logger.info(`[NativeRead] ${platformId} stopping read — ${r.loggedOut ? 'inline login form (logged out); sign in on next run\'s window' : r.appleEventsDisabled ? 'Apple Events JavaScript is disabled; remaining URLs would fail the same way' : r.challenged ? 'anti-bot challenge is showing; remaining URLs would keep refreshing it' : 'session bounced to a login page; remaining URLs would keep refreshing it — sign in on next run\'s window'}`);
           break;
         }
       }

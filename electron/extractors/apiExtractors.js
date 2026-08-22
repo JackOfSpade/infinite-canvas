@@ -455,8 +455,15 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
       const job = enriched[i];
       if (!job.url) continue;
 
+      // Set only once this job's navigation actually completed, so the tally
+      // below counts what its name says. A nav error means the page never
+      // loaded — counting it would make a fresh context look "productive" and
+      // silently disable the IP-limit stop in handleWall.
+      let navOk = false;
+
       try {
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        navOk = true;
 
         const finalUrl = page.url();
         consecutiveNavErrors = 0; // a navigation completed → the uplink is alive
@@ -606,7 +613,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
       // Reaching here means the navigation completed WITHOUT triggering a wall
       // rotation (wall paths do `i--; continue` and skip this). Counts toward the
       // current context's tally — used to detect "fresh context walled immediately".
-      jobsThisContext++;
+      if (navOk) jobsThisContext++;
 
       // Brief pause between navigations — only when there are more jobs to visit.
       // humanDelay gives a log-normal spread around the anchor (~500ms ±20%)
@@ -995,13 +1002,6 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   return !!jobRelevanceEvidence(roleText, query, geoTerms);
 }
 
-/** Shared admission predicate for multi-query browser result pages. */
-export function jobMatchesAnyRoleQuery(job, queries) {
-  const roleQueries = (Array.isArray(queries) ? queries : []).filter(q => String(q || '').trim());
-  return roleQueries.length === 0
-    || roleQueries.some(query => jobRelevanceEvidence(job?.title, query));
-}
-
 /**
  * Admit rows from a feed that has no query endpoint. Unlike an actual job-search
  * API, a whole-feed response has not been ranked or filtered for the user's
@@ -1078,13 +1078,6 @@ export function filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms = EM
       .map(({ title }) => title),
     relevanceTrace,
   };
-}
-
-/** USAJobs Keyword searches the whole announcement; the app needs role-title relevance. */
-export function filterUSAJobsByTitleRelevance(jobs, query) {
-  return (Array.isArray(jobs) ? jobs : []).filter((job) =>
-    jobRelevanceEvidence(job?.title, query),
-  );
 }
 
 // ── USAJobs API ─────────────────────────────────────────────────────────────

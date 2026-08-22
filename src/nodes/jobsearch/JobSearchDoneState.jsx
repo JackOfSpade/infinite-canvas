@@ -1,9 +1,10 @@
 import React from 'react';
-import { RefreshCw, Target, MapPin, Bot, LayoutGrid } from 'lucide-react';
+import { RefreshCw, Target, Bot, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
 import { JobPlatformSelectionControl } from '../../components/JobPlatformSelectionControl';
+import { JobSearchLocationFields } from '../../components/JobSearchLocationFields';
 
 // e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
@@ -28,6 +29,11 @@ export function JobSearchDoneState({
   locked = false,
   // Action props
   onRerun,
+  // Optional: drop the hub's career files (keeping its search settings) so fresh
+  // ones can be dropped on the same module. The hub rests here after every
+  // successful run, so without this the action is only reachable by burning a
+  // full Re-run + Reset just to get back to the empty state.
+  onClearCareerFiles = null,
   // Search controls (passed back to the hub for next run)
   maxAgeDays = 21,
   setMaxAgeDays,
@@ -36,8 +42,10 @@ export function JobSearchDoneState({
   enabledSourceIds,
   setEnabledSourceIds,
   availableSourceIds,
-  preferredLocation = '',
-  setPreferredLocation,
+  searchLocation,
+  setSearchLocation,
+  remoteResidences,
+  setRemoteResidence,
   // Target/pivot role input — surfaces on the done state so the user can
   // tweak it before re-running without going back to empty state.
   targetRole = '',
@@ -127,6 +135,19 @@ export function JobSearchDoneState({
         </div>
       )}
 
+      {/* Deliberately a bare text link, not a second pill: clearing is the rare
+          path and must not compete with Re-run for the click. */}
+      {!locked && onClearCareerFiles && (
+        <button
+          onClick={onClearCareerFiles}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-1 w-full text-[9px] text-white/20 hover:text-white/45 transition-colors bg-transparent border-0 cursor-pointer py-0.5"
+          title="Clear career data and results — search settings are kept for fresh files"
+        >
+          Clear career files
+        </button>
+      )}
+
       {/* Target role + Look back — both feed the next Re-run Search */}
       {!locked && (
         <div className="nodrag w-full mt-2 flex flex-col items-stretch gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
@@ -142,18 +163,13 @@ export function JobSearchDoneState({
               title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once. Applies on next Re-run Search."
             />
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] text-white/40">
-            <MapPin size={10} className="text-blue-300/70 shrink-0" />
-            <input
-              type="text"
-              data-native-undo="true"
-              value={preferredLocation}
-              onChange={(e) => setPreferredLocation?.(e.target.value)}
-              placeholder="One area — e.g. Canada or Toronto, Ontario, Canada"
-              className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
-              title="Use one area per run. Country, province/state, and city scopes are supported; use separate modules for Canada and the United States."
-            />
-          </div>
+          <JobSearchLocationFields
+            searchLocation={searchLocation}
+            setSearchLocation={setSearchLocation}
+            remoteResidences={remoteResidences}
+            setRemoteResidence={setRemoteResidence}
+            compact
+          />
           <div
             className="flex items-center justify-center gap-1.5 text-[10px] text-white/40"
             title="Maximum posting age (in days) to consider on the next search"

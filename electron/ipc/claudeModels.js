@@ -38,9 +38,9 @@
  * max_input_tokens/max_tokens whenever the Models API has reported them for
  * the resolved id (tokenWindow.js's modelMeta() checks the live value first).
  *
- * Ordered workhorse → app-gen → light — CLAUDE_MODEL_IDS below (and the
- * availability probe that iterates it) preserves this order for consistent
- * Settings-panel display.
+ * Ordered workhorse → app-gen → light — CLAUDE_MODEL_REGISTRY above (and
+ * claudeModelsInUse() in modelResolver.js, which the availability probe
+ * iterates) preserves this order for consistent Settings-panel display.
  */
 
 // The pinned safety net: never resolve OLDER than these ids, and fall back to
@@ -82,9 +82,6 @@ export const CLAUDE_MODEL_REGISTRY = Object.freeze([
     // platform-fit, page-status, text-polish
   },
 ]);
-
-/** Every Claude model id this app uses, in registry order. */
-export const CLAUDE_MODEL_IDS = Object.freeze(CLAUDE_MODEL_REGISTRY.map(({ id }) => id));
 
 // Claude 4.6+ (including the current Claude 5 family) supports adaptive
 // thinking.  `output_config.effort` is the documented control for its depth;

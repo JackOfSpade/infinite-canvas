@@ -11,6 +11,32 @@ export const MAX_LETTER_FIGURES = 3;
 export const MAX_FIGURE_DETAIL_ITEMS = 12;
 export const MAX_GENERIC_OBSERVATIONS = 12;
 export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
+export const MAX_HYPHENATION_OBSERVATIONS = 8;
+export const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
+export const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
+export const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
+export const MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS = 4;
+export const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
+export const MAX_PUNCTUATION_OBSERVATIONS = 8;
+export const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
+export const MAX_SALIENT_ECHO_OBSERVATIONS = 4;
+export const MAX_LEGAL_STATUS_OBSERVATIONS = 4;
+export const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
+export const MAX_SENTENCE_WORDS = 40;
+// One off-posting tool name is a paragraph's single concrete anchor; a second
+// one is a stack list. Across the letter, three names is a stack tour even
+// when they are spread one per paragraph.
+export const MAX_PARAGRAPH_OFF_POSTING_TOOLS = 1;
+export const MAX_LETTER_OFF_POSTING_TOOLS = 2;
+// Absence of a tool name is evidence only when the corpus is an actual posting
+// description. The pipeline builds that corpus from title/company/location/
+// salary/description, and an unscraped description is a first-class supported
+// state, so a job with no description still supplies roughly ten to
+// twenty-five words of metadata: non-empty, but silent about the stack. Below
+// this floor the check skips rather than reading every name in the letter as
+// off-posting.
+export const MIN_ANCHOR_RELEVANCE_CORPUS_WORDS = 60;
+export const OBSERVATION_SNIPPET_WORDS = 8;
 
 export const BANNED_GENERIC_PHRASES = Object.freeze([
   'writing to express my interest',
@@ -35,6 +61,15 @@ export const BANNED_GENERIC_PATTERNS = Object.freeze([
   { phrase: 'more than basic presence', pattern: /\bmore than(?:\s+just)?\s+basic presence\b/u },
   { phrase: 'primary line of defense', pattern: /\b(?:the )?primary line of defense\b/u },
   { phrase: 'exact foundation', pattern: /\b(?:this|that|the) exact foundation\b/u },
+  // Hollow balance: “a clear view of its downsides and trade-offs as well as
+  // its upsides” asserts judgment without exercising any. Only the fixed
+  // doublet is listed, and deliberately so: a wider “<downside noun> … as well
+  // as <upside noun>” frame also fires on sentences that state a real judgment
+  // (“I documented the benefits of the migration as well as its limitations”),
+  // and this id is not a soft check everywhere. localAiApplication.js throws on
+  // it and rejects a completed Local AI run, so an entry here has to be as
+  // literal as “hit the ground running”.
+  { phrase: 'downsides and trade-offs', pattern: /\b(?:downsides?|drawbacks?) and trade offs?\b/u },
 ]);
 
 export const BANNED_OPENERS = Object.freeze([
@@ -188,14 +223,25 @@ const GENERIC_THESIS_PATTERNS = Object.freeze([
   { label: 'generic blend claim', pattern: /\b(?:unique|strong)\s+blend\s+of\b/iu },
 ]);
 
-function sentenceCount(value) {
+/**
+ * Shared segmentation for every sentence-level check. Intl.Segmenter knows
+ * that “Inc.” and “e.g.” are not sentence ends; the regex fallback keeps the
+ * checks working on a runtime without ICU sentence data rather than letting a
+ * missing segmenter silently disable them.
+ */
+export function sentences(value) {
   const source = text(value);
-  if (!source) return 0;
+  if (!source) return [];
   if (typeof Intl?.Segmenter === 'function') {
     return Array.from(new Intl.Segmenter('en', { granularity: 'sentence' }).segment(source))
-      .filter(segment => text(segment?.segment)).length;
+      .map(segment => text(segment?.segment))
+      .filter(Boolean);
   }
-  return source.split(/(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u).filter(Boolean).length;
+  return source.split(/(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u).map(text).filter(Boolean);
+}
+
+function sentenceCount(value) {
+  return sentences(value).length;
 }
 
 /**
@@ -430,6 +476,30 @@ export function checkRedundancy(paragraphs = [], evidence = {}) {
     }
   }
   return result('redundancy', true, `${list.length} paragraph(s) have no ${REDUNDANCY_SHINGLE_WORDS}-word résumé run`);
+}
+
+// Short, distinctive source constructions can feel repetitive across the
+// résumé and letter even though they are below the general eight-word copy
+// threshold. Keep this list narrow so ordinary technical overlap remains
+// available for accurate evidence.
+const SALIENT_ECHO_PHRASES = Object.freeze([
+  'built from scratch',
+]);
+
+export function checkSalientPhraseEcho(paragraphs = [], evidence = {}) {
+  const resumeWords = genericWords(bulletTexts(evidence).join(' '));
+  const observations = [];
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  for (const phrase of SALIENT_ECHO_PHRASES) {
+    const phraseWords = genericWords(phrase);
+    if (!containsWordSequence(resumeWords, phraseWords)) continue;
+    for (let index = 0; index < list.length; index++) {
+      if (!containsWordSequence(genericWords(list[index]), phraseWords)) continue;
+      observations.push(`paragraph ${index + 1} repeats the résumé phrase “${phrase}”; preserve the fact but use a natural supported alternative such as “designed and implemented,” “created,” “developed,” or “delivered”`);
+    }
+  }
+  return observationResult('salient-phrase-echo', observations, MAX_SALIENT_ECHO_OBSERVATIONS,
+    `${list.length} paragraph(s) avoid distinctive short phrase echoes from the résumé`);
 }
 
 export function checkGenericPhrases(paragraphs = []) {
@@ -681,6 +751,523 @@ export function checkLogisticsContainment(plan = {}, paragraphs = []) {
   return result('logistics-containment', true, 'prose logistics concepts are contained in plan logistics');
 }
 
+// ---------------------------------------------------------------------------
+// Letter register and style checks.
+//
+// The writer prompt already states these rules in prose, but a prompt-level
+// ban is instance-level: banning a colon used to unload tools taught the model
+// to unload after a semicolon instead. The rules below are therefore
+// deterministic and punctuation-agnostic where the defect is, and closed
+// lists where the defect is lexical. Every one of them is narrow by design —
+// when a construction is defensible in ordinary register the rule is dropped
+// rather than widened, because a false positive costs a real revision cycle.
+// All of them read body paragraphs only; the envelope (contact block, date,
+// salutation) is never prose and must not be scored as prose.
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared observation tail for the checks below: identical cap-and-join
+ * behaviour to checkGenericPhrases/checkLogisticsContainment so a defect list
+ * can never flood the revision prompt or the audit line.
+ */
+function observationResult(id, observations, cap, passedDetail) {
+  if (!observations.length) return result(id, true, passedDetail);
+  const visible = observations.slice(0, cap);
+  const omitted = observations.length - visible.length;
+  return result(id, false,
+    `${visible.join('; ')}${omitted ? `; ${omitted} additional observation(s) omitted` : ''}`);
+}
+
+/** Opening words of a sentence, bounded like every other quoted detail value. */
+function leadingWordsSnippet(value, limit = OBSERVATION_SNIPPET_WORDS) {
+  const parts = text(value).split(' ').filter(Boolean);
+  const visible = boundedDetailValue(parts.slice(0, limit).join(' '));
+  return `${visible}${parts.length > limit && !visible.endsWith(' …') ? ' …' : ''}`;
+}
+
+// Asymmetric on purpose: only a MISSING hyphen is flagged. Over-hyphenation
+// (“worked end-to-end with the team”) is defensible style, and an inverse rule
+// would need part-of-speech tagging to separate an attributive modifier from
+// an adverbial. Each pattern that is only wrong attributively carries its own
+// following-noun list so the bare adverbial/noun uses stay legal. `<noun>` and
+// `<prefix>` in a suggestion are filled from the match, so the revision prompt
+// receives the concrete corrected phrase rather than a template.
+export const COMPOUND_HYPHENATION_RULES = Object.freeze([
+  // Merriam-Webster hyphenates “in-house” in every position, so this rule
+  // needs no following-noun guard.
+  { label: 'in-house', pattern: /\bin house\b/iu, suggestion: 'in-house' },
+  // Attributive only: “laid the cards end to end” is an adverbial and legal.
+  { label: 'end-to-end <noun>', suggestion: 'end-to-end <noun>', pattern: /\bend to end\s+(?:ownership|delivery|development|design|testing|solutions?|systems?|processes?|process|responsibility|pipelines?|experience)\b/iu },
+  // The noun phrase “the full stack” stays legal; only the modifier is flagged.
+  { label: 'full-stack <noun>', suggestion: 'full-stack <noun>', pattern: /\bfull stack\s+(?:engineers?|engineering|developers?|development|applications?|web|work|experience|roles?|positions?|teams?)\b/iu },
+  // Conjugated verbs (“students checked in devices”, “checking out a laptop”)
+  // never produce the bare “check in”/“check out” form required here.
+  // The suggestion carries only the direction(s) the letter actually wrote:
+  // the revision prompt applies a hyphenation suggestion verbatim, so offering
+  // the paired form to a paragraph that named one direction would hand the
+  // reviser a responsibility the résumé never evidenced — which the grounding
+  // audit would then report as an unsupported claim on the next iteration.
+  {
+    label: 'check-in / check-out <noun>',
+    suggestion: '<compound> <noun>',
+    pattern: /\bcheck (?:in|out)(?:\s+and\s+check (?:in|out))?\s+(?:system|systems|process|processes|desk|station|kiosk|flow|workflow|tracking)\b/iu,
+    compound: value => value
+      .replace(/\b(check)\s+(in|out)\b/giu, (_, head, direction) => `${head}-${direction.toLowerCase()}`)
+      .replace(/\s+and\s+/giu, ' / '),
+  },
+  { label: '<prefix>-wide', suggestion: '<prefix>-wide', pattern: /\b(?:district|company|organization|organisation|enterprise) wide\b/iu },
+  { label: 'third-party <noun>', suggestion: 'third-party <noun>', pattern: /\bthird party\s+(?:integrations?|products?|solutions?|tools?|services?|APIs?|vendors?|systems?|software)\b/iu },
+  { label: 'real-time <noun>', suggestion: 'real-time <noun>', pattern: /\breal time\s+(?:streaming|data|updates?|aggregations?|systems?|monitoring|dashboards?)\b/iu },
+  { label: 'open-source <noun>', suggestion: 'open-source <noun>', pattern: /\bopen source\s+(?:projects?|software|tools?|libraries|library|contributions?)\b/iu },
+]);
+
+// Every covered pattern places the compound head first and, when it requires
+// one, the governed noun last, so most rules need no per-rule code at all. A
+// rule whose corrected form depends on the alternative that matched supplies
+// its own `compound` transform for the words between head and noun.
+function hyphenationSuggestion(rule, matched) {
+  const parts = text(matched).split(' ').filter(Boolean);
+  const modifier = parts.slice(0, -1).join(' ');
+  return rule.suggestion
+    .replace('<prefix>', parts[0] || '')
+    // A rule whose corrected form depends on which alternative matched fills
+    // <compound> from the words the letter actually wrote.
+    .replace('<compound>', rule.compound ? rule.compound(modifier) : modifier)
+    .replace('<noun>', parts[parts.length - 1] || '');
+}
+
+/**
+ * One spelling of a compound throughout: a letter that wrote both “kept in
+ * house” and “shared in-house core” reads as two authors. The rule list is
+ * closed on purpose — it names the compounds this pipeline actually produces
+ * instead of attempting general English orthography.
+ */
+export function checkCompoundHyphenation(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const paragraph = text(list[index]);
+    for (const rule of COMPOUND_HYPHENATION_RULES) {
+      // One report per paragraph and rule: the patterns are not global, so a
+      // repeated compound produces guidance once rather than per occurrence.
+      const match = rule.pattern.exec(paragraph);
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} writes “${boundedDetailValue(match[0])}”; write “${hyphenationSuggestion(rule, match[0])}” (hyphenate the compound modifier)`);
+    }
+  }
+  return observationResult('compound-hyphenation', observations, MAX_HYPHENATION_OBSERVATIONS,
+    `${list.length} paragraph(s) hyphenate the covered compound modifiers`);
+}
+
+// Widely recognized stack tokens only. Technologies whose names are ordinary
+// English words or common given names (Go, Swift, R, C, D) are deliberately
+// absent: matching is case-sensitive, and capitalization alone cannot tell
+// “Go” the language from “Go” at the start of a sentence. A missed tool name
+// costs nothing here; a false one costs a revision cycle.
+export const STACK_TOOL_LEXICON = Object.freeze([
+  'React', 'Redux', 'Angular', 'Vue', 'Svelte', 'Nuxt', 'Next.js', 'Node.js', 'Deno', 'Express',
+  'jQuery', 'Tailwind', 'Bootstrap', 'Sass', 'Webpack', 'Vite', 'Electron', 'TypeScript', 'JavaScript',
+  'Python', 'Django', 'Flask', 'FastAPI', 'Celery', 'SQLAlchemy', 'Pandas', 'NumPy', 'PyTorch', 'TensorFlow',
+  'Rails', 'Laravel', 'PHP', 'Java', 'Kotlin', 'Scala', 'Spring', 'Haskell', 'Elixir', 'Erlang', 'Clojure',
+  'Rust', 'C#', 'C++', 'Objective-C', '.NET', 'ASP.NET', 'PowerShell', 'Bash', 'Linux', 'Ubuntu',
+  'PostgreSQL', 'Postgres', 'MySQL', 'SQLite', 'MongoDB', 'Mongoose', 'Prisma', 'Sequelize', 'Redis',
+  'Elasticsearch', 'Kafka', 'RabbitMQ', 'GraphQL', 'Nginx', 'Gunicorn', 'uWSGI', 'Apache', 'Tomcat',
+  'Docker Compose', 'Docker', 'Kubernetes', 'Terraform', 'Ansible', 'Jenkins', 'GitHub Actions', 'GitLab',
+  'Bitbucket', 'Git', 'Jira', 'Airflow', 'Spark', 'Hadoop', 'AWS', 'Azure', 'GCP', 'Lambda', 'EC2', 'S3',
+  'Vercel', 'Netlify', 'Heroku', 'Cloudflare', 'Firebase', 'Supabase', 'Grafana', 'Prometheus', 'Sentry',
+  'Datadog', 'Stripe', 'Twilio', 'SharePoint', 'Salesforce', 'Jest', 'Cypress', 'Playwright', 'Puppeteer',
+  'Selenium',
+]);
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Longest-first alternation so “Docker Compose” consumes both of its words and
+// is not counted a second time as “Docker”. Letter/number lookarounds rather
+// than \b: the tokens end in punctuation (“C++”, “.NET”, “Node.js”) that \b
+// would anchor in the wrong place.
+const STACK_TOOL_PATTERN = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${[...STACK_TOOL_LEXICON].sort((left, right) => right.length - left.length).map(escapeRegExp).join('|')})(?![\\p{L}\\p{N}])`,
+  'gu');
+
+/**
+ * A tool, framework, or product name earns a place in the LETTER only when the
+ * posting or the research names it, or when it is that paragraph's single
+ * concrete anchor; otherwise the technology category carries the argument and
+ * the résumé carries the stack. This is also the punctuation-agnostic form of
+ * the anti-unloading rule: a stack dump is high anchor density whatever
+ * delimiter introduces it, so a semicolon or a dash is no longer an escape.
+ */
+export function checkAnchorRelevance(paragraphs = [], jobText = '', researchText = '') {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  // Normalize each source separately so a null/undefined corpus argument
+  // stringifies to nothing instead of to a literal "null" the lexicon would
+  // then be matched against.
+  const corpus = `${normalized(jobText)} ${normalized(researchText)}`.trim();
+  // Never punish a missing corpus: with no posting and no research text every
+  // name would read as unlicensed and the whole letter would be rewritten.
+  if (!corpus) return result('anchor-relevance', true, 'skipped: no posting or research text supplied');
+  // Same reasoning for a corpus that is present but is only posting metadata:
+  // a title, company, location, and salary can license a name they happen to
+  // contain, but they can never establish that the employer does not want one.
+  const corpusWordCount = wordCount(corpus);
+  if (corpusWordCount < MIN_ANCHOR_RELEVANCE_CORPUS_WORDS) {
+    return result('anchor-relevance', true,
+      `skipped: posting and research text supply only ${corpusWordCount} word(s), too few to treat an unmentioned tool name as off-posting`);
+  }
+  const licenses = new Map();
+  // A posting that says “Docker” licenses “Docker Compose”: the head token is
+  // the technology, and the suffix is the flavour of it the letter names.
+  const licensed = entry => {
+    if (!licenses.has(entry)) {
+      licenses.set(entry, corpus.includes(normalized(entry)) || corpus.includes(normalized(entry.split(' ')[0])));
+    }
+    return licenses.get(entry);
+  };
+  const observations = [];
+  const letterWide = [];
+  for (let index = 0; index < list.length; index++) {
+    const unlicensed = [];
+    for (const match of text(list[index]).matchAll(STACK_TOOL_PATTERN)) {
+      const entry = match[0];
+      if (licensed(entry) || unlicensed.includes(entry)) continue;
+      unlicensed.push(entry);
+      if (!letterWide.includes(entry)) letterWide.push(entry);
+    }
+    if (unlicensed.length > MAX_PARAGRAPH_OFF_POSTING_TOOLS) {
+      observations.push(`paragraph ${index + 1} names ${unlicensed.length} stack tools the posting and research never mention (${boundedQuotedList(unlicensed)}); keep at most one as that paragraph's single concrete anchor and describe the rest by technology category (for example “a component-based front end”, “containerized deployment”)`);
+    }
+  }
+  // A tour spread one name per paragraph is still a tour, so the letter-wide
+  // total is checked even when no single paragraph exceeded its anchor.
+  if (letterWide.length > MAX_LETTER_OFF_POSTING_TOOLS) {
+    observations.push(`letter names ${letterWide.length} stack tools the posting and research never mention (${boundedQuotedList(letterWide)}); the resume carries the stack — keep at most one off-posting tool name in the whole letter`);
+  }
+  return observationResult('anchor-relevance', observations, MAX_ANCHOR_RELEVANCE_OBSERVATIONS,
+    `${letterWide.length} off-posting stack tool name(s) across ${list.length} paragraph(s)`);
+}
+
+// “I built X. I built Y too.” appends a second proof without saying why it
+// follows. Both halves are required before a sentence is flagged: an additive
+// opener in front of a non-evidence sentence is ordinary connective prose.
+// The build verb must also follow the connective subject immediately, with at
+// most one -ly adverb between them. Accepting a build verb anywhere in the
+// sentence swept in subordinate clauses — “In addition, I supported the staff
+// who wrote the policy.”, “I also saw how a poorly designed intake process
+// created rework for the front office.” — where the connective joins prose,
+// not a second artifact.
+const ADDITIVE_SEAM_CONNECTIVE_BUILD = /^(?:i\s+(?:also|additionally)\s+|additionally,?\s+i\s+|in\s+addition,?\s+i\s+|on\s+top\s+of\s+that,?\s+i\s+)(?:\p{L}+ly\s+)?(?:built|wrote|created|developed|designed|shipped|launched|made|delivered|maintained|architected|implemented)\b/u;
+const ADDITIVE_SEAM_EVIDENCE_OPENERS = /^i\s+(?:built|wrote|created|developed|designed|shipped|launched|made|delivered)\b/u;
+// Additive “too” need not end the sentence: a real letter escaped the trailer
+// branch with “I built the device check-in system from scratch too, in React
+// and TypeScript, covering …”, where the seam sits mid-sentence in front of a
+// trailing clause. Punctuation is the deterministic separator — additive “too”
+// is always followed by a mark or the sentence end (“too,” “too.”), while
+// degree “too” is always followed by the word it modifies (“too slow”, “too
+// many”), so the lookahead admits the first and never the second. “As well”
+// stays end-anchored on purpose: mid-sentence “as well as the reporting layer”
+// is a comparative, not an appended proof.
+const ADDITIVE_SEAM_TRAILERS = /\btoo(?=\s*[,.!?;:]|\s*$)|\bas\s+well[.!?]?$/u;
+
+/**
+ * Catch the additive seam, not the words “also” or “too”: the sentence must
+ * both wear the connective and be a piece of build evidence. The repair is
+ * argumentative rather than lexical, which is why the detail asks for the gap
+ * the artifact answers instead of a synonym for the connective.
+ */
+export function checkAdditiveSeam(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const candidate = normalized(sentence);
+      const seam = ADDITIVE_SEAM_CONNECTIVE_BUILD.test(candidate)
+        || (ADDITIVE_SEAM_EVIDENCE_OPENERS.test(candidate) && ADDITIVE_SEAM_TRAILERS.test(candidate));
+      if (!seam) continue;
+      observations.push(`paragraph ${index + 1} appends evidence with a bare additive connective (“${leadingWordsSnippet(sentence)}”); state the gap or need this evidence answers before naming the artifact, or state its relation to the previous proof`);
+    }
+  }
+  return observationResult('additive-seam', observations, MAX_ADDITIVE_SEAM_OBSERVATIONS,
+    `${list.length} paragraph(s) join their evidence without a bare additive connective`);
+}
+
+// Only advertisement-object nouns. “The role”, “this position”, and “the team”
+// name the work itself and stay legal; the defect is addressing the posting as
+// a thing the employer wrote rather than the need the employer has. Bare
+// “listing” and “job description” were dropped: they are marketplace and
+// job-board product vocabulary, so “your listing quality team”, “the listing
+// page I rebuilt”, and “the job description parser your team maintains” name
+// a product surface the candidate worked on, not this advertisement.
+const POSTING_REFERENCE_PATTERN = /\b(?:your|the|this)\s+(?:job\s+)?(?:posting|advert(?:isement)?)\b|\bjob\s+ad\b|\bas\s+advertised\b/giu;
+
+/** Keeps the letter addressed to the employer, not to the advertisement. */
+export function checkPostingReference(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const seen = new Set();
+    for (const match of text(list[index]).matchAll(POSTING_REFERENCE_PATTERN)) {
+      const phrase = normalized(match[0]);
+      if (seen.has(phrase)) continue;
+      seen.add(phrase);
+      observations.push(`paragraph ${index + 1} addresses the advertisement itself (“${boundedDetailValue(match[0])}”); name the employer's need directly instead of citing where it was written`);
+    }
+  }
+  return observationResult('posting-reference', observations, MAX_POSTING_REFERENCE_OBSERVATIONS,
+    `${list.length} paragraph(s) name the employer's need without citing the advertisement`);
+}
+
+// An asserted analogy is a claim the reader is invited to test, and the test
+// usually fails: the two domains are never identical. The shared mechanism is
+// arguable; the equivalence is not. This family stays small and literal so
+// ordinary uses (“translated the requirements”, a mirror in a data pipeline)
+// are not swept in. Only the reliable carriers stay. Literal replication
+// (“our dashboard mirrors production latency within a second”) and unit
+// restatement (“that volume translates to about two hundred tickets a week”)
+// state a fact rather than assert an analogy, so “mirrors” is gone entirely
+// and “translates to/into” fires only when “directly” makes the claim a
+// cross-domain equivalence rather than a conversion.
+const CLAIMED_EQUIVALENCE_PATTERN = /\bmaps?\s+(?:directly\s+)?onto\b|\btranslates?\s+directly\s+(?:to|into)\b|\bis\s+(?:exactly|precisely)\s+what\b/giu;
+
+/** Flags asserted cross-domain equivalence, not the transfer argument itself. */
+export function checkClaimedEquivalence(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const seen = new Set();
+    for (const match of text(list[index]).matchAll(CLAIMED_EQUIVALENCE_PATTERN)) {
+      const phrase = normalized(match[0]);
+      if (seen.has(phrase)) continue;
+      seen.add(phrase);
+      observations.push(`paragraph ${index + 1} asserts a cross-domain equivalence (“${boundedDetailValue(match[0])}”); an asserted analogy invites the reader to test the gap — explain the shared mechanism (constraints, data flow, failure modes) and let the transfer stay implicit`);
+    }
+  }
+  return observationResult('claimed-equivalence', observations, MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS,
+    `${list.length} paragraph(s) argue transfer without asserting an equivalence`);
+}
+
+/**
+ * The prompt asks for short causal sentences and the model still produced a
+ * 62-word sentence with nested purpose clauses. The threshold is deliberately
+ * far above ordinary long-sentence advice: this is a runaway-clause detector,
+ * not a readability score, so a well-built 30-word sentence is never revision
+ * work.
+ */
+export function checkSentenceLength(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const count = wordCount(sentence);
+      if (count <= MAX_SENTENCE_WORDS) continue;
+      observations.push(`paragraph ${index + 1} contains a ${count}-word sentence beginning “${leadingWordsSnippet(sentence)}”; split it into short causal sentences`);
+    }
+  }
+  return observationResult('sentence-length', observations, MAX_SENTENCE_LENGTH_OBSERVATIONS,
+    `${list.length} paragraph(s) keep every sentence under ${MAX_SENTENCE_WORDS + 1} words`);
+}
+
+// Range semantics copied from the design-system hard gate (enDashIsRange in
+// electron/ipc/resumeHtml.js, which throws during document build). A range may
+// be spaced and may name the month on both sides (“May 2023 – June 2026”), and
+// the gate blesses every such form, so a stricter soft rule here would send
+// shipping-safe copy back for a revision round that could only damage it. The
+// predicate is duplicated rather than imported because this module must stay
+// free of the document builder's Electron/fs/jsdom imports; the harness asserts
+// the two agree on a shared corpus.
+const RANGE_MONTH = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+const RANGE_RIGHT_ENDPOINT = new RegExp(`^\\s*(?:\\d|present\\b|${RANGE_MONTH}\\.?\\s+\\d{4}\\b)`, 'i');
+
+function enDashIsRange(raw, index) {
+  return /\d\s*$/.test(raw.slice(Math.max(0, index - 32), index))
+    && RANGE_RIGHT_ENDPOINT.test(raw.slice(index + 1, index + 34));
+}
+
+/**
+ * Every dash form the document gate rejects, so each one becomes a revisable
+ * observation instead of a thrown build. The spaced hyphen matters most: the
+ * gate's own test is exactly /\s-\s/, and a letter carrying one used to reach
+ * buildApplicationDocument() with no observation to repair it, failing the
+ * whole application over a punctuation defect one revision would have fixed.
+ */
+function hasDashSplice(raw) {
+  if (raw.includes('—') || /\s-\s/u.test(raw)) return true;
+  if (/(?:[\p{L}\p{N}]|\s)--(?:[\p{L}\p{N}]|\s)/u.test(raw)) return true;
+  for (let index = raw.indexOf('–'); index !== -1; index = raw.indexOf('–', index + 1)) {
+    if (!enDashIsRange(raw, index)) return true;
+  }
+  return false;
+}
+
+/**
+ * House register: short declarative sentences, no semicolons, no dashes as
+ * clause splices. Both marks read as generated prose to this user, and the
+ * semicolon in particular became the model's escape hatch once the colon
+ * unload was banned by name.
+ *
+ * This is the one check that must read the RAW paragraph string: text()
+ * normalizes every dash glyph to '-', which would erase exactly the
+ * distinction being made here.
+ */
+export function checkPunctuationStyle(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const raw = String(list[index] ?? '');
+    // One observation per paragraph and kind: the repair is the same for the
+    // whole paragraph, so repeating it per mark would only crowd the prompt.
+    if (raw.includes(';')) {
+      observations.push(`paragraph ${index + 1} uses a semicolon; split the clause into two short sentences`);
+    }
+    if (hasDashSplice(raw)) {
+      observations.push(`paragraph ${index + 1} uses a dash as a clause splice; restructure into separate sentences or a comma`);
+    }
+  }
+  return observationResult('punctuation-style', observations, MAX_PUNCTUATION_OBSERVATIONS,
+    `${list.length} paragraph(s) avoid semicolons and dash splices`);
+}
+
+// Passport-desk register in a letter that is otherwise first-person prose.
+// Two fixed formulas rather than an attempt to score formality. Citizenship
+// and “legally entitled to” phrasing used to live here as register repairs;
+// they moved to checkLegalStatus because their correct repair is removal, and
+// a register suggestion (“write it plainly: I am a Canadian citizen”) was
+// canonicalizing the exact sentence the letter must not contain.
+const PLAIN_REGISTER_PATTERNS = Object.freeze([
+  /\bin\s+possession\s+of\b/iu,
+  /\bpossess(?:es)?\s+a\s+valid\b/iu,
+]);
+
+/** Keeps logistics facts in plain first person rather than officialese. */
+export function checkPlainRegister(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const paragraph = text(list[index]);
+    const answeredGap = /\banswer(?:ed|ing|s)?\s+(?:that|this|the|a)\s+gap\b/iu.exec(paragraph);
+    if (answeredGap) {
+      observations.push(`paragraph ${index + 1} uses unnatural wording (“${boundedDetailValue(answeredGap[0])}”); use “closed the gap” or “addressed the gap”`);
+    }
+    for (const pattern of PLAIN_REGISTER_PATTERNS) {
+      const match = pattern.exec(paragraph);
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} uses bureaucratic register (“${boundedDetailValue(match[0])}”); state the fact in plain first-person English`);
+    }
+  }
+  return observationResult('plain-register', observations, MAX_PLAIN_REGISTER_OBSERVATIONS,
+    `${list.length} paragraph(s) state logistics facts in plain first person`);
+}
+
+// Legal work status is application-form data, never letter prose: the form
+// asks the question, and a letter that answers it unasked spends argument
+// space on an eligibility screen. Unlike the register family this is a
+// removal rule, not a rephrasing rule, so no observation suggests a plain
+// wording. Closed list; the capitalized-nationality guard keeps common-noun
+// uses such as “citizen developers” out of scope.
+const LEGAL_STATUS_CONCEPTS = Object.freeze([
+  { label: 'citizenship', pattern: /\b\p{Lu}(?:\p{L}|\.)*\s+citizen(?:ship)?\b/u },
+  { label: 'citizenship', pattern: /\b(?:my|dual)\s+citizenship\b/iu },
+  { label: 'citizenship', pattern: /\bcitizen\s+of\s+\p{Lu}\p{L}+\b/u },
+  { label: 'work authorization', pattern: /\bwork\s+(?:authoriza|authorisa)tion\b/iu },
+  { label: 'work authorization', pattern: /\bwork\s+(?:permit|eligibility)\b/iu },
+  { label: 'work authorization', pattern: /\b(?:authorized|authorised|eligible|entitled|cleared)\s+to\s+work\b/iu },
+  { label: 'work authorization', pattern: /\bright\s+to\s+work\b/iu },
+  { label: 'work authorization', pattern: /\blegally\s+entitled\s+to\b/iu },
+  { label: 'residency status', pattern: /\bpermanent\s+residen(?:t|ts|cy)\b/iu },
+  { label: 'residency status', pattern: /\bgreen\s+card\b/iu },
+  { label: 'visa status', pattern: /\bvisa\s+(?:status|sponsorship|holder|requirements?)\b/iu },
+  { label: 'visa status', pattern: /\b(?:require|need|needs|without|no)\s+(?:a\s+)?(?:visa|sponsorship)\b/iu },
+  { label: 'visa status', pattern: /\b(?:work|student|immigration)\s+visa\b/iu },
+]);
+
+function legalStatusMatch(value) {
+  for (const concept of LEGAL_STATUS_CONCEPTS) {
+    const match = concept.pattern.exec(value);
+    if (match) return { label: concept.label, phrase: match[0] };
+  }
+  return null;
+}
+
+/**
+ * Legal work status never belongs in letter prose; the repair is deletion.
+ * There is no compliant rewording, which is why the old plain-register
+ * citizenship arm (which suggested one) was retired rather than kept beside
+ * this check with contradictory advice.
+ */
+export function checkLegalStatus(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const found = legalStatusMatch(text(list[index]));
+    if (!found) continue;
+    observations.push(`paragraph ${index + 1} states ${found.label} (“${boundedDetailValue(found.phrase)}”); delete the statement — legal work status belongs on the application form, never in the letter`);
+  }
+  return observationResult('legal-status', observations, MAX_LEGAL_STATUS_OBSERVATIONS,
+    `${list.length} paragraph(s) leave legal work status to the application form`);
+}
+
+/** Plan-side twin of checkLegalStatus, so the fact is retried out of the plan before prose exists. */
+export function checkLogisticsLegalStatus(plan = {}) {
+  const found = legalStatusMatch(text(plan?.logistics));
+  if (found) {
+    return result('logistics-legal-status', false,
+      `plan logistics states ${found.label} (“${boundedDetailValue(found.phrase)}”); logistics carries availability, location intent, or stated motivation — legal work status belongs on the application form, so remove it from the plan entirely`);
+  }
+  return result('logistics-legal-status', true, 'plan logistics carries no legal work status');
+}
+
+// A paragraph-opening demonstrative noun phrase promises that its referent
+// sits in the paragraph the reader just finished. A shipped letter opened a
+// paragraph “That evaluation practice …” two paragraphs after the evaluation
+// material, forcing the reader to hunt backward. Deliberately narrow: only
+// the opening words of paragraphs after the first are read, only when the
+// demonstrative heads a noun phrase (pronoun and fixed-phrase heads are
+// skipped via the stopword set), and the referent search stems both sides so
+// “evaluated” anchors “evaluation”. Mid-paragraph demonstratives have local
+// context and stay out of scope.
+const OPENING_DEMONSTRATIVE_RE = /^(?:that|this|these|those)\s+([\p{L}’'-]+)(?:\s+([\p{L}’'-]+))?/iu;
+const DEMONSTRATIVE_HEAD_STOPWORDS = new Set([
+  'is', 'was', 'are', 'were', 'be', 'being', 'been', 'has', 'had', 'have',
+  'said', 'same', 'one', 'way', 'why', 'how', 'what', 'kind', 'sort', 'much',
+  'many', 'last', 'first', 'second', 'time', 'point', 'and', 'or', 'of', 'in',
+  'to', 'a', 'an', 'the', 'my', 'own', 'very',
+]);
+
+function referentStem(word) {
+  const lower = String(word || '').toLowerCase();
+  const stripped = lower.replace(/(?:ation|ing|ed|es|s)$/u, '');
+  return stripped.length >= 4 ? stripped : lower;
+}
+
+function referentStemsMatch(left, right) {
+  const a = referentStem(left);
+  const b = referentStem(right);
+  if (Math.min(a.length, b.length) < 4) return a === b;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/** Keeps a paragraph-opening “That/This <noun>” anchored to the previous paragraph. */
+export function checkOpeningDemonstrative(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 1; index < list.length; index++) {
+    const paragraph = text(list[index]);
+    const match = OPENING_DEMONSTRATIVE_RE.exec(paragraph);
+    if (!match) continue;
+    const heads = [match[1], match[2]]
+      .filter(Boolean)
+      .map(word => word.toLowerCase())
+      .filter(word => !DEMONSTRATIVE_HEAD_STOPWORDS.has(word));
+    if (!heads.length) continue;
+    const previousWords = words(list[index - 1]);
+    if (heads.some(head => previousWords.some(word => referentStemsMatch(head, word)))) continue;
+    observations.push(`paragraph ${index + 1} opens with “${leadingWordsSnippet(paragraph, 4)}”, but the previous paragraph never mentions ${heads.map(head => `“${head}”`).join(' or ')}; name the referent explicitly or open with this paragraph's own subject`);
+  }
+  return observationResult('opening-demonstrative', observations, MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS,
+    `${list.length} paragraph(s) anchor their opening references in the preceding paragraph`);
+}
+
 /** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
 export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '', careerData = '') {
   const checks = [
@@ -688,6 +1275,7 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
     checkEvidenceGrounding(plan, evidence),
     checkNeedGrounding(needs, jobText, researchText),
     checkLogisticsGrounding(plan, careerData),
+    checkLogisticsLegalStatus(plan),
     checkMappingNarrativeStructure(plan),
   ];
   const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
@@ -724,19 +1312,34 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
 }
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
-export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, researchText = '', companyName = '' } = {}) {
+export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '' } = {}) {
   const plannedCompanyDetail = text(plan?.companyHook?.detail);
   const companySpecificity = researchText && !plannedCompanyDetail
     ? result('company-specificity', true, 'skipped: argument plan intentionally omitted a company-specific hook')
     : checkCompanySpecificity(paragraphs, researchText, companyName, plannedCompanyDetail);
   return [
     checkRedundancy(paragraphs, evidence),
+    checkSalientPhraseEcho(paragraphs, evidence),
     checkGenericPhrases(paragraphs),
     checkExperienceInfinitiveGrammar(paragraphs),
     companySpecificity,
     checkShape(plan, paragraphs),
     checkFigureDiscipline(paragraphs, evidence, plan),
     checkLogisticsContainment(plan, paragraphs),
+    // Register and style checks. They are appended rather than interleaved so
+    // the established check order stays stable, and every one of them reads
+    // paragraphs only, so they still run in the plan-degraded path where the
+    // call site filters out the plan-dependent 'shape' result.
+    checkCompoundHyphenation(paragraphs),
+    checkAnchorRelevance(paragraphs, jobText, researchText),
+    checkAdditiveSeam(paragraphs),
+    checkPostingReference(paragraphs),
+    checkClaimedEquivalence(paragraphs),
+    checkSentenceLength(paragraphs),
+    checkPunctuationStyle(paragraphs),
+    checkPlainRegister(paragraphs),
+    checkLegalStatus(paragraphs),
+    checkOpeningDemonstrative(paragraphs),
   ];
 }
 

@@ -61,7 +61,7 @@ import {
   LETTER_PLAN_SCHEMA,
   LETTER_GROUNDING_AUDIT_SCHEMA,
 } from './aiSchemas.js';
-import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, isDualMode, isShortCoverLetterLayout, withCenteredLetterVariant, getDesignSystemDir, neutralizeHighlightTextEmphasis } from './resumeHtml.js';
+import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, isDualMode, getDesignSystemDir, neutralizeHighlightTextEmphasis } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { primeClaudeModels } from './modelResolver.js';
 import {
@@ -109,6 +109,29 @@ const COVER_LETTER_OPENING_RULE = `The first sentence must immediately advance t
 // initial writer and every revision receive the same copy-editing contract.
 const PARALLEL_STRUCTURE_RULE = `PARALLEL STRUCTURE: Keep coordinated elements in the same grammatical form, especially in “from X to/through Y,” “both X and Y,” “either X or Y,” and list constructions. Pair noun phrases with noun phrases or actions with actions. Reject a span shaped like “from [noun phrase] through [verb-ing phrase]”; rewrite it with parallel nouns or parallel actions. Prefer the simplest parallel wording and do not repair the mismatch with bureaucratic padding such as “from the time of.”`;
 
+// Letter register. Every clause here has a deterministic counterpart in
+// coverLetterChecks.js (punctuation-style, posting-reference, additive-seam,
+// anchor-relevance, plain-register, compound-hyphenation), so the prompt states
+// the principle only and the checks carry enforcement. Instance-level bans teach
+// evasion — the model routed a banned colon-unload through a semicolon — so each
+// clause names the register target rather than one forbidden glyph or phrase.
+const LETTER_REGISTER_RULE = `LETTER REGISTER: Write short declarative sentences, and avoid semicolons and dashes as clause splices. Never reference the posting, listing, or advertisement as an object (“what your posting wants”). Name the employer’s need directly. Never join two pieces of evidence with a bare additive connective (“I also built,” “… too”). State the relation that makes the second piece advance the argument. Introduce a personal project by first stating the concrete gap or problem it answers, then the artifact. Name a specific tool or product only when the posting or research names it, or as a paragraph’s single concrete anchor. Otherwise describe it by category (“a component-based front end,” “containerized deployment”). A category description must never name a different tool. State logistics facts in plain first person (“I can start in June”), never in bureaucratic register (“in possession of,” “legally entitled to”). Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter: the application form asks that question, and the letter must spend its space on the argument. Hyphenate compound modifiers (“in-house,” “end-to-end ownership,” “third-party integrations”) and keep one spelling of a compound throughout.`;
+
+// Paragraph-to-paragraph cohesion. Each clause answers a shipped letter
+// defect: a “migration off” our systems that never named a destination, a
+// paragraph opening “That evaluation practice” two paragraphs after the
+// evaluation material, a “That is why” whose premise was never on the page, a
+// comparison nested inside a condition, and a coined “two jobs” frame applied
+// to the target role so the close read as a request for two positions. The
+// opening-demonstrative and legal-status clauses have deterministic
+// counterparts in coverLetterChecks.js; the rest are prompt-plus-audit only,
+// because they require reading the argument rather than matching a pattern.
+const LETTER_COHESION_RULE = `LETTER COHESION: A sentence that announces a change, movement, or migration must land it in the same sentence: name both what was left and what replaced it (“moved ticketing off the in-house tracker onto the vendor platform”), never the origin alone. A paragraph may open with a demonstrative phrase (“That evaluation practice”) only when the immediately preceding paragraph is about that thing; a demonstrative never reaches past the previous paragraph, so either restate the referent in full or open with the new paragraph’s own subject. Use a causal connective (“that is why,” “which is why,” “so”) only when the premise already stated on the page makes the conclusion follow; if the reader must supply a missing link, write the link as its own sentence or drop the connective and let the sentences stand in sequence. Make one comparison per sentence with both terms named; never nest a comparison inside a condition (“is only worth more than X when Y”). A coined frame (“two jobs,” “both halves of the work”) may organize the evidence, but it must never be applied to the position itself: the closing names the posted role literally and in the singular, because “I want the same two jobs here” reads as a request for two positions.`;
+
+// Natural prose still has to remain strictly grounded. These rules authorize
+// connective paraphrase and narrow entailment, not new candidate facts.
+const LETTER_FLOW_AND_DICTION_RULE = `NATURAL FLOW AND DICTION: Use the résumé and career notes as evidence, not as wording to echo. Preserve every fact and its scope while varying repeated source constructions across the résumé and letter; avoid “built from scratch” when “designed and implemented,” “created,” “developed,” or “delivered” states the supported fact more naturally. Before entering a new employer, project, or time period, state the argumentative connection first. Never follow a thesis with a standalone background fact whose relevance is explained only later. A transition must name the shared responsibility or mechanism and explain why the next proof deepens it. Use “now,” “still,” “again,” “no longer,” “before,” or “after” only when the contrasted state or dated sequence has already been stated clearly. Prefer common contemporary wording: close or address a gap, solve a problem, and remove a limitation; never “answer a gap.” Name an ordinary prior employer once to locate the evidence, then refer to the role, system, project, organization, or “there” when the reference is unambiguous. Repeat the employer name only to distinguish another role or prevent ambiguity. You may add factual connective and causal language narrowly entailed by the supplied evidence to improve cohesion, but never invent a candidate fact, outcome, scope, tool, sequence, or motivation.`;
+
 // Per-card notes are user-authored context for ONE application, not a second
 // résumé source or a prompt-control channel. Keep the same cap as the renderer
 // at the IPC boundary: a renderer can be stale, modified, or invoked directly.
@@ -149,7 +172,7 @@ export function registerPendingApplicationWorkspace({
   workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
-  artifactData = {},
+  artifactData = {}, cleanupOnSaveFailure = true, onSuccessfulSave = null,
 } = {}) {
   if (typeof workDir !== 'string' || !workDir.trim()
     || typeof resumeHtmlPath !== 'string' || !resumeHtmlPath.trim()
@@ -193,6 +216,8 @@ export function registerPendingApplicationWorkspace({
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
     jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
+    cleanupOnSaveFailure: cleanupOnSaveFailure !== false,
+    onSuccessfulSave: typeof onSuccessfulSave === 'function' ? onSuccessfulSave : null,
     workspaceIdentity,
     artifactSha256,
     // Only trusted main-process generation/import code can register this
@@ -826,6 +851,7 @@ TRUTHFULNESS & FRAMING (read carefully — this is the core constraint):
 - You MAY state a capability that is directly entailed by concrete demonstrated work (shipped production REST APIs → HTTP/JSON and API design; led a 5-person team → team leadership; substantial PostgreSQL work → SQL). Do NOT turn mere technical proximity into experience or proficiency. A named framework alone does not prove use of every subsystem inside it. Any plausible-but-unverified adjacent skill is handled by a separate private review workflow and is expressly excluded from this draft until the candidate verifies it.
 - COMPRESSED-EVIDENCE SYNTHESIS: the CAREER DATA is shorthand evidence, not finished résumé copy. Combine compatible facts when the data clearly places them in the same role, project, or professional practice, and make the narrow inferences needed to express that work coherently. Turn supported tools, activities, constraints, and stated trade-offs into the strongest concrete action-and-judgment statement they entail: say what the candidate applied, evaluated, designed, decided, or balanced only when the evidence supports that verb. Do not merely dress up familiarity or self-assessed knowledge (for example, “understood,” “formed a view,” or “familiar with”) as an achievement. Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result, and never move a fact between employers or projects. If the data supports only familiarity and no applied action can be derived, keep it in Skills or omit it from the highlights.
 - ${PARALLEL_STRUCTURE_RULE}
+- Hyphenate compound modifiers (in-house, end-to-end, check-in/check-out, district-wide, third-party, real-time) and keep one spelling per compound throughout the document.
 - The ACHIEVEMENT LEDGER, when present, is a FLOOR, not a ceiling. Draw on its strongest items where they fit this job, but you still have the full CAREER DATA above — dig into it yourself for anything the target job emphasizes that the ledger didn't surface.
 - ATTRIBUTION: a ledger item with \`attribution=context\` means the change happened during the candidate's tenure but their personal causal role is uncertain — phrase it AS CONTEXT ("during a period when revenue grew 40%...", "amid a company-wide replatforming that cut latency 60%..."), never as a personal win ("I grew revenue 40%"). \`sole\`/\`led\`/\`contributed\` items may be phrased as a personal accomplishment, scaled to that word.
 - CAVEATS OVERRIDE CLAIMS: if a ledger caveat narrows or contradicts its claim, the caveat is authoritative. Do not repeat language the caveat disavows, and omit the item entirely when its figure cannot be stated truthfully without the contradictory framing. Never convert a sequence or count of jobs, employers, clients, sectors, or role changes into percentage growth, "scope expansion", or managed scale.
@@ -946,10 +972,6 @@ export function summarizeResumeMarkup(mainHtml) {
     skillRows: countMatches(skillsBlock, /<dt\b/gi),
   };
 }
-
-const ROLE_META_ROW = /<div\b[^>]*class=(?:"[^"]*\brole-meta\b[^"]*"|'[^']*\brole-meta\b[^']*')[^>]*>([\s\S]*?)<\/div>/i;
-const ROLE_LOCATION = /<p\b[^>]*class=(?:"[^"]*\brole-location\b[^"]*"|'[^']*\brole-location\b[^']*')[^>]*>([\s\S]*?)<\/p>/i;
-const ROLE_DATES = /(<p\b[^>]*class=(?:"[^"]*\brole-dates\b[^"]*"|'[^']*\brole-dates\b[^']*')[^>]*>)([\s\S]*?)(<\/p>)/i;
 
 // The generator returns a raw design-system <main>, not a built document.
 // Keep parsing deliberately regex-based: packaged Electron has no DOM parser,
@@ -1180,50 +1202,6 @@ export function renderResumeEvidenceForPrompt(evidence = {}) {
   lines.push('', 'EDUCATION:');
   (Array.isArray(evidence?.education) ? evidence.education : []).forEach(item => lines.push(item));
   return lines.join('\n').trim();
-}
-
-/**
- * The design system's role block is a two-line header: title/company + dates,
- * then scope summary + location (resume.css "Role" section). Cutting the scope
- * summary leaves that second row holding nothing, or a lone city — a full line
- * plus its margin spent on one right-aligned string. Fold the location up into
- * the dates cell and drop the row so the reclaimed height goes back to bullets
- * instead of whitespace.
- */
-function collapseOrphanedRoleMetaRow(roleHtml) {
-  const row = ROLE_META_ROW.exec(roleHtml);
-  if (!row) return roleHtml;
-  if (!row[1].trim()) return roleHtml.replace(row[0], '');
-
-  const location = ROLE_LOCATION.exec(row[1]);
-  // Anything else still sharing the row (a summary the cut missed, a second
-  // cell) means the grid is doing its job — leave the markup alone.
-  if (!location || row[1].replace(location[0], '').trim()) return roleHtml;
-  const text = location[1].trim();
-  if (!text || !ROLE_DATES.test(roleHtml)) return roleHtml;
-
-  return roleHtml.replace(row[0], '').replace(ROLE_DATES,
-    (_whole, open, cell, close) => `${open}${cell.trim()}<span class="sep" aria-hidden="true">·</span>${text}${close}`);
-}
-
-/**
- * The LLM is an editor, not a structural validator. Enforce the one-page
- * revision contract after its pass so an ignored bullet-floor instruction
- * cannot ship another 3-bullets-per-role, summary-heavy two-page document.
- */
-export function enforceOnePageRevisionStructure(mainHtml, targetPageCount) {
-  let html = String(mainHtml || '');
-  if (targetPageCount !== 1) return html;
-
-  html = html.replace(/\s*<p\b[^>]*class=(?:"[^"]*\brole-summary\b[^"]*"|'[^']*\brole-summary\b[^']*')[^>]*>[\s\S]*?<\/p>/gi, '');
-  html = html.replace(/(<article\b[^>]*class=(?:"[^"]*\brole\b[^"]*"|'[^']*\brole\b[^']*')[^>]*>)([\s\S]*?)(<\/article>)/gi,
-    (_whole, open, body, close) => `${open}${collapseOrphanedRoleMetaRow(body)}${close}`);
-  html = html.replace(/(<ul\b[^>]*class=(?:"[^"]*\bhighlights\b[^"]*"|'[^']*\bhighlights\b[^']*')[^>]*>)([\s\S]*?)(<\/ul>)/gi,
-    (_whole, open, body, close) => {
-      const items = body.match(/<li\b[^>]*>[\s\S]*?<\/li>/gi) || [];
-      return items.length > 2 ? `${open}\n${items.slice(0, 2).join('\n')}\n${close}` : `${open}${body}${close}`;
-    });
-  return html;
 }
 
 /**
@@ -1558,7 +1536,7 @@ function buildLetterPlanCachedPrefix() {
 
 AXIOM: the résumé is true. Do not re-derive, re-verify, or hedge it. The letter may explain what a résumé fact means, but may not claim more than the résumé says. An inference must name the mechanism connecting the concrete evidence to the employer need; "translates well" is not a mechanism.
 
-The résumé is the only source of evidence and accomplishments. Every mappings[].evidence must be a near-quote of one specific résumé bullet. Career data is supplied separately only for explicitly stated logistics, availability, geography/relocation intent, work authorization, or motivation; it may appear ONLY in logistics, never in mappings, thesis, hook, or inferred capability. If logistics is nonempty, make it a near-quote of the stated career-data fact; do not turn shift availability into a coverage promise.
+The résumé is the only source of evidence and accomplishments. Every mappings[].evidence must be a near-quote of one specific résumé bullet. Career data is supplied separately only for explicitly stated logistics, availability, geography/relocation intent, or motivation; it may appear ONLY in logistics, never in mappings, thesis, hook, or inferred capability. Citizenship, work authorization, residency, and visa status are application-form facts, never letter material: leave them out of logistics and every other plan field even when the career data states them, and when a ranked need is a work-authorization or similar eligibility screen, record it in droppedNeeds instead of arguing it. If logistics is nonempty, make it a near-quote of the stated career-data fact; do not turn shift availability into a coverage promise.
 
 Keep the target-side boundary: examples of clients, industries, sites, or duties in a posting remain examples, never facts about this specific role. Never name or imply an excluded skill. An attribution value of "context" means an outcome happened during the candidate's tenure, not necessarily because of them; do not frame it as a personal win.
 
@@ -1619,17 +1597,23 @@ ${wrapUntrustedText('plan-gate-observations', retryViolations.map(item => `- ${i
 function buildLetterProseCachedPrefix({ revision = false } = {}) {
   const rubricText = getEditorialRubric();
   const revisionRule = revision
-    ? 'Revise only the supplied paragraphs. Resolve every listed draft-audit observation while retaining the strongest coherent argument available. For faulty-parallelism, preserve the meaning but coordinate the same grammatical form: nouns with nouns or actions with actions. For detached-synthesis, either rewrite the sentence as a concrete conclusion that explicitly names the preceding evidence and stays within its scope, or delete it; never preserve unsupported role-wide or career-wide breadth. For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means. For other cohesion observations, cut or consolidate evidence that does not materially strengthen the controlling thesis instead of adding connective filler; establish the reason for a role, time, or project shift before its details. For any shared-run observation, rewrite the quoted wording so no contiguous run of eight or more words remains; changing punctuation or merely moving the same phrase is not a fix. If a figure is listed as absent from résumé evidence, delete it and never substitute another research-only figure; company-specific prose must use its relevant proper-name detail without years, revenue, valuation, headcount, or growth numbers. Return the complete replacement paragraphs array.'
+    ? 'Revise only the supplied paragraphs. Resolve every listed draft-audit observation while retaining the strongest coherent argument available. For faulty-parallelism, preserve the meaning but coordinate the same grammatical form: nouns with nouns or actions with actions. For detached-synthesis, either rewrite the sentence as a concrete conclusion that explicitly names the preceding evidence and stays within its scope, or delete it; never preserve unsupported role-wide or career-wide breadth. For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means. For other cohesion observations, cut or consolidate evidence that does not materially strengthen the controlling thesis instead of adding connective filler; establish the reason for a role, time, or project shift before its details. For any shared-run observation, rewrite the quoted wording so no contiguous run of eight or more words remains; changing punctuation or merely moving the same phrase is not a fix. If a figure is listed as absent from résumé evidence, delete it and never substitute another research-only figure; company-specific prose must use its relevant proper-name detail without years, revenue, valuation, headcount, or growth numbers. For a punctuation or dash observation, split the clause into separate short sentences. For a stack-tools observation, keep the single most argument-relevant name and replace the others with technology-category descriptions that name no further tools. For an additive-connective observation, replace the connective with the argumentative relation, or open with the gap the artifact answers. For an advertisement-reference or cross-domain-equivalence observation, restate the point as the employer’s need or the shared mechanism without citing the advertisement or asserting the analogy. For a long-sentence observation, split into short causal sentences preserving every fact. For a hyphenation observation, apply the exact suggested form. For a bureaucratic-register observation, use the suggested plain phrasing. For a legal-status observation, delete the citizenship, work-authorization, residency, or visa statement entirely; never reword it, because legal work status belongs on the application form. For an opening-demonstrative observation, replace the paragraph-opening demonstrative phrase with the full referent it means, or open with the paragraph’s own subject. For a dangling-transition observation, complete the movement in the same sentence by naming the missing endpoint. For an unearned-causal observation, state the missing premise as its own sentence before the conclusion, or remove the causal connective and let the sentences stand in sequence. For a literalized-frame observation, rewrite the span to name the single posted role literally and keep the coined frame on the evidence. Return the complete replacement paragraphs array.'
     : 'Write the complete cover-letter paragraphs from the supplied plan.';
   return `You are writing the argument, not a résumé summary. The recruiter is holding this candidate's résumé. They have already read it. Every sentence must survive: “the résumé already told me that — so what?” Return JSON matching the supplied schema.
 
 Before returning, work privately through one complete draft, one adversarial critique for argument strength, job specificity, factual support, redundancy, and concision, and one improved draft. Perform another private revision only when final verification finds a concrete defect, never for a merely stylistic preference. Return only the final draft.
 
-The plan is an argument skeleton, not sentence or paragraph scaffolding. roleThesis is the controlling claim: every paragraph must advance, demonstrate, deepen, or honestly qualify it. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Use the plan’s narrativeRole and relationToPrevious to establish the relationship before entering a new evidence block. Merge, reorder, subordinate, and write natural prose; choose paragraph boundaries solely for the clearest and most persuasive final letter. Do not turn two mappings into two independent reasons to hire the candidate, and do not let the company hook or logistics become a competing through-line. The letter may provide causal transfer, prioritization, context the résumé's terse bullet removed, motivation/fit direction, and an explicit cross-domain mapping. Do not introduce facts, figures, employers, tools, skills, or logistics absent from the plan. Keep only the minimum evidence required to make the argument; omit other relevant qualifications when they do not provide a foundation, corroboration, deepening, extension, or honest qualification for the same thesis, because the résumé carries breadth. Treat each mapping's evidence as an anchor, not copy: retain at most one concrete anchor (one exact figure, tool, proper name, or named system), paraphrase all surrounding words, and copy at most four consecutive words from mappings[].evidence. Spend the prose on the interpretation and mechanism. Do not use a colon to unload tools, systems, or achievements, and do not compress several résumé bullets into one sentence. Select the proof that matters, summarize related implementation details, or split the reasoning into short causal sentences. Prefer literal descriptions of the system, data flow, responsibility, or decision; never repeat an abstract metaphor across paragraphs as connective tissue. Use at most three numeric figures in the entire letter and at most one from each mapping; copy a used figure character-for-character from plan evidence, including currency signs, percent signs, decimal form, and K/M/B/unit suffixes, or omit it. Never use a companyHook year or figure. When companyHook.detail is nonempty, preserve its check-verifiable capitalized bigram verbatim somewhere in the prose. When the hook is empty, name the exact multiword target job title in the thesis instead; do not invent company-specific padding.
+The plan is an argument skeleton, not sentence or paragraph scaffolding. roleThesis is the controlling claim: every paragraph must advance, demonstrate, deepen, or honestly qualify it. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Use the plan’s narrativeRole and relationToPrevious to establish the relationship before entering a new evidence block. Merge, reorder, subordinate, and write natural prose; choose paragraph boundaries solely for the clearest and most persuasive final letter. Do not turn two mappings into two independent reasons to hire the candidate, and do not let the company hook or logistics become a competing through-line. The letter may provide causal transfer, prioritization, context the résumé's terse bullet removed, motivation/fit direction, and a cross-domain mapping argued through shared mechanism (constraints, data flow, failure modes), never by asserting that one domain maps onto the other or quoting the employer’s phrasing back as the second half of an analogy. Do not introduce facts, figures, employers, tools, skills, or logistics absent from the plan. Keep only the minimum evidence required to make the argument; omit other relevant qualifications when they do not provide a foundation, corroboration, deepening, extension, or honest qualification for the same thesis, because the résumé carries breadth. Treat each mapping's evidence as an anchor, not copy: retain at most one concrete anchor (one exact figure, tool, proper name, or named system), paraphrase all surrounding words, and copy at most four consecutive words from mappings[].evidence. Do not unload tools, systems, or achievements after any punctuation mark — colon, semicolon, or dash; spend the prose on interpretation and mechanism, and do not compress several résumé bullets into one sentence. Select the proof that matters, summarize related implementation details, or split the reasoning into short causal sentences. Prefer literal descriptions of the system, data flow, responsibility, or decision; never repeat an abstract metaphor across paragraphs as connective tissue. Use at most three numeric figures in the entire letter and at most one from each mapping; copy a used figure character-for-character from plan evidence, including currency signs, percent signs, decimal form, and K/M/B/unit suffixes, or omit it. Never use a companyHook year or figure. When companyHook.detail is nonempty, preserve its check-verifiable capitalized bigram verbatim somewhere in the prose. When the hook is empty, name the exact multiword target job title in the thesis instead; do not invent company-specific padding.
 
 ${COVER_LETTER_OPENING_RULE}
 
 ${PARALLEL_STRUCTURE_RULE}
+
+${LETTER_REGISTER_RULE}
+
+${LETTER_COHESION_RULE}
+
+${LETTER_FLOW_AND_DICTION_RULE}
 
 Avoid generic cover-letter language. There is no prescribed paragraph count or word count. Use as much or as little supported prose as makes the strongest argument; the rendered document must fit on one page.
 
@@ -1734,7 +1718,7 @@ The ALLOWED FACTUAL SOURCE block is the complete factual boundary the writer rec
 
 When the source contains directArgumentContract, it is non-rendered editorial metadata for a fallback draft. Use its roleThesis, primaryEvidence, and optional secondary relationship to audit whether the prose follows one argument. The contract never authorizes a factual claim: résumé evidence remains the factual boundary.
 
-Independently populate cohesionObservations for exact spans that weaken a single controlling argument or make the persuasive prose unnatural: unclear-antecedent when a backward reference such as “this,” “that,” “it,” or “under it” has more than one plausible referent, including across a paragraph boundary; unexplained-shift when an employer, project, or time-period change arrives without first stating why it belongs; chronological-backtracking when prose returns to an earlier employer or period without a stated argumentative reason; inventory-paragraph when a paragraph lists unrelated evidence rather than interpreting one shared capability; overloaded-sentence when one sentence, often after a colon, compresses several tools, systems, achievements, or résumé bullets instead of making one connected point; faulty-parallelism when coordinated elements use mismatched grammatical forms, especially noun-to-gerund process spans such as “from [noun phrase] through [verb-ing phrase]”; repeated-metaphor when an abstract metaphor recurs as connective tissue instead of naming the concrete system, data flow, responsibility, or decision; detached-synthesis when a concluding or transitional sentence introduces a broader abstraction, working style, role-wide or career-wide generalization, or new persuasive claim that the preceding evidence does not explicitly establish, including an abstract bridge such as “shape,” “pattern,” or “approach” that never names the concrete responsibility, system, decision, or process it summarizes; volunteered-gap when the letter advertises missing experience even though no explicit application question requires it and silence would not make a claim misleading; delayed-relevance when the reason a block belongs appears only after a long list of details; second-thesis when a paragraph begins an independent reason to hire; and unnecessary-evidence when a relevant block does not materially provide a foundation, corroboration, deepening, extension, or qualification for the controlling claim. Do not flag a concise, explicit transition or a necessary second proof merely for changing roles. Prefer cutting or consolidating unnecessary evidence over adding filler transitions.
+Independently populate cohesionObservations for exact spans that weaken a single controlling argument or make the persuasive prose unnatural: unclear-antecedent when a backward reference such as “this,” “that,” “it,” or “under it” has more than one plausible referent or no stated referent in the immediately preceding prose at all, including a paragraph-opening demonstrative phrase whose referent the previous paragraph never establishes; unexplained-shift when an employer, project, or time-period change arrives without first stating why it belongs, including a thesis followed by a standalone background fact whose argumentative relevance arrives only later; chronological-backtracking when prose returns to an earlier employer or period without a stated argumentative reason; unmoored-temporal-contrast when “now,” “still,” “again,” “no longer,” “before,” “after,” or equivalent state-change language implies a contrast or sequence the prose never introduced; inventory-paragraph when a paragraph lists unrelated evidence rather than interpreting one shared capability; overloaded-sentence when one sentence, often after a colon, compresses several tools, systems, achievements, or résumé bullets instead of making one connected point; faulty-parallelism when coordinated elements use mismatched grammatical forms, especially noun-to-gerund process spans such as “from [noun phrase] through [verb-ing phrase]”; repeated-metaphor when an abstract metaphor recurs as connective tissue instead of naming the concrete system, data flow, responsibility, or decision; awkward-register when wording is grammatical but conspicuously less natural than common contemporary professional English, such as “answered that gap” instead of “closed” or “addressed” it; unnecessary-employer-repetition when the same ordinary prior employer name is repeated after the role is already clear and the repetition neither distinguishes another role nor prevents ambiguity; detached-synthesis when a concluding or transitional sentence introduces a broader abstraction, working style, role-wide or career-wide generalization, or new persuasive claim that the preceding evidence does not explicitly establish, including an abstract bridge such as “shape,” “pattern,” or “approach” that never names the concrete responsibility, system, decision, or process it summarizes; volunteered-gap when the letter advertises missing experience even though no explicit application question requires it and silence would not make a claim misleading; delayed-relevance when the reason a block belongs appears only after a long list of details; second-thesis when a paragraph begins an independent reason to hire; unnecessary-evidence when a relevant block does not materially provide a foundation, corroboration, deepening, extension, or qualification for the controlling claim; dangling-transition when a sentence announces a migration, move, or change and names only the origin or only the destination instead of both; unearned-causal when a causal connective such as “that is why,” “which is why,” or “so” asserts a conclusion whose premise the preceding sentences never state; and literalized-frame when a rhetorical frame coined for the evidence (splitting one role into “two jobs”) is applied to the target position itself, so a span reads as asking for something other than the single posted role. Do not flag a concise, explicit transition or a necessary second proof merely for changing roles. Prefer cutting or consolidating unnecessary evidence over adding filler transitions.
 
 For every violation and cohesion observation, claim must be an exact verbatim span copied from the supplied paragraphs and should include the smallest span that preserves the defect. Return empty arrays only when every factual assertion is supported, the argument remains one coherent through-line, every synthesis is explicitly tied to and scoped by its evidence, backward references have one clear antecedent, and coordinated syntax is grammatically parallel. This is an adversarial audit: never repair the prose and never excuse an unsupported claim because it sounds plausible.`;
 }
@@ -1799,9 +1783,9 @@ Before returning, work privately through one complete draft, one adversarial cri
 
 Return argumentContract alongside paragraphs. It is host-only editorial metadata and must never be written into the letter: state one roleThesis, a near-quoted primaryEvidence and its relation to that thesis, plus either secondaryNarrativeRole "none" with empty secondary fields or one near-quoted supporting anchor with its explicit relationship to the primary proof. The contract is not permission to invent facts; every anchor must remain grounded in the supplied résumé evidence.
 
-The recruiter is holding the résumé. The résumé is true, and it is the ONLY source of accomplishments and capabilities. Do not re-verify it, hedge it, or claim more than it says. Build the argument internally around one thesis at the intersection of an emphasized employer need and a distinctive supported capability, using one primary proof by default and a second only when it supplies a distinct foundation, corroboration, deepening, extension, or honest qualification the primary proof cannot. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Relevant coverage alone is not a reason to add evidence. Every paragraph and mapping must advance, demonstrate, deepen, or honestly qualify that same thesis; a second mapping is supporting context, not a second reason to hire the candidate. State why a new employer, project, or time period follows before listing its details; never use a role change as résumé-tour coverage. Explain the mechanism that makes the evidence relevant rather than reciting the bullet. Choose paragraph boundaries solely for the clearest and most persuasive final letter. Do not use a colon to unload tools, systems, or achievements, and do not compress several résumé bullets into one sentence. Select the proof that matters, summarize related implementation details, or split the reasoning into short causal sentences. Prefer literal descriptions of the system, data flow, responsibility, or decision; never repeat an abstract metaphor across paragraphs as connective tissue. A supported fact may be asserted; a narrow entailment may be interpreted at the same scope; a general domain principle may frame relevance without becoming a candidate claim; merely plausible but undocumented experience must be omitted. Treat each chosen bullet as an anchor: retain at most one concrete anchor (one exact figure, tool, proper name, or named system), paraphrase every surrounding word, and copy at most four consecutive words. Use at most three numeric figures in the entire letter and at most one per evidence mapping; copy a used figure character-for-character from a résumé bullet, including currency signs, percent signs, decimal form, and K/M/B/unit suffixes, or omit it. Never introduce an employer, title, skill, figure, or outcome not shown in the supplied résumé evidence. The career-data block is logistics/stated-motivation only and may not support evidence or capabilities. A company-specific point may be used only when research supplies a relevant adjacent capitalized two-word proper detail other than the bare company name; preserve that bigram verbatim and never use research-only years or figures. Otherwise name the exact multiword target job title in the thesis and omit company-specific padding.
+The recruiter is holding the résumé. The résumé is true, and it is the ONLY source of accomplishments and capabilities. Do not re-verify it, hedge it, or claim more than it says. Build the argument internally around one thesis at the intersection of an emphasized employer need and a distinctive supported capability, using one primary proof by default and a second only when it supplies a distinct foundation, corroboration, deepening, extension, or honest qualification the primary proof cannot. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Relevant coverage alone is not a reason to add evidence. Every paragraph and mapping must advance, demonstrate, deepen, or honestly qualify that same thesis; a second mapping is supporting context, not a second reason to hire the candidate. State why a new employer, project, or time period follows before listing its details; never use a role change as résumé-tour coverage. Explain the mechanism that makes the evidence relevant rather than reciting the bullet. Choose paragraph boundaries solely for the clearest and most persuasive final letter. Do not unload tools, systems, or achievements after any punctuation mark — colon, semicolon, or dash; spend the prose on interpretation and mechanism, and do not compress several résumé bullets into one sentence. Select the proof that matters, summarize related implementation details, or split the reasoning into short causal sentences. Prefer literal descriptions of the system, data flow, responsibility, or decision; never repeat an abstract metaphor across paragraphs as connective tissue. A supported fact may be asserted; a narrow entailment may be interpreted at the same scope; a general domain principle may frame relevance without becoming a candidate claim; merely plausible but undocumented experience must be omitted. Treat each chosen bullet as an anchor: retain at most one concrete anchor (one exact figure, tool, proper name, or named system), paraphrase every surrounding word, and copy at most four consecutive words. Use at most three numeric figures in the entire letter and at most one per evidence mapping; copy a used figure character-for-character from a résumé bullet, including currency signs, percent signs, decimal form, and K/M/B/unit suffixes, or omit it. Never introduce an employer, title, skill, figure, or outcome not shown in the supplied résumé evidence. The career-data block is logistics/stated-motivation only and may not support evidence or capabilities; citizenship, work authorization, residency, and visa status are application-form facts, so never state them in the letter even though the career data supplies them. A company-specific point may be used only when research supplies a relevant adjacent capitalized two-word proper detail other than the bare company name; preserve that bigram verbatim and never use research-only years or figures. Otherwise name the exact multiword target job title in the thesis and omit company-specific padding.
 
-Keep target-side scope exact: examples of industries, clients, sites, and duties remain examples. Never name or imply an excluded skill. An attribution value of context is not a personal win. Preserve evidence specificity: do not strengthen "coordinated with emergency personnel" into "served as the municipal point of contact" unless the résumé says so. General evening/weekend availability may be described only at that same level; do not claim exact weekday/hour availability unless logistics explicitly confirms it. If the candidate location differs from the target job location, never imply that they are local, can commute, or will relocate unless the logistics data says so. ${COVER_LETTER_OPENING_RULE} ${PARALLEL_STRUCTURE_RULE} Avoid generic cover-letter phrases. There is no prescribed paragraph count or word count. Use as much or as little supported prose as makes the strongest argument; the rendered document must fit on one page.${revision ? ' Revise the supplied paragraphs to resolve the factual and cohesion audit observations. For faulty-parallelism, preserve the meaning but coordinate the same grammatical form: nouns with nouns or actions with actions. For detached-synthesis, either rewrite the sentence as a concrete conclusion that explicitly names the preceding evidence and stays within its scope, or delete it; never preserve unsupported role-wide or career-wide breadth. For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means. For other cohesion defects, cut or consolidate evidence that does not materially strengthen the thesis rather than adding filler; establish a role, time, or project shift before its details. For any shared-run observation, keep at most one concrete anchor from the quoted phrase and paraphrase every surrounding word so no contiguous run of eight or more words remains; punctuation-only changes or moving the same phrase do not resolve it. Delete every figure listed as absent from résumé evidence and never replace it with another research-only figure. Return complete replacement paragraphs.' : ''}${rubricText ? `\n\nEDITORIAL RUBRIC:\n${rubricText}` : ''}`;
+Keep target-side scope exact: examples of industries, clients, sites, and duties remain examples. Never name or imply an excluded skill. An attribution value of context is not a personal win. Preserve evidence specificity: do not strengthen "coordinated with emergency personnel" into "served as the municipal point of contact" unless the résumé says so. General evening/weekend availability may be described only at that same level; do not claim exact weekday/hour availability unless logistics explicitly confirms it. If the candidate location differs from the target job location, never imply that they are local, can commute, or will relocate unless the logistics data says so. ${COVER_LETTER_OPENING_RULE} ${PARALLEL_STRUCTURE_RULE} ${LETTER_REGISTER_RULE} ${LETTER_COHESION_RULE} ${LETTER_FLOW_AND_DICTION_RULE} Avoid generic cover-letter phrases. There is no prescribed paragraph count or word count. Use as much or as little supported prose as makes the strongest argument; the rendered document must fit on one page.${revision ? ' Revise the supplied paragraphs to resolve the factual and cohesion audit observations. For faulty-parallelism, preserve the meaning but coordinate the same grammatical form: nouns with nouns or actions with actions. For detached-synthesis, either rewrite the sentence as a concrete conclusion that explicitly names the preceding evidence and stays within its scope, or delete it; never preserve unsupported role-wide or career-wide breadth. For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means. For other cohesion defects, cut or consolidate evidence that does not materially strengthen the thesis rather than adding filler; establish a role, time, or project shift before its details. For any shared-run observation, keep at most one concrete anchor from the quoted phrase and paraphrase every surrounding word so no contiguous run of eight or more words remains; punctuation-only changes or moving the same phrase do not resolve it. Delete every figure listed as absent from résumé evidence and never replace it with another research-only figure. For a punctuation or dash observation, split the clause into separate short sentences. For a stack-tools observation, keep the single most argument-relevant name and replace the others with technology-category descriptions that name no further tools. For an additive-connective observation, replace the connective with the argumentative relation, or open with the gap the artifact answers. For an advertisement-reference or cross-domain-equivalence observation, restate the point as the employer’s need or the shared mechanism without citing the advertisement or asserting the analogy. For a long-sentence observation, split into short causal sentences preserving every fact. For a hyphenation observation, apply the exact suggested form. For a bureaucratic-register observation, use the suggested plain phrasing. For a legal-status observation, delete the citizenship, work-authorization, residency, or visa statement entirely; never reword it, because legal work status belongs on the application form. For an opening-demonstrative observation, replace the paragraph-opening demonstrative phrase with the full referent it means, or open with the paragraph’s own subject. For a dangling-transition observation, complete the movement in the same sentence by naming the missing endpoint. For an unearned-causal observation, state the missing premise as its own sentence before the conclusion, or remove the causal connective. For a literalized-frame observation, rewrite the span to name the single posted role literally and keep the coined frame on the evidence. Return complete replacement paragraphs.' : ''}${rubricText ? `\n\nEDITORIAL RUBRIC:\n${rubricText}` : ''}`;
 }
 
 async function generateDirectLetterProse({ careerData, job, research, researchAvailable, evidence, needs, attribution, skillInsights, paragraphs = null, violations = [], revisionAttempt = 1 }, signal, meta = null) {
@@ -2590,6 +2574,7 @@ export function registerJobApplicationHandlers() {
         plan: coverLetterPlan || {},
         paragraphs: coverLetter.paragraphs,
         evidence: resumeEvidence,
+        jobText,
         researchText: researchForChecks,
         companyName: job?.company || '',
       });
@@ -2720,7 +2705,6 @@ export function registerJobApplicationHandlers() {
     let coverLetterPdfError = null;
     let coverLetterFontsLoaded = null;
     let coverLetterPageCount = null;
-    let coverLetterCentered = false;
 
     markStage('cover-letter PDF render');
     // 6. Build ONE single-file application workspace. The design-system
@@ -2744,7 +2728,6 @@ export function registerJobApplicationHandlers() {
         location: job?.location || '', candidateLocation,
       },
       coverLetter,
-      coverLetterCentered,
       downloadBundle: {
         company: job?.company || '',
         candidateName,
@@ -2763,7 +2746,6 @@ export function registerJobApplicationHandlers() {
       coverLetterPdfBytes = null;
       coverLetterPdfError = null;
       coverLetterPageCount = null;
-      coverLetterCentered = false;
       try {
         const coverDocument = buildCoverLetterDocument({
           letter: coverLetter,
@@ -2776,32 +2758,6 @@ export function registerJobApplicationHandlers() {
         if (coverLetterFontsLoaded) coverLetterPdfBytes = rendered.bytes;
         else coverLetterPdfError = 'Web fonts were unavailable while rendering the cover-letter PDF.';
 
-        // The design system owns the treatment; the host only selects it after
-        // a real render proves that this is a short, one-page letter. Render a
-        // second time with the root-only flag so PDF bytes and workspace state
-        // describe the same document. A failed second render leaves the valid
-        // baseline intact rather than withholding the application.
-        if (coverLetterFontsLoaded
-          && coverLetterPageCount === 1
-          && isShortCoverLetterLayout(rendered.layout)) {
-          try {
-            const centeredDocument = buildCoverLetterDocument({
-              letter: coverLetter,
-              variantAttrs: withCenteredLetterVariant(variantAttrs, true),
-              docId: `${resumeDocId}-cover-pdf`,
-            });
-            const centered = await renderPdf(centeredDocument, { signal });
-            if (centered.fontsLoaded !== false && centered.pageCount === 1) {
-              coverLetterPdfBytes = centered.bytes;
-              coverLetterPageCount = centered.pageCount;
-              coverLetterFontsLoaded = true;
-              coverLetterCentered = true;
-            }
-          } catch (e) {
-            if (e?.name === 'AbortError') throw e;
-            logger.warn(`[JobApplication][${nodeId || '?'}] Could not apply short-letter centring — keeping the verified baseline: ${e?.message || e}`);
-          }
-        }
       } catch (e) {
         if (e?.name === 'AbortError') throw e;
         coverLetterPdfError = e?.message || String(e);
@@ -2848,7 +2804,13 @@ export function registerJobApplicationHandlers() {
       finalPlan: coverLetterPlan || {},
       checks: coverLetterChecks,
     };
-    if (!pageCheck.passed) {
+    // Mirror renderResumeWithFit's own throw gate (see fitResult.pageCount check
+    // above): only a VERIFIED overflow — real fonts, a real measured page count
+    // — is a failed generation. Fonts-unavailable or a render-infra exception
+    // means coverLetterPageCount/coverLetterFontsLoaded never went false in a
+    // way that proves overflow, so those degrade to the recoverable HTML-only
+    // shipment the renderCoverLetterPdf catch above already logs.
+    if (!pageCheck.passed && coverLetterFontsLoaded !== false && coverLetterPageCount != null) {
       const convergenceDetail = coverLetterRevisionError ? ` Last revision stopped: ${coverLetterRevisionError}` : '';
       throw new Error(`Cover letter did not meet the required one-page maximum after reaching convergence (${coverLetterRevisionAttempts} AI revision attempt(s)): ${pageCheck.detail}.${convergenceDetail}`);
     }
@@ -2938,7 +2900,7 @@ export function registerJobApplicationHandlers() {
         revisionHistory: coverLetterRevisionHistory,
         revisionError: coverLetterRevisionError,
         pageCount: coverLetterPageCount,
-        centered: coverLetterCentered,
+        centered: false,
       },
       coverLetterPlan,
       resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
@@ -2988,93 +2950,103 @@ export function registerJobApplicationHandlers() {
     applicationAttempt.stage = 'writing application artifacts';
     applicationAttempt.stages = [...applicationAttempt.stages, { stage: 'writing application artifacts', ts: Date.now() }];
     const outDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-out-'));
-    // These temporary files contain the applicant's full résumé, contact
-    // details, and job history. Make the privacy boundary explicit even on a
-    // host with an unusually permissive process umask.
-    await fs.promises.chmod(outDir, 0o700);
-    const resumeHtmlPath = path.join(outDir, `application-${resumeDocId}.html`);
-    // Keep the exact source-side job data alongside the editable résumé. The
-    // stable filename lets save-application discover it even if an older
-    // renderer has not yet been updated to pass jobListingPath explicitly.
-    const jobListingPath = path.join(outDir, 'original-job-listing.md');
-    await fs.promises.writeFile(resumeHtmlPath, resumeDoc, { encoding: 'utf8', mode: 0o600 });
-    await fs.promises.writeFile(jobListingPath, jobMarkdown, { encoding: 'utf8', mode: 0o600 });
+    let resumeHtmlPath = null, jobListingPath = null, resumePdfPath = null, coverLetterPdfPath = null;
+    try {
+      // These temporary files contain the applicant's full résumé, contact
+      // details, and job history. Make the privacy boundary explicit even on a
+      // host with an unusually permissive process umask.
+      await fs.promises.chmod(outDir, 0o700);
+      resumeHtmlPath = path.join(outDir, `application-${resumeDocId}.html`);
+      // Keep the exact source-side job data alongside the editable résumé. The
+      // stable filename lets save-application discover it even if an older
+      // renderer has not yet been updated to pass jobListingPath explicitly.
+      jobListingPath = path.join(outDir, 'original-job-listing.md');
+      await fs.promises.writeFile(resumeHtmlPath, resumeDoc, { encoding: 'utf8', mode: 0o600 });
+      await fs.promises.writeFile(jobListingPath, jobMarkdown, { encoding: 'utf8', mode: 0o600 });
 
-    // PDF companion — written next to the HTML, never in place of it (§5.1
-    // still stands: HTML is the primary, editable artifact). null when
-    // rendering failed for any reason; the caller (JobCardNode.jsx / the
-    // renderer) must treat it as optional the same way it already treats a
-    // failed résumé PDF as "generation still succeeded."
-    let resumePdfPath = null;
-    if (resumePdfBytes) {
-      const candidatePath = path.join(outDir, `resume-${resumeDocId}.pdf`);
-      try {
-        await fs.promises.writeFile(candidatePath, resumePdfBytes, { mode: 0o600 });
-        resumePdfPath = candidatePath;
-      } catch (e) {
-        logger.warn(`[JobApplication][${nodeId || '?'}] Could not write résumé PDF to disk — continuing with HTML only: ${e?.message || e}`);
+      // PDF companion — written next to the HTML, never in place of it (§5.1
+      // still stands: HTML is the primary, editable artifact). null when
+      // rendering failed for any reason; the caller (JobCardNode.jsx / the
+      // renderer) must treat it as optional the same way it already treats a
+      // failed résumé PDF as "generation still succeeded."
+      if (resumePdfBytes) {
+        const candidatePath = path.join(outDir, `resume-${resumeDocId}.pdf`);
+        try {
+          await fs.promises.writeFile(candidatePath, resumePdfBytes, { mode: 0o600 });
+          resumePdfPath = candidatePath;
+        } catch (e) {
+          logger.warn(`[JobApplication][${nodeId || '?'}] Could not write résumé PDF to disk — continuing with HTML only: ${e?.message || e}`);
+        }
       }
-    }
-    let coverLetterPdfPath = null;
-    if (coverLetterPdfBytes) {
-      const candidatePath = path.join(outDir, `cover-letter-${resumeDocId}.pdf`);
-      try {
-        await fs.promises.writeFile(candidatePath, coverLetterPdfBytes, { mode: 0o600 });
-        coverLetterPdfPath = candidatePath;
-      } catch (e) {
-        logger.warn(`[JobApplication][${nodeId || '?'}] Could not write cover-letter PDF to disk — continuing with HTML only: ${e?.message || e}`);
+      if (coverLetterPdfBytes) {
+        const candidatePath = path.join(outDir, `cover-letter-${resumeDocId}.pdf`);
+        try {
+          await fs.promises.writeFile(candidatePath, coverLetterPdfBytes, { mode: 0o600 });
+          coverLetterPdfPath = candidatePath;
+        } catch (e) {
+          logger.warn(`[JobApplication][${nodeId || '?'}] Could not write cover-letter PDF to disk — continuing with HTML only: ${e?.message || e}`);
+        }
       }
-    }
 
-    // Count demand only after the application has real, readable artifacts.
-    // The previous placement persisted immediately after the analysis call, so
-    // a later résumé/cover/render/write failure inflated the histogram with an
-    // application the user never received.
-    markStage('recording skill-demand analysis');
-    if (skillAnalysisReady) {
-      try {
-        skillHistogram = await withSkillOpportunityLock(
-          async () => recordSkillOpportunityAnalysis(
-            skillOpportunitySourceKey,
-            skillInsights,
-            skillOpportunityRecordOptions,
-          ),
-          signal,
-        );
-      } catch (e) {
-        if (e?.name === 'AbortError') throw e;
-        skillOpportunityError = String(e?.message || e).slice(0, 300);
-        logger.warn(`[JobApplication][${nodeId || '?'}] Application built, but skill-opportunity demand could not be recorded: ${skillOpportunityError}`);
+      // Count demand only after the application has real, readable artifacts.
+      // The previous placement persisted immediately after the analysis call, so
+      // a later résumé/cover/render/write failure inflated the histogram with an
+      // application the user never received.
+      markStage('recording skill-demand analysis');
+      if (skillAnalysisReady) {
+        try {
+          skillHistogram = await withSkillOpportunityLock(
+            async () => recordSkillOpportunityAnalysis(
+              skillOpportunitySourceKey,
+              skillInsights,
+              skillOpportunityRecordOptions,
+            ),
+            signal,
+          );
+        } catch (e) {
+          if (e?.name === 'AbortError') throw e;
+          skillOpportunityError = String(e?.message || e).slice(0, 300);
+          logger.warn(`[JobApplication][${nodeId || '?'}] Application built, but skill-opportunity demand could not be recorded: ${skillOpportunityError}`);
+        }
       }
-    }
-    if (lastApplication?.attemptId === attemptId && lastApplication.skillOpportunities) {
-      updateAttempt({
-        skillOpportunities: {
-          ...lastApplication.skillOpportunities,
-          histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
-          error: skillOpportunityError,
-          recordedAfterArtifacts: skillAnalysisReady && !skillOpportunityError,
+      if (lastApplication?.attemptId === attemptId && lastApplication.skillOpportunities) {
+        updateAttempt({
+          skillOpportunities: {
+            ...lastApplication.skillOpportunities,
+            histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
+            error: skillOpportunityError,
+            recordedAfterArtifacts: skillAnalysisReady && !skillOpportunityError,
+          },
+        });
+      }
+
+      registerPendingApplicationWorkspace({
+        workDir: outDir,
+        attemptId,
+        senderId: event.sender.id,
+        company: job?.company || '',
+        candidateName,
+        resumeHtmlPath,
+        resumePdfPath,
+        coverLetterPdfPath,
+        jobListingPath,
+        artifactData: {
+          resumeHtml: resumeDoc,
+          resumePdf: resumePdfPath ? resumePdfBytes : null,
+          coverLetterPdf: coverLetterPdfPath ? coverLetterPdfBytes : null,
+          jobListing: jobMarkdown,
         },
       });
+    } catch (e) {
+      // Nothing else ever cleans up this directory on a failure in this
+      // window: discardPendingApplicationArtifacts only removes a workspace
+      // that reached registerPendingApplicationWorkspace above, and no
+      // startup sweep exists for orphaned "jobapp-out-*" dirs. Without this,
+      // any write/chmod/abort failure here leaves the applicant's résumé and
+      // contact details sitting in os.tmpdir() indefinitely.
+      await fs.promises.rm(outDir, { recursive: true, force: true }).catch(() => {});
+      throw e;
     }
-
-    registerPendingApplicationWorkspace({
-      workDir: outDir,
-      attemptId,
-      senderId: event.sender.id,
-      company: job?.company || '',
-      candidateName,
-      resumeHtmlPath,
-      resumePdfPath,
-      coverLetterPdfPath,
-      jobListingPath,
-      artifactData: {
-        resumeHtml: resumeDoc,
-        resumePdf: resumePdfPath ? resumePdfBytes : null,
-        coverLetterPdf: coverLetterPdfPath ? coverLetterPdfBytes : null,
-        jobListing: jobMarkdown,
-      },
-    });
     logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath && coverLetterPdfPath ? ' (+ résumé and cover-letter PDFs)' : ' (one or more PDFs unavailable — see log above)'}`);
     updateAttempt({
       status: 'completed',
@@ -3263,6 +3235,16 @@ export function registerJobApplicationHandlers() {
     // Clean up the temp output dir now that the files are safely copied out.
     await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
 
+    // Local-AI handoffs use this app-owned callback to publish their terminal
+    // receipt. It deliberately runs only after the destination transaction
+    // passed readback and the intermediate cleanup was attempted, so a receipt
+    // can never make an unsaved bundle look accepted. Receipt publication is
+    // diagnostic: failure must not roll back an already durable application.
+    if (pending.onSuccessfulSave) {
+      try { await pending.onSuccessfulSave({ dir, manifest }); }
+      catch (error) { logger.warn(`[JobApplication] Could not publish application save completion: ${error?.message || error}`); }
+    }
+
     // Open the destination folder in a Finder/Explorer window.
     let openErr = '';
     try { openErr = await shell.openPath(dir); }
@@ -3301,12 +3283,21 @@ export function registerJobApplicationHandlers() {
         },
       });
       logger.error(`[JobApplication] save-application failed during "${exportPhase}": ${error?.stack || error?.message || error}`);
-      // There is no retry UI for a failed save.  Once the trusted source files
-      // cannot be saved, remove their registered temp workspace rather than
-      // retaining it indefinitely.  Validation failures above this try block
-      // deliberately do not discard anything, so a malformed IPC request can
+      // Ordinary API generations have no retry UI, so their trusted temp
+      // workspace is removed after a terminal save failure. Local-AI jobs opt
+      // out: their result/context remains on disk for a fresh import after the
+      // short imported-save window lapses. Validation failures above this try
+      // block deliberately discard nothing, so a malformed IPC request can
       // never erase a valid session it does not own.
-      await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure');
+      if (pending.cleanupOnSaveFailure) {
+        await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure');
+      } else {
+        // Release the one-shot capability without deleting the Local-AI job.
+        // Its manifest/result remain available for a fresh measured import
+        // after the short imported-save window lapses.
+        pendingApplicationArtifacts.delete(resolvedWorkDir);
+        logger.warn('[JobApplication] Preserved retryable Local AI workspace after save failure');
+      }
       throw error;
     }
   });

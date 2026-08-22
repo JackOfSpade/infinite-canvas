@@ -103,6 +103,7 @@ export function ContextMenu({ x, y, items, onClose }) {
                 disabled={item.disabled}
                 onPointerDown={(e) => {
                   e.stopPropagation();
+                  if (e.button !== 0) return;
                   if (!hasSubmenu && item.onClick && !item.disabled) {
                     item.onClick();
                     onClose();
@@ -185,6 +186,7 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
             disabled={sub.disabled}
             onPointerDown={(e) => {
               e.stopPropagation();
+              if (e.button !== 0) return;
               if (sub.onClick && !sub.disabled) {
                 sub.onClick();
                 onClose();

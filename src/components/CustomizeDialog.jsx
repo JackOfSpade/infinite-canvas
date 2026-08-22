@@ -117,20 +117,25 @@ export function CustomizeDialog({
   onClose,
 }) {
   const [fontSize, setFontSize] = useState(initialSize || 14);
+  const appliedFontSizeRef = useRef(initialSize || 14);
   const [fontFamily, setFontFamily] = useState(initialFamily || 'sans-serif');
   const [textColor, setTextColor] = useState(initialColor);
   const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
   const [staticGlowColor, setStaticGlowColor] = useState(() => normalizeStaticGlowColor(initialStaticGlowColor));
   const appliedStaticGlowColorRef = useRef(normalizeStaticGlowColor(initialStaticGlowColor));
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
+  const appliedSpacingRef = useRef(initialSpacing ?? 0);
 
   const hasFont = showFont;
 
-  /** Push every change to the caller immediately — no Done button needed. */
+  /** Push every change to the caller immediately — no Done button needed.
+   *  fontSize/titleSpacing read from the "last valid" refs, not the raw input
+   *  state, so an out-of-range or empty in-progress edit in one field can't
+   *  ride along on an unrelated field's emit (e.g. a color swatch click). */
   const emit = (overrides) => {
     const payload = {
-      ...(hasFont ? { fontSize, fontFamily, textColor } : {}),
-      ...(showSpacing ? { titleSpacing } : {}),
+      ...(hasFont ? { fontSize: appliedFontSizeRef.current, fontFamily, textColor } : {}),
+      ...(showSpacing ? { titleSpacing: appliedSpacingRef.current } : {}),
       ...(showBackground ? { backgroundColor } : {}),
       ...(showStaticGlow ? { staticGlowColor: appliedStaticGlowColorRef.current } : {}),
       ...overrides
@@ -148,25 +153,34 @@ export function CustomizeDialog({
     setFontSize(val);
     const num = Number(val);
     // Emit real-time updates ONLY if the current input is a valid number inside bounds
-    if (!isNaN(num) && num >= 1 && num <= 500) emit({ fontSize: num });
+    if (!isNaN(num) && num >= 1 && num <= 500) {
+      appliedFontSizeRef.current = num;
+      emit({ fontSize: num });
+    }
   };
 
   const handleSizeBlur = () => {
     // Assert visual bounds correction only when they click away
     const clamped = Math.max(1, Math.min(500, Number(fontSize) || initialSize || 14));
     setFontSize(clamped);
+    appliedFontSizeRef.current = clamped;
     emit({ fontSize: clamped });
   };
 
   const handleSpacingChange = (val) => {
     setTitleSpacing(val);
     const num = Number(val);
-    if (!isNaN(num) && val !== '' && val !== '-') emit({ titleSpacing: Math.max(-20, Math.min(40, num)) });
+    if (!isNaN(num) && val !== '' && val !== '-') {
+      const clamped = Math.max(-20, Math.min(40, num));
+      appliedSpacingRef.current = clamped;
+      emit({ titleSpacing: clamped });
+    }
   };
 
   const handleSpacingBlur = () => {
     const clamped = Math.max(-20, Math.min(40, Number(titleSpacing) || 0));
     setTitleSpacing(clamped);
+    appliedSpacingRef.current = clamped;
     emit({ titleSpacing: clamped });
   };
 

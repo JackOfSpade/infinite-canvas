@@ -29,7 +29,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
   deleteOSFile: (filePath) => ipcRenderer.invoke('delete-os-file', filePath),
   writeTextFile: (filePath, content) => ipcRenderer.invoke('write-text-file', { filePath, content }),
-  saveFileDialog: (args) => ipcRenderer.invoke('save-file-dialog', args),
 
   // Report which canvas file this window currently has open so the main
   // process can avoid opening the same file in a second window.
@@ -50,8 +49,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendSaveResponse: (success) => ipcRenderer.send('save-response', { success }),
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
-  parseResume: (args) => ipcRenderer.invoke('parse-resume', args),
-  getResumeFingerprint: (args) => ipcRenderer.invoke('get-resume-fingerprint', args),
   generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),
   resolveJobSearchLocation: (args) => ipcRenderer.invoke('resolve-job-search-location', args),
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
@@ -74,12 +71,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   unmarkJobApplied: (args) => ipcRenderer.invoke('unmark-job-applied', args),
   loadAppliedJobs:  (args) => ipcRenderer.invoke('load-applied-jobs', args),
   isJobApplied:     (args) => ipcRenderer.invoke('is-job-applied', args),
-  loadJobsHistory: (args) => ipcRenderer.invoke('load-jobs-history', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
   // Per-batch AI-scoring progress (real-time path). Payload: { nodeId, scored, total, batch, batchTotal }.
   onScoringProgress: createListener('scoring-progress'),
+  // Grounded cash-pay research follows fit scoring. Payload: { nodeId, processed, total }.
+  onCompensationProgress: createListener('compensation-progress'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),
   // Crash/quit recovery: detect an incomplete prior run, or clear it. Resuming
@@ -105,17 +103,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Settings) for anything needing the seller's attention — NOT per-listing.
   checkMarketplaceStatus: (args) => ipcRenderer.invoke('check-marketplace-status', args),
   onMarketplaceStatusProgress: createListener('marketplace-status-progress'),
-  getSellPlatforms: async () => {
-    const res = await ipcRenderer.invoke('get-sell-platforms');
-    return res.success ? (res.platforms || []) : [];
-  },
   checkSellMonitorAuth: async (args) => {
     const res = await ipcRenderer.invoke('check-sell-monitor-auth', args);
     return res.success ? res : { platform: args.platformId, connected: false };
-  },
-  getJobPlatforms: async () => {
-    const res = await ipcRenderer.invoke('get-job-platforms');
-    return res.success ? (res.platforms || []) : [];
   },
   checkJobPlatformAuth: async (args) => {
     const res = await ipcRenderer.invoke('check-job-platform-auth', args);
@@ -128,18 +118,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPriceQueueStatus: createListener('price-queue-status'),
 
   // ── Accounts Module ───────────────────────────────────────────────────
-  getPlatforms: async () => {
-    const res = await ipcRenderer.invoke('get-platforms');
-    return res.success ? (res.platforms || []) : [];
-  },
-  getSessionStatuses: async () => {
-    const res = await ipcRenderer.invoke('get-session-statuses');
-    return res.success ? (res.statuses || []) : [];
-  },
-  getCachedSessionStatuses: async () => {
-    const res = await ipcRenderer.invoke('get-cached-session-statuses');
-    return res.success ? (res.statuses || []) : [];
-  },
   getVerifyState: async () => {
     const res = await ipcRenderer.invoke('get-verify-state');
     return res.success ? res : { verifying: [], statuses: {} };
@@ -147,14 +125,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSessionVerifyStart:  createListener('accounts:verify-start'),
   onSessionVerifyUpdate: createListener('accounts:verify-update'),
   onSessionVerifyDone:   createListener('accounts:verify-done'),
-  getSystemConfigStatus: async () => {
-    const res = await ipcRenderer.invoke('get-system-config-status');
-    return res.success ? (res.config || {}) : {};
-  },
-  checkPlatformSession: async (args) => {
-    const res = await ipcRenderer.invoke('check-platform-session', args);
-    return res.success ? res : { platform: args.platformId, connected: false };
-  },
   openLoginWindow: async (args) => {
     // Pass the full IPC response through. Previously this bridge replaced
     // any !success response with a bare `{ success: false }`, dropping the
@@ -171,19 +141,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const res = await ipcRenderer.invoke('clear-browser-session');
     return res?.success ?? false;
   },
-
-  // ── Tier 4 Monitor Module ─────────────────────────────────────────────
-  // Human-assisted BrowserView monitors for hostile platforms (Facebook, etc.)
-  openMonitor: (args) => ipcRenderer.invoke('open-monitor', args),
-  startMonitoring: (args) => ipcRenderer.invoke('start-monitoring', args),
-  stopMonitor: (args) => ipcRenderer.invoke('stop-monitor', args),
-  reopenMonitor: (args) => ipcRenderer.invoke('reopen-monitor', args),
-  getMonitors: () => ipcRenderer.invoke('get-monitors'),
-  getMonitorData: (args) => ipcRenderer.invoke('get-monitor-data', args),
-
-  onMonitorDataChanged: createListener('monitor-data-changed'),
-  onMonitorSessionExpired: createListener('monitor-session-expired'),
-  onMonitorPaused: createListener('monitor-paused'),
 
   // ── AI Tools ────────────────────────────────────────────────────────────
   aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),

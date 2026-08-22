@@ -1,9 +1,10 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
+import { collapseEventBursts } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 
 export default [
@@ -54,7 +55,7 @@ export default [
         connected: true, outcome: 'retained-prior', inconclusive: true,
         reason: `Anti-bot wall at https://example.test/${'very-long-path/'.repeat(20)}`,
       });
-      assert(clipped.endsWith('…') && clipped.length < 180,
+      assert(clipped.endsWith('…') && clipped.length < 280,
         'bounded verification reasons mark truncation with an ellipsis instead of ending mid-token silently');
       assert(report.includes('skipped native read (prior: not connected) — native read owns login state'),
         'verification timing must distinguish an intentional native-read skip');
@@ -187,7 +188,107 @@ export default [
       assert(secondaryHard.markdown.includes('2 section(s) dropped: S10, S11')
         && secondaryHard.markdown.includes('"S9" cut mid-section'),
       'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
-      return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
+
+      // A single board re-combine tears down hundreds of uniquely-id'd nodes in
+      // a couple of milliseconds. Capture-time collapsers cannot merge unique
+      // ids, so those bursts arrive whole and can eat most of the retained-event
+      // budget; the clipboard path folds them at render time only.
+      const teardownStamp = 'board-6f7c1a2e-3b9d-4c05-8e21-0d4a7b6c9e13-1755820000000';
+      const burstTs = (i) => `12:00:${String(Math.floor(i / 100)).padStart(2, '0')}.${String(i % 100).padStart(3, '0')}`;
+      const teardownBurst = Array.from({ length: 300 }, (_, i) => `[${burstTs(i)}] node removed id=${teardownStamp}-job-${i}`);
+      const distinctEvents = Array.from({ length: 50 }, (_, i) => `[12:01:${String(i % 60).padStart(2, '0')}.000] DISTINCT-${i} unique canvas activity`);
+      const FOLD_SIGNATURE = /×\d+ \(id prefix/;
+
+      // Save to file is the uncapped artifact and the primary evidence for
+      // "my card disappeared" reports: every raw id must survive it verbatim.
+      const savedToFile = generateMarkdown({
+        description: 'Burst-fold save-to-file fidelity fixture.',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: teardownBurst,
+      }).markdown;
+      assert(teardownBurst.every((line) => savedToFile.includes(line)) && !FOLD_SIGNATURE.test(savedToFile),
+        'Save to file keeps every raw node-removed id: burst folding must never reach the uncapped export');
+
+      const roomyBurst = enforceClipboardMarkdownCap('# Bug Report\nbody\n', teardownBurst, logs, 1_000_000);
+      assert(!roomyBurst.truncated && teardownBurst.every((line) => roomyBurst.markdown.includes(line))
+        && !FOLD_SIGNATURE.test(roomyBurst.markdown),
+      'Clipboard cap: a report that fits keeps every id verbatim — folding is a last-resort transform');
+
+      const foldedEvents = [...teardownBurst, ...distinctEvents];
+      const folded = enforceClipboardMarkdownCap('# Bug Report\nbody\n', foldedEvents, [], cap);
+      assert(folded.markdown.length <= cap, `Clipboard cap: folded output must respect the cap (${folded.markdown.length} <= ${cap})`);
+      assert((folded.markdown.match(new RegExp(FOLD_SIGNATURE, 'g')) || []).length === 1
+        && folded.markdown.includes(`node removed ×${teardownBurst.length} (id prefix ${teardownStamp}-job-`),
+      'Clipboard cap: one structural teardown burst folds into exactly one run line');
+      assert(folded.markdown.includes(`first ${teardownStamp}-job-0`)
+        && folded.markdown.includes(`last ${teardownStamp}-job-${teardownBurst.length - 1}`),
+      'Clipboard cap: the fold line carries the full first/last ids that identify which tree was torn down');
+      assert(distinctEvents.every((line) => folded.markdown.includes(line)),
+        'Clipboard cap: folding repetitive churn buys room for every distinct event line');
+      assert(folded.markdown.includes(`${teardownBurst.length} repeated event line(s) from ${foldedEvents.length} captured line(s) were folded into 1 run line(s) before capping`),
+        'Clipboard cap: the banner states how many captured lines were folded into how many run lines');
+
+      const foldedFilterBase = '# Bug Report\n' + buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: foldedEvents.length, eventsTotal: foldedEvents.length, omittedSections: [] },
+      }) + '\n';
+      const foldedFull = enforceClipboardMarkdownCap(foldedFilterBase, foldedEvents, [], cap);
+      assert(foldedFull.markdown.includes(`event log selected all ${foldedEvents.length} line(s) before clipboard capping`)
+        && foldedFull.markdown.includes(`of ${foldedEvents.length} event line(s)`),
+      'Clipboard cap: the rewritten FULL summary counts raw captured lines, not folded run lines');
+
+      const foldedHard = enforceClipboardMarkdownCap(giantBase, foldedEvents, logs, cap);
+      assert(foldedHard.hardTruncated && foldedHard.markdown.length <= cap,
+        `Clipboard cap: a folded hard-cap report still respects the exact cap (${foldedHard.markdown.length} <= ${cap})`);
+      assert(foldedHard.markdown.includes('were folded into 1 run line(s) before capping'),
+        'Clipboard cap: the hard-cap banner also accounts for folded churn');
+
+      // Direct folding contracts: short runs, unrelated ids, verb boundaries and
+      // the non-structural allowlist all keep their lines verbatim.
+      const shortRun = teardownBurst.slice(0, 7);
+      const shortFold = collapseEventBursts(shortRun);
+      assert(shortFold.collapsedRuns === 0 && shortFold.foldedLineCount === 0
+        && JSON.stringify(shortFold.lines) === JSON.stringify(shortRun),
+      'Burst folding leaves a small deletion verbatim: every id of a 7-node teardown survives');
+
+      const unrelatedRemovals = Array.from({ length: 20 }, (_, i) =>
+        `[12:02:${String(i).padStart(2, '0')}.000] node removed id=${String.fromCharCode(97 + i)}${i}-node`);
+      const unrelatedFold = collapseEventBursts(unrelatedRemovals);
+      assert(unrelatedFold.collapsedRuns === 0
+        && JSON.stringify(unrelatedFold.lines) === JSON.stringify(unrelatedRemovals),
+      'Burst folding is data-driven: ids without a shared prefix are never summarized as one run');
+
+      const rebuildBurst = Array.from({ length: 10 }, (_, i) => `[12:03:00.${String(i).padStart(3, '0')}] node added id=${teardownStamp}-job-${i}`);
+      const verbBoundary = collapseEventBursts([...teardownBurst.slice(0, 10), ...rebuildBurst]);
+      assert(verbBoundary.collapsedRuns === 2 && verbBoundary.lines.length === 2
+        && verbBoundary.lines[0].includes('node removed ×10 ') && verbBoundary.lines[1].includes('node added ×10 '),
+      'Burst folding never merges across verbs: a teardown and the rebuild that follows stay separate runs');
+
+      const noisyLines = [
+        ...Array.from({ length: 30 }, (_, i) => `[12:04:${String(i % 60).padStart(2, '0')}.000] CONSOLE-ERROR render failed id=${teardownStamp}-job-${i}`),
+        ...Array.from({ length: 30 }, (_, i) => `[12:05:${String(i % 60).padStart(2, '0')}.000] [LocalAI] import rejected id=${teardownStamp}-job-${i}`),
+      ];
+      const noisyFold = collapseEventBursts(noisyLines);
+      assert(noisyFold.collapsedRuns === 0 && JSON.stringify(noisyFold.lines) === JSON.stringify(noisyLines),
+        'Burst folding is verb-allowlisted: error and module lines are never folded, however repetitive');
+
+      const firstFoldPass = collapseEventBursts([...teardownBurst, ...distinctEvents, ...rebuildBurst]);
+      const secondFoldPass = collapseEventBursts(firstFoldPass.lines);
+      assert(secondFoldPass.collapsedRuns === 0
+        && JSON.stringify(secondFoldPass.lines) === JSON.stringify(firstFoldPass.lines),
+      'Burst folding is idempotent: an emitted run line can never be folded again');
+
+      const orderedFold = collapseEventBursts([
+        '[12:06:00.000] viewport changed zoom=1.2',
+        ...Array.from({ length: 10 }, (_, i) => `[12:06:01.${String(i).padStart(3, '0')}] node removed id=${teardownStamp}-job-${i}`),
+        '[12:06:02.000] [JobSearch] combine finished',
+      ]);
+      assert(orderedFold.lines.length === 3
+        && orderedFold.lines[0].startsWith('[12:06:00.000]')
+        && orderedFold.lines[1].startsWith('[12:06:01.000–12:06:01.009] node removed ×10 ')
+        && orderedFold.lines[2].startsWith('[12:06:02.000]'),
+      'Burst folding preserves ordering: the run line carries its first timestamp between its neighbours');
+      return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount, foldedRuns: firstFoldPass.collapsedRuns };
     },
   },
 {
@@ -547,41 +648,6 @@ export default [
     },
   },
 {
-    name: 'Résumé one-page revision is structurally enforced when the editor ignores the cut',
-    run: () => {
-      const input = `<main class="page"><article class="role"><div class="role-meta"><p class="role-summary">Redundant summary.</p></div><ul class="highlights"><li>Strongest</li><li>Second</li><li>Weak third</li></ul></article><dl class="skills"><dt>Ops</dt><dd>One</dd><dt>Safety</dt><dd>Two</dd></dl></main>`;
-      const output = enforceOnePageRevisionStructure(input, 1);
-      const before = summarizeResumeMarkup(input);
-      const after = summarizeResumeMarkup(output);
-      assert(before.bullets === 3 && after.bullets === 2 && before.roleSummaries === 1 && after.roleSummaries === 0,
-        'one-page post-processing must cap each role at two bullets and remove redundant role summaries');
-      assert(enforceOnePageRevisionStructure(input, 2) === input,
-        'two-page targets must not receive the one-page structural cut');
-      assert(after.hash !== before.hash && after.chars < before.chars && after.skillRows === 2,
-        'revision diagnostics must prove a real structural change without deleting the Skills rows');
-      assert(!/role-meta/.test(output),
-        'a role-meta row emptied by the summary cut must be dropped, not left spending its margin on nothing');
-
-      // The shipped Allied Universal résumé kept a lone city in the second
-      // meta row: .meta-row is `1fr auto`, so the orphan sat in column one and
-      // right-aligned exactly one --col-gap (0.32in) short of the dates above.
-      const withLocation = `<main class="page"><article class="role"><div class="role-header meta-row"><p class="role-title-line"><span class="title">Security Officer</span></p><p class="role-dates"><time datetime="2024-10">Oct 2024</time> – <time>Present</time></p></div><div class="role-meta meta-row"><p class="role-summary">Cut me.</p><p class="role-location">Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article></main>`;
-      const folded = enforceOnePageRevisionStructure(withLocation, 1);
-      assert(!/role-meta/.test(folded) && !/role-location/.test(folded),
-        'a role-meta row left holding only a location must be folded away, not kept as a whole line');
-      assert(/class="role-dates"[^>]*>[\s\S]*?Present[\s\S]*?Memphis, TN[\s\S]*?<\/p>/.test(folded),
-        'the folded location must land in the dates cell, after the date range');
-      assert(summarizeResumeMarkup(folded).bullets === 1,
-        'folding the location must not disturb the bullets');
-
-      // A row still carrying a second cell is doing its job — leave it alone.
-      const twoCell = `<main class="page"><article class="role"><div class="role-header meta-row"><p class="role-dates">Oct 2024</p></div><div class="role-meta meta-row"><p class="role-scope">Kept</p><p class="role-location">Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article></main>`;
-      assert(/role-meta/.test(enforceOnePageRevisionStructure(twoCell, 1)),
-        'a populated two-cell meta row must survive the one-page cut');
-      return { before, after, folded: folded.length };
-  },
-},
-{
     name: 'Résumé retained roles always carry factual bullet evidence',
     run: () => {
       const summaryOnly = `<main class="page"><article class="role"><div class="role-header"><span class="title">Software Engineer</span><span class="company">FliteX</span></div><div class="role-meta"><p class="role-summary">Built shortest-path tooling and FAA data-sync automation.</p></div></article><article class="role"><span class="title">Data Engineer</span><span class="company">Horizon</span><ul class="highlights"><li>Built Python ETL pipelines.</li></ul></article></main>`;
@@ -761,18 +827,35 @@ export default [
       'résumé, planned-letter, direct-letter, and semantic-audit prompts must prevent and repair faulty grammatical parallelism');
       assert(source.includes('Treat breadth and frequency language as factual scope')
         && source.includes('detached-synthesis when a concluding or transitional sentence introduces a broader abstraction')
-        && source.includes('including across a paragraph boundary')
+        && source.includes('including a paragraph-opening demonstrative phrase whose referent the previous paragraph never establishes')
         && source.includes('For detached-synthesis, either rewrite the sentence as a concrete conclusion')
         && source.includes('For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means')
         && source.includes('every synthesis is explicitly tied to and scoped by its evidence'),
       'the independent audit and both revision paths must catch unsupported synthesis and ambiguous cross-paragraph references, then repair them concretely');
+      assert(source.includes('const LETTER_COHESION_RULE = `LETTER COHESION:')
+        && source.includes('${LETTER_REGISTER_RULE}\n\n${LETTER_COHESION_RULE}')
+        && source.includes('${LETTER_REGISTER_RULE} ${LETTER_COHESION_RULE}')
+        && source.includes('dangling-transition when a sentence announces a migration, move, or change')
+        && source.includes('unearned-causal when a causal connective such as “that is why,” “which is why,” or “so”')
+        && source.includes('literalized-frame when a rhetorical frame coined for the evidence')
+        && source.includes('For a dangling-transition observation, complete the movement in the same sentence')
+        && source.includes('For an unearned-causal observation, state the missing premise as its own sentence')
+        && source.includes('For a literalized-frame observation, rewrite the span to name the single posted role literally')
+        && source.includes('Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter')
+        && source.includes('For a legal-status observation, delete the citizenship, work-authorization, residency, or visa statement entirely'),
+      'planned-letter, direct-letter, audit, and both revision paths must prevent and repair dangling transitions, unearned causality, literalized frames, and letter-stated legal status');
       assert(source.includes('it is not permission to volunteer a weakness')
-        && source.includes('Do not use a colon to unload tools, systems, or achievements')
+        && source.includes('Do not unload tools, systems, or achievements after any punctuation mark — colon, semicolon, or dash')
+        && source.includes('const LETTER_REGISTER_RULE = `LETTER REGISTER:')
+        && source.includes('${PARALLEL_STRUCTURE_RULE}\n\n${LETTER_REGISTER_RULE}')
+        && source.includes('${PARALLEL_STRUCTURE_RULE} ${LETTER_REGISTER_RULE}')
+        && source.includes('For a stack-tools observation, keep the single most argument-relevant name')
+        && source.includes('For a punctuation or dash observation, split the clause into separate short sentences')
         && source.includes('never repeat an abstract metaphor across paragraphs as connective tissue')
         && source.includes('overloaded-sentence')
         && source.includes('repeated-metaphor')
         && source.includes('volunteered-gap'),
-      'cover-letter generation and semantic audit reject volunteered gaps, overloaded evidence lists, and repeated organizing metaphors');
+      'cover-letter generation and semantic audit reject volunteered gaps, overloaded evidence lists, and repeated organizing metaphors, and both letter writers carry the shared punctuation-agnostic register rule');
       const revisionPrompts = [
         buildResumeLengthRevisionPrompt({ mainHtml: '<main class="page"></main>', pageCount: 2, targetPageCount: 1, compactApplied: true }),
         buildResumeUnderfillRevisionPrompt({ mainHtml: '<main class="page"></main>', contentUtilization: 0.75, targetPageCount: 1 }),
@@ -3426,7 +3509,7 @@ export default [
 {
     name: 'scraper overlay: Trusted Types-safe construction remains inert on challenge documents',
     run: () => {
-      const script = buildOverlayScript({ withPause: true, cdpBridge: false });
+      const script = buildOverlayScript({ withPause: true });
       assert(!script.includes('innerHTML'),
         'overlay script never assigns or probes an HTML sink, so it cannot emit TrustedHTML errors');
       assert(script.includes("_icTitle.startsWith('just a moment')")
@@ -4011,6 +4094,44 @@ export default [
       // Stats path must not alter the returned union vs. the no-stats call.
       assert(unionScoredJobs([a, b]).length === out.length, 'stats: out-param does not change the result');
       return stats;
+  },
+},
+{
+    name: 'Job Board: equal-score duplicates only prefer compensation research in the identical market context',
+    run: () => {
+      const base = {
+        title: 'Engineer', company: 'Acme', url: 'https://jobs/acme/1', salary: '$80k–$100k', matchScore: 85,
+        compensationAssessment: {
+          schemaVersion: 1, status: 'not_evaluated',
+          offered: { min: 80_000, max: 100_000, currency: 'USD', period: 'annual' },
+          comparisonLocation: 'Austin, Texas, United States',
+        },
+      };
+      const researchedSameMarket = {
+        ...base,
+        originHubId: 'researched',
+        compensationAssessment: {
+          ...base.compensationAssessment,
+          status: 'competitive',
+          competitiveRange: { min: 95_000, max: 130_000, currency: 'USD', period: 'annual' },
+          justification: 'The maximum reaches the market floor.',
+        },
+      };
+      const stats = {};
+      const sameMarket = unionScoredJobs([[{ ...base, originHubId: 'first' }], [researchedSameMarket]], stats);
+      assert(sameMarket[0].originHubId === 'researched' && sameMarket[0].compensationAssessment.status === 'competitive'
+        && stats.collisionAssessmentUpgrades === 1,
+      'equal-score duplicates may retain a richer assessment only for the same offer and comparison market');
+
+      const differentMarket = {
+        ...researchedSameMarket,
+        originHubId: 'different-market',
+        compensationAssessment: { ...researchedSameMarket.compensationAssessment, comparisonLocation: 'Toronto, Ontario, Canada' },
+      };
+      const isolated = unionScoredJobs([[{ ...base, originHubId: 'first' }], [differentMarket]]);
+      assert(isolated[0].originHubId === 'first' && isolated[0].compensationAssessment.status === 'not_evaluated',
+        'a different remote residence/market must not be copied across duplicate jobs');
+      return { assessmentUpgrades: stats.collisionAssessmentUpgrades };
     },
   },
 {
@@ -4046,10 +4167,23 @@ export default [
       assert(moduleFingerprint([{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', reasoning: 'old reason' }])
           !== moduleFingerprint([{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', reasoning: 'new reason' }]),
         'fingerprint: card-visible reasoning changes invalidate a board');
-      assert(moduleFingerprint(null).startsWith('3:0:'), 'fingerprint: nullish → v3 empty fingerprint');
+      const assessed = [{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', compensationAssessment: {
+        schemaVersion: 1, status: 'below_market', reasonCode: 'offered_max_below_competitive_floor',
+        offered: { min: 80_000, max: 90_000, currency: 'USD', period: 'annual' },
+        competitiveRange: { min: 100_000, max: 120_000, currency: 'USD', period: 'annual' },
+        comparisonLocation: 'Austin, Texas, United States', justification: 'Below market.',
+        sourceLinks: [{ title: 'Survey', url: 'https://example.test', min: 100_000, max: 120_000, currency: 'USD' }],
+      } }];
+      const reassessed = [{ ...assessed[0], compensationAssessment: {
+        ...assessed[0].compensationAssessment, status: 'competitive', justification: 'At market.',
+      } }];
+      assert(moduleFingerprint(assessed) !== moduleFingerprint(reassessed),
+        'fingerprint: compensation verdict/explanation changes invalidate a board');
+      assert(moduleFingerprint(null).startsWith('4:0:'), 'fingerprint: nullish → v4 empty fingerprint');
       // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
       assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
-      assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe v3 baseline');
+      assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe current baseline');
+      assert(!isLegacyCombineSignature('hub-1=3:1:123'), 'v3 boards must be rechecked so compensation-aware v4 fingerprints can mark them stale');
       assert(!isLegacyCombineSignature(combineSignature([{ id: 'A', fingerprint: moduleFingerprint(a) }])),
         'current-format signature is not legacy');
       assert(!isLegacyCombineSignature('') && !isLegacyCombineSignature(null),
@@ -4588,26 +4722,21 @@ export default [
       bareDom.window.close();
       dom.window.close();
 
-      // The new short-letter treatment is root-only on a standalone cover,
-      // but Application.html carries both documents under one root. Its cover
-      // panel is marked and the injected tab logic toggles the root attribute
-      // only while that panel is active, so the résumé can never be centred.
-      const centeredStandalone = buildCoverLetterDocument({
+      // Cover letters remain top-aligned at every length. Neither a standalone
+      // document nor the combined workspace may retain the retired centring
+      // variant or its host marker.
+      const shortStandalone = buildCoverLetterDocument({
         letter: { name: 'X', paragraphs: ['Short note.'] },
-        variantAttrs: 'data-print="dual-pdf" data-letter="centered"',
+        variantAttrs: 'data-print="dual-pdf"',
       });
-      assert(/<html\b[^>]*data-letter="centered"[^>]*>/.test(centeredStandalone), 'cover: centred treatment must remain root-scoped');
-      const centeredWorkspace = buildResumeDocument({
+      assert(!shortStandalone.includes('data-letter'), 'cover: short standalone letters must remain top-aligned');
+      const shortWorkspace = buildResumeDocument({
         resumeMainHtml: '<main class="page"><h1 class="name">Résumé</h1></main>',
         variantAttrs: 'data-print="dual-pdf"',
         coverLetter: { name: 'X', paragraphs: ['Short note.'] },
-        coverLetterCentered: true,
       });
-      const workspaceRoot = /<html\b[^>]*>/.exec(centeredWorkspace)?.[0] || '';
-      assert(!workspaceRoot.includes('data-letter'), 'workspace: cover-only treatment must not be pinned on the shared root');
-      assert(centeredWorkspace.includes('<main data-ic-letter-centered class="page"'), 'workspace: centred cover panel must retain its host marker');
-      assert(centeredWorkspace.includes("setAttribute('data-letter', 'centered')"), 'workspace: cover tab must apply the root-only treatment');
-      assert(centeredWorkspace.includes("removeAttribute('data-letter')"), 'workspace: résumé tab must remove the cover-only treatment');
+      assert(!shortWorkspace.includes('data-letter'), 'workspace: retired letter centring variant must be absent');
+      assert(!shortWorkspace.includes('data-ic-letter-centered'), 'workspace: retired cover marker must be absent');
       return { ok: true };
     },
   }

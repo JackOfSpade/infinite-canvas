@@ -116,6 +116,15 @@ End-to-end, given candidate data + job description:
    name the responsibility or sequence it stands for in the same
    sentence.
 
+   **Facts are binding; source wording is not.** Preserve the evidence and its
+   scope while varying distinctive constructions across the résumé and cover
+   letter. Establish why a new employer, project, or period belongs before its
+   details; never use a temporal contrast such as “now” without stating the
+   contrasted state. Prefer common contemporary verbs (“closed the gap,” not
+   “answered the gap”), and avoid repeating an ordinary prior employer name
+   once the role or system is unambiguous. Narrow connective or causal language
+   entailed by the evidence is allowed for cohesion; new candidate facts are not.
+
    **The header subtitle** is `[current professional role] ·
    [highest completed degree], [institution]` — e.g. `Staff Engineer
    · B.S. Computer Science, Carnegie Mellon University`. Role in

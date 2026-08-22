@@ -6,6 +6,7 @@
 import { generateId } from './idGenerator.js';
 import { safeClone } from './navigationUtils.js';
 import { JOB_COLLECTION_LIMITS_DEFAULT } from './jobCollectionLimits.js';
+import { readLastRemoteResidences } from './jobSearchLocations.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that
@@ -61,7 +62,16 @@ function createGroupNode(position) {
 function createJobSearchNode(position, extra = {}) {
   return {
     id: generateId(), type: 'jobhub', position,
-    data: { hubState: 'empty', collectionLimits: { ...JOB_COLLECTION_LIMITS_DEFAULT }, ...extra },
+    // Only remote residences are carried into a new module. Search scope,
+    // target role, platforms, limits, and every other setting retain factory
+    // defaults so one search cannot silently steer the next.
+    data: {
+      hubState: 'empty',
+      collectionLimits: { ...JOB_COLLECTION_LIMITS_DEFAULT },
+      searchLocation: { city: '', subdivision: '', country: '', countryCode: null },
+      remoteResidences: readLastRemoteResidences(),
+      ...extra,
+    },
   };
 }
 

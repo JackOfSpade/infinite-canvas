@@ -2,15 +2,11 @@
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
-import fs from 'fs';
-import path from 'path';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import {
   openLoginWindow,
   getSessionStatus,
-  getAllSessionStatuses,
-  getSupportedPlatforms,
   getSellMonitorPlatforms,
   getSellMonitorConfig,
   getJobLoginPlatforms,
@@ -307,6 +303,32 @@ export async function verifySellMonitorLogin(platformId) {
     }
 
     const lastTrace = traces[traces.length - 1];
+    // The verdict below is a DEFAULT — no positive logged-in evidence, only the
+    // absence of negative signals. Those negative checks (login-URL redirect +
+    // the body sniff) are trustworthy only off a COMPLETED page read.
+    // fetchHtmlClean returns `response?.status() ?? 0` and response is null
+    // exactly when page.goto's timeout/ERR_ABORTED was swallowed: the main-frame
+    // navigation produced no response and page.content() read a partially built
+    // DOM, so a login form that had not painted yet cannot be sniffed. An
+    // unobserved status must therefore never UPGRADE to a fresh `connected` —
+    // same non-confirmable class as the >=400 guard above. Negative verdicts are
+    // unaffected: a status-0 read that DID redirect to /login or DID show a
+    // sign-in body already returned connected:false above, so a genuine logout
+    // is still caught definitively.
+    const unobserved = traces.find(t => !(t.status >= 200 && t.status < 400));
+    if (unobserved) {
+      return {
+        connected: false,
+        inconclusive: true,
+        reason: `No HTTP status observed at ${unobserved.finalUrl || unobserved.target} — the navigation produced no main-frame response (timed out or was aborted) and only ${unobserved.htmlBytes} bytes of a possibly partial DOM were read; cannot confirm the session, keeping prior status.`,
+        trace: {
+          target: targets[0], checks: traces, finalUrl: unobserved.finalUrl,
+          status: unobserved.status, htmlBytes: unobserved.htmlBytes, bodyHead: unobserved.bodyHead,
+          ...(unobserved.pageTitle ? { pageTitle: unobserved.pageTitle } : {}),
+          unobservedStatus: true,
+        },
+      };
+    }
     // Diagnostic-only (NEVER gates the verdict): connected here is a DEFAULT reached
     // because no negative check matched. For an SPA that client-renders its login form
     // over a generic SSR shell (Mercari at /mypage), the login bodySignal can race the
@@ -646,6 +668,12 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
         outcome: keepPrior ? 'retained-prior' : 'verified',
         reason: verdict.reason || null,
         inconclusive: !!verdict.inconclusive,
+        // The two facts that discriminate "login never persisted locally" from
+        // "platform invalidated the session server-side" / "we never reached the
+        // logged-in host". Computed by the verifier, so carry them onto the timing
+        // record instead of making the report re-derive them from prose.
+        authCookiePresent: verdict.trace?.authCookiePresent ?? null,
+        finalUrl: verdict.trace?.finalUrl ?? null,
       });
       logger.info(`[Accounts] Startup verify ${platformId}: ${keepPrior ? 'kept prior status' : (verdict.connected ? 'connected' : 'not connected')} (${ms}ms)`);
     } catch (e) {
@@ -703,6 +731,13 @@ const activeLoginFlows = new Map(); // platformId → Promise<verdict>
  * Register all Accounts IPC handlers.
  */
 export function registerAccountsHandlers() {
+  // Seed the disk-backed cache now, not just inside verifyAllPlatforms (which
+  // main.js delays by 2.5s so the renderer can mount first). Any handler below
+  // can be hit before that timer fires — without this, an early price check or
+  // job search would read an empty in-memory cache and treat a real prior
+  // session as logged out. Idempotent (_statusCacheLoaded guard).
+  loadPersistedStatusCache();
+
   // Current verification state — renderer calls this on mount to sync with
   // whatever state the startup verify has already reached before the window loaded.
   handleSafe('get-verify-state', async () => {
@@ -712,67 +747,6 @@ export function registerAccountsHandlers() {
         Object.entries(_statusCache).map(([id, v]) => [id, { connected: v.connected }])
       ),
     };
-  });
-
-  // Get CACHED session statuses — instant, no Chrome launch.
-  // Use this for panel display. The full (Chrome-based) check is get-session-statuses.
-  handleSafe('get-cached-session-statuses', async () => {
-    const cache = await readStatusCache();
-    const statuses = Object.entries(cache).map(([platform, v]) => ({
-      platform, connected: v.connected,
-    }));
-    return { statuses };
-  });
-
-  // Get system config status (Gemini, USAJobs, etc)
-  handleSafe('get-system-config-status', async () => {
-    let hasGemini = !!process.env.GEMINI_API_KEY;
-    if (!hasGemini) {
-      try {
-        const content = await fs.promises.readFile(path.join(process.cwd(), '.env'), 'utf8');
-        // Use a start-of-line anchor so commented-out lines (e.g. #GEMINI_API_KEY=) aren't matched.
-        hasGemini = /^GEMINI_API_KEY=/m.test(content);
-      } catch { /* env file absent */ }
-    }
-
-    let hasServiceAccount = false;
-    try {
-      await fs.promises.stat(path.join(process.cwd(), 'service-account.json'));
-      hasServiceAccount = true;
-    } catch { /* stat fails if absent */ }
-
-    return {
-      config: {
-        gemini:         { connected: hasGemini,          name: 'Gemini AI API' },
-        serviceAccount: { connected: hasServiceAccount,  name: 'Google Cloud Service Account' },
-      }
-    };
-  });
-
-  // Get list of supported platforms
-  handleSafe('get-platforms', async () => {
-    return { platforms: getSupportedPlatforms() };
-  });
-
-  // Get connection status for all platforms
-  handleSafe('get-session-statuses', async () => {
-    try {
-      const statuses = await getAllSessionStatuses();
-      return { statuses };
-    } catch (error) {
-      logger.error('[Accounts] Failed to check sessions:', error?.message || String(error));
-      return { statuses: [] };
-    }
-  });
-
-  // Check session for a SINGLE platform (fast — no login prompt)
-  handleSafe('check-platform-session', async (_event, { platformId }) => {
-    try {
-      return await getSessionStatus(platformId);
-    } catch (error) {
-      logger.error(`[Accounts] Session check failed for ${platformId}:`, error?.message || String(error));
-      return { platform: platformId, connected: false };
-    }
   });
 
   // Open a visible login window for a specific platform.
@@ -889,11 +863,6 @@ export function registerAccountsHandlers() {
 
   // ── Sell Monitor Auth (moved from marketplace.js — these are auth concerns) ──
 
-  // Returns which platforms need login for sell monitoring
-  handleSafe('get-sell-platforms', async () => {
-    return { platforms: getSellMonitorPlatforms() };
-  });
-
   // Before sell monitoring: check if the user is logged into the platform.
   // Returns { platform, connected, name, sellerUrl }
   //
@@ -923,10 +892,6 @@ export function registerAccountsHandlers() {
   });
 
   // ── Job Platform Auth ──────────────────────────────────────────────────────
-
-  handleSafe('get-job-platforms', async () => {
-    return { platforms: getJobLoginPlatforms() };
-  });
 
   // Check whether the user is logged into a job platform.
   // Truth source is the disk cache (same as sell monitor auth).

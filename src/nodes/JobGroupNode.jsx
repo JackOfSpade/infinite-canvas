@@ -152,10 +152,25 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
     EventLogger.log(`[JobTree] show more in role "${data.label}" id=${id} (now ${nextCount}/${liveCount})`);
   };
 
+  const onGroupKeyDown = (event) => {
+    // The leaf's "Show more" is its own button. Do not let Enter/Space on
+    // that control bubble up and also collapse the whole group.
+    if (event.target !== event.currentTarget || hubLocked || childIds.length === 0) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggle(event);
+  };
+
   return (
     <div
       onClick={toggle}
-      className={`w-[240px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden transition-all ${
+      onKeyDown={onGroupKeyDown}
+      role="button"
+      tabIndex={hubLocked || childIds.length === 0 ? -1 : 0}
+      aria-expanded={expanded}
+      aria-disabled={hubLocked || childIds.length === 0}
+      aria-label={`${expanded ? 'Collapse' : 'Expand'} ${data.label || 'job group'}`}
+      className={`w-[240px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300/70 ${
         hubLocked ? 'cursor-default' : 'cursor-pointer hover:brightness-110'
       }`}
       style={{ borderColor: accent.border }}

@@ -534,6 +534,12 @@ function buildForeignRegexes(targetCountry) {
  * match; remote is bucketed separately; a missing location field is "unknown".
  * `offBySource` tallies off-target jobs per source so the report can tell a
  * keyword-only/remote spillover apart from a real-param source's radius/leak.
+ * `matchedBySource` is its in-area mirror: a source that received no location
+ * param renders its location strings relative to the search itself, so knowing
+ * WHICH sources produced the in-area count is what separates corroboration from
+ * an echo. `foreignDetectable` names the only countries the off-target check can
+ * recognize (everything else lands in `unclear`), so a reader can bound what
+ * "0 off-target" is actually evidence of.
  * Returns null when no target location was set (nothing to adhere to).
  */
 export function summarizeLocationAdherence(jobs, canonical) {
@@ -569,7 +575,9 @@ export function summarizeLocationAdherence(jobs, canonical) {
   const countryRe = countryOnly ? buildCountryRegex(countryTarget) : null;
   const foreignRes = countryOnly ? buildForeignRegexes(countryTarget) : [];
   const stateRe = subCode ? buildStateRegex(subCode) : null;
-  const counts = { target: loc, country: countryOnly ? countryTarget : null, total: 0, matched: 0, remote: 0, offTarget: 0, unclear: 0, unknown: 0, offSamples: [], unclearSamples: [], offBySource: {}, unclearBySource: {} };
+  // foreignRes is empty outside country-membership mode, so a city/subdivision
+  // target claims no cross-border reach rather than implying one it doesn't have.
+  const counts = { target: loc, country: countryOnly ? countryTarget : null, total: 0, matched: 0, remote: 0, offTarget: 0, unclear: 0, unknown: 0, offSamples: [], unclearSamples: [], matchedBySource: {}, offBySource: {}, unclearBySource: {}, foreignDetectable: foreignRes.map(f => f.country) };
   for (const j of (Array.isArray(jobs) ? jobs : [])) {
     counts.total++;
     const src = j?.source || '?';
@@ -590,7 +598,7 @@ export function summarizeLocationAdherence(jobs, canonical) {
       // So: in-country token ⇒ in-area; a token from a DIFFERENT country we can
       // enumerate ⇒ off-target; neither ⇒ `unclear`, counted and reported as its
       // own bucket rather than folded into a leak figure.
-      if (countryRe.test(jl)) { counts.matched++; continue; }
+      if (countryRe.test(jl)) { counts.matched++; counts.matchedBySource[src] = (counts.matchedBySource[src] || 0) + 1; continue; }
       const foreign = foreignRes.find(f => f.re.test(jl));
       if (foreign) {
         counts.offTarget++;
@@ -613,6 +621,7 @@ export function summarizeLocationAdherence(jobs, canonical) {
         // the whole target is a lone country), so a city- or state-level target
         // still judges USAJobs on real location tokens.
         counts.matched++;
+        counts.matchedBySource[src] = (counts.matchedBySource[src] || 0) + 1;
       } else {
         counts.unclear++;
         counts.unclearBySource[src] = (counts.unclearBySource[src] || 0) + 1;
@@ -623,8 +632,10 @@ export function summarizeLocationAdherence(jobs, canonical) {
     // City / subdivision target: the token IS enumerable, so absence is evidence.
     const cityHit  = cityToken.length >= 3 && jl.includes(cityToken);
     const stateHit = stateRe && stateRe.test(jl);
-    if (cityHit || stateHit) counts.matched++;
-    else {
+    if (cityHit || stateHit) {
+      counts.matched++;
+      counts.matchedBySource[src] = (counts.matchedBySource[src] || 0) + 1;
+    } else {
       counts.offTarget++;
       counts.offBySource[src] = (counts.offBySource[src] || 0) + 1;
       if (counts.offSamples.length < 6) counts.offSamples.push(sample);

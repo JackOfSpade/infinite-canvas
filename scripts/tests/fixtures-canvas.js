@@ -1,6 +1,6 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobMatchesAnyRoleQuery, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 
-import { assessDetailSelection, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, createRunOwnershipGuard, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
+import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDetailSelection, buildDescriptionCardTargets, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
 
 export default [
 {
@@ -896,6 +896,70 @@ export default [
     },
   },
 {
+    // A jobhub saved mid-parse had its hubState rewritten to 'empty' while
+    // inputLocked survived, so it reloaded refusing new drops, claiming
+    // "Career files retained" with nothing retained, and hiding its Re-run
+    // button (no resumeProfile) — unrecoverable except by deleting the module.
+    name: 'migrateStaleJobHubInputLock (v5): a preflight lock with no career input behind it is cleared',
+    run: () => {
+      const stranded = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', inputLocked: true, targetRole: 'System Architect', preferredLocation: 'Canada' } };
+      const parsed = { id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', inputLocked: true, resumeProfile: { skills: [] } } };
+      const withPaths = { id: 'h3', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', inputLocked: true, careerFilePaths: ['/tmp/cv.pdf'] } };
+      const unlocked = { id: 'h4', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty' } };
+      const nonJobhub = { id: 'sell', type: 'sellhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', inputLocked: true } };
+      const nodes = [stranded, parsed, withPaths, unlocked, nonJobhub];
+
+      const out = migrateStaleJobHubInputLock(nodes);
+      assert(out !== nodes, 'migration: a stranded lock was present → new array ref');
+      const healed = out.find(n => n.id === 'h1');
+      assert(!('inputLocked' in healed.data), 'migration: a lock with no career input behind it is removed, not left false');
+      assert(healed.data.targetRole === 'System Architect' && healed.data.preferredLocation === 'Canada',
+        'migration: the hub keeps every configured field — only the stranded lock goes');
+      assert(out.find(n => n.id === 'h2') === parsed,
+        'migration: a hub that really parsed a profile stays locked (same ref) — its lock is backed by real career data');
+      assert(out.find(n => n.id === 'h3') === withPaths,
+        'migration: retained career file paths are career input, so that lock is genuine (same ref)');
+      assert(out.find(n => n.id === 'h4') === unlocked, 'migration: an unlocked hub has nothing to migrate (same ref)');
+      assert(out.find(n => n.id === 'sell') === nonJobhub,
+        'migration: a sellhub carrying the same-shaped flag is never touched — the gate is type==="jobhub"');
+
+      const out2 = migrateStaleJobHubInputLock(out);
+      assert(out2 === out, 'migration: idempotent — a second run over already-migrated nodes is a same-ref no-op');
+
+      assert(CURRENT_SCHEMA_VERSION >= 5, 'migration: schema version advanced to include the stranded-lock clear');
+      const nested = runNodeMigrations([{
+        id: 'grp-lock', type: 'group', position: { x: 0, y: 0 },
+        data: { canvasData: { nodes: [{ id: 'inner', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', inputLocked: true } }] } },
+      }], 4);
+      assert(!('inputLocked' in nested[0].data.canvasData.nodes[0].data),
+        'migration: the runner reaches a stranded hub nested inside a group sub-canvas');
+
+      // The healed hub is droppable again — the whole point of the migration.
+      assert(canHubAcceptInitialDrop({ type: 'jobhub', data: healed.data }),
+        'migration: after healing, the hub accepts a fresh career-file drop instead of dead-ending');
+      return { strandedCleared: true, genuineLocksKept: true };
+    },
+  },
+  {
+    name: 'sanitizeNodesForSave: a mid-parse jobhub does not persist its preflight drop lock',
+    run: () => {
+      const midParse = [{ id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'parsing', inputLocked: true, targetRole: 'System Architect' } }];
+      const saved = sanitizeNodesForSave(midParse)[0];
+      assert(saved.data.hubState === 'empty', 'save: a transient processing state is rewritten to empty');
+      assert(!('inputLocked' in saved.data),
+        'save: the preflight lock must not outlive the hubState that justified it — keeping it strands the hub');
+      assert(saved.data.targetRole === 'System Architect', 'save: configured fields survive the strip');
+      assert(canHubAcceptInitialDrop({ type: 'jobhub', data: saved.data }),
+        'save: the reloaded hub can accept career files again');
+
+      // A hub that finished parsing stays locked on its real career data.
+      const parsed = sanitizeNodesForSave([{ id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', inputLocked: true, resumeProfile: { skills: [] } } }])[0];
+      assert(!canHubAcceptInitialDrop({ type: 'jobhub', data: parsed.data }),
+        'save: stripping the flag never unlocks a hub whose resumeProfile already binds it');
+      return { lockNotPersisted: true };
+    },
+  },
+{
     name: 'migrateJobHubPageCeiling (v4): retired 10-page default resets to "All", explicit/already-null values are left alone',
     run: () => {
       const withOldDefault = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { collectionLimits: { jobsPerPlatform: null, pagesPerPlatform: 10 } } };
@@ -1335,6 +1399,169 @@ export default [
     },
   },
 {
+    name: 'Clearing a job hub\'s career files reopens it for a fresh drop while every search setting survives',
+    run: () => {
+      const parsed = {
+        hubState: 'empty',
+        inputLocked: true,
+        resumeProfile: {},
+        careerData: 'x',
+        resumeSummary: 's',
+        resumeFingerprint: 'f',
+        resumeContext: {},
+        filePath: '/a',
+        filePaths: ['/a'],
+        careerFilePaths: ['/a'],
+        achievements: {},
+        achievementsMining: 123,
+        queries: ['q'],
+        queryCacheKey: 'k',
+        queryModel: 'm',
+        queryCount: 1,
+        canonicalLocation: 'X',
+        targetRole: 'ROLE',
+        preferredLocation: 'LOC',
+        maxAgeDays: 7,
+        collectionLimits: {},
+        enabledSourceIds: ['indeed'],
+        batchScoring: true,
+      };
+      const patch = buildJobHubCareerClearPatch();
+      const merged = { ...parsed, ...patch };
+
+      assert(hubHasAcceptedInitialDrop({ type: 'jobhub', data: parsed }),
+        'the fixture must start as a hub that has accepted career files, or the clear assertions below prove nothing');
+      assert(!hubHasAcceptedInitialDrop({ type: 'jobhub', data: merged }),
+        'a cleared hub still reading as "already dropped" would keep rejecting the fresh career files the user is trying to add');
+      // Cross-check against the CONSUMERS, not just the reader: the drop lock and
+      // the drop-mode router are what actually gate the replacement drop.
+      assert(canHubAcceptInitialDrop({ type: 'jobhub', data: merged }),
+        'a cleared hub that cannot accept an initial drop leaves the user with a dead module and no way to swap career files');
+      assert(getHubFileDropMode({ type: 'jobhub', data: merged }) === 'initial-input',
+        'a cleared hub must route the next file drop as initial input, otherwise fresh career files land as nothing at all');
+
+      for (const settingKey of ['targetRole', 'preferredLocation', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
+        assert(!Object.prototype.hasOwnProperty.call(patch, settingKey),
+          `clearing career files must not touch ${settingKey} — wiping search settings defeats the point of clearing in place instead of rebuilding the module`);
+      }
+      assert(merged.targetRole === 'ROLE' && merged.preferredLocation === 'LOC' && merged.maxAgeDays === 7
+        && merged.enabledSourceIds.length === 1 && merged.batchScoring === true,
+      'a cleared hub that loses its role, location, age window or platform selection forces the user to re-enter every search setting');
+
+      // Career-derived caches: none of these are fingerprint-keyed, so a survivor
+      // is silently reused against the NEW files. achievements is the worst case —
+      // JobCardNode mines only when the ledger is absent, so a stale ledger would
+      // write new résumés from the old files' figures.
+      for (const cacheKey of ['achievements', 'achievementsMining', 'queries', 'queryCacheKey', 'queryModel', 'queryCount', 'canonicalLocation']) {
+        assert(patch[cacheKey] === null,
+          `clearing career files must null ${cacheKey} — it is derived from the old files with no fingerprint keying, so a survivor (the unkeyed achievements ledger above all) would silently seed the next run from the previous person's history`);
+      }
+
+      // Reader/writer drift guard: the patch (WRITER) must overwrite EVERY field
+      // the reader consults, each one on its own. The field list comes from the
+      // reader's own export so adding a field there fails here until the patch
+      // covers it; the patch keeps its literal spelling so this stays a real
+      // comparison rather than two views of the same array.
+      assert(patch.inputLocked === false,
+        'the clear patch must unlock the hub — inputLocked short-circuits the reader ahead of every identity field, so leaving it set keeps the hub refusing drops no matter what else is cleared');
+      for (const identityKey of JOBHUB_CAREER_IDENTITY_FIELDS) {
+        assert(Object.prototype.hasOwnProperty.call(patch, identityKey),
+          `the clear patch never writes ${identityKey}, so that field survives the clear and keeps the hub locked against replacement career files`);
+        assert(!hubHasAcceptedInitialDrop({ type: 'jobhub', data: { [identityKey]: patch[identityKey] } }),
+          `the clear patch writes a value for ${identityKey} that still reads as an accepted drop — it must be cleared, not merely rewritten`);
+      }
+      const identityFixtures = {
+        inputLocked: true,
+        ...Object.fromEntries(JOBHUB_CAREER_IDENTITY_FIELDS.map(field => [
+          field,
+          field.endsWith('Paths') ? ['/a'] : (field === 'resumeProfile' ? {} : '/a'),
+        ])),
+      };
+      for (const [identityKey, identityValue] of Object.entries(identityFixtures)) {
+        assert(hubHasAcceptedInitialDrop({ type: 'jobhub', data: { [identityKey]: identityValue } }),
+          `${identityKey} alone must read as an accepted drop, otherwise this drift guard is testing nothing`);
+        assert(!hubHasAcceptedInitialDrop({ type: 'jobhub', data: { [identityKey]: identityValue, ...patch } }),
+          `the clear patch does not cover ${identityKey}, so a hub carrying only that field stays permanently locked against a replacement drop`);
+      }
+      return { clearedKeys: Object.keys(patch).length, settingsKept: 6 };
+    },
+  },
+{
+    // Clearing must dismantle every latch that would otherwise wedge the hub:
+    // initialDropAcceptedRef is the likeliest — it is latched true by the
+    // identity effect and never reset by data changes, so a UI that reopens
+    // still bounces the drop inside acceptCareerFiles. The cancel quartet stops
+    // a late-settling parse from writing the old profile straight back, and the
+    // sidecar discards must read their tokens before updateGlobal nulls them.
+    name: 'Clearing career files tears down the refs, in-flight work and sidecars that would wedge the reopened job hub',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const clearStart = source.indexOf('const handleClearCareerFiles = useCallback');
+      assert(clearStart >= 0, 'the clear-career-files handler is missing, so the empty-state button cannot do anything');
+      const clearEnd = source.indexOf('const isProcessing = PROCESSING_STATES', clearStart);
+      assert(clearEnd > clearStart, 'the clear handler must sit before the render-phase code it is sliced against, or this contract silently checks the whole file');
+      const clear = source.slice(clearStart, clearEnd);
+
+      const guarded = [
+        ['initialDropAcceptedRef.current = false', 'the latched initial-drop ref would keep acceptCareerFiles bouncing every replacement drop'],
+        ['lastDroppedPathsRef.current = null', 'the previous files\' paths would let Re-run silently re-parse the cleared career files'],
+        ['buildJobHubCareerClearPatch()', 'the career identity and its derived caches would survive the clear'],
+        ['discardJobBatch', 'an abandoned batch sidecar would keep billing and could report results onto a cleared hub'],
+        ['discardJobRun', 'the staged run sidecar would linger and re-offer a resume for career files that are gone'],
+        ['setResumeOffer(null)', 'the resume banner would stay up offering to continue the very run this clear just discarded'],
+        ['epoch.bump()', 'a late-settling parse would write the old profile straight back onto the cleared hub'],
+        ['cancelNodeTask', 'the backend scrape would keep running and bounce the hub out of its cleared empty state'],
+        ['cancelQueuedRunsForNode', 'a queued module run would start against career files that no longer exist'],
+        ['addToast(', 'a clear refused because a run is in flight would be a silent dead button'],
+      ];
+      for (const [needle, consequence] of guarded) {
+        assert(clear.includes(needle), `clearing career files is missing ${needle}: ${consequence}`);
+      }
+
+      assert(clear.indexOf('const runId =') >= 0 && clear.indexOf('const runId =') < clear.indexOf('updateGlobal('),
+        'the run token must be captured before updateGlobal nulls pendingBatch/jobRunId, otherwise the recovery sidecars are orphaned on disk forever');
+
+      // peekJobRun/discardJobRun are keyed by canvasFilePath ALONE — one staged
+      // run per canvas — so the banner this hub happens to be showing may be
+      // another job hub's recoverable run.
+      assert(clear.includes('resumeOffer?.runId === runId'),
+        'the resume banner must only be dismissed when the offered run is the one this hub just discarded with its own token');
+      assert(!clear.includes('runId: resumeOffer'),
+        'clearing this hub must never discard the offered run by its own id: the offer is canvas-scoped, so that trashes a DIFFERENT hub\'s recoverable run');
+
+      // With the offer left standing, the Resume button is the only thing left
+      // to degrade — and handleResumeRun DESTROYS the staged run when either the
+      // profile or the run's queries are missing, so the button must not be
+      // offered without both.
+      assert(source.includes('const resumeRunActionable = canResumeOffer && hasReusableCareerProfile && ((resumeOffer?.queries?.length ?? 0) > 0)'),
+        'the Resume button is gated on location alone, so a run with no profile or no staged queries still offers Resume — and clicking it silently discards the very run it offered to recover');
+      assert(source.includes('{resumeRunActionable && <button'),
+        'the Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer');
+      assert(source.includes(' Start fresh — this run cannot be resumed from this module.')
+        && !source.includes('this hub no longer has career files'),
+      'the banner must report the observation (this run cannot be resumed here) rather than asserting a history a virgin hub never had — the offer is canvas-scoped and may come from another module entirely');
+      return { guardedBehaviours: guarded.length };
+    },
+  },
+{
+    // The other half of the clear: nothing may write the OLD files' derivatives
+    // back onto a hub that has since been cleared. A generation takes minutes,
+    // and the user is free to clear the hub while one is in flight.
+    name: 'A mined achievement ledger is only written back to the hub whose career data it was mined from',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const writeBackAt = source.indexOf('updateGlobal(originHubId, { achievements: result.achievements })');
+      assert(writeBackAt >= 0, 'the mined-ledger write-back is missing, so every application would re-mine the ledger from scratch');
+      const guard = source.slice(source.lastIndexOf('if (', writeBackAt), writeBackAt);
+      assert(guard.includes('getNode(originHubId)?.data?.careerData === careerData'),
+        'the ledger write-back only checks that the hub still exists, so a "Clear career files" (or a file swap) during the minutes-long generation lands the OLD files\' ledger on the cleared hub — and because the mine gate is just `!cachedAchievements`, every later résumé is then written from the previous files\' figures');
+      assert(source.indexOf('const careerData = originHub?.data?.careerData') >= 0
+        && source.indexOf('const careerData = originHub?.data?.careerData') < writeBackAt,
+      'the compared careerData must be the one this generation actually read and mined from, captured before the backend call');
+      return { writeBackGuarded: true };
+    },
+  },
+{
     name: 'Job Search cancellation keeps retained-profile rerun reachable and stale cleanup cannot unlock a newer run',
     run: () => {
       const guard = createRunOwnershipGuard();
@@ -1360,22 +1587,56 @@ export default [
         && emptyState.includes('hasReusableCareerProfile && !data.locked')
         && emptyState.includes('handleRerun();'),
       'only a locked empty hub with a retained profile exposes the existing rerun path');
+      assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
+        && emptyState.includes('Re-run with these files, or clear them to search with different ones')
+        && emptyState.includes('Clear career files')
+        && emptyState.includes('handleClearCareerFiles(e);'),
+      'a hub holding career files must offer the clear action, and a hub holding none must not claim files are retained');
+      // Both empty-state branches hide their actions while data.locked, so both
+      // must say so instead of naming buttons that aren't rendered or inviting a
+      // drop that handleDrop silently refuses.
+      assert(emptyState.includes('Unlock this module to re-run it or change its files'),
+        'a locked retained-files hub still tells the user to re-run or clear, but both buttons are hidden behind !data.locked — the instruction points at nothing');
+      assert(emptyState.includes('Module locked')
+        && emptyState.includes('Unlock it to drop career files'),
+      'a locked virgin hub falls through to the drop copy and invites a drop that handleDrop refuses without a word');
+
+      // The hub rests at 'done' after every successful run, so the clear action
+      // has to be reachable from there too — otherwise swapping career files
+      // costs a full Re-run + Reset just to reach the empty state.
+      assert(source.includes('onClearCareerFiles={handleClearCareerFiles}'),
+        'the done state never receives the clear action, so after a successful run the only way to swap career files is a wasted Re-run + Reset');
+      const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
+      assert(doneState.includes('onClearCareerFiles')
+        && /!locked && onClearCareerFiles/.test(doneState),
+      'the done state must render the clear action only when the hub is unlocked — the handler bails on data.locked, so a visible button there would be a dead click');
 
       const resetStart = source.indexOf('const resetHandler = useCallback');
       const resetEnd = source.indexOf('const handleRerun = useCallback', resetStart);
       const reset = source.slice(resetStart, resetEnd);
+      // The cleared-career literals now live in buildJobHubCareerClearPatch, so
+      // pin the call site here and assert the cleared values on the helper itself.
+      const cancelClearPatch = buildJobHubCareerClearPatch();
+      assert(cancelClearPatch.inputLocked === false,
+        'cancelling before a profile exists must unlock the hub, otherwise the drop lock strands it with nothing to rerun');
+      assert(cancelClearPatch.resumeProfile === null,
+        'cancelling before a profile exists must leave no half-parsed profile behind for the rerun action to trust');
+      assert(cancelClearPatch.careerData === null,
+        'cancelling before a profile exists must drop the parsed career text, otherwise a stale corpus feeds the next run');
       assert(reset.includes('processingRunsRef.current.cancel()')
         && /pendingJobs:\s*null/.test(reset)
         && /scrapeWarnings:\s*\[\]/.test(reset)
         && reset.includes('const retainedCareerData = hasReusableCareerProfile')
-        && reset.includes('inputLocked: false')
-        && reset.includes('resumeProfile: null')
-        && reset.includes('careerData: null')
+        && reset.includes('buildJobHubCareerClearPatch()')
         && reset.includes('...retainedCareerData')
         && reset.includes('initialDropAcceptedRef.current = hasReusableCareerProfile')
         && reset.includes('const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null')
         && reset.includes('discardJobRun?.({ canvasFilePath, runId: resetRunId })'),
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
+      // The presence checks above hold for either arm of the ternary; pin the
+      // DIRECTION separately.
+      assert(/hasReusableCareerProfile\s*\?\s*\{\}\s*:\s*buildJobHubCareerClearPatch\(\)/.test(reset),
+        'the cancel ternary is inverted: applying the clear patch when hasReusableCareerProfile is TRUE wipes the parsed profile exactly when it must be retained, leaving a cancelled hub with no career data and no rerun path');
 
       assert(canHubAcceptInitialDrop({
         type: 'jobhub',
@@ -1387,20 +1648,20 @@ export default [
       }), 'cancelling after profile extraction keeps the hub bound to its original career files');
 
       const rerunStart = source.indexOf('const handleRerun = useCallback');
-      const rerunEnd = source.indexOf('const isProcessing =', rerunStart);
+      // Anchored on the NEXT handler, not on the render-phase `isProcessing`:
+      // handlers added between the two would otherwise be swept into this slice
+      // and could satisfy the rerun contract on handleRerun's behalf.
+      const rerunEnd = source.indexOf('const handleClearCareerFiles', rerunStart);
+      assert(rerunEnd > rerunStart, 'the rerun slice must end at the next handler, or this contract silently checks unrelated code too');
       const rerun = source.slice(rerunStart, rerunEnd);
       assert(rerun.includes('effectivePaths.length === 0 && !data.resumeProfile')
         && rerun.includes('startProcessingWithProfile(data.resumeProfile'),
       'the retained-profile action re-enters the pipeline without requiring the cancelled run\'s file path');
 
-      const batchStart = source.indexOf('const cancelBatchScoring = useCallback');
-      const batchEnd = source.indexOf('Shared post-search disposition', batchStart);
-      const batchCancel = source.slice(batchStart, batchEnd);
-      assert(!/resumeProfile:\s*null/.test(batchCancel) && !/careerData:\s*null/.test(batchCancel),
-        'batch cancellation retains the career profile required by the rerun action');
-      assert(batchCancel.includes('const batchId = data.pendingBatch?.batchId || null')
-        && batchCancel.includes('discardJobBatch?.({ canvasFilePath, nodeId: id, batchId })'),
-      'batch cancellation scopes late sidecar cleanup to the abandoned batch');
+      assert(!source.includes('const cancelBatchScoring = useCallback')
+        && !source.includes('Economy scoring')
+        && source.includes("hubState === 'scoring-batch'"),
+      'new searches expose no batch-scoring controls while old submitted batches retain a narrow finalizer');
       const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       assert(jobsSource.includes('async function deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId = null } = {})')
         && jobsSource.includes('current?.batchId !== expectedBatchId')
@@ -1879,13 +2140,8 @@ export default [
         cappedCandidates,
         ['Systems Architect'],
       ).slice(0, 5);
-      const localDiagnosticMatches = cappedCandidates.filter(job =>
-        jobMatchesAnyRoleQuery(job, ['Systems Architect'])
-      );
       assert(providerRowsBeforeCap.map(job => job.title).join('|') === cappedCandidates.slice(0, 5).map(job => job.title).join('|'),
         'per-platform caps preserve provider order without a second local title gate');
-      assert(localDiagnosticMatches.length === 2,
-        'title matching remains available as diagnostics but does not control provider-result admission');
       const wholeFeedRows = [
         { title: 'Business Systems Architect', company: 'Acme', url: 'wwr-1' },
         { title: 'Enterprise Platform Systems Architect', company: 'Acme', url: 'wwr-2' },
@@ -2063,49 +2319,6 @@ export default [
         && splitPhraseRejection.required === 2
         && splitPhraseRejection.matched.join('|') === 'property|assistant',
       `relevance rejection diagnostics: disconnected title concepts are explicit, got ${JSON.stringify(splitPhraseRejection)}`);
-      const usaJobsRows = [
-        { title: 'Shipping and Receiving Assistant' },
-        { title: 'Dental Assistant - Expanded Function' },
-        { title: 'Traffic Management Specialist' },
-      ];
-      const usaJobsRelevant = filterUSAJobsByTitleRelevance(usaJobsRows, 'Shipping and Receiving Assistant');
-      assert(usaJobsRelevant.length === 1 && usaJobsRelevant[0].title === 'Shipping and Receiving Assistant',
-        'USAJobs: broad Keyword matches are narrowed to position-title relevance before they enter the cascade');
-      const propertyManagementRows = [
-        { title: 'Assistant Property Manager' },
-        { title: 'Housing Management Assistant' },
-        { title: 'TRANSPORTATION ASSISTANT (PERSONAL PROPERTY)' },
-      ];
-      const propertyManagementRelevant = filterUSAJobsByTitleRelevance(propertyManagementRows, 'Property Management Assistant');
-      assert(propertyManagementRelevant.map(row => row.title).join('|') === 'Assistant Property Manager|Housing Management Assistant',
-        'USAJobs: adjacent domain-role evidence keeps genuine property/housing-management variants but rejects disconnected “personal property” + “assistant” terms');
-      // A run rejected 53 of 58 USAJobs rows and the report showed only that count,
-      // so there was no way to tell a healthy gate from one starving the source.
-      // The rejected TITLES are the only signal, and they die with the fetcher —
-      // so sample them there. Mirrors fetchUSAJobs' object-identity diff exactly;
-      // URL membership would misclassify missing or duplicate URLs.
-      const sampleRows = [
-        { title: 'Patient Representative', url: 'u1' },
-        { title: 'Supervisory Wildlife Biologist', url: 'u2' },
-        { title: 'Motor Vehicle Operator', url: 'u3' },
-      ];
-      const sampleKept = filterUSAJobsByTitleRelevance(sampleRows, 'Patient Services Representative');
-      const keptRows = new Set(sampleKept);
-      const rejectedTitles = sampleRows.filter(j => !keptRows.has(j)).map(j => j.title).slice(0, 8);
-      assert(rejectedTitles.length === 2 && !rejectedTitles.includes('Patient Representative'),
-        `rejected sample carries only the discarded titles, got ${JSON.stringify(rejectedTitles)}`);
-      assert(rejectedTitles.includes('Supervisory Wildlife Biologist'),
-        'an off-target federal title must appear in the rejected sample so an over-strict gate is visible');
-      const urlEdgeRows = [
-        { title: 'Patient Representative', url: '' },
-        { title: 'Wildlife Biologist', url: '' },
-        { title: 'Patient Services Representative', url: 'shared' },
-        { title: 'Motor Vehicle Operator', url: 'shared' },
-      ];
-      const urlEdgeKept = new Set(filterUSAJobsByTitleRelevance(urlEdgeRows, 'Patient Services Representative'));
-      const urlEdgeRejected = urlEdgeRows.filter(j => !urlEdgeKept.has(j)).map(j => j.title);
-      assert(urlEdgeRejected.join('|') === 'Wildlife Biologist|Motor Vehicle Operator',
-        `missing/duplicate URLs cannot corrupt the rejected-title sample, got ${JSON.stringify(urlEdgeRejected)}`);
       assert(jobRelevanceMatch('Maintenance Tech', 'Maintenance Technician', new Set())
         && jobRelevanceMatch('Building Maintenance Tech I or II', 'Maintenance Technician', new Set())
         && jobRelevanceMatch('General Trades Maintenance Worker', 'Maintenance Technician', new Set())
@@ -2143,7 +2356,7 @@ export default [
         && finalGateSources.glassdoor.jobs.length === 2
         && !finalGateSources.indeed.relevanceDropped,
       'provider-ranked results survive local title wording in explicit-role and generated-query runs');
-      return { geoTerms: [...geoTerms].sort(), fallback: true, rejectedTitles };
+      return { geoTerms: [...geoTerms].sort(), fallback: true };
     },
   },
 {

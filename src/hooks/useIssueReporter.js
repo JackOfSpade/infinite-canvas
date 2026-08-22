@@ -281,7 +281,7 @@ export function useIssueReporter({
               description: res.hardTruncated
                 ? `Report copied with ${hardCapOmissions} omitted. Save to file for the full report.`
                 : res.truncated
-                  ? 'Report copied with the oldest timeline entries omitted to fit the clipboard cap. Save to file for the full report.'
+                  ? 'Report copied with repeated or oldest timeline entries condensed to fit the clipboard cap. Save to file for the full report.'
                   : 'Report copied to clipboard.',
               type: "success",
             });
@@ -309,7 +309,8 @@ export function useIssueReporter({
     }
   }, [
     nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile,
-    hasUnsavedChanges, navigationDepth, snapToGrid, addToast, getViewport, isMountedRef
+    hasUnsavedChanges, navigationDepth, snapToGrid, addToast, getViewport, isMountedRef,
+    enumerateAllNodes
   ]);
 
   return { handleIssueSubmit };

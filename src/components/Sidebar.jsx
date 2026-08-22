@@ -70,11 +70,6 @@ export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubs
                 title={tab.label}
               >
                 <Icon size={18} />
-                {tab.badge && (
-                  <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] rounded-full bg-blue-500 text-white text-[9px] font-bold flex items-center justify-center px-0.5 badge-bounce">
-                    {tab.badge}
-                  </span>
-                )}
               </button>
             </React.Fragment>
           );

@@ -24,6 +24,20 @@ const JOBSEARCH_TRANSIENT_KEYS = [
   // with this marker still set would wedge the hub into permanently skipping
   // its own mine, since a stale marker reads as "someone else is mining."
   'achievementsMining',
+  // Preflight drop lock, set the instant a career-file drop is accepted and
+  // BEFORE parsing has produced a profile. It exists to reject a second drop
+  // during that window, which is a within-session concern only.
+  //
+  // It has to be stripped here because saving mid-parse already rewrites
+  // hubState to 'empty' (TRANSIENT_PROCESSING_HUB_STATES, applied a few lines
+  // down in sanitizeNodesForSave). Keeping the lock while discarding the state
+  // that justified it reloads a hub that refuses new drops, reports "Career
+  // files retained" when nothing was retained, and hides its own Re-run button
+  // because no resumeProfile ever landed — no route forward but deleting the
+  // module. A hub that genuinely finished parsing stays locked on its
+  // resumeProfile/careerData/filePaths, which hubHasAcceptedInitialDrop checks
+  // independently, so nothing that should stay locked is unlocked by this.
+  'inputLocked',
 ];
 
 const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [

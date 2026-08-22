@@ -371,6 +371,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // out-of-area role is either that source's own search radius (e.g. Dice
         // +30mi → metro suburbs, which are on-target in practice) or a genuine
         // leak — don't hand-wave it as "keyword-only".
+        // Shared by the off-target attribution AND the in-area caveat below:
+        // "soft" means the source never received a location param, so its
+        // location strings are the provider's own rendering either way.
+        const isSoft = (id) => /keyword-only|best-effort|remote board|global remote/i.test(loc.perSource?.[id] || '');
         let offFlag = '';
         if (ad.offTarget > 0) {
           if (ad.country) {
@@ -380,7 +384,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             // no country signal at all land in `unclear` below instead.
             offFlag = ` — ⚠️ ${ad.offTarget} provably OUTSIDE ${ad.country} (cross-border leak; check the samples below)`;
           } else {
-            const isSoft = (id) => /keyword-only|best-effort|remote board|global remote/i.test(loc.perSource?.[id] || '');
             const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
             offFlag = hard.length > 0
               ? ` — ⚠️ ${ad.offTarget} OUT-OF-AREA, incl. from real-param source(s) [${hard.join(', ')}] — likely that source's own search radius (e.g. Dice +30mi → nearby metro suburbs) or a genuine leak; check the samples below`
@@ -391,9 +394,30 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // so the reader doesn't read 50% as a city-level miss (it isn't).
         const scopeNote = ad.country ? ` (in-area = anywhere in ${ad.country})` : '';
         const unclearPart = ad.unclear > 0 ? `, ${ad.unclear} unclear` : '';
-        lines.push(`- Location adherence over ${ad.total} kept job(s)${scopeNote}: ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target${unclearPart}, ${ad.unknown} no-location${offFlag}`);
+        // "remote-by-location", not "remote": this bucket counts LOCATION FIELDS
+        // carrying a remote token (plus remote-only boards), which is not a census
+        // of remote-eligible roles — a listing whose work arrangement lives only
+        // in its title or description is not in it.
+        lines.push(`- Location adherence over ${ad.total} kept job(s)${scopeNote}: ${ad.matched} in-area (${pct}%), ${ad.remote} remote-by-location, ${ad.offTarget} off-target${unclearPart}, ${ad.unknown} no-location${offFlag}`);
         if (ad.country) {
-          lines.push(`  - ℹ️ Country-level target — "in-area" just means inside ${ad.country}. Search a city/province (e.g. "Toronto, Ontario") to tighten results and get city-level adherence.`);
+          // State the detector's reach with the figure it qualifies. We can only
+          // enumerate subdivisions for the countries in foreignDetectable, so a
+          // listing naming any other country lands in `unclear` and can never
+          // reach the off-target count.
+          const detectable = Array.isArray(ad.foreignDetectable) ? ad.foreignDetectable : [];
+          const reach = detectable.length > 0
+            ? ` Cross-border detection covers ${detectable.join(', ')} only — a listing naming any other country lands in "unclear", so "0 off-target" means "no ${detectable.join('/')} token seen", not "no foreign listings".`
+            : '';
+          lines.push(`  - ℹ️ Country-level target — "in-area" just means inside ${ad.country}. Search a city/province (e.g. "Toronto, Ontario") to tighten results and get city-level adherence.${reach}`);
+        }
+        // An in-area figure sourced entirely from location-param-less platforms is
+        // an echo of the query, not corroboration of it: the same run produced one
+        // listing fanned across five distinct locality cards, and a "Canada" stamp
+        // on a posting whose title named a German city.
+        const matchedSources = Object.keys(ad.matchedBySource || {});
+        if (pct >= 90 && matchedSources.length > 0 && matchedSources.every(isSoft)) {
+          const targetLabel = ad.country || ad.target;
+          lines.push(`  - ⚠️ ${pct}% in-area rests entirely on keyword-only source(s) [${matchedSources.join(', ')}] that take no location parameter — their location strings come from the provider's own search-results rendering, so a high in-area figure is not independent confirmation of location targeting. Read it as "${ad.matched} location string(s) carried a ${targetLabel} token".`);
         }
         if (ad.unclear > 0) {
           // Deliberately NOT counted as a leak. We can enumerate a country's
@@ -549,6 +573,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // API/feed sources don't paginate. If a source matched more than it
       // surfaced, its per-platform Jobs setting truncated that run. `gathered`
       // is set only for API sources; > count = truncated.
+      // NOTE: `finalRelevanceDropped` has had no live producer since the final
+      // title-relevance gate was removed (provider-trust admission is
+      // deliberate) — jobs.js no longer emits it, so these reads only ever see
+      // it in synthetic/fixture telemetry. Kept so an older saved report still
+      // renders, not because a scrape can still set it.
       const capOverflowFor = (v) => Number.isFinite(v.capOverflow)
         ? Math.max(0, v.capOverflow)
         : Math.max(0, Number(v.gathered || 0) - Number(v.count || 0) - Number(v.finalRelevanceDropped || 0));
@@ -1496,7 +1525,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // Cooldown observations are valid only within one observed IP/browser
     // identity. Never pair a wall on IP A with a clean result on IP B: that
     // would mistake a changed egress for elapsed-time recovery.
-    const fmtGap2 = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
     const cooldownByIdentity = new Map();
     let previousActual = null;
     for (const e of enrichTrail) {
@@ -1524,11 +1552,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const walledBelow = sample.walled.filter(wait => wait < minClean);
         const identity = `IP ${sample.ip}, browser#${sample.browserGen}`;
         if (walledBelow.length > 0) {
-          const loStr = fmtGap2(Math.max(...walledBelow));
-          const hiStr = fmtGap2(minClean);
+          const loStr = fmtGap(Math.max(...walledBelow));
+          const hiStr = fmtGap(minClean);
           lines.push(`- 🧊 **Cooldown on ${identity}: between ${loStr} and ${hiStr}.** A same-IP/browser retry still walled after ${loStr}, then one finished clean after ${hiStr}.`);
         } else {
-          lines.push(`- 🧊 **Cooldown on ${identity}: ≤ ${fmtGap2(minClean)}.** A same-IP/browser retry finished clean after that idle; test shorter waits to tighten the bound.`);
+          lines.push(`- 🧊 **Cooldown on ${identity}: ≤ ${fmtGap(minClean)}.** A same-IP/browser retry finished clean after that idle; test shorter waits to tighten the bound.`);
         }
       }
     } else if (realPasses.some(e => e.walled || (e.noDescSoftBlock || 0) > 0)) {
@@ -1541,7 +1569,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (cd.running) {
         lines.push(`- ⏳ **Cooldown probe in progress** — ${cd.attempts} attempt(s) so far${cd.aborted ? ' (aborted)' : ''}.`);
       } else if (cd.foundMs != null) {
-        lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap2(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap2(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
+        lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
       } else if (cd.identityChanged || cd.identityUnverified) {
         const expected = cd.expectedIdentity?.ip
           ? `expected IP ${cd.expectedIdentity.ip}, browser#${cd.expectedIdentity.browserGen ?? '?'}`
@@ -1556,7 +1584,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`- ⏹️ **Cooldown probe aborted** after ${cd.attempts} attempt(s) — no clearing wait found yet.`);
       } else {
         const maxMs = Array.isArray(cd.waitsMs) && cd.waitsMs.length ? Math.max(...cd.waitsMs) : 0;
-        lines.push(`- ❌ **Cooldown probe exhausted** ${cd.attempts} attempt(s) (idle waits up to ${fmtGap2(maxMs)}) without clearing — the cooldown is longer than that, or idle alone won't clear it (try a longer schedule / Reset browser session / residential IP).`);
+        lines.push(`- ❌ **Cooldown probe exhausted** ${cd.attempts} attempt(s) (idle waits up to ${fmtGap(maxMs)}) without clearing — the cooldown is longer than that, or idle alone won't clear it (try a longer schedule / Reset browser session / residential IP).`);
       }
     }
     // Residual verdict — the durable answer to "did we get every description?".
@@ -2006,6 +2034,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
     }[ach.source] || ach.source || 'unknown';
     lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.suppressedWeakened ? ` · ${ach.suppressedWeakened} refute-weakened item(s) withheld from application prompts` : ''}${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
+    // These are sub-bullets OF the ledger line above, so they have to be pushed
+    // here — emitted after the résumé-render block below they would nest under
+    // whichever render bullet happened to be last.
+    if (ach.stats) {
+      const s = ach.stats;
+      lines.push(`  - mined ${s.mined ?? 0} → dropped-by-refute ${s.droppedByRefute ?? 0}, demoted-by-check ${s.demotedByCheck ?? 0}, evidence-misses ${s.evidenceMisses ?? 0}`);
+      // claim-figure-leaks (§3.2 telemetry, achievementLedger.js) never demotes
+      // confidence and touches no other counter above — without its own line
+      // a miner that leaked a self-computed figure into `claim` text would be
+      // invisible in every report despite the check running and catching it.
+      // date/direction misses surfaced alongside it for the same reason: both
+      // are advisory-only (never gate, per computeLedger's doc-comment) so
+      // neither shows up anywhere else either.
+      lines.push(`  - claim-figure-leaks ${s.claimFigureLeaks ?? 0}, date-misses ${s.dateMisses ?? 0}, direction-misses ${s.directionMisses ?? 0}`);
+    }
+    if (ach.skipped) lines.push(`  - ⚠️ ${ach.skipped}`);
     // Local render → page-count → fit loop (jobApplication.js's
     // renderResumeWithFit / resumeRender.js, SKILL.md §5) — the only place a
     // "why did I get a 2-page résumé" or "why is there no PDF" question is
@@ -2078,19 +2122,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
       if (!r.baselinePdfProduced && r.baselinePdfError) lines.push(`  - ⚠️ ${String(r.baselinePdfError).replace(/`/g, "'").slice(0, 300)}`);
     }
-    if (ach.stats) {
-      const s = ach.stats;
-      lines.push(`  - mined ${s.mined ?? 0} → dropped-by-refute ${s.droppedByRefute ?? 0}, demoted-by-check ${s.demotedByCheck ?? 0}, evidence-misses ${s.evidenceMisses ?? 0}`);
-      // claim-figure-leaks (§3.2 telemetry, achievementLedger.js) never demotes
-      // confidence and touches no other counter above — without its own line
-      // a miner that leaked a self-computed figure into `claim` text would be
-      // invisible in every report despite the check running and catching it.
-      // date/direction misses surfaced alongside it for the same reason: both
-      // are advisory-only (never gate, per computeLedger's doc-comment) so
-      // neither shows up anywhere else either.
-      lines.push(`  - claim-figure-leaks ${s.claimFigureLeaks ?? 0}, date-misses ${s.dateMisses ?? 0}, direction-misses ${s.directionMisses ?? 0}`);
-    }
-    if (ach.skipped) lines.push(`  - ⚠️ ${ach.skipped}`);
     // Skill-opportunity analysis (jobApplication.js's analyzeSkillOpportunities
     // → resumeHtml.js's injectInferredSkills) — the one place a "why did this
     // verified skill file under the wrong Skills heading" question is
@@ -2138,7 +2169,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - needs evidence source: ${needsSource}`);
       if (cl.needsError) lines.push(`  - needs observation: ${String(cl.needsError).replace(/\s+/g, ' ').slice(0, 300)}`);
       if (cl.planRetryReason) lines.push(`  - plan retry observation: ${String(cl.planRetryReason).replace(/\s+/g, ' ').slice(0, 500)}`);
-      if (cl.revisionError) lines.push(`  - revision observation: ${String(cl.revisionError).replace(/\s+/g, ' ').slice(0, 300)}`);
       lines.push(`  - checks: ${checks.length - unmet.length}/${checks.length} passed${unmet.length ? ` · ${unmet.length} unmet` : ''}`);
       for (const check of unmet.slice(0, 8)) {
         lines.push(`    - ${String(check?.id || 'unknown').slice(0, 80)}: ${String(check?.detail || '').replace(/\s+/g, ' ').slice(0, 500)}`);

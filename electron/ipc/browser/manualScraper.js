@@ -994,7 +994,7 @@ async function recoverFromChallengeHomeLanding(page, overlayBase, signal, resume
 // Runtime.addBinding that anti-bots (DataDome on Wellfound) fingerprint, so the
 // button only toggles the page-local window.__icPaused; the Node side reads it by
 // POLLING (waitIfPaused) and re-asserts it after navigations (injectOverlay).
-const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true, cdpBridge: false });
+const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true });
 
 async function injectOverlay(page) {
   await page.evaluate(OVERLAY_SCRIPT).catch(() => {});
@@ -3047,64 +3047,75 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
   });
 
   const page = await browser.newPage();
-  await applyStealthMask(page);
-
-  // Capture browser-side console errors/warnings for the bug report. Fires for all
-  // frames (challenge-page + Turnstile frames included). error/warning only.
-  page.on('console', msg => {
-    const type = msg.type();
-    if (type !== 'error' && type !== 'warning') return;
-    const loc = msg.location();
-    if (isIgnorableManualBrowserTelemetry({ url: loc?.url || '', text: msg.text() })) return;
-    manualScraperTelemetry.consoleLogs.push({
-      ts: Date.now(),
-      type,
-      text: msg.text().slice(0, 300),
-      url: (loc?.url || '').slice(0, 120),
-      line: loc?.lineNumber ?? null,
-    });
-    if (manualScraperTelemetry.consoleLogs.length > 60) manualScraperTelemetry.consoleLogs.shift();
-  });
-
-  // Capture hard network failures (DNS, TCP, TLS, COEP, etc.)
-  page.on('requestfailed', req => {
-    const url = req.url();
-    if (isIgnorableManualBrowserTelemetry({ url })) return;
-    manualScraperTelemetry.networkErrors.push({
-      ts: Date.now(),
-      method: req.method(),
-      url: url.slice(0, 200),
-      status: null,
-      errorText: req.failure()?.errorText || 'unknown',
-    });
-    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
-  });
-
-  // Tracks the status code of the most recent main-frame document response — lets
-  // the SITE_CHANGED branch tell "200 but selectors stale" from "403 block page".
+  // Everything below, up to the overlay injection, runs against the browser we
+  // just launched. The caller's `platform` bundle isn't assigned until this
+  // function returns, so a throw here (protocol error, hung renderer right
+  // after launch) would otherwise leave nothing holding a reference to close
+  // it — the just-spawned Chrome leaks and keeps the shared userDataDir's
+  // SingletonLock held for every source after this one.
   const navStatusRef = { last: null };
-  page.on('response', res => {
-    const status = res.status();
-    try {
-      if (res.request().resourceType() === 'document' && res.frame() === page.mainFrame()) {
-        navStatusRef.last = status;
-      }
-    } catch { /* frame may be detached on rapid navigations — skip */ }
-    if (status < 400) return;
-    const url = res.url();
-    if (isIgnorableManualBrowserTelemetry({ url })) return;
-    manualScraperTelemetry.networkErrors.push({
-      ts: Date.now(),
-      method: res.request().method(),
-      url: url.slice(0, 200),
-      status,
-      errorText: null,
-    });
-    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
-  });
+  try {
+    await applyStealthMask(page);
 
-  // Inject overlay on every new document so it survives navigations
-  await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+    // Capture browser-side console errors/warnings for the bug report. Fires for all
+    // frames (challenge-page + Turnstile frames included). error/warning only.
+    page.on('console', msg => {
+      const type = msg.type();
+      if (type !== 'error' && type !== 'warning') return;
+      const loc = msg.location();
+      if (isIgnorableManualBrowserTelemetry({ url: loc?.url || '', text: msg.text() })) return;
+      manualScraperTelemetry.consoleLogs.push({
+        ts: Date.now(),
+        type,
+        text: msg.text().slice(0, 300),
+        url: (loc?.url || '').slice(0, 120),
+        line: loc?.lineNumber ?? null,
+      });
+      if (manualScraperTelemetry.consoleLogs.length > 60) manualScraperTelemetry.consoleLogs.shift();
+    });
+
+    // Capture hard network failures (DNS, TCP, TLS, COEP, etc.)
+    page.on('requestfailed', req => {
+      const url = req.url();
+      if (isIgnorableManualBrowserTelemetry({ url })) return;
+      manualScraperTelemetry.networkErrors.push({
+        ts: Date.now(),
+        method: req.method(),
+        url: url.slice(0, 200),
+        status: null,
+        errorText: req.failure()?.errorText || 'unknown',
+      });
+      if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+    });
+
+    // Tracks the status code of the most recent main-frame document response — lets
+    // the SITE_CHANGED branch tell "200 but selectors stale" from "403 block page".
+    page.on('response', res => {
+      const status = res.status();
+      try {
+        if (res.request().resourceType() === 'document' && res.frame() === page.mainFrame()) {
+          navStatusRef.last = status;
+        }
+      } catch { /* frame may be detached on rapid navigations — skip */ }
+      if (status < 400) return;
+      const url = res.url();
+      if (isIgnorableManualBrowserTelemetry({ url })) return;
+      manualScraperTelemetry.networkErrors.push({
+        ts: Date.now(),
+        method: res.request().method(),
+        url: url.slice(0, 200),
+        status,
+        errorText: null,
+      });
+      if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+    });
+
+    // Inject overlay on every new document so it survives navigations
+    await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
 
   let closed = false;
   let intentional = false;
@@ -3273,7 +3284,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         const task = sourceTasks[qi];
 
         const overlayBase = {
-          srcLabel: `Source ${si + 1} of ${sourceList.length}`,
+          srcLabel: `Source ${displayIndex} of ${displayTotal}`,
           srcName,
           qLabel:   `Query ${qi + 1} of ${sourceTasks.length}`,
           qText:    task.query || '',
@@ -3644,7 +3655,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             detailResult = { jobs: jobsToExpand, descError: null, descWarning: null, expandedCount: 0 };
           } else {
             detailResult = await expandDescriptions(
-              page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + newJobs.length, signal, walkPlan,
+              page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal, walkPlan,
             );
           }
           const { jobs: enhanced, descError, descWarning, expandedCount } = detailResult;

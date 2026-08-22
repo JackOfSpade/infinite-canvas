@@ -67,7 +67,11 @@ export function pageTextMeasurementExpression() {
   return [
     '(function () {',
     '  try {',
-    "    var page = document.querySelector('main.page');",
+    // A combined workspace keeps both documents' <main.page> in the DOM at
+    // once, with the inactive one `hidden`. Falling back to the bare
+    // selector keeps this working for a standalone document, which has no
+    // [data-ic-document-panel] wrapper at all.
+    "    var page = document.querySelector('[data-ic-document-panel]:not([hidden]) main.page') || document.querySelector('main.page');",
     '    if (!page) return null;',
     '    var pageStyle = getComputedStyle(page);',
     "    var minPageHeight = parseFloat(pageStyle.minHeight || '0');",

@@ -7,6 +7,7 @@ export function JobSearchProcessingState({
   hubState,
   totalSourceJobs,
   scoringProgress,
+  compensationProgress,
   resumeSummary,
   activeSourceId,
   onReset,
@@ -73,7 +74,11 @@ export function JobSearchProcessingState({
       )}
       <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
       <p className="text-white/60 text-xs font-medium">
-        {hubState === 'searching' && activeSourceId ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...` : statusLabel}
+        {compensationProgress?.total > 0
+          ? 'Researching compensation...'
+          : hubState === 'searching' && activeSourceId
+            ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...`
+            : statusLabel}
       </p>
       {hubState === 'queued' && (
         <p className="text-blue-400/60 text-[10px] mt-1">
@@ -85,9 +90,14 @@ export function JobSearchProcessingState({
           {totalSourceJobs} jobs found so far
         </p>
       )}
-      {hubState === 'scoring' && scoringProgress?.total > 0 && (
+      {hubState === 'scoring' && !compensationProgress?.total && scoringProgress?.total > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1">
           {scoringProgress.scored} / {scoringProgress.total} scored
+        </p>
+      )}
+      {hubState === 'scoring' && compensationProgress?.total > 0 && (
+        <p className="text-blue-400/60 text-[10px] mt-1">
+          {compensationProgress.processed} / {compensationProgress.total} evaluated
         </p>
       )}
       {resumeSummary && (

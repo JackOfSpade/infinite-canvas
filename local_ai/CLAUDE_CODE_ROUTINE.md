@@ -83,16 +83,24 @@ switch to Anthropic Console/API credits for this routine.
    unexplained employer or time-period changes, chronological backtracking
    unless its purpose is explicit, inventory-style paragraphs, delayed
    relevance, paragraphs that introduce a second thesis, colon-led evidence
-   dumps, sentences that compress several résumé bullets, repeated organizing
+   dumps and the same unloading routed through a semicolon or dash,
+   sentences that compress several résumé bullets, repeated organizing
    metaphors, detached synthesis that broadens one example into a role-wide or
    career-wide claim, faulty parallelism in coordinated forms such as `from X
-   to/through Y`, and unsolicited admissions of missing experience. A
+   to/through Y`, unsolicited admissions of missing experience, transitions
+   that announce a migration or change but name only the origin or only the
+   destination, causal connectives whose premise the preceding sentences never
+   state, comparisons nested inside conditions, and a coined organizing frame
+   applied to the position itself rather than to the evidence. A
    concluding or transitional sentence must name the concrete responsibility,
    system, decision, or process it synthesizes and remain within that evidence's
    scope. Treat phrases such as `most of my work` and `throughout my career` as
    factual breadth claims that require source support. Across paragraph
-   boundaries, replace `this`, `that`, or `it` when more than one antecedent is
-   plausible. Pair noun
+   boundaries a demonstrative must find its referent in the immediately
+   preceding paragraph: replace `this`, `that`, or `it` when more than one
+   antecedent is plausible, and never open a paragraph with `That <thing>` or
+   `This <thing>` unless the previous paragraph is about that thing; otherwise
+   restate the referent in full. Pair noun
    phrases with noun phrases or actions with actions; do not use bureaucratic
    padding such as `from the time of` to conceal a mismatch. Honest
    qualification exists to prevent a misleading claim or answer an explicit
@@ -113,8 +121,8 @@ switch to Anthropic Console/API credits for this routine.
    constraint. On a first pass, do not pre-emptively delete high-value evidence
    or force compact density merely to guess at a page count; Infinite Canvas
    renders and measures it afterwards:
-   - The agent must not emit `data-print`, `data-page`, `data-mono`,
-     `data-density`, or `data-letter` anywhere in generated résumé markup,
+   - The agent must not emit `data-print`, `data-page`, `data-mono`, or
+     `data-density` anywhere in generated résumé markup,
      including `<html>`, `<body>`, `<main>`, or descendants.
    - For Infinite Canvas, emit exactly one bare `<main class="page">...</main>`
      using existing design-system component classes.
@@ -159,9 +167,8 @@ switch to Anthropic Console/API credits for this routine.
      section; never use it as a peer category heading or nest a peer category
      inside the preceding role/section.
    - Infinite Canvas owns all root document variants: print mode, paper size,
-     monochrome, density, and the cover-letter-only centred treatment. It
-     measures a one-page cover letter and sets `data-letter="centered"` only
-     when the design system’s short-letter threshold is met.
+     monochrome, and density. The cover letter always remains top-aligned so
+     its letterhead starts at the same position as the résumé header.
    - The app always renders default density first and may add the single
      `data-density="compact"` fallback only after a measured overflow.
    - This host-specific rule overrides the standalone variant-selection
@@ -215,10 +222,60 @@ switch to Anthropic Console/API credits for this routine.
    candidate claim must be supported by the supplied career data, using the
    evidence boundary in step 3. Write natural connected prose: select one
    load-bearing proof, summarize related implementation details, and use short
-   causal sentences instead of a colon followed by an inventory. Prefer the
+   causal sentences instead of an inventory unloaded after a colon, a
+   semicolon, or a dash. Prefer the
    concrete system, data flow, responsibility, or decision to an abstract
    metaphor, and never repeat a metaphor across paragraphs as connective
-   tissue. The first sentence must
+   tissue. When a sentence announces a migration, move, or change, land it in
+   the same sentence: name both what was left and what replaced it (`moved
+   ticketing off the in-house tracker onto the vendor platform`), never the
+   origin alone. Open a paragraph with a demonstrative phrase (`That
+   evaluation practice`) only when the immediately preceding paragraph is
+   about that thing; a demonstrative never reaches past the previous
+   paragraph, so either restate the referent in full or open with the new
+   paragraph's own subject. Use a causal connective (`that is why`, `which is
+   why`, `so`) only when the premise already stated on the page makes the
+   conclusion follow; if the reader must supply a missing link, write the
+   link as its own sentence or drop the connective. Make one comparison per
+   sentence with both terms named; never nest a comparison inside a condition
+   (`is only worth more than X when Y`). A coined frame (`two jobs`, `both
+   halves of the work`) may organize the evidence, but never apply it to the
+   position itself: close by naming the posted role literally and in the
+   singular, because `I want the same two jobs here` reads as a request for
+   two positions.
+   Keep the letter in a plain, direct register. Write short declarative
+   sentences, split long reasoning into short causal ones instead of nesting
+   purpose clauses, and let no sentence run much past 40 words. Do not use a
+   semicolon or a dash as a clause splice; Infinite Canvas rejects the whole
+   result for an em dash, for a spaced hyphen used as sentence punctuation,
+   and for an en dash outside a date or numeric range. Never address the
+   posting, listing, advertisement, or job description as an object, as in
+   `what your posting wants`; name the employer's need directly. `The role`
+   and `this position` remain fine. Never join two pieces of evidence with a
+   bare additive connective such as `I also built` or `... too`: state the
+   relation that makes the second piece advance the argument, and introduce a
+   personal project by first stating the concrete gap or problem it answers
+   and only then the artifact. Name a specific tool, framework, or product
+   only when the job listing or the research names it, or as that paragraph's
+   single concrete anchor; otherwise describe it by category, as in `a Python
+   back end` or `containerized deployment`. The résumé carries the stack, so a
+   paragraph naming several tools the listing never mentions is a stack tour
+   whatever punctuation separates them. Do not assert a cross-domain
+   equivalence with `maps onto`, `translates directly to`, or `mirrors`, and
+   do not quote the employer's phrasing back as the second half of an analogy:
+   argue the shared mechanism (constraints, data flow, failure modes) and let
+   the transfer stay implicit. State logistics facts in plain first person,
+   never in bureaucratic register such as `in possession of`. Never state
+   citizenship, work authorization, residency, or visa status anywhere in the
+   letter: legal work status belongs on the application form, and Infinite
+   Canvas rejects the entire result when the letter states it (for example
+   `Canadian citizen`, `authorized to work`, `permanent resident`, `visa
+   sponsorship`, `legally entitled to`).
+   Hyphenate compound modifiers (`in-house`, `end-to-end ownership`,
+   `full-stack engineer`, `district-wide`, `third-party integrations`,
+   `real-time data`, `open-source project`) and use one spelling of a compound
+   throughout both documents.
+   The first sentence must
    immediately advance the candidate's argument with a job-specific thesis, a
    concrete evidence-to-need connection, or a supported observation about the
    company's work that establishes the candidate's relevant direction. Never
@@ -233,7 +290,12 @@ switch to Anthropic Console/API credits for this routine.
    `fast-paced environment`, `dynamic environment`, `passionate about`,
    `hit the ground running`, `align with your values`, `team player`,
    `wealth of experience`, `writing to express my interest`, and
-   `I believe I would be a great fit`. The
+   `I believe I would be a great fit`. It also rejects the bare pair
+   `downsides and trade-offs`. Treat that as the narrow, literal edge of a
+   wider writing rule the host deliberately does not enforce: a balance claim
+   that pairs a thing's downsides with its upsides is unfalsifiable filler in
+   either direction, so state the specific judgment the evidence supports.
+   The
    company or exact role title may appear when it contributes substantively to
    the argument, but not merely to identify the application. Respect the
    recruiter's intelligence: every opening sentence must contain information
@@ -291,16 +353,17 @@ switch to Anthropic Console/API credits for this routine.
    - Continue through every measured revision requested by the app in this same
      Claude Code session. There is no fixed round limit. These layout-feedback
      rounds are separate from your private drafting critique.
-   - Before treating `manifest.json` status `imported` or job-folder removal as
-     terminal, read the matching terminal receipt if it is available. If it
-     says `imported`, Infinite Canvas accepted the result: stop immediately and
-     report its final résumé and cover-letter page counts as app-measured
-     values. If no matching receipt is readable, report acceptance but do not
-     claim a final page count.
+   - Treat only a matching terminal receipt or job-folder removal as terminal;
+     `manifest.json` status `imported` means the measured result is staged and
+     its bundle save may still be settling. If the receipt says `imported`,
+     Infinite Canvas durably saved the application and accepted the result:
+     stop immediately and report its final résumé and cover-letter page counts
+     as app-measured values. If the job folder vanished but no matching receipt
+     is readable, report acceptance but do not claim a final page count.
    - If matching feedback says `revision-exhausted`, stop without another
      rewrite: the app emits this only when an overflowing document was left
      unchanged with an explicit `kept_diminishing_returns` decision. If
-     `manifest.json` becomes `imported` or the job folder is removed, Infinite
+     the job folder is removed or a matching terminal receipt appears, Infinite
      Canvas accepted the result; stop immediately. Do not inspect the imported
      bundle or any post-import artifacts. Report this as acceptance, not as an
      app-confirmed final page count unless that final count was actually
@@ -317,7 +380,7 @@ switch to Anthropic Console/API credits for this routine.
      `revision-required` feedback has ever arrived for this job. Do not count
      the rejection as a measured revision round and do not report its `error`
      text as an app measurement.
-   - If no matching feedback or import status appears within 6 minutes, stop
+   - If no matching feedback, terminal receipt, or job-folder removal appears within 6 minutes, stop
      without another rewrite and report that Infinite Canvas did not return a
      measured result while this session was waiting.
 

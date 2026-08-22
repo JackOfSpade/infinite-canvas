@@ -249,6 +249,17 @@ this role — not a résumé's bullets converted into paragraph form.
 The full rules are stated as sentence *shapes* rather than sample
 copy, on purpose: `STYLE.md §11.2.3`.
 
+Source material supplies facts, not mandatory wording. Preserve the evidence
+boundary while paraphrasing distinctive constructions across the résumé and
+letter; do not repeat “built from scratch” when a plain supported verb such as
+“created” or “designed and implemented” does the job. State why a new employer,
+project, or period belongs before its details. Do not use “now,” “still,” or a
+similar temporal contrast without stating the other side of the contrast.
+Prefer ordinary contemporary wording (“closed the gap,” not “answered the
+gap”), and name a prior employer once before using the role, system, or “there”
+when the reference is clear. Narrow evidence-derived connective language is
+part of good synthesis; invented candidate facts are not.
+
 ### Tone
 
 Specific, structural, unhyped. **Numbers and trade-offs**, not

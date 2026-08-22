@@ -54,6 +54,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const liveRef = useRef(null);
   liveRef.current = { isEditing, title, data, SIZE, measuredTextLen };
 
+  const commitTitle = useCallback((val) => {
+    const v = (val ?? liveRef.current.title).trim();
+    setTitle(v);
+    mainFlow.updateNodeData(id, { title: v });
+    setIsEditing(false);
+  }, [id, mainFlow]);
+
   useEffect(() => {
     EventLogger.registerNodeState(id, {
       isEditing,
@@ -117,16 +124,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     const onDocPointerDown = (e) => {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
         // Read the live input value so any pending keystrokes are captured.
-        const v = (inputRef.current?.value ?? liveRef.current.title).trim();
-        setTitle(v);
-        mainFlow.updateNodeData(id, { title: v });
-        setIsEditing(false);
+        commitTitle(inputRef.current?.value);
       }
     };
     document.addEventListener('pointerdown', onDocPointerDown, { capture: true });
     return () => document.removeEventListener('pointerdown', onDocPointerDown, { capture: true });
-  // id and mainFlow are stable; isEditing is the trigger; liveRef/inputRef/containerRef are refs.
-  }, [isEditing, id, mainFlow]);
+  // id and commitTitle are stable; isEditing is the trigger; inputRef/containerRef are refs.
+  }, [isEditing, id, commitTitle]);
 
 
 
@@ -526,13 +530,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const fontFamily   = data.fontFamily   || 'Inter, ui-sans-serif, system-ui, sans-serif';
   const textColor    = data.textColor    || null;
   const titleSpacing = data.titleSpacing ?? 0;
-
-  const commitTitle = useCallback((val) => {
-    const v = (val ?? liveRef.current.title).trim();
-    setTitle(v);
-    mainFlow.updateNodeData(id, { title: v });
-    setIsEditing(false);
-  }, [id, mainFlow]);
 
   const handleDelete = useCallback((e) => {
     e.stopPropagation();

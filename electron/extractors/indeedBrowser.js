@@ -493,7 +493,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
 
     // Verify auth state before running any queries.
-    await page.goto(`https://${host}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    let navError = null;
+    await page.goto(`https://${host}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch((e) => { navError = e; });
     const landedUrl = page.url();
     await injectOverlay(page);
     await updateOverlay(page, { srcName: 'Indeed', srcLabel: 'Checking session…', count: 0, status: 'Verifying login…' });
@@ -510,6 +511,26 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const redirectedToSignIn = /\/(auth|login|signin)(\?|$)/i.test(landedUrl);
     const sessionOk = hasPPID || (!redirectedToSignIn && landedUrl.includes('indeed.com'));
     logger.info(`[Indeed/Browser] Session check — PPID:${hasPPID} cf_clearance:${hasCfClearance} __cf_bm:${hasCfBm} | all cookies: ${allCookieNames} | landedUrl: ${landedUrl} | ok: ${sessionOk}`);
+
+    // The navigation never landed anywhere (no internet, DNS failure, dead VPN):
+    // the page is still about:blank, so nothing was observed about the session.
+    // Reporting that as 'needs-login' would assert a cause the run never saw —
+    // say what was actually observed instead. A timeout that still landed keeps
+    // the sign-in-redirect check below, and a PPID cookie still proves the
+    // session regardless of a transient nav failure.
+    if (!hasPPID && landedUrl === 'about:blank') {
+      logger.warn(`[Indeed/Browser] Landing navigation never completed — session state unknown${navError ? ` (${navError.message})` : ''}`);
+      return {
+        items: [],
+        warning: {
+          code: 'scrape-failed',
+          severity: 'block',
+          evidence: `Could not reach ${host}${navError ? ` — ${String(navError.message || navError).slice(0, 200)}` : ''}. Session state unknown.`,
+          suggestion: 'Check your internet connection (or VPN) and retry.',
+        },
+        gathered: 0,
+      };
+    }
 
     if (!sessionOk) {
       logger.warn('[Indeed/Browser] Not logged in — PPID missing and page redirected to sign-in');
@@ -698,11 +719,18 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         qText:    q,
       };
 
+      // Which page hitCount's budget currently belongs to. A CF hit retries the
+      // SAME page via `p--; continue`, so the reset below must fire only when
+      // the walk actually advances to a new page — keying it on `p >
+      // entry.startPage` reset the counter on every retry too, and the pass
+      // could then restart inline forever without ever escalating.
+      let escalationPage = entry.startPage;
+
       for (let p = entry.startPage; p < maxPages; p++) {
         // Each page beyond the originally-deferred startPage is a fresh page —
         // reset hitCount so it gets its own full escalation budget rather than
         // inheriting the exhausted retryCount from the entry that was deferred.
-        if (p > entry.startPage) hitCount = 0;
+        if (p !== escalationPage) { hitCount = 0; escalationPage = p; }
 
         if (signal?.aborted) break outer;
         if (allJobs.length >= resultCap) break outer;

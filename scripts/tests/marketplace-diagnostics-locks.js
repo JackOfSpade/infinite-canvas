@@ -1,4 +1,4 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, enqueueStatusCheckAction, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckActionQueueDepth, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isSessionExpired, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, enqueueStatusCheckAction, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckActionQueueDepth, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 
 export default [
   {
@@ -948,22 +948,6 @@ export default [
         return withStatusCheckLock(async () => 'cross-lock-ok');
       });
       assert(crossLockResult === 'cross-lock-ok', 'nesting a DIFFERENT lock inside another is not treated as reentrant');
-      return { ok: true };
-    },
-  },
-{
-    name: 'browserViewMonitor: isSessionExpired matches each platform\'s own redirect patterns, not a generic guess',
-    run: () => {
-      assert(isSessionExpired('facebook', 'https://facebook.com/login') === true, 'facebook /login is expired');
-      assert(isSessionExpired('facebook', 'https://facebook.com/checkpoint/123') === true, 'facebook /checkpoint is expired');
-      assert(isSessionExpired('facebook', 'https://facebook.com/marketplace/you/selling') === false, 'facebook selling hub is not expired');
-      assert(isSessionExpired('glassdoor', 'https://glassdoor.com/profile/login.htm') === true, 'glassdoor profile login is expired');
-      assert(isSessionExpired('glassdoor', 'https://glassdoor.com/member/login.htm') === true, 'glassdoor member login is expired');
-      assert(isSessionExpired('ebay', 'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn') === true, 'ebay signin is expired');
-      assert(isSessionExpired('ebay', 'https://www.ebay.com/sh/lst/active') === false, 'ebay seller hub is not expired');
-      // Unknown platform falls back to the generic /login|/signin|/auth check.
-      assert(isSessionExpired('some-future-platform', 'https://example.com/auth/relogin') === true, 'unknown platform falls back to generic patterns');
-      assert(isSessionExpired('some-future-platform', 'https://example.com/dashboard') === false, 'unknown platform, non-matching URL is not expired');
       return { ok: true };
     },
   },

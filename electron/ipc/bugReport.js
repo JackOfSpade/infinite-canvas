@@ -68,12 +68,18 @@ export function formatLoginVerificationTimingResult(duration = {}) {
     .replace(/[|\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  const boundedReason = truncateDiagnosticText(reason, 120);
+  // 220, not 120: the auth-cookie discriminator the verifier appends ("Auth cookie
+  // li_at IS present on disk → session invalidated server-side…") sits at the END
+  // of the reason, so a tighter bound truncates away the only sentence that says
+  // WHY a platform reads logged-out.
+  const boundedReason = truncateDiagnosticText(reason, 220);
   const withReason = (label) => boundedReason ? `${label} — ${boundedReason}` : label;
 
   switch (duration.outcome) {
     case 'verified':
-      return `verified ${state}`;
+      // A fresh `connected` needs no explanation; a fresh NOT-connected is the row
+      // the reader has to act on, and its reason names the check that rejected it.
+      return duration.connected ? 'verified connected' : withReason('verified not connected');
     case 'retained-prior':
       return withReason(`retained prior: ${state}${duration.inconclusive ? ' (inconclusive verify)' : ''}`);
     case 'skipped-native':
@@ -97,8 +103,14 @@ export function buildLoginVerificationTimingMarkdown(run) {
   const durations = run.durations;
   const sumMs = durations.reduce((a, d) => a + (d.ms || 0), 0);
   const slowest = durations[0]; // durations are pre-sorted slowest-first
+  // Auth-cookie presence rides in the Result cell rather than a column of its own:
+  // it is recorded only for the platforms that have a known auth cookie AND read
+  // logged-out, so a dedicated column would be empty for most rows.
+  const cookieSuffix = (d) => (typeof d.authCookiePresent === 'boolean'
+    ? (d.authCookiePresent ? ' · auth cookie present' : ' · auth cookie ABSENT')
+    : '');
   const rows = durations.map(d =>
-    `| \`${d.platformId}\` | ${d.ms} | ${formatLoginVerificationTimingResult(d)} |`,
+    `| \`${d.platformId}\` | ${d.ms} | ${formatLoginVerificationTimingResult(d)}${cookieSuffix(d)} |`,
   ).join('\n');
   const savedMs = Math.max(0, sumMs - run.totalMs);
   // `platformCount` historically meant every platform considered by the
@@ -1202,7 +1214,12 @@ ${statusQueueLine}
     }
   } catch { /* never break the report on diagnostic failure */ }
 
-  const sellHubResolveMarkdown = buildSellHubResolveRollup(sellHubResolveStates || []);
+  // Same guard as every other section builder: a malformed row in the renderer
+  // payload should cost this one section, not the whole report.
+  let sellHubResolveMarkdown = '';
+  try {
+    sellHubResolveMarkdown = buildSellHubResolveRollup(sellHubResolveStates || []);
+  } catch (err) { sellHubResolveMarkdown = diagnosticRenderFailureMarkdown('SellHub Source Resolve Queue', err); }
 
   // ── Build freshness ───────────────────────────────────────────────────────
   // Catches the "I edited a file but the running app still does the old thing"
@@ -1441,10 +1458,11 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
           const detected = h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
           const title = h.title ? `, title="${String(h.title).replace(/\s+/g, ' ').slice(0, 100)}"` : '';
-          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
+          const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
+          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
-        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window.\n${historyRows.join('\n')}\n`
+        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
         : '';
       // Scrape/stealth browser liveness — a captcha/login window launches a
       // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here

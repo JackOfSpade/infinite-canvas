@@ -1,21 +1,20 @@
 /**
  * Shared browser overlay for job scraper sessions.
  *
- * buildOverlayScript({ withPause, cdpBridge }) — returns the IIFE string to
+ * buildOverlayScript({ withPause }) — returns the IIFE string to
  *   inject into the page via evaluateOnNewDocument + evaluate.
  *   - withPause:true adds the ⏸ Pause button; false gives a display-only panel.
- *   - cdpBridge:true wires the button to the Puppeteer-exposed __icSetPaused /
- *     __icGetPaused functions. Those install a CDP Runtime.addBinding, which is
- *     an automation fingerprint anti-bots (DataDome/Cloudflare) read — so set
- *     cdpBridge:false to keep the button but have it only toggle the page-local
- *     window.__icPaused, which the Node side reads by POLLING (no binding).
+ *   - The button only toggles the page-local window.__icPaused; the Node side
+ *     reads it by POLLING (see injectOverlay() in manualScraper.js) rather than
+ *     a CDP Runtime.addBinding exposeFunction callback — that binding is an
+ *     automation fingerprint anti-bots (DataDome/Cloudflare) read.
  *
  * updateOverlay(page, state) — updates the visible panel fields. All fields
  *   are optional; omitted fields are left unchanged.
  *   state: { srcLabel, srcName, qLabel, qText, count, status, progressText, challenge, error }
  */
 
-export function buildOverlayScript({ withPause = true, cdpBridge = true } = {}) {
+export function buildOverlayScript({ withPause = true } = {}) {
   const buttonStyles = withPause
     ? `'#__ic-panel button:hover:not(:disabled){filter:brightness(1.2)}',
     '#__ic-panel button:disabled{opacity:.4;cursor:default}',`
@@ -23,33 +22,12 @@ export function buildOverlayScript({ withPause = true, cdpBridge = true } = {}) 
 
   const statusMargin = withPause ? '14' : '4';
 
-  // CDP-bridge restore: only emitted when cdpBridge is on. It reads the Node-side
-  // flag back into the page after a navigation via the exposed __icGetPaused. With
-  // cdpBridge off there's no exposed function (it would be an automation
-  // fingerprint), so the Node side re-asserts paused state by pushing it in after
-  // each overlay (re)injection instead — see injectOverlay() in manualScraper.js.
-  const restoreLogic = (withPause && cdpBridge) ? `
-  (function restorePause(attempts) {
-    if(typeof window.__icGetPaused !== 'function') {
-      if(attempts > 0) setTimeout(function(){ restorePause(attempts - 1); }, 50);
-      return;
-    }
-    window.__icGetPaused().then(function(p){
-      window.__icPaused = !!p;
-      var btn = el.querySelector('#ic-pause');
-      if(btn) btn.textContent = p ? '\\u25b6 Resume' : '\\u23f8 Pause';
-      var dot = document.getElementById('ic-dot');
-      if(dot && p){ dot.style.background = '#eab308'; dot.style.animation = 'none'; }
-    });
-  })(10);
-` : '';
-
   const pauseLogic = withPause ? `
   window.__icPaused = false;
   el.querySelector('#ic-pause').addEventListener('click', function(){
     if(this.disabled) return;
     window.__icPaused = !window.__icPaused;
-    ${cdpBridge ? 'if(window.__icSetPaused) window.__icSetPaused(window.__icPaused);' : '/* no CDP bridge — Node polls window.__icPaused */'}
+    /* no CDP bridge — Node polls window.__icPaused, see injectOverlay() in manualScraper.js */
     this.textContent = window.__icPaused ? '\\u25b6 Resume' : '\\u23f8 Pause';
     const dot = document.getElementById('ic-dot');
     if(dot){
@@ -62,7 +40,7 @@ export function buildOverlayScript({ withPause = true, cdpBridge = true } = {}) 
       }
     }
   });
-${restoreLogic}` : '';
+` : '';
 
   return `(function(){
   if(document.getElementById('__ic-panel')) return;

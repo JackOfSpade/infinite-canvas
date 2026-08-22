@@ -251,6 +251,10 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const pendingItemsRef   = useRef(data.pendingItems);
   const hubStateRef       = useRef(hubState);
   const researchItemsRef  = useRef(null);
+  // Sources the user explicitly skipped this run (vs. still-blocked ones in
+  // scrapeWarningsRef) — kept aside instead of discarded so the eventual
+  // synthesizeAndPrice call still reports what pricing went ahead without.
+  const skippedWarningsRef = useRef([]);
   useEffect(() => { scrapeWarningsRef.current = data.scrapeWarnings; }, [data.scrapeWarnings]);
   useEffect(() => { pendingItemsRef.current   = data.pendingItems;   }, [data.pendingItems]);
   useEffect(() => { hubStateRef.current       = hubState;            }, [hubState]);
@@ -1036,6 +1040,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           activeResolveSourceIdsRef.current.clear();
           pendingItemsRef.current = null;
           scrapeWarningsRef.current = [];
+          skippedWarningsRef.current = [];
           setIsApplyingResolves(false);
           setResolveQueueWait(0);
           syncResolveWorkCount();
@@ -1167,10 +1172,14 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       const skippedSourceId = e.detail?.sourceId;
       if (!skippedSourceId) return;
 
+      const skippedWarning = (scrapeWarningsRef.current || []).find(w => w.sourceId === skippedSourceId);
       const remainingWarnings = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
       // Mutate the ref synchronously so a SECOND skip event in the same
       // tick sees the post-first-skip list, not the stale closure value.
       scrapeWarningsRef.current = remainingWarnings;
+      // Kept aside (not discarded) so the priced card can still report it was
+      // synthesized without this source once every blocker clears.
+      if (skippedWarning) skippedWarningsRef.current = [...skippedWarningsRef.current, skippedWarning];
       EventLogger.log(`[SellHub][${id}] user skipped ${skippedSourceId}; ${remainingWarnings.length} blocked source(s) remaining`);
       updateGlobal(id, { scrapeWarnings: remainingWarnings });
 
@@ -1188,8 +1197,16 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         const items = pendingItemsRef.current;
         (async () => {
           try {
-            await queueSynthesizeAndPrice(items, [], cancelled);
+            await queueSynthesizeAndPrice(items, skippedWarningsRef.current, cancelled);
             updateGlobal(id, { pendingItems: null });
+          } catch (err) {
+            // acquireModuleRun rejects if this queued run is cancelled (reset/
+            // delete) before it dequeues — an expected outcome, not a failure.
+            if (cancelled() || isNodeDeletedAbort(err)) return;
+            EventLogger.error(`[SellHub][${id}] Auto-fire synthesis after skip failed:`, err);
+            hubStateRef.current = 'draft';
+            updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err), isRateLimit: !!err?.isRateLimit });
+            addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
           } finally {
             processingPriceRef.current = false;
           }
@@ -1198,7 +1215,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     };
     document.addEventListener('comp-source-skip', onSkip);
     return () => document.removeEventListener('comp-source-skip', onSkip);
-  }, [id, updateGlobal, getNodes, deleteElements, queueSynthesizeAndPrice, epoch]);
+  }, [id, updateGlobal, getNodes, deleteElements, queueSynthesizeAndPrice, epoch, addToast]);
 
   // After a comp card's captcha-resolve window auto-detects the challenge as
   // cleared, refetch ONLY the unblocked source and merge into the pending items
@@ -1322,8 +1339,16 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         if (processingPriceRef.current) return;
         processingPriceRef.current = true;
         try {
-          await queueSynthesizeAndPrice(mergedItems, [], cancelled);
+          await queueSynthesizeAndPrice(mergedItems, skippedWarningsRef.current, cancelled);
           updateGlobal(id, { pendingItems: null });
+        } catch (err) {
+          // acquireModuleRun rejects if this queued run is cancelled (reset/
+          // delete) before it dequeues — an expected outcome, not a failure.
+          if (cancelled() || isNodeDeletedAbort(err)) return;
+          EventLogger.error(`[SellHub][${id}] Auto-fire synthesis after resolve failed:`, err);
+          hubStateRef.current = 'draft';
+          updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err), isRateLimit: !!err?.isRateLimit });
+          addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
         } finally {
           processingPriceRef.current = false;
         }
@@ -1715,6 +1740,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     hubStateRef.current = 'draft';
     pendingItemsRef.current = null;
     scrapeWarningsRef.current = [];
+    skippedWarningsRef.current = [];
     pendingMergesRef.current.splice(0);
     activeResolveSourceIdsRef.current.clear();
     scrapeInFlightRef.current = false;

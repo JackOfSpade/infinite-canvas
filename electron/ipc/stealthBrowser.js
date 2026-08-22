@@ -143,6 +143,21 @@ let browserClosePromise = null;
 let sharedProfileReservation = null;
 
 export function reserveSharedProfile(reason = 'visible-window') {
+  // Only one visible window can hold the shared userDataDir at a time (OS-level
+  // profile lock), so a second reservation while one is already held must not
+  // silently overwrite it — the earlier holder (e.g. a job-side captcha-resolve
+  // window) is still open, and when the SECOND caller later releases, its release
+  // closure would null out sharedProfileReservation out from under the first
+  // window, letting assertSharedProfileAvailable wave through a headless launch
+  // that races the still-open visible Chrome. Refuse up front instead, so the
+  // caller gets this function's own orderly error rather than a launch that
+  // collides on the OS lock and fails ~11s later with a cryptic one.
+  if (sharedProfileReservation) {
+    throw new Error(
+      `Shared browser profile is already reserved for ${sharedProfileReservation.reason}; ` +
+      `cannot also reserve it for ${reason} until that window closes.`
+    );
+  }
   const token = Symbol(reason);
   sharedProfileReservation = {
     token,
@@ -397,6 +412,43 @@ export async function createStealthPage() {
   return page;
 }
 
+// Bound page.content() and retry once past a destroyed execution context. When an
+// anti-bot challenge (e.g. Cloudflare) keeps the page in a reload loop, content()
+// blocks indefinitely waiting for a stable execution context — sailing past the
+// navigation timeout the caller set. Without this race a wedged page hangs the
+// caller forever; this is what stalled the startup login verify on Glassdoor (the
+// whole "checking connections" step never returned). On timeout the caller's own
+// catch falls through to { ok:false } and its finally still closes the page.
+//
+// A client-side (SPA) redirect firing AFTER page.goto's wait condition already
+// resolved — e.g. an auth wall bouncing an unauthenticated hub URL to a /login
+// route — can destroy the execution context mid-read, throwing Puppeteer's
+// "Execution context was destroyed, most likely because of a navigation."
+// manualScraper.js's runExtractor treats this exact error class as a transient
+// race (not a terminal failure) and retries; mirror that here with a single
+// bounded retry once the new page settles, instead of surfacing a bare "Fetch
+// failed" for a page that a moment later reads fine (and classifies normally —
+// e.g. as needs-login instead of an opaque error). Shared by fetchHtmlAuthed and
+// fetchHtmlClean so this fragile Puppeteer workaround has only one copy to fix.
+async function readPageHtmlBounded(page, timeoutMs, finalUrl) {
+  const readContent = () => Promise.race([
+    page.content(),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
+      Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
+  ]);
+  try {
+    const html = await readContent();
+    return { html, finalUrl };
+  } catch (err) {
+    if (!/Execution context was destroyed/i.test(err?.message || '')) throw err;
+    await new Promise((r) => setTimeout(r, 500));
+    finalUrl = page.url() || finalUrl;
+    const html = await readContent();
+    return { html, finalUrl };
+  }
+}
+
 /**
  * Fetch a page's fully-rendered HTML through the persistent stealth browser.
  * Because the browser uses `userDataDir`, cookies from a prior `openLoginWindow`
@@ -425,39 +477,8 @@ export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
     }
     if (signal?.aborted) throw new Error('Aborted');
 
-    const status   = response?.status() ?? 0;
-    let finalUrl   = page.url() || url;
-    // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
-    // page in a reload loop, content() blocks indefinitely waiting for a stable
-    // execution context — sailing past the navigation timeout above. Without this
-    // race a wedged page hangs the caller forever; this is what stalled the startup
-    // login verify on Glassdoor (the whole "checking connections" step never
-    // returned). On timeout we fall through to the catch → { ok:false } and the
-    // finally still closes the page.
-    const readContent = () => Promise.race([
-      page.content(),
-      new Promise((_, reject) => setTimeout(
-        () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
-        Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
-    ]);
-    let html;
-    try {
-      html = await readContent();
-    } catch (err) {
-      // A client-side (SPA) redirect firing AFTER page.goto's wait condition already
-      // resolved — e.g. an auth wall bouncing an unauthenticated hub URL to a /login
-      // route — can destroy the execution context mid-read, throwing Puppeteer's
-      // "Execution context was destroyed, most likely because of a navigation."
-      // manualScraper.js's runExtractor treats this exact error class as a transient
-      // race (not a terminal failure) and retries; mirror that here with a single
-      // bounded retry once the new page settles, instead of surfacing a bare "Fetch
-      // failed" for a page that a moment later reads fine (and classifies normally —
-      // e.g. as needs-login instead of an opaque error).
-      if (!/Execution context was destroyed/i.test(err?.message || '')) throw err;
-      await new Promise((r) => setTimeout(r, 500));
-      finalUrl = page.url() || finalUrl;
-      html = await readContent();
-    }
+    const status = response?.status() ?? 0;
+    const { html, finalUrl } = await readPageHtmlBounded(page, timeoutMs, page.url() || url);
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -510,39 +531,8 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal, waitForRe
       if (signal?.aborted) throw new Error('Aborted');
     }
 
-    const status   = response?.status() ?? 0;
-    let finalUrl   = page.url() || url;
-    // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
-    // page in a reload loop, content() blocks indefinitely waiting for a stable
-    // execution context — sailing past the navigation timeout above. Without this
-    // race a wedged page hangs the caller forever; this is what stalled the startup
-    // login verify on Glassdoor (the whole "checking connections" step never
-    // returned). On timeout we fall through to the catch → { ok:false } and the
-    // finally still closes the page.
-    const readContent = () => Promise.race([
-      page.content(),
-      new Promise((_, reject) => setTimeout(
-        () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
-        Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
-    ]);
-    let html;
-    try {
-      html = await readContent();
-    } catch (err) {
-      // A client-side (SPA) redirect firing AFTER page.goto's wait condition already
-      // resolved — e.g. an auth wall bouncing an unauthenticated hub URL to a /login
-      // route — can destroy the execution context mid-read, throwing Puppeteer's
-      // "Execution context was destroyed, most likely because of a navigation."
-      // manualScraper.js's runExtractor treats this exact error class as a transient
-      // race (not a terminal failure) and retries; mirror that here with a single
-      // bounded retry once the new page settles, instead of surfacing a bare "Fetch
-      // failed" for a page that a moment later reads fine (and classifies normally —
-      // e.g. as needs-login instead of an opaque error).
-      if (!/Execution context was destroyed/i.test(err?.message || '')) throw err;
-      await new Promise((r) => setTimeout(r, 500));
-      finalUrl = page.url() || finalUrl;
-      html = await readContent();
-    }
+    const status = response?.status() ?? 0;
+    const { html, finalUrl } = await readPageHtmlBounded(page, timeoutMs, page.url() || url);
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -664,9 +654,12 @@ const JOB_LOGIN_PLATFORMS = {
   // verifyTimeoutMs: Glassdoor's member page is frequently Cloudflare-challenged for
   // the headless verify (a successful verify lands in ~1.5–3.7s; a challenged one
   // otherwise burns the full 25s budget before degrading to "not connected", which
-  // dominates the whole startup "checking connections" wall). A 12s cap can't cut
-  // off a real success but bounds the blocked case to ~13s.
-  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  verifyTimeoutMs: 12000, bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
+  // dominates the whole startup "checking connections" wall). This is NOT the nav
+  // budget: fetchHtmlClean navigates with timeoutMs - 5000, so this value must be
+  // the intended nav budget + 5s. 17000 ⇒ a 12s navigation — the value the earlier
+  // 12000 was reasoning about, which actually cut the nav off at 7s and truncated a
+  // real (469KB, redirect-heavy) member-page load into a status-less partial read.
+  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  verifyTimeoutMs: 17000, bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
   // /jobseeker/home is the post-login landing page — authenticated sessions stay
   // there; anonymous requests redirect to /user/login (connectedFinalUrlMustContain
   // catches the redirect). Avoids /profile which Cloudflare challenges on new

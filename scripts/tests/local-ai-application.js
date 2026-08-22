@@ -53,8 +53,16 @@ export default [
       assert(normalizedRoutineSource.includes('detached synthesis that broadens one example into a role-wide or career-wide claim')
         && normalizedRoutineSource.includes('must name the concrete responsibility, system, decision, or process it synthesizes')
         && normalizedRoutineSource.includes('Treat phrases such as `most of my work` and `throughout my career` as factual breadth claims')
-        && normalizedRoutineSource.includes('Across paragraph boundaries, replace `this`, `that`, or `it` when more than one antecedent is plausible'),
+        && normalizedRoutineSource.includes('Across paragraph boundaries a demonstrative must find its referent in the immediately preceding paragraph')
+        && normalizedRoutineSource.includes('never open a paragraph with `That <thing>` or `This <thing>` unless the previous paragraph is about that thing'),
       'Local AI must keep synthesis evidence-scoped and replace ambiguous cross-paragraph references');
+      assert(normalizedRoutineSource.includes('Never state citizenship, work authorization, residency, or visa status anywhere in the letter')
+        && normalizedRoutineSource.includes('legal work status belongs on the application form')
+        && normalizedRoutineSource.includes('name both what was left and what replaced it')
+        && normalizedRoutineSource.includes('close by naming the posted role literally and in the singular')
+        && localSource.includes('checkLegalStatus')
+        && localSource.includes('failed the legal-status check'),
+      'Local AI letters must never state legal work status, and the host rejects a completed result that does');
       assert(localSource.includes('renderLocalResumeWithFit')
         && localSource.includes('renderPdf(buildResumeDocument')
         && localSource.includes('targetPageCount')
@@ -141,44 +149,47 @@ export default [
     name: 'Local AI application: queued handoff is app-owned and supplies a strict routine',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({
-        job: { title: 'Developer', company: 'Acme', snippet: 'Build reliable systems.' },
-        careerData: 'Built reliable systems with measurable outcomes.', additionalNotes: 'Prefer a concise letter.',
-        canvasFilePath: project.canvasFilePath,
-      });
-      assert(queued.status === 'queued' && /^[a-f0-9-]{36}$/i.test(queued.id), 'queue creates a UUID-backed Local AI job');
-      const [manifest, input, prompt, jobListing, careerData] = await Promise.all([
-        fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'),
-        fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'),
-        fs.promises.readFile(path.join(queued.folder, 'CLAUDE_CODE_PROMPT.md'), 'utf8'),
-        fs.promises.readFile(path.join(queued.folder, 'context', 'job-listing.md'), 'utf8'),
-        fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8'),
-      ]);
-      assert(JSON.parse(manifest).status === 'queued' && JSON.parse(input).jobId === queued.id,
-        'job manifest and input are tied to the exact queued job id');
-      assert(queued.folder.startsWith(`${project.root}${path.sep}.local-ai${path.sep}jobs${path.sep}`)
-        && queued.canvasFilePath === project.canvasFilePath
-        && prompt.includes('local_ai/CLAUDE_CODE_ROUTINE.md') && prompt.includes('INPUT_JOBS_ROOT')
-        && prompt.includes('result.json.outputBundleRoot'),
-      'job is beside the saved canvas and binds Claude Code to the reusable routine plus one result file');
-      assert(jobListing.includes('Developer') && jobListing.includes('Build reliable systems.')
-        && careerData === 'Built reliable systems with measurable outcomes.',
-      'Generate materializes the complete job-listing and career context Claude Code needs');
-      const parsedManifest = JSON.parse(manifest);
-      const parsedInput = JSON.parse(input);
-      assert(parsedManifest.canvasFilePath === project.canvasFilePath && parsedInput.canvasRoot === project.root,
-        'manifest and input bind the job to one canonical saved canvas and its folder');
-      if (process.platform !== 'win32') {
-        const jobMode = (await fs.promises.stat(queued.folder)).mode & 0o777;
-        const privateFileModes = await Promise.all([
-          'manifest.json', 'input.json', 'CLAUDE_CODE_PROMPT.md',
-          path.join('context', 'job-listing.md'), path.join('context', 'career-data.txt'),
-        ].map(async file => (await fs.promises.stat(path.join(queued.folder, file))).mode & 0o777));
-        assert(jobMode === 0o700 && privateFileModes.every(mode => mode === 0o600),
-          'Local AI candidate context must use owner-only directory and file permissions');
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Build reliable systems.' },
+          careerData: 'Built reliable systems with measurable outcomes.', additionalNotes: 'Prefer a concise letter.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        assert(queued.status === 'queued' && /^[a-f0-9-]{36}$/i.test(queued.id), 'queue creates a UUID-backed Local AI job');
+        const [manifest, input, prompt, jobListing, careerData] = await Promise.all([
+          fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'),
+          fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'),
+          fs.promises.readFile(path.join(queued.folder, 'CLAUDE_CODE_PROMPT.md'), 'utf8'),
+          fs.promises.readFile(path.join(queued.folder, 'context', 'job-listing.md'), 'utf8'),
+          fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8'),
+        ]);
+        assert(JSON.parse(manifest).status === 'queued' && JSON.parse(input).jobId === queued.id,
+          'job manifest and input are tied to the exact queued job id');
+        assert(queued.folder.startsWith(`${project.root}${path.sep}.local-ai${path.sep}jobs${path.sep}`)
+          && queued.canvasFilePath === project.canvasFilePath
+          && prompt.includes('local_ai/CLAUDE_CODE_ROUTINE.md') && prompt.includes('INPUT_JOBS_ROOT')
+          && prompt.includes('result.json.outputBundleRoot'),
+        'job is beside the saved canvas and binds Claude Code to the reusable routine plus one result file');
+        assert(jobListing.includes('Developer') && jobListing.includes('Build reliable systems.')
+          && careerData === 'Built reliable systems with measurable outcomes.',
+        'Generate materializes the complete job-listing and career context Claude Code needs');
+        const parsedManifest = JSON.parse(manifest);
+        const parsedInput = JSON.parse(input);
+        assert(parsedManifest.canvasFilePath === project.canvasFilePath && parsedInput.canvasRoot === project.root,
+          'manifest and input bind the job to one canonical saved canvas and its folder');
+        if (process.platform !== 'win32') {
+          const jobMode = (await fs.promises.stat(queued.folder)).mode & 0o777;
+          const privateFileModes = await Promise.all([
+            'manifest.json', 'input.json', 'CLAUDE_CODE_PROMPT.md',
+            path.join('context', 'job-listing.md'), path.join('context', 'career-data.txt'),
+          ].map(async file => (await fs.promises.stat(path.join(queued.folder, file))).mode & 0o777));
+          assert(jobMode === 0o700 && privateFileModes.every(mode => mode === 0o600),
+            'Local AI candidate context must use owner-only directory and file permissions');
+        }
+        return { id: queued.id };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
       }
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { id: queued.id };
     },
   },
   {
@@ -299,19 +310,22 @@ export default [
     name: 'Local AI application: stale unfinished jobs are pruned before a new job is queued',
     run: async () => {
       const project = await createCanvasProject();
-      const stale = await queueLocalApplicationJob({
-        job: { title: 'Old Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
-      });
-      const manifestPath = path.join(stale.folder, 'manifest.json');
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
-      manifest.createdAt = '2000-01-01T00:00:00.000Z';
-      await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, 'utf8');
-      await queueLocalApplicationJob({
-        job: { title: 'New Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
-      });
-      assert(!fs.existsSync(stale.folder), 'a job abandoned beyond the retention period is pruned before another is accepted');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { stalePruned: true };
+      try {
+        const stale = await queueLocalApplicationJob({
+          job: { title: 'Old Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
+        });
+        const manifestPath = path.join(stale.folder, 'manifest.json');
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        manifest.createdAt = '2000-01-01T00:00:00.000Z';
+        await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, 'utf8');
+        await queueLocalApplicationJob({
+          job: { title: 'New Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
+        });
+        assert(!fs.existsSync(stale.folder), 'a job abandoned beyond the retention period is pruned before another is accepted');
+        return { stalePruned: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -538,152 +552,173 @@ export default [
     name: 'Local AI application: status treats malformed result.json as invalid without importing it',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
-      await fs.promises.writeFile(path.join(queued.folder, 'result.json'), '{bad json', 'utf8');
-      const status = await localApplicationStatus(queued.id, project.canvasFilePath);
-      // A hard rejection must leave a trace in the ONE job-folder file the
-      // waiting Claude Code session is allowed to read. Without this the
-      // session cannot tell a rejected result from an app that never ran, and
-      // can only burn its 6-minute wait (local_ai/CLAUDE_CODE_ROUTINE.md §7).
-      const rejection = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
-      // REGRESSION GUARD. The rejection record's resultSha256 is, by
-      // construction, the hash of the CURRENT result.json — so a consumer that
-      // matches feedback on jobId+hash alone would treat it as a measured
-      // verdict. importLocalApplicationJobUnlocked did exactly that, which let
-      // a Retry-import click walk past assertLocalAiQualityReviewConsistency on
-      // a result the status poll had just rejected. Both consumers must gate on
-      // the measured-status allow-list, not on the hash match alone.
-      const importSource = await fs.promises.readFile(path.join(process.cwd(), 'electron', 'ipc', 'localAiApplication.js'), 'utf8');
-      assert(/const measuredPriorFeedback = matchingPriorFeedback\s*\n?\s*&& \['revision-required', 'revision-exhausted'\]\.includes\(priorFeedback\?\.status\)/.test(importSource)
-        && /const documentSha256 = measuredPriorFeedback/.test(importSource)
-        && !/const documentSha256 = matchingPriorFeedback/.test(importSource),
-        'the import path gates the quality-review assert on a MEASURED prior verdict, so an invalid rejection record cannot skip it');
-      assert(rejection.status === 'invalid' && rejection.measured === false
-        && rejection.jobId === queued.id
-        && typeof rejection.resultSha256 === 'string' && rejection.resultSha256.length === 64
-        // Assert the ERROR field, not `message`: `message` is fixed boilerplate
-        // that contains the literal "result.json", so a /JSON/i test against it
-        // passes even when the real reason was never recorded.
-        && /JSON|Unexpected/i.test(String(rejection.error || ''))
-        && rejection.error.length > 0 && rejection.error.length <= 500
-        && rejection.resume === undefined && rejection.coverLetter === undefined,
-        'a hard validation rejection writes a non-measured invalid record carrying the rejected bytes\' hash, and no page/layout data that could read as a measurement');
-      assert(status.status === 'invalid' && /JSON|Unexpected/i.test(status.message),
-        'bad result JSON is surfaced as an actionable invalid state');
-      const linkedResultTarget = path.join(project.root, 'outside-result.json');
-      await fs.promises.writeFile(linkedResultTarget, '{}', 'utf8');
-      await fs.promises.unlink(path.join(queued.folder, 'result.json'));
-      await fs.promises.symlink(linkedResultTarget, path.join(queued.folder, 'result.json'), process.platform === 'win32' ? 'file' : undefined);
-      const linkedStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(linkedStatus.status === 'invalid' && /regular file|link/i.test(linkedStatus.message),
-        'a result.json symlink is rejected at the no-follow read boundary');
-      const otherProject = await createCanvasProject();
-      let crossCanvasRejected = false;
-      try { await localApplicationStatus(queued.id, otherProject.canvasFilePath); } catch { crossCanvasRejected = true; }
-      assert(crossCanvasRejected, 'a job id cannot be reopened from a different canvas directory');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      await fs.promises.rm(otherProject.root, { recursive: true, force: true });
-      return { status: status.status, linkedStatus: linkedStatus.status };
+      try {
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), '{bad json', 'utf8');
+        const status = await localApplicationStatus(queued.id, project.canvasFilePath);
+        // A hard rejection must leave a trace in the ONE job-folder file the
+        // waiting Claude Code session is allowed to read. Without this the
+        // session cannot tell a rejected result from an app that never ran, and
+        // can only burn its 6-minute wait (local_ai/CLAUDE_CODE_ROUTINE.md §7).
+        const rejection = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+        // REGRESSION GUARD. The rejection record's resultSha256 is, by
+        // construction, the hash of the CURRENT result.json — so a consumer that
+        // matches feedback on jobId+hash alone would treat it as a measured
+        // verdict. importLocalApplicationJobUnlocked did exactly that, which let
+        // a Retry-import click walk past assertLocalAiQualityReviewConsistency on
+        // a result the status poll had just rejected. Both consumers must gate on
+        // the measured-status allow-list, not on the hash match alone.
+        const importSource = await fs.promises.readFile(path.join(process.cwd(), 'electron', 'ipc', 'localAiApplication.js'), 'utf8');
+        assert(/const measuredPriorFeedback = matchingPriorFeedback\s*\n?\s*&& \['revision-required', 'revision-exhausted'\]\.includes\(priorFeedback\?\.status\)/.test(importSource)
+          && /const documentSha256 = assertLocalAiQualityReviewConsistency\(result, priorFeedback\)/.test(importSource)
+          && !/const documentSha256 = matchingPriorFeedback/.test(importSource),
+          'the import path gates the quality-review assert on a MEASURED prior verdict, so an invalid rejection record cannot skip it');
+        assert(rejection.status === 'invalid' && rejection.measured === false
+          && rejection.jobId === queued.id
+          && typeof rejection.resultSha256 === 'string' && rejection.resultSha256.length === 64
+          // Assert the ERROR field, not `message`: `message` is fixed boilerplate
+          // that contains the literal "result.json", so a /JSON/i test against it
+          // passes even when the real reason was never recorded.
+          && /JSON|Unexpected/i.test(String(rejection.error || ''))
+          && rejection.error.length > 0 && rejection.error.length <= 500
+          && rejection.resume === undefined && rejection.coverLetter === undefined,
+          'a hard validation rejection writes a non-measured invalid record carrying the rejected bytes\' hash, and no page/layout data that could read as a measurement');
+        assert(status.status === 'invalid' && /JSON|Unexpected/i.test(status.message),
+          'bad result JSON is surfaced as an actionable invalid state');
+        const linkedResultTarget = path.join(project.root, 'outside-result.json');
+        await fs.promises.writeFile(linkedResultTarget, '{}', 'utf8');
+        await fs.promises.unlink(path.join(queued.folder, 'result.json'));
+        await fs.promises.symlink(linkedResultTarget, path.join(queued.folder, 'result.json'), process.platform === 'win32' ? 'file' : undefined);
+        const linkedStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(linkedStatus.status === 'invalid' && /regular file|link/i.test(linkedStatus.message),
+          'a result.json symlink is rejected at the no-follow read boundary');
+        const otherProject = await createCanvasProject();
+        try {
+          let crossCanvasRejected = false;
+          try { await localApplicationStatus(queued.id, otherProject.canvasFilePath); } catch { crossCanvasRejected = true; }
+          assert(crossCanvasRejected, 'a job id cannot be reopened from a different canvas directory');
+        } finally {
+          await fs.promises.rm(otherProject.root, { recursive: true, force: true });
+        }
+        return { status: status.status, linkedStatus: linkedStatus.status };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
     name: 'Local AI application: a cleaned-up job folder is a terminal polling state, not an IPC ENOENT',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
-      await fs.promises.rm(queued.folder, { recursive: true, force: true });
-      const status = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(status.status === 'failed' && /no longer available|cleaned up/i.test(status.message),
-        'a removed private job folder produces a terminal, actionable status instead of propagating ENOENT through the IPC handler');
-      const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      assert(cardSource.includes("!['saved', 'failed'].includes(localApplication.status)"),
-        'the card does not offer a folder-open action after the app reports that the folder is gone');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { status: status.status };
+      try {
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
+        await fs.promises.rm(queued.folder, { recursive: true, force: true });
+        const status = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(status.status === 'failed' && /no longer available|cleaned up/i.test(status.message),
+          'a removed private job folder produces a terminal, actionable status instead of propagating ENOENT through the IPC handler');
+        const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+        assert(cardSource.includes("!['saved', 'failed'].includes(localApplication.status)"),
+          'the card does not offer a folder-open action after the app reports that the folder is gone');
+        return { status: status.status };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
-    name: 'Local AI application: corrected invalid results remain eligible for automatic status recovery',
+    name: 'Local AI application: invalid and transient status failures remain eligible for automatic recovery',
     run: async () => {
-      const source = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      assert(/LOCAL_AI_CARD_POLL_IDLE_STATUSES\.includes\(localApplication\.status\)\) return undefined;/.test(source),
+      const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const fallbackSource = await fs.promises.readFile(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+      assert(/LOCAL_AI_CARD_POLL_IDLE_STATUSES\.includes\(localApplication\.status\)\) return undefined;/.test(cardSource),
         "the card's poll gate consumes the shared idle-status constant — one source of truth with the fallback manager, so the two drivers' idle sets cannot silently diverge");
       assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('invalid'),
         'invalid results remain eligible for status polling after Claude Code corrects result.json');
-      return { invalidRecoveryPolling: true };
+      assert(cardSource.includes("status: 'status-error'")
+        && cardSource.includes('LOCAL_AI_STATUS_ERROR_STREAK_LIMIT')
+        && fallbackSource.includes("status: 'status-error'")
+        && fallbackSource.includes('LOCAL_AI_STATUS_ERROR_STREAK_LIMIT'),
+      'both mounted and fallback pollers surface repeated transient status failures as retryable status-error, never terminal failed');
+      assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('status-error')
+        && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('status-error'),
+      'neither poll driver idles on status-error, so the next successful status check reconnects automatically');
+      return { invalidRecoveryPolling: true, transientFailureRecovery: true };
     },
   },
   {
     name: 'Local AI application: measured overflow waits for an AI revision, then accepts a changed result',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
-      const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
-      const result = {
-        version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
-        resumeMainHtml: validResumeMain,
-        coverLetter: normalizedCoverLetter(),
-        coverLetterArgument: validCoverLetterArgument(),
-        qualityReview: draftedQualityReview(),
-      };
-      const resultText = `${JSON.stringify(result)}\n`;
-      const canonicalResult = validateLocalApplicationResult(
-        result,
-        queued.id,
-        project.root,
-        { title: 'Developer', company: 'Acme' },
-      );
-      const documentSha256 = {
-        resume: sha256(canonicalResult.resumeMainHtml),
-        coverLetter: sha256(JSON.stringify(canonicalResult.coverLetter)),
-      };
-      await fs.promises.writeFile(path.join(queued.folder, 'result.json'), resultText, 'utf8');
-      const ready = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(ready.status === 'completed' && ready.resultSha256 === sha256(resultText),
-        'a completed Local AI status supplies the exact result hash so the renderer can wait for a stable final write');
-      await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
-        version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 17,
-        resultSha256: sha256(resultText), documentSha256,
-        resume: { targetPageCount: 1, pageCount: 2 }, coverLetter: { targetPageCount: 1, pageCount: 1 },
-        message: 'résumé is 2 pages (target: 1). Re-run the Local AI routine.',
-      })}\n`, 'utf8');
-      const revisionRequired = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(revisionRequired.status === 'revision-required' && /2 page/.test(revisionRequired.message),
-        'matching app feedback holds the result for a content-aware Local AI revision even beyond the old fixed limit');
+      try {
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath });
+        const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+        const result = {
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: validResumeMain,
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: validCoverLetterArgument(),
+          qualityReview: draftedQualityReview(),
+        };
+        const resultText = `${JSON.stringify(result)}\n`;
+        const canonicalResult = validateLocalApplicationResult(
+          result,
+          queued.id,
+          project.root,
+          { title: 'Developer', company: 'Acme' },
+        );
+        const documentSha256 = {
+          resume: sha256(canonicalResult.resumeMainHtml),
+          coverLetter: sha256(JSON.stringify(canonicalResult.coverLetter)),
+        };
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), resultText, 'utf8');
+        const ready = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(ready.status === 'completed' && ready.resultSha256 === sha256(resultText),
+          'a completed Local AI status supplies the exact result hash so the renderer can wait for a stable final write');
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 17,
+          resultSha256: sha256(resultText), documentSha256,
+          resume: { targetPageCount: 1, pageCount: 2 }, coverLetter: { targetPageCount: 1, pageCount: 1 },
+          message: 'résumé is 2 pages (target: 1). Re-run the Local AI routine.',
+        })}\n`, 'utf8');
+        const revisionRequired = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(revisionRequired.status === 'revision-required' && /2 page/.test(revisionRequired.message),
+          'matching app feedback holds the result for a content-aware Local AI revision even beyond the old fixed limit');
 
-      const diminishingResult = {
-        ...result,
-        qualityReview: {
-          resume: { decision: 'kept_diminishing_returns', rationale: 'No remaining cut preserves more priority evidence than it removes from the résumé.' },
-          coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.' },
-        },
-      };
-      const diminishingText = `${JSON.stringify(diminishingResult)}\n`;
-      await fs.promises.writeFile(path.join(queued.folder, 'result.json'), diminishingText, 'utf8');
-      const reviewed = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(reviewed.status === 'completed', 'an unchanged result is import-ready only after both documents explicitly record diminishing returns');
-      await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
-        version: 1, jobId: queued.id, status: 'revision-exhausted', revisionRound: 18,
-        resultSha256: sha256(diminishingText), documentSha256,
-        message: 'The overflowing résumé remained unchanged after an explicit diminishing-returns review.',
-      })}\n`, 'utf8');
-      const exhausted = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(exhausted.status === 'revision-exhausted' && /diminishing-returns/.test(exhausted.message),
-        'matching feedback terminates the loop because the overflowing document is unchanged at diminishing returns, not because of a retry count');
+        const diminishingResult = {
+          ...result,
+          qualityReview: {
+            resume: { decision: 'kept_diminishing_returns', rationale: 'No remaining cut preserves more priority evidence than it removes from the résumé.' },
+            coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.' },
+          },
+        };
+        const diminishingText = `${JSON.stringify(diminishingResult)}\n`;
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), diminishingText, 'utf8');
+        const reviewed = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(reviewed.status === 'completed', 'an unchanged result is import-ready only after both documents explicitly record diminishing returns');
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
+          version: 1, jobId: queued.id, status: 'revision-exhausted', revisionRound: 18,
+          resultSha256: sha256(diminishingText), documentSha256,
+          message: 'The overflowing résumé remained unchanged after an explicit diminishing-returns review.',
+        })}\n`, 'utf8');
+        const exhausted = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(exhausted.status === 'revision-exhausted' && /diminishing-returns/.test(exhausted.message),
+          'matching feedback terminates the loop because the overflowing document is unchanged at diminishing returns, not because of a retry count');
 
-      const changedResult = {
-        ...result,
-        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>More relevant evidence.</li></ul></article></section></main>',
-        qualityReview: {
-          resume: { decision: 'changed_materially', rationale: 'Replaced weaker material with more relevant and specifically supported résumé evidence.' },
-          coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.' },
-        },
-      };
-      await fs.promises.writeFile(path.join(queued.folder, 'result.json'), `${JSON.stringify(changedResult, null, 2)}\n`, 'utf8');
-      const revised = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(revised.status === 'completed', 'a materially changed résumé and unchanged diminishing-returns cover letter clear stale feedback and return to import-ready state');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { held: revisionRequired.status, exhausted: exhausted.status, revised: revised.status };
+        const changedResult = {
+          ...result,
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>More relevant evidence.</li></ul></article></section></main>',
+          qualityReview: {
+            resume: { decision: 'changed_materially', rationale: 'Replaced weaker material with more relevant and specifically supported résumé evidence.' },
+            coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.' },
+          },
+        };
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), `${JSON.stringify(changedResult, null, 2)}\n`, 'utf8');
+        const revised = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(revised.status === 'completed', 'a materially changed résumé and unchanged diminishing-returns cover letter clear stale feedback and return to import-ready state');
+        return { held: revisionRequired.status, exhausted: exhausted.status, revised: revised.status };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -694,28 +729,31 @@ export default [
     name: 'Local AI import: concurrent imports of one job serialize behind the per-job lock',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({
-        job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
-        canvasFilePath: project.canvasFilePath,
-      });
-      // No result.json exists, so the winning import fails on the missing
-      // file — the point is WHICH error each concurrent caller receives.
-      const first = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
-      const second = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
-      const [firstErr, secondErr] = await Promise.all([
-        first.then(() => null, (e) => e),
-        second.then(() => null, (e) => e),
-      ]);
-      assert(firstErr && firstErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
-        'the first import enters the job body and fails on the missing result.json, not on the lock');
-      assert(secondErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
-        'a concurrent second import of the same job is rejected by the per-job lock');
-      const thirdErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
-        .then(() => null, (e) => e);
-      assert(thirdErr && thirdErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
-        'the lock is released once the first import settles — later imports run normally');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { firstError: String(firstErr?.message || '').slice(0, 60), secondCode: secondErr?.code };
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        // No result.json exists, so the winning import fails on the missing
+        // file — the point is WHICH error each concurrent caller receives.
+        const first = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const second = importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const [firstErr, secondErr] = await Promise.all([
+          first.then(() => null, (e) => e),
+          second.then(() => null, (e) => e),
+        ]);
+        assert(firstErr && firstErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'the first import enters the job body and fails on the missing result.json, not on the lock');
+        assert(secondErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'a concurrent second import of the same job is rejected by the per-job lock');
+        const thirdErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+          .then(() => null, (e) => e);
+        assert(thirdErr && thirdErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'the lock is released once the first import settles — later imports run normally');
+        return { firstError: String(firstErr?.message || '').slice(0, 60), secondCode: secondErr?.code };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -803,30 +841,89 @@ export default [
     name: 'Local AI import: a fresh manifest ‘imported’ holds pollers and rejects re-import until the save window lapses',
     run: async () => {
       const project = await createCanvasProject();
-      const queued = await queueLocalApplicationJob({
-        job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
-        canvasFilePath: project.canvasFilePath,
-      });
-      const manifestPath = path.join(queued.folder, 'manifest.json');
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
-      await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date().toISOString() }), 'utf8');
-      const settling = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(settling.status === 'importing' && /bundle save to settle/.test(settling.message) && settling.resultSha256 === null,
-        'a fresh imported manifest reports the save window instead of a completed, re-importable result');
-      const reimportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
-        .then(() => null, (e) => e);
-      assert(reimportErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
-        're-import during the save window is rejected with the typed retriable code');
-      await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date(Date.now() - 10 * 60_000).toISOString() }), 'utf8');
-      const lapsed = await localApplicationStatus(queued.id, project.canvasFilePath);
-      assert(lapsed.status === 'queued',
-        'a lapsed save window falls through to normal status — a crashed save never permanently wedges the job');
-      const lapsedImportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
-        .then(() => null, (e) => e);
-      assert(lapsedImportErr && lapsedImportErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
-        'after the window lapses, import proceeds into the job body again (fails only on the missing result.json)');
-      await fs.promises.rm(project.root, { recursive: true, force: true });
-      return { settling: settling.status, lapsed: lapsed.status };
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date().toISOString() }), 'utf8');
+        const settling = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(settling.status === 'importing' && /bundle save to settle/.test(settling.message) && settling.resultSha256 === null,
+          'a fresh imported manifest reports the save window instead of a completed, re-importable result');
+        const reimportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+          .then(() => null, (e) => e);
+        assert(reimportErr?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          're-import during the save window is rejected with the typed retriable code');
+        await fs.promises.writeFile(manifestPath, JSON.stringify({ ...manifest, status: 'imported', importedAt: new Date(Date.now() - 10 * 60_000).toISOString() }), 'utf8');
+        const lapsed = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(lapsed.status === 'queued',
+          'a lapsed save window falls through to normal status — a crashed save never permanently wedges the job');
+        const lapsedImportErr = await importLocalApplicationJob({ jobId: queued.id, canvasFilePath: project.canvasFilePath })
+          .then(() => null, (e) => e);
+        assert(lapsedImportErr && lapsedImportErr.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'after the window lapses, import proceeds into the job body again (fails only on the missing result.json)');
+        return { settling: settling.status, lapsed: lapsed.status };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // The measured import finishes before the renderer promotes its registered
+    // workspace. A receipt is terminal evidence for the waiting Claude Code
+    // session, so it must be emitted by save-application only after that
+    // promotion and the private-workspace cleanup both succeed. Conversely, a
+    // failed promotion must retain the Local AI job/result for retry.
+    name: 'Local AI handoff: terminal receipt follows durable save and failed save retains the job',
+    run: async () => {
+      const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      const applicationSource = await fs.promises.readFile(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
+      const registrationAt = localSource.indexOf('const workDir = registerPendingApplicationWorkspace({');
+      const receiptCalls = [...localSource.matchAll(/await writeLocalAiTerminalReceipt\(/g)].map(match => match.index);
+      assert(registrationAt >= 0
+        && /cleanupOnSaveFailure\s*:\s*false/.test(localSource.slice(registrationAt))
+        && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt)),
+      'a Local AI import registers failure-retention plus a post-save receipt callback');
+      assert(receiptCalls.length === 1 && receiptCalls[0] > registrationAt,
+        'the terminal receipt is not emitted during measured import before save-application owns the workspace');
+
+      const cleanupAt = applicationSource.indexOf("await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save')");
+      const finalizerAt = applicationSource.indexOf('await pending.onSuccessfulSave(');
+      const saveReturnAt = applicationSource.indexOf('return {\n      saved: true,');
+      assert(cleanupAt >= 0 && finalizerAt > cleanupAt && saveReturnAt > finalizerAt,
+        'save-application invokes the registered terminal callback only after atomic promotion and private-workspace cleanup');
+      const saveFailureAt = applicationSource.indexOf("discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure')");
+      const failureWindow = applicationSource.slice(Math.max(0, saveFailureAt - 700), saveFailureAt + 250);
+      assert(saveFailureAt >= 0 && /pending\.cleanupOnSaveFailure/.test(failureWindow),
+        'the failed-save cleanup path honors a workspace-specific retention policy instead of unconditionally removing a Local AI job');
+
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
+        });
+        const receiptsRoot = path.join(project.root, '.local-ai', 'handoff-receipts');
+        await fs.promises.mkdir(receiptsRoot, { recursive: true });
+        await fs.promises.writeFile(path.join(receiptsRoot, `${queued.id}.json`), `${JSON.stringify({
+          version: 1,
+          jobId: queued.id,
+          status: 'imported',
+          resultSha256: 'a'.repeat(64),
+          importedAt: new Date().toISOString(),
+          resume: { pageCount: 1, targetPageCount: 1, attempts: [{ density: 'default', pageCount: 1 }] },
+          coverLetter: { pageCount: 1, targetPageCount: 1 },
+          message: 'Both documents met their measured targets.',
+        })}\n`, 'utf8');
+        await fs.promises.rm(queued.folder, { recursive: true, force: true });
+        const status = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(status.status === 'saved' && status.receipt?.jobId === queued.id,
+          `a valid terminal receipt must distinguish a completed-save cleanup from a failed/missing job, got ${JSON.stringify(status)}`);
+        return { status: status.status, receipt: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
 ];

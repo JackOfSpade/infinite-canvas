@@ -1643,6 +1643,20 @@ draws me to…"* replaces an ambiguous "It" with the single noun phrase
 it meant. Diagnose and repair by shape, as with every rule in this
 section; do not pattern-match on these sentences.
 
+**Write from the evidence, not from its phrasing.** Preserve every fact and
+its scope, but vary distinctive source constructions across the résumé and
+letter. “Built from scratch” is rarely load-bearing; use a natural supported
+verb such as “designed and implemented,” “created,” “developed,” or “delivered”
+when it carries the same meaning. Establish the argumentative relationship
+before introducing a new employer, project, or period. Temporal contrast words
+such as “now,” “still,” “again,” “before,” and “after” require an explicit
+contrast or sequence already on the page. Prefer common contemporary diction:
+close or address a gap, never “answer” one. Name an ordinary prior employer
+once, then use the role, system, project, organization, or “there” when the
+referent is clear. Narrow connective or causal language directly entailed by
+the evidence is welcome because it improves flow; a new candidate fact,
+outcome, scope, tool, sequence, or motivation is not.
+
 **Synthesize, don't list.** The letter's job is to explain what the
 candidate built or owned, the problem it solved, and why that matters
 to *this* role — as a small number of well-chosen examples argued in
@@ -1708,26 +1722,13 @@ for any letter that runs long.
   exactly one possible antecedent, or repeats the noun phrase instead
   (§11.2.3 Rule 6).
 
-### 11.5 Short letters — `data-letter="centered"`
+### 11.5 Short letters stay top-aligned
 
-```html
-<html lang="en" data-letter="centered">
-```
-
-Equal top/bottom margins hold only when the block reaches the bottom
-margin (§4.4). A letter that runs **≲⅔ of the type area** leaves all
-its slack at the foot and reads as though it slid off the top of the
-sheet. For correspondence, the editorial answer is to hang the short
-letter optically centred in the type area.
-
-| | |
-|---|---|
-| Scope | **Cover letter only.** The rule lives in `cover-letter.css`, which the résumé does not load — the scoping is structural, not conventional. A résumé is read top-down as a data grid and is *never* centred. |
-| Contract | Root-only and opt-in, same as the other four variants. |
-| When to set | Only after measuring the rendered letter at ≲⅔ of the type-area height — the same measure-then-set discipline as `data-density="compact"` (§6.0). |
-| Mechanism | `align-content: safe center` on `.page` — **not** flex. Switching `.page` to a flex container disables margin collapsing, which the optical trims (§4.4) live in; measured, it grew a full letter's page box by ~9 pt, enough to tip a one-page letter onto a second sheet. `align-content` centres block children inside a definite height and leaves the formatting context — and every other measurement — untouched. `safe` leaves negative free space alone, so a letter that fills or overflows the page is left exactly as it was and can never be pushed off the top edge. Degradation is graceful at every length: the shorter the letter, the more it centres. |
-| Print | Print drops the screen page box (`min-height: auto`; vertical margins move to `@page`), leaving no definite height to centre in. The print branch restores one as `--page-h − --margin-top − --margin-bot`; because the margin tokens track the values `@page` uses, that single `calc` covers letter, a4, letter-compact and a4-compact. |
-| Ink balance | The optical lead trim (§4.4) still applies inside the letterhead, so a centred letter keeps equal ink-to-edge distances at top and bottom as well as equal slack. |
+The cover letter always begins at the same top position as the résumé.
+Short content leaves its unused space below the close; it is never vertically
+centred or shifted down to balance the page. This shared top edge makes the two
+documents read as a matched pair and keeps the letterhead position stable
+across every generation, paper size, and density.
 
 ---
 

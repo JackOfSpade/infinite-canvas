@@ -265,8 +265,13 @@ const _historyTails = new Map();
 function withHistoryLock(filePath, fn) {
   const prev = _historyTails.get(filePath) || Promise.resolve();
   const result = prev.then(fn, fn); // run regardless of the prior op's outcome
-  _historyTails.set(filePath, result.then(() => {}, () => {}));
-  return result;
+  const tail = result.then(() => {}, () => {});
+  _historyTails.set(filePath, tail);
+  return result.finally(() => {
+    // Canvas paths are unbounded over a long app session. Remove an idle key
+    // without disturbing a newer operation that queued behind this one.
+    if (_historyTails.get(filePath) === tail) _historyTails.delete(filePath);
+  });
 }
 
 /**

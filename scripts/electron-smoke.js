@@ -631,8 +631,14 @@ try {
 
   step('create and navigate a nested canvas');
   await clickToolbar(page, 'Nested Canvas');
+  // `clickToolbar` invokes the button from page context so it does not wait
+  // for React's placement-mode commit.  Wait for the visible placement cursor
+  // before sending the next, real pointer event; otherwise the pane click can
+  // race the state update and be treated as an ordinary deselect click.
+  await page.locator('div.fixed.pointer-events-none.z-50:has(svg[viewBox="0 0 24 24"])').waitFor();
   await clickPane(page, 850, 250);
-  assert.equal(await nodeCount(page, 'group'), 1, 'nested-canvas placement should create a group');
+  await waitForCount(page.locator('.react-flow__node-group'), (count) => count === 1,
+    'nested-canvas placement should create a group');
   await page.locator('.react-flow__node-group').dblclick();
   const backToParent = page.locator('button[title="Back to parent canvas"]');
   await backToParent.waitFor();

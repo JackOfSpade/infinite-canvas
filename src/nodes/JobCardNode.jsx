@@ -1,14 +1,14 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, X, Sparkles, Check } from 'lucide-react';
+import { ExternalLink, X, Sparkles, Check, ChevronDown } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
-import { computeJobTreeView } from './jobsearch/buildJobTree';
+import { computeJobTreeView, normalizeCompensationAssessment } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
@@ -22,6 +22,39 @@ function scoreColor(score) {
   if (score >= 65) return '#3b82f6'; // blue   — good chance of interview
   if (score >= 40) return '#eab308'; // amber  — stretch / longshot
   return '#6b7280';                  // gray   — unlikely
+}
+
+const COMPENSATION_BORDER_COLORS = {
+  competitive: '#22c55e',
+  below_market: '#ef4444',
+};
+
+function compensationLabel(status) {
+  if (status === 'competitive') return 'Competitive cash pay';
+  if (status === 'below_market') return 'Likely below-market cash pay';
+  if (status === 'uncertain') return 'Cash-pay comparison uncertain';
+  return 'Cash pay not evaluated';
+}
+
+function cashRangeLabel(range) {
+  const min = typeof range?.min === 'number' && Number.isFinite(range.min) ? range.min : null;
+  const max = typeof range?.max === 'number' && Number.isFinite(range.max) ? range.max : null;
+  if (min === null && max === null) return '';
+  const currency = String(range?.currency || '').trim().toUpperCase();
+  const formatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+  const money = (amount) => `${currency ? `${currency} ` : ''}${formatter.format(amount)}`;
+  const values = min !== null && max !== null && min !== max
+    ? `${money(min)}–${money(max)}`
+    : money(max ?? min);
+  const period = String(range?.period || '').trim().toLowerCase();
+  return `${values}${period ? ` / ${period}` : ''}`;
+}
+
+function researchedDateLabel(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 // A cached ledger's in-flight marker (data.achievementsMining, a ms timestamp)
@@ -60,6 +93,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const { acquireModuleRun, cancelQueuedRunsForNode, snapshot: moduleRunSnapshot } = useModuleRunQueue();
 
   const [showFullReasoning, setShowFullReasoning] = useState(false);
+  const [showCompensationDetails, setShowCompensationDetails] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
   // Local AI is deliberately a human-in-the-loop workflow. The durable job
   // folder is authoritative; this persisted pointer lets a remounted card
@@ -127,14 +161,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [id, data.localApplication, localApplication, localApplicationKey, updateGlobal]);
 
-  // Reasoning disclosure changes the card's DOM height asynchronously through
-  // ResizeObserver. Re-run the tree layout only after a *subsequent* visible
-  // measurement change lands in ReactFlow, otherwise a tall card can overlap
-  // the card/root below it. Skipping a null → first-measurement transition
-  // avoids N reflows when a fresh cascade initially mounts. The same guard also
-  // fixes collapse → re-expand: hidden cards unmount and reset this local
-  // disclosure state, so an old 308px measurement can legitimately become the
-  // normal 210px measurement when the card returns.
+  // Match and compensation disclosures change the card's DOM height
+  // asynchronously through ResizeObserver. Re-run the tree layout only after a
+  // *subsequent* visible measurement change lands in ReactFlow, otherwise a
+  // tall card can overlap the card/root below it. Skipping a null →
+  // first-measurement transition avoids N reflows when a fresh cascade initially
+  // mounts. The same guard also fixes collapse → re-expand: hidden cards unmount
+  // and reset this local disclosure state, so an old 308px measurement can
+  // legitimately become the normal 210px measurement when the card returns.
   useEffect(() => {
     const previousMeasuredHeight = previousMeasuredHeightRef.current;
     previousMeasuredHeightRef.current = measuredHeight;
@@ -156,8 +190,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // Local disclosure state is intentionally non-persistent, but report it while
   // mounted so a bug report can explain a measured-height/layout discrepancy.
   useEffect(() => {
-    EventLogger.registerNodeState(id, { reasoningExpanded: showFullReasoning });
-  }, [id, showFullReasoning]);
+    EventLogger.registerNodeState(id, {
+      reasoningExpanded: showFullReasoning,
+      compensationExpanded: showCompensationDetails,
+    });
+  }, [id, showFullReasoning, showCompensationDetails]);
   useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
 
   // Folder the last successful generation actually wrote artifacts to, so
@@ -171,9 +208,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // ensures a completed local result is imported exactly once.
   const localImportingRef = useRef(new Set());
   const localResultSettlingRef = useRef(new Map());
-  // jobId → consecutive status-poll failures. Terminal 'failed' is idle for
-  // BOTH drivers (the fallback manager never resumes it), so a single
-  // transient status error here would permanently orphan a pending handoff.
+  // jobId → consecutive status-poll failures. The visible `status-error`
+  // state remains pollable, so a transient filesystem/IPC issue cannot orphan
+  // a pending handoff.
   const localStatusErrorStreakRef = useRef(new Map());
   // React state does not disable a button until the next render. Keep a
   // synchronous latch too, so two click events in the same render frame cannot
@@ -193,9 +230,18 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     () => formatSalaryCurrencyLabel(data.salary, data.location),
     [data.salary, data.location]
   );
+  const compensationAssessment = useMemo(
+    () => normalizeCompensationAssessment(data.compensationAssessment),
+    [data.compensationAssessment]
+  );
+  const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
+    .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
+    .filter((source) => source.safeUrl), [compensationAssessment]);
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
+  const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || 'rgba(255,255,255,0.12)';
+  const hasExpandedDisclosure = showFullReasoning || showCompensationDetails;
   // NodeHandles is React.memo'd; an inline object literal here would create a
   // new reference every render and defeat that memoization, unlike every
   // other caller of NodeHandles, which pass only a stable className.
@@ -231,6 +277,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       window.electronAPI.openExternal(url);
     }
   }, [data.url]);
+
+  const openResearchSource = useCallback((rawUrl) => {
+    const url = normalizeExternalHttpUrl(rawUrl);
+    if (url && window.electronAPI?.openExternal) window.electronAPI.openExternal(url);
+  }, []);
 
   // Dismiss = delete this card, then re-derive the tree view so the column
   // tightens and the role leaf's pagination window backfills the next matching
@@ -442,12 +493,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (cancelled || !isMountedRef.current) return;
         // Same transient tolerance as the fallback manager: one status hiccup
         // (e.g. a canvas re-save renaming files under the resolver) must not
-        // park the handoff on terminal 'failed'.
+        // park the handoff in a terminal state.
         const streak = (localStatusErrorStreakRef.current.get(jobId) || 0) + 1;
         localStatusErrorStreakRef.current.set(jobId, streak);
         if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
         localStatusErrorStreakRef.current.delete(jobId);
-        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'failed', message: error?.message || String(error) } : current);
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` } : current);
       }
     };
     check();
@@ -634,8 +685,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       // A freshly mined ledger comes back on the result — cache it on the
       // origin hub so every later application from this hub reuses it instead
-      // of re-mining (§2/§3.6).
-      if (result.achievements && getNode(originHubId)) {
+      // of re-mining (§2/§3.6). The identity compare is load-bearing: the ledger
+      // is an UNKEYED hub-level cache (mineAllowed is just `!cachedAchievements`),
+      // so a write-back must prove the source text it was mined from is still the
+      // hub's current career data. A "Clear career files" or a file swap during
+      // this multi-minute generation would otherwise re-poison the cleared hub
+      // with the previous files' figures, and every later résumé would be written
+      // from them.
+      if (result.achievements && getNode(originHubId)?.data?.careerData === careerData) {
         updateGlobal(originHubId, { achievements: result.achievements });
       }
       // A view can unmount simply because its branch was hidden; that must not
@@ -792,8 +849,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
   return (
     <div
-      className="w-[280px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group"
-      style={{ borderColor: accentColor + '55' }}
+      className={`${hasExpandedDisclosure ? 'w-[420px]' : 'w-[280px]'} rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group`}
+      style={{ borderColor: compensationBorderColor }}
     >
       <NodeHandles className="w-2 h-2" style={handleStyle} />
 
@@ -820,10 +877,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <button
             onClick={data.locked ? undefined : () => dismissCard()}
             disabled={!!data.locked}
-            className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all ${
+            className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/70 transition-all ${
               data.locked ? 'hidden' : 'text-white/30 hover:text-red-400 hover:bg-white/10'
             }`}
             title="Dismiss Job"
+            aria-label="Dismiss job"
           >
             <X size={14} />
           </button>
@@ -849,9 +907,81 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
             className="ml-auto -my-1 p-1 text-white/30 hover:text-white/70 transition-colors"
             title="Open job listing"
+            aria-label="Open job listing"
           >
             <ExternalLink size={12} />
           </button>
+        )}
+      </div>
+
+      {/* Compensation is deliberately separate from the interview-match score.
+          Its border is semantic (green/red only for a confident cash-pay
+          verdict); unknown, old, and incomplete research remains neutral. */}
+      <div className="border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className={`nodrag w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left text-[11px] transition-colors hover:bg-white/[0.035] ${
+            compensationAssessment.status === 'competitive'
+              ? 'text-emerald-300/90'
+              : compensationAssessment.status === 'below_market'
+                ? 'text-red-300/90'
+                : 'text-white/45'
+          }`}
+          onClick={(e) => {
+            e.stopPropagation();
+            const nextExpanded = !showCompensationDetails;
+            setShowCompensationDetails(nextExpanded);
+            EventLogger.log(`[JobCard] compensation ${nextExpanded ? 'expanded' : 'collapsed'} id=${id} status=${compensationAssessment.status}`);
+          }}
+          aria-expanded={showCompensationDetails}
+          title={showCompensationDetails ? 'Hide cash-pay research' : 'Show cash-pay research'}
+        >
+          <span className="min-w-0 truncate">{compensationLabel(compensationAssessment.status)}</span>
+          <ChevronDown size={13} className={`shrink-0 transition-transform ${showCompensationDetails ? 'rotate-180' : ''}`} aria-hidden="true" />
+        </button>
+
+        {showCompensationDetails && (
+          <div className="px-3 pb-2.5 text-xs leading-relaxed text-white/55">
+            <p className="text-white/70">{compensationAssessment.justification}</p>
+            {(cashRangeLabel(compensationAssessment.offered) || data.salary) && (
+              <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || data.salary}</div>
+            )}
+            {cashRangeLabel(compensationAssessment.competitiveRange) && (
+              <div><span className="text-white/35">Competitive cash range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
+            )}
+            {compensationAssessment.comparisonLocation && (
+              <div><span className="text-white/35">Compared for:</span> {compensationAssessment.comparisonLocation}</div>
+            )}
+            {researchedDateLabel(compensationAssessment.researchedAt) && (
+              <div><span className="text-white/35">Researched:</span> {researchedDateLabel(compensationAssessment.researchedAt)}</div>
+            )}
+            {compensationSourceLinks.length > 0 && (
+              <div className="mt-2 border-t border-white/5 pt-1.5">
+                <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-white/35">Research sources</div>
+                <div className="space-y-1">
+                  {compensationSourceLinks.map((source, index) => {
+                    const sourceRange = cashRangeLabel(source.range);
+                    return (
+                      <div key={`${source.url}-${index}`} className="min-w-0">
+                        <button
+                          type="button"
+                          className="nodrag flex max-w-full items-center gap-1 text-left text-[11px] text-blue-300/80 hover:text-blue-200"
+                          onClick={(e) => { e.stopPropagation(); openResearchSource(source.safeUrl); }}
+                          title={`Open research source: ${source.label}`}
+                        >
+                          <ExternalLink size={11} className="shrink-0" aria-hidden="true" />
+                          <span className="truncate">{source.label}{sourceRange ? ` · ${sourceRange}` : ''}</span>
+                        </button>
+                        {source.details && (
+                          <p className="mt-0.5 pl-4 text-[10px] leading-snug text-white/35">{source.details}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -859,8 +989,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           clamp it so every card keeps a consistent height, and let the user click
           to expand and read it all (then click again to collapse). */}
       {data.reasoning && (
-        <div
-          className={`px-3 py-1.5 text-white/45 text-xs leading-relaxed border-t border-white/5 cursor-pointer hover:text-white/60 transition-colors ${showFullReasoning ? '' : 'line-clamp-3'}`}
+        <button
+          type="button"
+          className={`nodrag block w-full px-3 py-1.5 text-left text-white/45 text-xs leading-relaxed border-t border-white/5 cursor-pointer hover:text-white/60 focus-visible:text-white/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-300/70 transition-colors ${showFullReasoning ? '' : 'line-clamp-3'}`}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
@@ -868,10 +999,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             setShowFullReasoning(nextExpanded);
             EventLogger.log(`[JobCard] reasoning ${nextExpanded ? 'expanded' : 'collapsed'} id=${id}`);
           }}
+          aria-expanded={showFullReasoning}
           title={showFullReasoning ? 'Show less' : 'Show full reasoning'}
         >
           {data.reasoning}
-        </div>
+        </button>
       )}
 
       {/* Job-specific context is persisted on this card, never merged into the
@@ -906,6 +1038,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 {localApplication.status === 'queued' ? 'Local AI queued — run Claude Code' :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
+                      localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
               <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>

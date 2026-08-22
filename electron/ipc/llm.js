@@ -1,7 +1,7 @@
 import { getAISettings } from './settings.js';
 import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, countGeminiInputTokens } from './gemini.js';
 import { GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS } from './geminiModels.js';
-import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
+import { callClaudeText, callClaudeVision, callClaudeDocument, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
 import { parseAiJson } from './jsonRepair.js';
 import { isWordDoc, extractWordText } from './docUtils.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
@@ -63,6 +63,10 @@ const TASK_MODELS = {
   'job-query-generation':      { gemini: 'gemini-3.7-flash' },
   'job-scoring':                { gemini: 'gemini-3.7-flash' },
   'job-bucketing':              { gemini: 'gemini-3.7-flash' },
+  // Two-step cash-compensation pipeline: grounded research discovers current
+  // market evidence; a separate structured pass extracts comparable ranges.
+  'job-compensation-research':  { gemini: 'gemini-3.7-flash' },
+  'job-compensation-assessment': { gemini: 'gemini-3.7-flash' },
   // Research: grounded summarization that FEEDS application generation, not
   // the employer-facing artifact itself (see the `generation` group doc below
   // for why it steps down a tier on the Claude path).
@@ -194,6 +198,8 @@ const TASK_GROUPS = {
   'job-query-generation':      { group: 'analysis' },
   'job-scoring':                { group: 'analysis' },
   'job-bucketing':              { group: 'analysis' },
+  'job-compensation-research':  { group: 'analysis' },
+  'job-compensation-assessment': { group: 'analysis' },
   'default':                    { group: 'analysis' },
 
   // light — page status classify, text polish, platform-fit: short
@@ -310,6 +316,10 @@ const TASK_MAX_TOKENS = {
   // observed truncation point), 50→24k, capped at 24576 to bound billing.
   'job-bucketing':             ({ itemCount = 15 } = {}) =>
     Math.min(24576, 4096 + itemCount * 400),
+  // One grounded search is shared by a role/seniority/location cohort.
+  'job-compensation-research': 4096,
+  'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
+    Math.min(8192, 2048 + itemCount * 600),
   // Research: synthesized web findings covering BOTH the company (culture,
   // products, recent news, stage) AND the specific role (responsibilities,
   // requirements, emphasized skills) — the primary job-context source. Grounded
@@ -489,6 +499,31 @@ function pickMaxTokens(task, hints = {}, provider = null, model = null) {
   return { cap, seed };
 }
 
+/**
+ * After a provider failed with an output-cap truncation, the cap that would be
+ * used NOW — or null if there is nothing to gain from trying again.
+ *
+ * The provider records the truncation SYNCHRONOUSLY before it throws
+ * (recordTruncation, claude.js/gemini.js), which raises this task's persisted
+ * floor immediately; the call that paid for the truncation is the only one that
+ * never gets to use it. Re-resolving here recovers the corrected cap for a
+ * single retry — the difference between a completed atomic call and a hard
+ * failure for tasks with no chunking path to fall back on
+ * (career-file-extract, career-achievement-refute, application-resume).
+ *
+ * Returns null unless the floor ACTUALLY moved, so a task already pinned at
+ * TOKEN_HARD_CAP (or one that failed for any other reason) never retries.
+ * `err.code` is the real signal; the message match is a fallback for any
+ * provider path that loses the tag on its way up (e.g. a wrapped cascade error).
+ */
+function raisedCapAfterTruncation(err, { signal, usedCap, task, hints, provider, model }) {
+  if (signal?.aborted) return null;
+  const truncated = err?.code === 'MAX_TOKENS' || /hit the \d+-token output cap/.test(err?.message || '');
+  if (!truncated) return null;
+  const resolved = pickMaxTokens(task, hints, provider, model);
+  return resolved.cap > usedCap ? resolved : null;
+}
+
 // ── Context-window preflight ──────────────────────────────────────────────────
 /**
  * Will `prompt` (+ its cached prefix and the task's reserved output) fit the
@@ -631,14 +666,15 @@ export async function callLLMText(prompt, opts = {}) {
   assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
+  const capHints = { promptLength: fullLen, ...hints };
+  let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Context-window preflight (free token count, mostly a local estimate): fail
   // loud BEFORE sending if the prompt + reserved output won't fit the serving
   // model. List-payload callers (job scoring) pre-split via checkPromptFits, so
   // they never reach this; atomic tasks (parse/research/cover-letter) that
   // genuinely overflow get an actionable error instead of a truncated answer.
   await assertPromptFits(prompt, { signal, task, hints, responseSchema, cachedPrefix });
-  try {
+  const attempt = async () => {
     if (provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
       if (meta) meta.model = model;
@@ -648,33 +684,28 @@ export async function callLLMText(prompt, opts = {}) {
     // models picks up the repeated content automatically.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
     return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta, excludeModels });
-  } catch (err) {
-    throw enhanceLLMError(err, provider);
+  };
+  // `retriedForCap` caps this at ONE extra attempt no matter what the provider
+  // does — a task whose floor keeps rising must never turn a single truncation
+  // into an unbounded (and billed) climb toward TOKEN_HARD_CAP.
+  let retriedForCap = false;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      if (!raised) throw enhanceLLMError(err, provider);
+      logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
+      retriedForCap = true;
+      maxTok = raised.cap;
+      formulaSeed = raised.seed;
+    }
   }
 }
 
-// ── Batch text/JSON (async, Claude-only) ───────────────────────────────────
-// The Batch API is ~50% cheaper but async (results within 24h). Only Claude is
-// supported (free-tier Gemini is already $0); callers must gate on provider.
-// Each item: { customId, prompt, hints }. Per-item max_tokens is resolved from
-// the task budget + hints exactly like callLLMText, so a batched call sizes its
-// output identically to a real-time one. cachedPrefix is sent as an ephemeral
-// cache block per request (the shared profile+rules), stacking the caching
-// discount on top of the batch discount.
-export async function submitLLMTextBatch(items, { task, responseSchema, cachedPrefix } = {}) {
-  const settings = getAISettings();
-  if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
-  if (!settings.anthropicApiKey) throw new Error('Batch scoring requires an Anthropic API key (set it in Settings).');
-  const model = pickModel('claude', task, settings);
-  const requests = (items || []).map((it) => {
-    const fullLen = (it.prompt?.length || 0) + (cachedPrefix?.length || 0);
-    const { cap: maxTokens } = pickMaxTokens(task, { promptLength: fullLen, ...(it.hints || {}) }, 'claude', model);
-    return { customId: it.customId, userContent: it.prompt, model, maxTokens, responseSchema, cachedPrefix, expectJson: !responseSchema };
-  });
-  const res = await createClaudeBatch(settings.anthropicApiKey, requests);
-  return { batchId: res.id, status: res.status, count: requests.length, model };
-}
-
+// Legacy read/cancel support only. New callers cannot submit Batch API work;
+// these functions exist solely to finish or discard jobs paid for by an older
+// app version before economy scoring was removed.
 export async function getLLMTextBatchStatus(batchId) {
   const settings = getAISettings();
   if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
@@ -684,10 +715,15 @@ export async function getLLMTextBatchStatus(batchId) {
 // Download + parse → { [customId]: parsedObject | null }. Unusable entries
 // (errored/expired request, non-JSON body) map to null so the caller's
 // reconciliation applies its placeholder fallback.
-export async function getLLMTextBatchResults(batchId) {
+//
+// `budget` is the { task, capsByCustomId } pair the caller persisted at submit
+// time; it feeds the token-budget telemetry a batched call would otherwise skip
+// entirely (see getClaudeBatchResults). Omitting it — as a sidecar written
+// before this existed does — is inert, not an error.
+export async function getLLMTextBatchResults(batchId, budget = {}) {
   const settings = getAISettings();
   if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
-  const raw = await getClaudeBatchResults(settings.anthropicApiKey, batchId);
+  const raw = await getClaudeBatchResults(settings.anthropicApiKey, batchId, budget);
   const parsed = {};
   for (const [customId, r] of Object.entries(raw)) {
     if (!r.ok || !r.text) { parsed[customId] = null; continue; }
@@ -720,12 +756,13 @@ export async function callLLMRaw(prompt, opts = {}) {
   assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
+  const capHints = { promptLength: fullLen, ...hints };
+  let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Same context-window preflight as callLLMText (this free-text path can carry
   // large research/synthesis prompts). Grounding adds server-side search tokens
   // we can't predict, but the prompt itself is what we guard here.
   await assertPromptFits(prompt, { signal, task, hints, cachedPrefix });
-  try {
+  const attempt = async () => {
     if (provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: false, grounding, task, cachedPrefix });
       if (meta) meta.model = model;
@@ -735,8 +772,22 @@ export async function callLLMRaw(prompt, opts = {}) {
     // caching picks up the repeated content); mirrors callLLMText.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
     return await callGeminiTextRaw(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta, excludeModels });
-  } catch (err) {
-    throw enhanceLLMError(err, provider);
+  };
+  // Same single bounded cap retry as callLLMText — this path resolves its cap
+  // through the identical pickMaxTokens/effectiveCap mechanism, so a truncation
+  // here has the same one-line-away corrected cap waiting for it.
+  let retriedForCap = false;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      if (!raised) throw enhanceLLMError(err, provider);
+      logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
+      retriedForCap = true;
+      maxTok = raised.cap;
+      formulaSeed = raised.seed;
+    }
   }
 }
 
@@ -750,19 +801,35 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
   // call site can override when it knows better than the default heuristic.
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints }, provider, model);
+  const capHints = { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints };
+  let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Preflight the text prompt + a per-image allowance (image tokens themselves
   // are the provider's authority). Fails loud before sending if clearly over.
   await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: imagePaths?.length || 0 });
-  try {
+  const attempt = async () => {
     if (provider === 'claude') {
       const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       if (meta) meta.model = model;
       return parseAiJson(raw);
     }
     return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta, excludeModels });
-  } catch (err) {
-    throw enhanceLLMError(err, provider);
+  };
+  // Same single bounded cap retry as callLLMText/callLLMRaw — a multi-photo
+  // upload (vision-product-analysis) has no chunking path to fall back on, so
+  // one retry at the raised cap is the difference between a completed call
+  // and a hard failure.
+  let retriedForCap = false;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      if (!raised) throw enhanceLLMError(err, provider);
+      logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
+      retriedForCap = true;
+      maxTok = raised.cap;
+      formulaSeed = raised.seed;
+    }
   }
 }
 
@@ -790,19 +857,35 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   const provider = providerForTask(task, settings);
   assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints }, provider, model);
+  const capHints = { promptLength: prompt?.length || 0, ...hints };
+  let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Preflight the text prompt + one document allowance (the file's own tokens —
   // PDF pages, etc. — remain the provider's authority). A pathologically large
   // career-file/résumé fails loud here instead of mid-extraction truncation.
   await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: 1 });
-  try {
+  const attempt = async () => {
     if (provider === 'claude') {
       const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       return parseAiJson(raw);
     }
     return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, excludeModels });
-  } catch (err) {
-    throw enhanceLLMError(err, provider);
+  };
+  // Same single bounded cap retry as callLLMText/callLLMRaw/callLLMVision —
+  // career-file-extract's non-.docx path lands here with no chunking path to
+  // fall back on, so a truncated career-file parse gets one shot at the
+  // raised cap instead of hard-failing the whole run.
+  let retriedForCap = false;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      if (!raised) throw enhanceLLMError(err, provider);
+      logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
+      retriedForCap = true;
+      maxTok = raised.cap;
+      formulaSeed = raised.seed;
+    }
   }
 }
 
@@ -810,7 +893,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || Object.keys(opts).length === 0)) {
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || opts.meta !== undefined || Object.keys(opts).length === 0)) {
     return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [] };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.

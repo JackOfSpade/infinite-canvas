@@ -17,7 +17,8 @@ import { jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
  * a stable input keeps the result deterministic).
  *
  * Pass an optional `stats` object to collect merge telemetry (mutated in place):
- * `{ totalIncoming, unique, duplicatesRemoved, collisions, collisionUpgrades }`.
+ * `{ totalIncoming, unique, duplicatesRemoved, collisions, collisionUpgrades,
+ *    collisionAssessmentUpgrades }`.
  * The Job Board stores this so a "merged the wrong count / kept the wrong copy"
  * bug is diagnosable from the report — the merge is otherwise invisible (it runs
  * in the renderer, before the bucketJobs IPC that main stamps a funnel for).
@@ -33,6 +34,7 @@ export function unionScoredJobs(jobArrays, stats) {
   let totalIncoming = 0;   // valid job objects seen across all arrays
   let collisions = 0;      // duplicate keys encountered (any resolution)
   let collisionUpgrades = 0; // collisions where a higher matchScore replaced the kept copy
+  let collisionAssessmentUpgrades = 0;
 
   for (const arr of Array.isArray(jobArrays) ? jobArrays : []) {
     if (!Array.isArray(arr)) continue;
@@ -49,6 +51,15 @@ export function unionScoredJobs(jobArrays, stats) {
         if ((job.matchScore || 0) > (existing.matchScore || 0)) {
           byKey.set(key, job); // higher score wins; first-seen position unchanged
           collisionUpgrades++;
+        } else if ((job.matchScore || 0) === (existing.matchScore || 0)
+          && canSafelyPreferCompensationAssessment(job, existing)) {
+          // Compensation is independent of résumé-fit score. On an exact
+          // score tie, retain the richer current assessment only when both
+          // copies explicitly compare the same advertised cash offer in the
+          // same market. Never combine remote assessments from different
+          // candidate residences just to make a card look more complete.
+          byKey.set(key, job);
+          collisionAssessmentUpgrades++;
         }
       }
     }
@@ -60,9 +71,47 @@ export function unionScoredJobs(jobArrays, stats) {
     stats.duplicatesRemoved = totalIncoming - order.length;
     stats.collisions = collisions;
     stats.collisionUpgrades = collisionUpgrades;
+    stats.collisionAssessmentUpgrades = collisionAssessmentUpgrades;
   }
 
   return order.map(k => byKey.get(k));
+}
+
+function normalizedAssessmentLocation(value) {
+  if (typeof value === 'string') return value.trim().toLowerCase();
+  if (!value || typeof value !== 'object') return '';
+  return String(value.display || value.label || [value.city, value.subdivision ?? value.state ?? value.province, value.country]
+    .filter(Boolean).join(', ')).trim().toLowerCase();
+}
+
+function assessmentOfferKey(value) {
+  const assessment = value && typeof value === 'object' ? value : null;
+  const offer = assessment?.offered;
+  if (Number(assessment?.schemaVersion) !== 1 || !offer || typeof offer !== 'object') return '';
+  const min = Number(offer.min);
+  const max = Number(offer.max);
+  const currency = String(offer.currency || '').trim().toUpperCase();
+  const period = String(offer.period || '').trim().toLowerCase();
+  const location = normalizedAssessmentLocation(assessment.comparisonLocation);
+  if (!(min > 0) || !(max >= min) || !currency || !location) return '';
+  return `${min}|${max}|${currency}|${period || 'annual'}|${location}`;
+}
+
+function assessmentQuality(value) {
+  const assessment = value && typeof value === 'object' ? value : null;
+  if (Number(assessment?.schemaVersion) !== 1) return 0;
+  const status = String(assessment.status || '').trim().toLowerCase();
+  if (status === 'competitive' || status === 'below_market') return 4;
+  if (status === 'uncertain') return 3;
+  if (status === 'not_evaluated') return 1;
+  return 0;
+}
+
+function canSafelyPreferCompensationAssessment(candidate, existing) {
+  const candidateKey = assessmentOfferKey(candidate?.compensationAssessment);
+  const existingKey = assessmentOfferKey(existing?.compensationAssessment);
+  return !!candidateKey && candidateKey === existingKey
+    && assessmentQuality(candidate?.compensationAssessment) > assessmentQuality(existing?.compensationAssessment);
 }
 
 /**
@@ -75,13 +124,13 @@ export function unionScoredJobs(jobArrays, stats) {
  * the old count+score-sum format it can't be fooled by a re-run whose score
  * deltas cancel out ([80,90] → [85,85]).
  *
- * The "3:" prefix versions the format: combineSignatures saved by the old
+ * The "4:" prefix versions the format: combineSignatures saved by the old
  * fingerprint can't be recomputed, so the board treats a signature without the
  * marker as a legacy baseline to adopt rather than a staleness mismatch (see
  * isLegacyCombineSignature).
  *
  * @param {object[]} scoredJobs
- * @returns {string} e.g. "3:191:123456789" (version:length:fold)
+ * @returns {string} e.g. "4:191:123456789" (version:length:fold)
  */
 export function moduleFingerprint(scoredJobs) {
   const arr = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -117,8 +166,47 @@ export function moduleFingerprint(scoredJobs) {
     fold(j.posted);
     fold(j.language);
     fold(j.originHubId);
+    // A compensation assessment controls the card's border, expandable
+    // explanation, source list, and comparison metadata. It must participate
+    // in board staleness just like visible match reasoning does, otherwise a
+    // re-run can leave an old red/green card on a board that claims it is
+    // current. Fold the current renderer contract explicitly instead of
+    // JSON.stringify so property insertion order cannot create false updates.
+    const assessment = j.compensationAssessment;
+    fold(assessment?.schemaVersion);
+    fold(assessment?.status);
+    fold(assessment?.reasonCode);
+    fold(assessment?.justification);
+    fold(assessment?.researchedAt);
+    const comparisonLocation = assessment?.comparisonLocation;
+    fold(typeof comparisonLocation === 'object' && comparisonLocation
+      ? comparisonLocation.display ?? comparisonLocation.label ?? comparisonLocation.city
+      : comparisonLocation);
+    if (comparisonLocation && typeof comparisonLocation === 'object') {
+      fold(comparisonLocation.subdivision ?? comparisonLocation.state ?? comparisonLocation.province);
+      fold(comparisonLocation.country);
+    }
+    for (const range of [assessment?.offered, assessment?.competitiveRange]) {
+      fold(range?.min);
+      fold(range?.max);
+      fold(range?.currency);
+      fold(range?.period);
+    }
+    const links = Array.isArray(assessment?.sourceLinks) ? assessment.sourceLinks : [];
+    fold(links.length);
+    for (const link of links) {
+      if (typeof link === 'string') { fold(link); continue; }
+      fold(link?.title ?? link?.name ?? link?.label);
+      fold(link?.url ?? link?.href ?? link?.link);
+      fold(link?.note ?? link?.details ?? link?.summary);
+      const range = link?.range ?? link?.competitiveRange ?? link;
+      fold(range?.min ?? range?.low ?? range?.minimum);
+      fold(range?.max ?? range?.high ?? range?.maximum);
+      fold(range?.currency ?? range?.currencyCode);
+      fold(range?.period ?? range?.payPeriod ?? range?.unit);
+    }
   }
-  return `3:${arr.length}:${h >>> 0}`;
+  return `4:${arr.length}:${h >>> 0}`;
 }
 
 /**
@@ -129,7 +217,7 @@ export function moduleFingerprint(scoredJobs) {
  */
 export function isLegacyCombineSignature(signature) {
   const s = String(signature || '');
-  return !!s && !s.includes('=3:');
+  return !!s && !/(?:^|\|)[^=]+=([34]):/.test(s);
 }
 
 /**

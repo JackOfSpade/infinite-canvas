@@ -367,6 +367,32 @@ export default [
     },
   },
   {
+    // A resumed run seeds sourceResults from recovered staging and then
+    // RE-SCRAPES the unfinished sources, so those seeded entries flow into the
+    // manual-result loop that merges pagesWalked and adds to stopReasons. When
+    // the seed omitted those two fields the merge read Math.max(undefined, n)
+    // (silent NaN) and then threw on `.add` of undefined — after the full
+    // gather, so every resume of that canvas re-scraped for minutes and then
+    // crashed again. Both initializers must therefore agree on the shape.
+    name: 'job search: recovered-staging seed and manual-result init agree on the sourceResults shape',
+    run: () => {
+      const src = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const inits = [...src.matchAll(/sourceResults\[\w+\]\s*=\s*\{([^}]*)\}/g)].map(m => m[1]);
+      assert(inits.length >= 2,
+        `expected at least the seed and the manual-result initializer, found ${inits.length}`);
+      const merging = inits.filter(body => /jobs\s*:\s*\[\]/.test(body));
+      assert(merging.length >= 2,
+        `expected at least two sourceResults initializers, found ${merging.length}`);
+      for (const body of merging) {
+        assert(/pagesWalked\s*:/.test(body),
+          `every sourceResults initializer must seed pagesWalked, missing in: {${body.trim()}}`);
+        assert(/stopReasons\s*:\s*new Set\(\)/.test(body),
+          `every sourceResults initializer must seed a stopReasons Set, missing in: {${body.trim()}}`);
+      }
+      return { initializers: merging.length };
+    },
+  },
+  {
     name: 'canvas navigation trusts only dist in production and the configured Vite origin in development',
     run: () => {
       const distDir = path.join(path.sep, 'app', 'dist');

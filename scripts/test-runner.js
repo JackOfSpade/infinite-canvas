@@ -15,6 +15,10 @@ import job_search_queries from './tests/job-search-queries.js';
 import electron_regressions from './tests/electron-regressions.js';
 import renderer_content_security from './tests/renderer-content-security.js';
 import local_ai_application from './tests/local-ai-application.js';
+import login_url_markers from './tests/login-url-markers.js';
+import compensation_assessment from './tests/compensation-assessment.js';
+import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
+import job_search_locations from './tests/job-search-locations.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -34,6 +38,10 @@ const tests = [
   ...electron_regressions,
   ...renderer_content_security,
   ...local_ai_application,
+  ...login_url_markers,
+  ...compensation_assessment,
+  ...job_compensation_pipeline,
+  ...job_search_locations,
 ];
 
 async function run() {
@@ -48,7 +56,7 @@ async function run() {
       console.log(`PASS ${test.name}`, details ? JSON.stringify(details) : '');
       passed++;
     } catch (error) {
-      console.error(`FAIL ${test.name}: ${error.message}`);
+      console.error(`FAIL ${test.name}:`, error.stack || error.message);
       failed++;
     }
   }
