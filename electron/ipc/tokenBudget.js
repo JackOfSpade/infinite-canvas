@@ -31,11 +31,10 @@ const store = lazyStore('token-budgets');
 const WINDOW       = 30;     // rolling samples kept per task
 const MIN_SAMPLES  = 8;      // trust the learned cap only after this many
 const HEADROOM     = 1.2;    // p95 × this — bias upward (truncation is billed)
-const HARD_CAP     = 32768;  // absolute ceiling — bounds runaway billing
-// Note: tasks whose formula seeds above the old 24576 hard cap (e.g. job-bucketing
-// at 52+ jobs: 4096+52×400=24896) were permanently stuck — effectiveCap kept
-// returning 24576 even when the self-calibration wanted to raise it higher.
-// 32768 gives the self-calibration room to grow past the 24576 truncation floor.
+const HARD_CAP     = 40000;  // absolute ceiling — bounds runaway billing
+// Job scoring now has a 32k formula ceiling. Leave meaningful room above that
+// floor for self-calibration after a truncation rather than pinning the very
+// first learned increase at the absolute ceiling.
 
 function allUsage() {
   return store.get('usage') || {};

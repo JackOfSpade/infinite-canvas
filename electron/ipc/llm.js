@@ -76,33 +76,34 @@ const TASK_MODELS = {
  * ── Task groups: the user-selected Claude tier ─────────────────────────────
  *
  * On the Claude path, every task belongs to exactly one live API group.
- * `analysis` and `light` take their family from Settings (`ai.claudeModels`),
+ * `judgment`, `extraction`, and `light` take their family from Settings (`ai.claudeModels`),
  * with GROUP_DEFAULT_FAMILY as the safe fallback for absent or invalid values.
  */
 const GROUP_DEFAULT_FAMILY = {
-  analysis:   CLAUDE_FAMILY.SONNET,
+  judgment:   CLAUDE_FAMILY.OPUS,
+  extraction: CLAUDE_FAMILY.SONNET,
   light:      CLAUDE_FAMILY.HAIKU,
 };
 
 const TASK_GROUPS = {
-  // analysis — vision identification, pricing judgment, resume parsing, job
-  // scoring/query-gen/bucketing, and the fallback default: anywhere quality
-  // compounds or the output is user-facing rather than a light classifier.
-  // Query gen and bucketing are here deliberately: query quality
-  // gates which jobs are ever DISCOVERED, and the bucketing role-
-  // consolidation IS the user-facing results hierarchy. Both run once per
-  // search (not per-job), so the quality tier is cheap regardless of pick.
-  'vision-product-analysis':   { group: 'analysis' },
-  'price-synthesis':           { group: 'analysis' },
-  'bundle-price-synthesis':    { group: 'analysis' },
-  'resume-parse':              { group: 'analysis' },
-  'career-file-extract':       { group: 'analysis' },
-  'job-query-generation':      { group: 'analysis' },
-  'job-scoring':                { group: 'analysis' },
-  'job-bucketing':              { group: 'analysis' },
-  'job-compensation-research':  { group: 'analysis' },
-  'job-compensation-assessment': { group: 'analysis' },
-  'default':                    { group: 'analysis' },
+  // Judgment — paid/recommendation calls whose quality compounds across the
+  // user's next decision. Compensation tasks also need high-quality grounded
+  // research, so they deliberately share the Opus default.
+  'price-synthesis':             { group: 'judgment' },
+  'bundle-price-synthesis':      { group: 'judgment' },
+  'job-scoring':                 { group: 'judgment' },
+  'job-compensation-research':   { group: 'judgment' },
+  'job-compensation-assessment': { group: 'judgment' },
+
+  // Extraction — faithful structured capture and organization of supplied
+  // material. Query generation and bucketing shape retrieval/presentation,
+  // rather than rendering a final judgment.
+  'vision-product-analysis':   { group: 'extraction' },
+  'resume-parse':              { group: 'extraction' },
+  'career-file-extract':       { group: 'extraction' },
+  'job-query-generation':      { group: 'extraction' },
+  'job-bucketing':             { group: 'extraction' },
+  'default':                   { group: 'extraction' },
 
   // light — page status classify, text polish, platform-fit: short
   // structured outputs (enum + a sentence) where a bigger family adds no
@@ -198,11 +199,11 @@ const TASK_MAX_TOKENS = {
   // material gaps, and separate tenure assessments in addition to the concise
   // fit explanation. On thinking-capable models, the former 420/item reserve
   // could truncate that structured evidence before the final rows. Formula:
-  // 2800 base + 1000/item gives 15→17800, still capped at 24576 so a
+  // 2800 base + 1000/item gives 15→17800, capped at 32000 so a
   // pathological batch cannot request runaway billing. Output is billed on
   // actual tokens; the reserve is headroom for complete, auditable JSON.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
-    Math.min(24576, 2800 + itemCount * 1000),
+    Math.min(32000, 2800 + itemCount * 1000),
   // Bucketing reasons over salaries per category — thinking-heavy (the model
   // weighs each job's salary against its category's distribution). The old
   // static 6144 was calibrated against an older lighter-thinking Flash model
@@ -218,15 +219,18 @@ const TASK_MAX_TOKENS = {
     Math.min(24576, 4096 + itemCount * 400),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
+  // Location-based cohort consolidation makes this per-job structured output
+  // materially larger than the old city-fragmented cohorts. 12,288 preserves
+  // headroom through roughly 17 normal rows before the ceiling applies.
   'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
-    Math.min(8192, 2048 + itemCount * 600),
+    Math.min(12288, 2048 + itemCount * 600),
   'text-polish':               1024,  // light edit
   'default':                   2048,
 };
 
 function resolveTask(task) {
   if (!task || !TASK_MODELS[task]) {
-    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (analysis group / Gemini 3.7 Flash, 2048 max_tokens). Add it to TASK_MODELS and TASK_GROUPS.`);
+    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (extraction group / Gemini 3.7 Flash, 2048 max_tokens). Add it to TASK_MODELS and TASK_GROUPS.`);
     return 'default';
   }
   return task;
@@ -311,13 +315,19 @@ export function taskModelRoutingSnapshot(settings = getAISettings()) {
   return { provider, groups, tasks };
 }
 
-function pickMaxTokens(task, hints = {}, provider = null, model = null) {
+/** The calibrated, task-specific token-budget seed before telemetry learning. */
+export function taskMaxTokensFor(task, hints = {}) {
   const t = resolveTask(task);
   const entry = TASK_MAX_TOKENS[t] ?? TASK_MAX_TOKENS['default'];
-  const seed = typeof entry === 'function' ? entry(hints) : entry;
+  return typeof entry === 'function' ? entry(hints) : entry;
+}
+
+function pickMaxTokens(task, hints = {}, provider = null, model = null) {
+  const t = resolveTask(task);
+  const seed = taskMaxTokensFor(t, hints);
   // The TASK_MAX_TOKENS value above is the calibrated seed/floor. effectiveCap
   // raises it toward observed p95 usage if a model has churned to use more than
-  // the formula assumed (never below the seed; never above the 24576 hard cap).
+  // the formula assumed (never below the seed; never above TOKEN_HARD_CAP).
   const learnedCap = effectiveCap(t, seed);
   // Legacy Claude models use a fixed extended-thinking budget rather than
   // adaptive effort. Reserve its required reasoning + answer headroom before

@@ -77,6 +77,24 @@ export function unionScoredJobs(jobArrays, stats) {
   return order.map(k => byKey.get(k));
 }
 
+/**
+ * Attach the transient residence settings belonging to each merged job's
+ * originating search module. A board can combine modules configured with
+ * different residences, so selecting one board-wide map would research some
+ * remote listings against the wrong market. The helper is pure: callers get
+ * cloned job objects and the stored scored jobs remain untouched.
+ *
+ * The main-process board-stage handler removes this field in `finally` after
+ * research; buildJobTreeNodes also uses an explicit whitelist, so it can never
+ * become persisted card data.
+ */
+export function attachCompensationRemoteResidences(jobs, residencesByOrigin = {}) {
+  return (Array.isArray(jobs) ? jobs : []).map((job) => ({
+    ...job,
+    compensationRemoteResidences: residencesByOrigin?.[job?.originHubId] || {},
+  }));
+}
+
 function normalizedAssessmentLocation(value) {
   if (typeof value === 'string') return value.trim().toLowerCase();
   if (!value || typeof value !== 'object') return '';

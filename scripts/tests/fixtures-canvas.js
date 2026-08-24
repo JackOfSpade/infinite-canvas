@@ -330,6 +330,40 @@ export default [
         'the real Soma Energy row must survive; its placeholder-id phantom must never reach the output');
       assert(jobs.rejectedPlaceholderCount === 1, `expected exactly 1 rejected placeholder, got ${jobs.rejectedPlaceholderCount}`);
       return { count: jobs.length, rejectedPlaceholderCount: jobs.rejectedPlaceholderCount };
+  },
+},
+{
+    // JSON legitimately contains more results than the visible card list on
+    // some Indeed responses.  Only the already-suspicious zero-description
+    // shape may be DOM-gated: a described JSON-only record must survive, a
+    // description-less record with an exact DOM card must survive, and the
+    // same weak shape with no card must be rejected.
+    name: 'Indeed extraction: only description-less JSON records require a DOM anchor',
+    run: () => {
+      const results = [
+        { title: 'JSON-only described role', company: 'Data North', jobkey: '2136516a5da5d5e0', location: 'Toronto, ON', snippet: 'A complete posting description that is intentionally JSON-only.' },
+        { title: 'DOM-anchored weak role', company: 'Data North', jobkey: 'b36bd069f99d6c51', location: 'Toronto, ON' },
+        { title: 'Unanchored weak role', company: 'Data North', jobkey: 'cbf351c41691bab3', location: 'Toronto, ON' },
+      ];
+      const html = `<html><body>
+        <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { results } } })}</script>
+        <div class="job_seen_beacon" data-jk="b36bd069f99d6c51">
+          <h2 class="jobTitle"><a href="/rc/clk?jk=b36bd069f99d6c51">DOM-anchored weak role</a></h2>
+          <span data-testid="company-name">Data North</span>
+          <div data-testid="text-location">Toronto, ON</div>
+        </div>
+      </body></html>`;
+      const jobs = extractIndeedJobsFromHtml(html);
+      const byKey = new Map(jobs.map(job => [job.jobkey, job]));
+      assert(byKey.has('2136516a5da5d5e0'),
+        'a described JSON-only Indeed record must stay even when it has no DOM card');
+      assert(byKey.has('b36bd069f99d6c51'),
+        'a description-less JSON record must stay when the same listing appears in the DOM');
+      assert(!byKey.has('cbf351c41691bab3'),
+        'a description-less JSON-only record with no DOM anchor must be rejected as suspicious');
+      assert(jobs.rejectedUnanchoredDescriptionlessCount === 1,
+        `expected 1 rejected unanchored description-less JSON record, got ${jobs.rejectedUnanchoredDescriptionlessCount}`);
+      return { count: jobs.length, rejectedUnanchoredDescriptionlessCount: jobs.rejectedUnanchoredDescriptionlessCount };
     },
   },
 {

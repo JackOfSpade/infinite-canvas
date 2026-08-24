@@ -3,6 +3,7 @@ import electronPkg from 'electron';
 import fs from 'fs';
 import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
+import { isValidCompensationExperienceBandLadder } from './jobCompensation.js';
 import { logger } from '../logger.js';
 
 const { dialog, BrowserWindow, safeStorage } = electronPkg;
@@ -24,6 +25,7 @@ const { dialog, BrowserWindow, safeStorage } = electronPkg;
 const ENC_PREFIX = 'safeStorage:v1:';
 const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
 const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
+const GEMINI_MODEL_RUNTIME_STATE_KEY = 'geminiModelRuntimeState';
 
 // ── Claude live-group family selection ──────────────────────────────────────
 // Mirrors llm.js's GROUP_DEFAULT_FAMILY and modelResolver's family tokens —
@@ -37,7 +39,7 @@ const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
 // to configure. Keep only groups served by live Gemini/Claude API calls here.
 // A legacy persisted `generation` key is deliberately dropped on read and on
 // the next settings write because no live API route consumes it.
-const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ analysis: 'SONNET', light: 'HAIKU' });
+const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' });
 const VALID_CLAUDE_FAMILY_TOKENS = new Set(['FABLE', 'OPUS', 'SONNET', 'HAIKU']);
 const VALID_AI_PROVIDERS = new Set(['gemini', 'claude']);
 
@@ -59,10 +61,16 @@ export function normalizeAIProvider(value) {
  * controls something. Invalid live values fall back to their own default.
  */
 export function normalizeClaudeModels(raw) {
+  // `analysis` was the pre-redesign catch-all. Preserve a non-default legacy
+  // choice across both groups it split into; an old SONNET value is
+  // indistinguishable from the old default, so it adopts the new defaults
+  // (Judgment=Opus, Extraction=Sonnet) instead of silently weakening Judgment.
+  const legacyAnalysis = VALID_CLAUDE_FAMILY_TOKENS.has(raw?.analysis) ? raw.analysis : null;
+  const migratedLegacyChoice = legacyAnalysis && legacyAnalysis !== 'SONNET' ? legacyAnalysis : null;
   const out = {};
   for (const [group, def] of Object.entries(CLAUDE_MODEL_GROUP_DEFAULTS)) {
     const v = raw?.[group];
-    out[group] = VALID_CLAUDE_FAMILY_TOKENS.has(v) ? v : def;
+    out[group] = VALID_CLAUDE_FAMILY_TOKENS.has(v) ? v : (migratedLegacyChoice || def);
   }
   return out;
 }
@@ -164,7 +172,7 @@ function getStore() {
         serviceAccountPath: '',
         // Per-live-group Claude family. Application Generate is handled by
         // Local AI and therefore deliberately has no API model setting.
-        claudeModels: { analysis: 'SONNET', light: 'HAIKU' },
+        claudeModels: { judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' },
       },
       // Aggregate seller pages scanned by the Marketplace Status Module, keyed
       // by platformId: dashboards, notification centers, messages, sold-items
@@ -218,6 +226,54 @@ export function tryGetStore() {
   }
 }
 
+/**
+ * Normalize the non-secret, credential-hash-scoped Gemini model-health cache.
+ * Expired suppression and warning rows are discarded on read/write so a past
+ * quota event cannot grow the settings file indefinitely or reappear after it
+ * should have naturally cleared.
+ */
+export function normalizeGeminiModelRuntimeState(raw, now = Date.now()) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, record] of Object.entries(raw)) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 1024 || !record || typeof record !== 'object') continue;
+    const suppressedUntil = Number(record.suppressedUntil);
+    const activeSuppression = Number.isFinite(suppressedUntil) && suppressedUntil > now ? suppressedUntil : null;
+    const sourceRuntime = record.runtime;
+    const warnUntil = Number(sourceRuntime?.warnUntil);
+    const activeRuntime = sourceRuntime && typeof sourceRuntime === 'object'
+      && Number.isFinite(warnUntil) && warnUntil > now
+      && typeof sourceRuntime.model === 'string' && sourceRuntime.model.length > 0
+      && typeof sourceRuntime.classification === 'string' && sourceRuntime.classification.length > 0
+      ? {
+          model: sourceRuntime.model.slice(0, 200),
+          classification: sourceRuntime.classification.slice(0, 100),
+          message: typeof sourceRuntime.message === 'string' ? sourceRuntime.message.slice(0, 300) : '',
+          observedAt: Number.isFinite(Number(sourceRuntime.observedAt)) ? Number(sourceRuntime.observedAt) : now,
+          suppressedUntil: activeSuppression,
+          warnUntil,
+        }
+      : null;
+    if (activeSuppression || activeRuntime) {
+      out[key] = { ...(activeSuppression ? { suppressedUntil: activeSuppression } : {}), ...(activeRuntime ? { runtime: activeRuntime } : {}) };
+    }
+  }
+  return out;
+}
+
+/** Read Gemini health state without exposing API-key material (keys are hashes). */
+export function getGeminiModelRuntimeState() {
+  return normalizeGeminiModelRuntimeState(tryGetStore()?.get(GEMINI_MODEL_RUNTIME_STATE_KEY));
+}
+
+/** Persist the complete, normalized Gemini model-health snapshot. */
+export function saveGeminiModelRuntimeState(snapshot) {
+  const store = tryGetStore();
+  if (!store) return false;
+  store.set(GEMINI_MODEL_RUNTIME_STATE_KEY, normalizeGeminiModelRuntimeState(snapshot));
+  return true;
+}
+
 // The renderer's Settings UI round-trips the actual key value into an
 // editable input (not a masked placeholder), so both get-settings and
 // update-settings's return value must hand back DECRYPTED secrets — only
@@ -247,12 +303,12 @@ function decryptedStoreSnapshot(s) {
  * wipe sibling keys). Exported (pure, no store/encryption side effects) so
  * the nested-merge behavior below is directly unit-testable.
  *
- * `ai.claudeModels` is itself an {analysis,light} object.
+ * `ai.claudeModels` is itself a {judgment,extraction,light} object.
  * SettingsPanel's updateAISetting/updateClaudeModelGroup send ONE changed
  * top-level `ai` key per call, so a single family-dropdown change arrives as
- * `{ claudeModels: { analysis: 'FABLE' } }`. A bare top-level shallow merge
+ * `{ claudeModels: { judgment: 'FABLE' } }`. A bare top-level shallow merge
  * (`{ ...current, ...value }`) would REPLACE `claudeModels` wholesale with
- * that partial object, silently dropping `analysis`/`light` back to
+ * that partial object, silently dropping sibling groups back to
  * undefined — getAISettings() papers over it with defaults on the next read,
  * but the user's OTHER two picks would be gone, not just the one they
  * changed. Deep-merge this one nested key instead of trusting the top-level
@@ -396,6 +452,83 @@ export function saveGlassdoorLocId(locationKey, value) {
   }
   map[key] = entry;
   store.set('jobs.glassdoorLocIds', map);
+}
+
+// Persisted, compact role-family → experience-band research. Salary-market
+// research needs a role-appropriate experience label; this cache keeps that
+// grounded lookup from repeating for every job search or application restart.
+// It is deliberately separate from location IDs because entries carry source
+// provenance and a verification date rather than an opaque platform id.
+function roleFamilyExperienceBandCacheKey(roleFamily) {
+  return String(roleFamily || '').trim().toLowerCase().slice(0, 180);
+}
+
+/**
+ * Copy persisted entries into a prototype-free dictionary. Role-family names
+ * originate in listing/model data and valid JavaScript property names include
+ * `__proto__` and `constructor`; a normal object would interpret those through
+ * its prototype instead of as independent cache keys.
+ */
+export function normalizeRoleFamilyExperienceBandCache(raw) {
+  const out = Object.create(null);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) out[key] = value;
+  return out;
+}
+
+export function getRoleFamilyExperienceBandCache() {
+  return normalizeRoleFamilyExperienceBandCache(tryGetStore()?.get('jobs.roleFamilyExperienceBands'));
+}
+
+/** Prototype-safe lookup shared by the store-backed getter and pure tests. */
+export function roleFamilyExperienceBandCacheEntry(cache, roleFamily) {
+  const key = roleFamilyExperienceBandCacheKey(roleFamily);
+  if (!key) return null;
+  const normalized = normalizeRoleFamilyExperienceBandCache(cache);
+  return Object.hasOwn(normalized, key) ? normalized[key] : null;
+}
+
+export function getRoleFamilyExperienceBands(roleFamily) {
+  return roleFamilyExperienceBandCacheEntry(getRoleFamilyExperienceBandCache(), roleFamily);
+}
+
+export function saveRoleFamilyExperienceBands(roleFamily, value) {
+  const key = roleFamilyExperienceBandCacheKey(roleFamily);
+  if (!key || !value || typeof value !== 'object') return;
+  const store = tryGetStore();
+  if (!store) return;
+  const bands = (Array.isArray(value.bands) ? value.bands : [])
+    .map((band) => {
+      const label = String(band?.label || '').trim().slice(0, 80);
+      const minYears = Number(band?.minYears);
+      const maxYears = band?.maxYears == null ? null : Number(band.maxYears);
+      if (!label || !Number.isFinite(minYears) || minYears < 0 || (maxYears != null && (!Number.isFinite(maxYears) || maxYears < minYears))) return null;
+      return { label, minYears, maxYears };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+  const sources = (Array.isArray(value.sources) ? value.sources : [])
+    .map((source) => {
+      const name = String(source?.name || source?.title || '').trim().slice(0, 160);
+      const url = String(source?.url || source?.sourceUrl || '').trim();
+      try {
+        const parsed = new URL(url);
+        if (!name || !/^https?:$/.test(parsed.protocol)) return null;
+      } catch { return null; }
+      return { name, url };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+  if (!isValidCompensationExperienceBandLadder(bands) || !sources.length) return;
+  const map = getRoleFamilyExperienceBandCache();
+  map[key] = {
+    roleFamily: String(value.roleFamily || roleFamily).trim().slice(0, 180),
+    bands,
+    sources,
+    verifiedDate: typeof value.verifiedDate === 'string' ? value.verifiedDate : new Date().toISOString(),
+    ...(value.reusedFrom ? { reusedFrom: String(value.reusedFrom).trim().slice(0, 180) } : {}),
+  };
+  store.set('jobs.roleFamilyExperienceBands', map);
 }
 
 /**

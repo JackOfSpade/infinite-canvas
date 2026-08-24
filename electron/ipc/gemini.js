@@ -4,10 +4,11 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'node:crypto';
 import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
-import { resolveServiceAccountPath, getAISettings } from './settings.js';
+import { resolveServiceAccountPath, getAISettings, getGeminiModelRuntimeState, saveGeminiModelRuntimeState, tryGetStore } from './settings.js';
 import { probeClaude, claudeModelsInUse } from './claude.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
@@ -34,8 +35,22 @@ import {
 } from './geminiEntitlement.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { parseAiJson } from './jsonRepair.js';
+import { appendGroundedSourceAppendix } from './groundedSourceAppendix.js';
 
 export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
+
+/**
+ * Gemini keeps Google Search provenance in candidate.groundingMetadata rather
+ * than inline in text parts. Copy only public web URI/title fields; never the
+ * provider's raw grounding payload.
+ */
+export function formatGeminiGroundedResponse(prose, candidate) {
+  const sources = (candidate?.groundingMetadata?.groundingChunks || []).flatMap((chunk) => {
+    const web = chunk?.web;
+    return web ? [{ url: web.uri, title: web.title }] : [];
+  });
+  return appendGroundedSourceAppendix(prose, sources);
+}
 
 // A document/image node's filePath is sourced from loaded canvas JSON, which
 // (unlike the local-file:// preview protocol) had NO path check at all before
@@ -256,18 +271,19 @@ async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = RETRY.
 let authClient = null;
 let projectId = null;
 let cachedKeyFile = null; // tracks which file the cached client was built from
+// A one-way digest of the complete service-account file. It is never sent to
+// the renderer or persisted as raw credential material; it lets the model
+// health cache distinguish a key rotation that keeps the same file path.
+let cachedServiceAccountFingerprint = null;
 
 async function getAuthClient() {
   const keyFile = resolveServiceAccountPath();
-  // Reuse the cached client only if it was built from the same file we'd
-  // resolve right now. If the user changes the path in Settings, the next
-  // call rebuilds against the new account instead of silently using the old one.
-  if (authClient && cachedKeyFile === keyFile) return { auth: authClient, projectId };
-  authClient = null;
-  projectId = null;
-  cachedKeyFile = null;
 
   if (!keyFile) {
+    authClient = null;
+    projectId = null;
+    cachedKeyFile = null;
+    cachedServiceAccountFingerprint = null;
     // No API key and no service-account.json → no usable Gemini credential.
     // Fail loudly instead of fabricating placeholder data, so a missing key can
     // never be silently mistaken for a real AI result.
@@ -278,11 +294,27 @@ async function getAuthClient() {
   try {
     saRaw = await fs.promises.readFile(keyFile, 'utf8');
   } catch (err) {
+    authClient = null;
+    projectId = null;
+    cachedKeyFile = null;
+    cachedServiceAccountFingerprint = null;
     if (err.code === 'ENOENT') {
       throw new Error(`Configured Gemini service-account file not found at ${keyFile} — fix the path or add a Gemini API key in Settings.`);
     }
     throw err;
   }
+  const fingerprint = hashCredential(saRaw);
+  // Reuse only when both the configured pathname AND credential file contents
+  // match. Service-account key rotation commonly replaces a JSON file in
+  // place; path-only caching would keep using the retired account and carry
+  // its suppression state into the replacement credential.
+  if (authClient && cachedKeyFile === keyFile && cachedServiceAccountFingerprint === fingerprint) {
+    return { auth: authClient, projectId };
+  }
+  authClient = null;
+  projectId = null;
+  cachedKeyFile = null;
+  cachedServiceAccountFingerprint = null;
   const sa = JSON.parse(saRaw);
   projectId = sa.project_id;
   authClient = new GoogleAuth({
@@ -290,6 +322,7 @@ async function getAuthClient() {
     scopes: ['https://www.googleapis.com/auth/cloud-platform'],
   });
   cachedKeyFile = keyFile;
+  cachedServiceAccountFingerprint = fingerprint;
   return { auth: authClient, projectId };
 }
 
@@ -306,6 +339,8 @@ async function getToken() {
     // cached permanently for the process lifetime, silently failing every call.
     authClient = null;
     projectId = null;
+    cachedKeyFile = null;
+    cachedServiceAccountFingerprint = null;
     throw err;
   }
 }
@@ -327,6 +362,7 @@ let lastAttemptedError = '(none)';
 // the active credential; switching keys therefore starts from a clean slate.
 const modelSuppressedUntil = new Map();  // `${scope}\x00${model}` → timestamp
 const modelRuntimeState = new Map();     // `${scope}\x00${model}` → state
+let geminiRuntimeStateLoaded = false;
 const UNAVAILABLE_RECHECK_MS = 6 * 60 * 60_000;
 // Request-specific failures (truncation / server / timeout / malformed) are NOT
 // model-health problems — their warning self-expires so one bad request can't
@@ -337,30 +373,77 @@ const REQUEST_FAILURE_WARN_MS = 15 * 60_000;
 // don't know the active credential still surface the right scope's warnings.
 let lastActiveScope = null;
 
-/** Stable, non-secret-leaking fingerprint of a credential string. */
+/**
+ * Stable, non-secret-leaking fingerprint of credential material.
+ *
+ * Health state persists across launches, so its key needs both practical
+ * collision resistance and preimage resistance. A short non-cryptographic
+ * checksum can make two independent API keys share a six-hour suppression;
+ * SHA-256 keeps the stored identifier safe to expose as telemetry while
+ * making that cross-credential state bleed infeasible.
+ */
 function hashCredential(value) {
-  const str = String(value || '');
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+  return createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+/**
+ * Pure scope constructor, exported for regression tests. Inputs may contain
+ * secrets, but the returned `ai:`/`vx:` scope contains only a SHA-256 digest.
+ */
+export function geminiCredentialScope({ apiKey = '', vertexCredentialIdentity = '' } = {}) {
+  const normalizedApiKey = normalizeGeminiApiKey(apiKey);
+  if (normalizedApiKey) return `ai:${hashCredential(normalizedApiKey)}`;
+  return `vx:${hashCredential(vertexCredentialIdentity || 'default')}`;
 }
 
 /**
  * Scope key for the active credential + endpoint. AI Studio scopes by API key;
- * Vertex by service-account file (or project). `cachedKeyFile`/`projectId` are
- * populated by getAuthClient() before any Vertex call records failures.
+ * Vertex scopes by a digest of the loaded service-account contents. The
+ * fallback pathname/project identity is used only while a malformed account
+ * cannot be loaded. getAuthClient() establishes this before Vertex calls
+ * record failures.
  */
 function credentialScope(apiKey) {
-  if (apiKey) return `ai:${hashCredential(apiKey)}`;
-  return `vx:${hashCredential(cachedKeyFile || projectId || 'default')}`;
+  return geminiCredentialScope({
+    apiKey,
+    // A successfully-loaded account uses a digest of its complete JSON, so a
+    // same-path rotation starts with clean model health. The path/project
+    // fallback is used only while an invalid account cannot be read at all.
+    vertexCredentialIdentity: cachedServiceAccountFingerprint || cachedKeyFile || projectId || 'default',
+  });
 }
 
 function scopedKey(scope, model) {
   return `${scope}\x00${model}`;
 }
 
+/** Hydrate persisted quota/access state once Electron's settings store is ready. */
+function hydrateGeminiModelRuntimeState() {
+  if (geminiRuntimeStateLoaded || !tryGetStore()) return;
+  const persisted = getGeminiModelRuntimeState();
+  for (const [key, record] of Object.entries(persisted)) {
+    if (record.suppressedUntil) modelSuppressedUntil.set(key, record.suppressedUntil);
+    if (record.runtime) modelRuntimeState.set(key, record.runtime);
+  }
+  geminiRuntimeStateLoaded = true;
+}
+
+/** Persist the same hashed `(credential scope, model)` keys used in memory. */
+function persistGeminiModelRuntimeState() {
+  if (!geminiRuntimeStateLoaded) return;
+  const keys = new Set([...modelSuppressedUntil.keys(), ...modelRuntimeState.keys()]);
+  const snapshot = {};
+  for (const key of keys) {
+    const suppressedUntil = modelSuppressedUntil.get(key);
+    const runtime = modelRuntimeState.get(key);
+    if (suppressedUntil || runtime) snapshot[key] = { ...(suppressedUntil ? { suppressedUntil } : {}), ...(runtime ? { runtime } : {}) };
+  }
+  saveGeminiModelRuntimeState(snapshot);
+}
+
 /** Build a model→suppressedUntil view for the given scope (only cooling entries). */
 function suppressionMapForScope(scope, now, models = GEMINI_MODEL_REGISTRY.map(({ id }) => id)) {
+  hydrateGeminiModelRuntimeState();
   const m = new Map();
   for (const id of models) {
     const until = modelSuppressedUntil.get(scopedKey(scope, id)) || 0;
@@ -370,11 +453,14 @@ function suppressionMapForScope(scope, now, models = GEMINI_MODEL_REGISTRY.map((
 }
 
 function clearGeminiModelFailure(scope, model) {
+  hydrateGeminiModelRuntimeState();
   modelSuppressedUntil.delete(scopedKey(scope, model));
   modelRuntimeState.delete(scopedKey(scope, model));
+  persistGeminiModelRuntimeState();
 }
 
 function rememberGeminiModelFailure(scope, model, classification, message, suppressedUntil = null) {
+  hydrateGeminiModelRuntimeState();
   const key = scopedKey(scope, model);
   if (suppressedUntil) modelSuppressedUntil.set(key, suppressedUntil);
   // Warning visibility window: a suppressed failure stays visible until it's
@@ -388,9 +474,11 @@ function rememberGeminiModelFailure(scope, model, classification, message, suppr
     suppressedUntil,
     warnUntil,
   });
+  persistGeminiModelRuntimeState();
 }
 
 function geminiWarnings(scope = lastActiveScope) {
+  hydrateGeminiModelRuntimeState();
   const warnings = [];
   const now = Date.now();
   for (const id of [...new Set([...GEMINI_MODEL_REGISTRY.map(({ id }) => id), ...VERTEX_GEMINI_MODEL_FALLBACKS])]) {
@@ -401,6 +489,7 @@ function geminiWarnings(scope = lastActiveScope) {
     if (!runtime) continue;
     if (runtime.warnUntil && runtime.warnUntil <= now) {
       modelRuntimeState.delete(scopedKey(scope, id));  // expired — stop warning
+      persistGeminiModelRuntimeState();
       continue;
     }
     warnings.push({ model: id, type: runtime.classification, message: runtime.message });
@@ -1023,7 +1112,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
   if (!contentText) throw new Error(`No content returned from Gemini (finishReason=${finishReason || 'unknown'}).`);
 
-  return contentText;
+  return _grounding ? formatGeminiGroundedResponse(contentText, candidate) : contentText;
 }
 
 /**

@@ -1,11 +1,23 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
 // retry-pass tests below never sleep for real (see its doc comment).
-import { __setGeminiLadderRetryWaitForTests } from '../../electron/ipc/gemini.js';
+import { __setGeminiLadderRetryWaitForTests, geminiCredentialScope } from '../../electron/ipc/gemini.js';
 
 export default [
+{
+    name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
+    run: () => {
+      assert(taskMaxTokensFor('job-scoring', { itemCount: 100 }) === 32000,
+        'job-scoring has the redesigned 32,000-token formula ceiling');
+      assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) === 12288,
+        'per-cohort compensation assessment has the larger 12,288-token ceiling');
+      assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
+        'a 15-job consolidated cohort no longer flattens at the former 8,192-token ceiling');
+      return { scoringCap: taskMaxTokensFor('job-scoring', { itemCount: 100 }), compensationCap: taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) };
+    },
+  },
 {
     name: 'Gemini Vertex routing: global endpoint uses only the supported 2.5 fallback chain',
     run: () => {
@@ -31,6 +43,29 @@ export default [
       assert(JSON.stringify(orderVertexGeminiModels(suppressed, now)) === JSON.stringify(['gemini-2.5-flash-lite', 'gemini-2.5-flash']),
         'a cooling Vertex primary moves behind Flash-Lite without leaving the chain empty');
       return { ok: true };
+  },
+},
+{
+    name: 'Gemini credential scopes isolate colliding API-key prefixes and same-path Vertex rotations',
+    run: () => {
+      // These two suffixes collide under the old 32-bit DJB2-style hash. A
+      // shared tail preserves that collision, so this is a regression fixture
+      // for the exact bug rather than merely an arbitrary unequal-key check.
+      const keyTail = 'x'.repeat(32);
+      const firstKey = `AIzaAB-${keyTail}`;
+      const secondKey = `AIzaAAN${keyTail}`;
+      const firstScope = geminiCredentialScope({ apiKey: firstKey });
+      const secondScope = geminiCredentialScope({ apiKey: secondKey });
+      assert(firstScope !== secondScope && /^ai:[a-f0-9]{64}$/.test(firstScope)
+        && !firstScope.includes(firstKey) && !secondScope.includes(secondKey),
+      'persisted AI Studio health state uses distinct non-secret SHA-256 scopes even for the demonstrated legacy hash collision');
+
+      const rotatedAtSamePathBefore = geminiCredentialScope({ vertexCredentialIdentity: '{"client_email":"worker@example.test","private_key_id":"old"}' });
+      const rotatedAtSamePathAfter = geminiCredentialScope({ vertexCredentialIdentity: '{"client_email":"worker@example.test","private_key_id":"new"}' });
+      assert(rotatedAtSamePathBefore !== rotatedAtSamePathAfter
+        && /^vx:[a-f0-9]{64}$/.test(rotatedAtSamePathBefore),
+      'a replacement service-account identity receives a clean Vertex suppression scope even when its configured path is unchanged');
+      return { aiScopeLength: firstScope.length, vertexScopeLength: rotatedAtSamePathBefore.length };
     },
   },
 {
@@ -781,20 +816,20 @@ export default [
     run: () => {
       // The safety net for the whole task-group refactor: an install with no
       // `claudeModels` configured (settings.js backfills GROUP_DEFAULT_FAMILY)
-      // must resolve analysis and light tasks to their respective defaults.
+      // must resolve Judgment, Extraction, and Light tasks to their defaults.
       const settings = { provider: 'claude', anthropicApiKey: 'x' }; // no claudeModels key — defaults apply
-      const { SONNET, HAIKU } = MODEL_FLOOR;
+      const { OPUS, SONNET, HAIKU } = MODEL_FLOOR;
       const expected = {
         'vision-product-analysis':   SONNET,
-        'price-synthesis':           SONNET,
-        'bundle-price-synthesis':    SONNET,
+        'price-synthesis':           OPUS,
+        'bundle-price-synthesis':    OPUS,
         'resume-parse':              SONNET,
         'career-file-extract':       SONNET,
         'job-query-generation':      SONNET,
-        'job-scoring':               SONNET,
+        'job-scoring':               OPUS,
         'job-bucketing':             SONNET,
-        'job-compensation-research': SONNET,
-        'job-compensation-assessment': SONNET,
+        'job-compensation-research': OPUS,
+        'job-compensation-assessment': OPUS,
         'default':                   SONNET,
         'platform-fit-assessment':   HAIKU,
         'page-status-classify':      HAIKU,
@@ -803,7 +838,7 @@ export default [
       };
       for (const [task, expectedModel] of Object.entries(expected)) {
         const got = modelForTask(task, settings);
-        assert(got === expectedModel, `default claudeModels: '${task}' should resolve to ${expectedModel} (the old TASK_MODELS value), got ${got}`);
+        assert(got === expectedModel, `default claudeModels: '${task}' should resolve to ${expectedModel}, got ${got}`);
       }
       // Every known task (+ the 'default' fallback) is covered above — a task
       // added to TASK_GROUPS without a row here would silently go unverified.
@@ -819,12 +854,12 @@ export default [
       // top of settings.js's own normalizeClaudeModels()) — llm.js is
       // reachable with a hand-built settings object that never went through
       // that layer (tests, or a future caller).
-      const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { analysis: 'nope', light: null } };
-      assert(modelForTask('job-scoring', badToken) === MODEL_FLOOR.SONNET, 'an unrecognized analysis token falls back to SONNET (the group default)');
+      const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { judgment: 'nope', light: null } };
+      assert(modelForTask('job-scoring', badToken) === MODEL_FLOOR.OPUS, 'an unrecognized Judgment token falls back to OPUS (the group default)');
       assert(modelForTask('text-polish', badToken) === MODEL_FLOOR.HAIKU, 'a null light token falls back to HAIKU (the group default)');
 
       const noClaudeModelsAtAll = { provider: 'claude', anthropicApiKey: 'x' };
-      assert(modelForTask('job-scoring', noClaudeModelsAtAll) === MODEL_FLOOR.SONNET, 'a settings object with no claudeModels key at all still resolves via the group default');
+      assert(modelForTask('job-scoring', noClaudeModelsAtAll) === MODEL_FLOOR.OPUS, 'a settings object with no claudeModels key at all still resolves via the group default');
       return { ok: true };
     },
   },
@@ -834,12 +869,12 @@ export default [
       // The whole point of the group/step refactor is that the FAMILY is a
       // per-group Settings choice, not a hard-code — prove picking a
       // non-default family actually changes the resolved model id, not just
-      // that the plumbing accepts the value without erroring. Analysis is set
+      // that the plumbing accepts the value without erroring. Judgment is set
       // below while Light is left unset, proving the choice is group-scoped.
 
-      const haikuAnalysis = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { analysis: 'HAIKU' } };
-      assert(modelForTask('job-scoring', haikuAnalysis) === MODEL_FLOOR.HAIKU, 'analysis=HAIKU moves job-scoring off its SONNET default');
-      assert(modelForTask('text-polish', haikuAnalysis) === MODEL_FLOOR.HAIKU, 'light (unset) retains its own HAIKU default');
+      const sonnetJudgment = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { judgment: 'SONNET' } };
+      assert(modelForTask('job-scoring', sonnetJudgment) === MODEL_FLOOR.SONNET, 'judgment=SONNET moves job-scoring off its OPUS default');
+      assert(modelForTask('text-polish', sonnetJudgment) === MODEL_FLOOR.HAIKU, 'light (unset) retains its own HAIKU default');
       return { ok: true };
     },
   },
@@ -853,8 +888,8 @@ export default [
       const settings = { provider: 'claude', anthropicApiKey: 'x' }; // defaults apply
       const snap = taskModelRoutingSnapshot(settings);
       assert(snap.provider === 'claude', 'snapshot.provider reflects the Settings provider');
-      assert(Object.keys(snap.groups).sort().join(',') === 'analysis,light', 'snapshot.groups excludes the local-only application generation group');
-      assert(snap.groups.analysis.family === 'SONNET' && snap.groups.light.family === 'HAIKU', 'analysis/light group summaries resolve to their own defaults');
+      assert(Object.keys(snap.groups).sort().join(',') === 'extraction,judgment,light', 'snapshot.groups contains exactly the three live API groups');
+      assert(snap.groups.judgment.family === 'OPUS' && snap.groups.extraction.family === 'SONNET' && snap.groups.light.family === 'HAIKU', 'group summaries resolve to their own defaults');
 
       const knownTasks = getKnownTaskIds();
       assert(knownTasks.size > 0, 'sanity: getKnownTaskIds is non-empty');
@@ -991,6 +1026,81 @@ export default [
       assert(webSearchToolType(undefined) === 'web_search_20250305', 'undefined input falls back to the safe variant without throwing');
       assert(webSearchToolType('garbage-model-xyz') === 'web_search_20250305', 'an unrecognized id falls back to the safe variant');
       return { ok: true };
+    },
+  },
+{
+    name: 'grounded research: Claude and Gemini retain public search provenance in the bounded raw-research prefix',
+    run: () => {
+      const longTitle = `Claude evidence ${'x'.repeat(260)}`;
+      const claude = formatClaudeGroundedResponse([
+        {
+          type: 'text',
+          text: 'Claude found a credible career framework.',
+          citations: [
+            { type: 'web_search_result_location', url: 'https://framework.example/ladder', title: longTitle, encrypted_index: 'never-copy-this' },
+            { type: 'web_search_result_location', url: 'javascript:alert(1)', title: 'Unsafe protocol' },
+          ],
+        },
+        {
+          type: 'web_search_tool_result',
+          content: [
+            { type: 'web_search_result', url: 'https://framework.example/ladder', title: 'Duplicate title loses to first', encrypted_content: 'never-copy-this-either' },
+            { type: 'web_search_result', url: 'https://association.example/levels', title: 'Professional levels https://title-injected.example/not-a-source', encrypted_content: 'opaque payload' },
+            { type: 'web_search_result', url: 'https://secret@example.test/private', title: 'Credential URL is unsafe', encrypted_content: 'opaque payload' },
+          ],
+        },
+        { type: 'text', text: 'It also found an association ladder.', citations: null },
+      ]);
+      assert(claude.startsWith('Grounded source URLs (provider metadata):\n- https://framework.example/ladder — Claude evidence ') && claude.includes('https://framework.example/ladder')
+        && claude.includes('https://association.example/levels')
+        && claude.includes('Claude found a credible career framework.\nIt also found an association ladder.'),
+      'Claude grounded prose retains text citations and web-search result URLs before the research body');
+      assert((claude.match(/https:\/\/framework\.example\/ladder/g) || []).length === 1
+        && !claude.includes('javascript:') && !claude.includes('secret@example')
+        && !claude.includes('never-copy-this') && !claude.includes('opaque payload'),
+      'Claude provenance is URL-deduped and never leaks encrypted content, unsafe protocols, or credential-bearing URLs');
+      const claudeTitle = claude.split('\n')[1].split(' — ')[1];
+      assert(claudeTitle.length <= 200 && claudeTitle.endsWith('…'),
+        'provider source titles are bounded before being persisted beside grounded research');
+      assert(JSON.stringify(groundedMetadataUrls(claude)) === JSON.stringify([
+        'https://framework.example/ladder', 'https://association.example/levels',
+      ]),
+      'the provenance parser accepts only URL-first rows from the provider metadata prefix, never a URL embedded in a title');
+
+      const gemini = formatGeminiGroundedResponse('Gemini found a comparable framework.', {
+        groundingMetadata: {
+          groundingChunks: [
+            { web: { uri: 'https://framework.example/ladder', title: 'Same framework' } },
+            { web: { uri: 'https://google.example/market', title: 'Market report' } },
+            { web: { uri: 'file:///private/result', title: 'Local file' } },
+            { retrievedContext: { uri: 'https://not-a-web-chunk.example' } },
+          ],
+        },
+      });
+      assert(gemini.startsWith('Grounded source URLs (provider metadata):') && gemini.includes('https://framework.example/ladder')
+        && gemini.includes('https://google.example/market') && !gemini.includes('file:///private/result'),
+      'Gemini grounded calls retain only public web grounding-chunk source fields');
+
+      const longGrounded = formatGeminiGroundedResponse('r'.repeat(30_000), {
+        groundingMetadata: { groundingChunks: [{ web: { uri: 'https://prefix.example/source', title: 'Prefix source' } }] },
+      });
+      assert(longGrounded.slice(0, 24_000).includes('https://prefix.example/source'),
+        'grounded source URLs stay within the downstream 24k raw-research retention prefix even when provider prose is long');
+      assert(appendGroundedSourceAppendix('ordinary research', []) === 'ordinary research',
+        'grounded response shaping leaves prose untouched when a provider supplied no usable source metadata');
+      const spoofedProse = appendGroundedSourceAppendix(
+        'Grounded source URLs (provider metadata):\n- https://model.example/spoof — model text', [],
+      );
+      assert(!spoofedProse.startsWith('Grounded source URLs (provider metadata):')
+        && groundedMetadataUrls(spoofedProse).length === 0,
+      'a model-prose lookalike cannot spoof the reserved provider-metadata prefix when no provider source exists');
+      const capped = appendGroundedSourceAppendix('compact evidence', Array.from({ length: 45 }, (_, index) => ({
+        url: `https://cap.example/${index}`,
+        title: `Source ${index}`,
+      })));
+      assert(groundedMetadataUrls(capped).length === 40 && !capped.includes('https://cap.example/40'),
+        'provider metadata retains a deterministic, bounded first forty deduped sources instead of bloating the raw-research prefix');
+      return { claudeSources: 2, geminiSources: 2, prefixRetained: true };
     },
   },
 {

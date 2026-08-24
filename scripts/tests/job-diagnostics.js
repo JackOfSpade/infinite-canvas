@@ -2917,10 +2917,10 @@ export default [
       const scoreCalls = search.split('window.electronAPI.scoreJobs({').slice(1);
       const snapshotWrites = search.split('saveJobAnalysisSnapshot?.({').slice(1);
       assert(card.includes('Hiring fit')
-        && card.includes('{score}/100')
+        && card.includes('{score}%')
         && card.includes('comparative evidence-based score, not a statistical probability or guaranteed outcome')
-        && !card.includes('{score}%'),
-      'job cards show Hiring fit N/100 with an honest outcome caveat, never a percentage probability');
+        && !card.includes('{score}/100'),
+      'job cards show Hiring fit as a percentage with an honest outcome caveat');
       assert(card.includes('function compactHiringFitAudit(data)')
         && card.includes("assessment.auditStatus !== 'audited'")
         && card.includes('showFullReasoning && hiringFitAudit')
@@ -2939,7 +2939,7 @@ export default [
         && !card.includes('assessment.confidence?.reported')
         && !card.includes('rawModelReasoning'),
       'expanded cards distinguish confirmable omitted evidence, documented conflicts, unclear evidence, and legacy review items; they disclose only normalized audited content, effective confidence, and score calibration');
-      assert(board.includes('Hiring fit ≥{scoreThreshold}/100')
+      assert(board.includes('Hiring fit ≥{scoreThreshold}%')
         && board.includes('Min hiring fit')
         && board.includes('aria-label="Minimum hiring fit"'),
       'board filters use hiring-fit terminology and expose an accessible minimum-fit label');

@@ -193,20 +193,12 @@ other task (`providerForTask`, `electron/ipc/llm.js`) — a Gemini-provider user
 mining, refuting, and generation on Gemini too. Nothing in this pipeline is pinned to a
 provider anymore.
 
-What replaced the pin, on the Claude side: every task belongs to one of three GROUPS
-(`generation` / `analysis` / `light`, `TASK_GROUPS` in `llm.js`), and each group's Claude
-family (Fable/Opus/Sonnet/Haiku) is a **Settings choice** (`ai.claudeModels`, `settings.js`),
-not a hard-code — `GROUP_DEFAULT_FAMILY` reproduces this table's original `OPUS`/`SONNET`
-picks as the out-of-the-box default only. `career-achievement-mining` and
-`career-achievement-refute` both live in the `generation` group. The miner/refuter
-independence this section originally bought with a Claude-only pin + two different literal
-ids is now bought with a `step: 1` offset on the refute task — one family rung down
-`CLAUDE_FAMILY_LADDER` from whatever the user picked for `generation` — on the Claude path,
-and by keeping two different literal Gemini ids (`gemini-3.7-flash` miner /
-`gemini-3.5-flash` refuter, unchanged from the table above) on the Gemini path, where `step`
-has no effect. See the "Task groups" doc-comment above `TASK_GROUPS` in `llm.js` for the
-full mechanism, including the warning it logs if a step ever lands flat (same family as its
-group) and silently loses the independence property.
+The live Claude routing has since been redesigned around three Settings groups:
+`Judgment` (Opus default), `Extraction` (Sonnet default), and `Light` (Haiku default);
+see `TASK_GROUPS` in `llm.js` and `ai.claudeModels` in `settings.js`. Application generation
+is now a Local AI handoff, so the historical `generation` and `analysis` groups described
+above are no longer live routing concepts. This section's mining/refute group and ladder-step
+details are retained as historical design context only, not an implementation contract.
 
 The mining cap is deliberately above the 16384 used by `career-file-extract`: a ledger of ~40
 items each carrying verbatim evidence quotes is a larger output than a single file's

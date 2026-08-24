@@ -802,3 +802,40 @@ export const JOB_COMPENSATION_EVIDENCE_SCHEMA = {
     },
   },
 };
+
+// Grounded role-family experience ladders. These are persisted before any
+// salary cohort using a new role family can proceed, so a later market lookup
+// receives a concrete, auditable band rather than a generic seniority guess.
+export const ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA = {
+  type: 'object',
+  required: ['roleFamily', 'reusedFrom', 'bands', 'sources'],
+  properties: {
+    roleFamily: { type: 'string' },
+    reusedFrom: { type: 'string', description: 'Exact cached role family reused when its ladder applies; empty when this is a new researched ladder.' },
+    bands: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['label', 'minYears', 'maxYears'],
+        properties: {
+          label: { type: 'string' },
+          // The persisted ladder validator requires whole-year, contiguous
+          // bands. Keep the provider contract equally strict so a response
+          // such as 0–2.5 does not pass schema enforcement then fail later.
+          minYears: { type: 'integer' },
+          // Use a finite high endpoint (for example 99 for "12+ years") so
+          // both Claude and Gemini can enforce the same portable schema.
+          maxYears: { type: 'integer' },
+        },
+      },
+    },
+    sources: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['name', 'url'],
+        properties: { name: { type: 'string' }, url: { type: 'string' } },
+      },
+    },
+  },
+};

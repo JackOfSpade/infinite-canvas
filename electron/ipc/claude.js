@@ -7,6 +7,7 @@ import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 import { buildAnthropicMessageParams, buildAnthropicTokenCountParams } from './anthropicRequest.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { claudeModelFor, claudeModelsInUse, CLAUDE_FAMILY } from './modelResolver.js';
+import { appendGroundedSourceAppendix } from './groundedSourceAppendix.js';
 
 // A document/image node's filePath is sourced from loaded canvas JSON, which
 // (unlike the local-file:// preview protocol) had NO path check at all before
@@ -198,6 +199,38 @@ export function webSearchToolType(model) {
   return modern ? 'web_search_20260209' : 'web_search_20250305';
 }
 
+/**
+ * Preserve only the public source fields Claude returns beside grounded prose.
+ * Search result blocks also carry encrypted_content; it is intentionally never
+ * read, copied, or appended here.
+ */
+export function formatClaudeGroundedResponse(content) {
+  const blocks = Array.isArray(content) ? content : [];
+  const prose = blocks
+    .filter((block) => block?.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+  const sources = [];
+  for (const block of blocks) {
+    if (block?.type === 'text') {
+      for (const citation of Array.isArray(block.citations) ? block.citations : []) {
+        if (citation?.type === 'web_search_result_location') {
+          sources.push({ url: citation.url, title: citation.title });
+        }
+      }
+      continue;
+    }
+    if (block?.type !== 'web_search_tool_result' || !Array.isArray(block.content)) continue;
+    for (const result of block.content) {
+      if (result?.type === 'web_search_result') {
+        sources.push({ url: result.url, title: result.title });
+      }
+    }
+  }
+  return appendGroundedSourceAppendix(prose, sources);
+}
+
 async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding }) {
   // Build the shared Anthropic request shape — cache_control prefix block +
   // the tool-use schema that forces the submit_response tool. Extracted to
@@ -275,15 +308,10 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
 
   // Web-search (grounding) response: the answer is spread across one or more
   // `text` blocks, interleaved with server_tool_use / web_search_tool_result
-  // blocks. Concatenate the text blocks into the final prose; ignore the
-  // tool-result blocks (they're the raw search payloads the model already
-  // synthesized from).
+  // blocks. Keep the prose plus public URLs from text citations / result
+  // metadata so the structured extraction pass can verify its sources.
   if (grounding) {
-    const txt = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n')
-      .trim();
+    const txt = formatClaudeGroundedResponse(response.content);
     if (!txt) throw new Error(`Claude web-search returned no text (stop_reason=${stopReason || 'unknown'}).`);
     return txt;
   }

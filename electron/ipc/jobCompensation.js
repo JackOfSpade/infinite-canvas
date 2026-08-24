@@ -5,6 +5,8 @@
  */
 
 import { inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
+import { normalizeLocationInput, normalizeCountry } from '../../src/utils/jobLocation.js';
+import { GROUNDED_SOURCE_METADATA_MARKER, groundedMetadataUrls } from './groundedSourceAppendix.js';
 
 const VARIABLE_PAY_RE = /\b(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?))\b/i;
 const NON_CASH_RE = /\b(?:medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)\b/i;
@@ -247,18 +249,163 @@ export function compensationAssessment({ offer, competitiveRanges, comparisonLoc
   };
 }
 
+/**
+ * Resolve a listing/residence place to the one compensation market we can
+ * safely compare.  The ladder intentionally stops at the most-specific
+ * deterministic field available: city, then subdivision, then country.
+ * `value` retains available parent geography so a Toronto, ON cohort cannot
+ * accidentally merge with a Toronto in another market.
+ */
+function stripTrailingPostalCode(raw) {
+  // Board location fields routinely append an address-style postal code
+  // ("Toronto, ON M5V 1K4", "Austin, TX 78701-1234"). A postal code is
+  // neither the compensation city nor its administrative market, so keeping
+  // it in the final city segment creates one cohort per listing/address.
+  // Restrict this to an end-anchored Canadian or US form: arbitrary numbers in
+  // a city name or a job title are deliberately never touched.
+  return String(raw || '').trim().replace(
+    /\s*(?:[,;|/]|[-–—])?\s*(?:[[(]?\s*)?(?:[ABCEGHJKLMNPRSTVWXYZ]\d[ABCEGHJKLMNPRSTVWXYZ][ -]?\d[ABCEGHJKLMNPRSTVWXYZ]\d|\d{5}(?:-\d{4})?)(?:\s*[)\]]?)?\s*$/i,
+    '',
+  ).trim();
+}
+
+const NON_REMOTE_WORK_MODE_RE = '(?:hybrid|on[-\\s]?site|onsite)';
+const NON_GEOGRAPHIC_LOCATION_RE = /^(?:multiple|various)\s+locations?$|^location\s+negotiable(?:\s+after\s+selection)?$|^negotiable(?:\s+after\s+selection)?$|^(?:tbd|to\s+be\s+determined|not\s+specified|unknown|n\/?a)$|^anywhere\s+(?:in|within)\b|^nationwide\b/i;
+const COARSE_LOCATION_PREFIX = '(?:(?:multiple|various)\\s+locations?|location\\s+negotiable(?:\\s+after\\s+selection)?|negotiable(?:\\s+after\\s+selection)?|tbd|to\\s+be\\s+determined|not\\s+specified|unknown|n\\/?a|nationwide)';
+
+/**
+ * Boards decorate a real place in both directions: "Hybrid - Toronto, ON",
+ * "Toronto, ON (Hybrid)", and "Austin, TX - On-site" are equivalent
+ * compensation markets. Strip only a standalone work-mode decoration; do not
+ * attempt to rewrite ordinary place names.
+ */
+function stripNonRemoteWorkModeLabels(raw) {
+  return String(raw || '').trim()
+    .replace(new RegExp(`^${NON_REMOTE_WORK_MODE_RE}\\s*(?:[-–—:|/,])\\s*`, 'i'), '')
+    .replace(new RegExp(`\\s*(?:\\(\\s*${NON_REMOTE_WORK_MODE_RE}\\s*\\)|\\[\\s*${NON_REMOTE_WORK_MODE_RE}\\s*\\])\\s*$`, 'i'), '')
+    .replace(new RegExp(`\\s*(?:[-–—:|/,])\\s*${NON_REMOTE_WORK_MODE_RE}\\s*$`, 'i'), '')
+    .trim();
+}
+
+/** A country-wide "Anywhere in Canada" listing is a valid country cohort. */
+function recognizedAnywhereCountry(raw) {
+  const match = String(raw || '').trim().match(/^anywhere\s+(?:in|within)\s+(.+)$/i);
+  if (!match) return '';
+  const parsed = normalizeLocationInput(match[1]);
+  return !parsed.countryConflict && parsed.scope === 'country' ? String(parsed.country || '').trim() : '';
+}
+
+/** A coarse board placeholder can still carry a useful country boundary. */
+function recognizedCoarseLocationCountry(raw) {
+  const match = String(raw || '').trim().match(new RegExp(`^${COARSE_LOCATION_PREFIX}\\s*(?:[,;|/]|[-–—])\\s*(.+)$`, 'i'));
+  if (!match) return '';
+  const parsed = normalizeLocationInput(match[1]);
+  return !parsed.countryConflict && parsed.scope === 'country' ? String(parsed.country || '').trim() : '';
+}
+
+/** Infer only an explicit country-shaped suffix such as "Remote - Canada". */
+function recognizedRemoteLocationCountry(raw) {
+  const remainder = String(raw || '').replace(/\bremote\b/ig, ' ')
+    .replaceAll('(', ' ').replaceAll(')', ' ').replaceAll('[', ' ').replaceAll(']', ' ')
+    .replace(/^[\s,;:|/\-–—]+|[\s,;:|/\-–—]+$/g, '').trim();
+  if (!remainder) return '';
+  const parsed = normalizeLocationInput(remainder);
+  return !parsed.countryConflict && parsed.scope === 'country' ? String(parsed.country || '').trim() : '';
+}
+
+function isNonGeographicCompensationLocation(raw) {
+  const value = String(raw || '').trim();
+  return !value || NON_GEOGRAPHIC_LOCATION_RE.test(value)
+    || new RegExp(`^${COARSE_LOCATION_PREFIX}(?:\\s*(?:[,;|/]|[-–—])|$)`, 'i').test(value)
+    || /\bremote\b/i.test(value);
+}
+
+export function canonicalizeCompensationLocation(location = {}) {
+  const suppliedDisplay = stripTrailingPostalCode(location?.display);
+  const coarseCountry = recognizedAnywhereCountry(suppliedDisplay) || recognizedCoarseLocationCountry(suppliedDisplay);
+  if (coarseCountry) {
+    return {
+      ...location,
+      country: coarseCountry,
+      city: '',
+      subdivision: '',
+      level: 'country',
+      value: coarseCountry,
+      display: coarseCountry,
+    };
+  }
+  const rawDisplay = stripNonRemoteWorkModeLabels(suppliedDisplay);
+  // A non-place must never become a fabricated city cohort (for example,
+  // "Multiple Locations"), while a Remote marker belongs on the separate
+  // residence-resolution path rather than in an on-site market key.
+  if (isNonGeographicCompensationLocation(rawDisplay)) return null;
+  const parsed = normalizeLocationInput(rawDisplay);
+  const explicitCountry = normalizeCountry(location?.country || parsed.country);
+  const city = String(parsed.city || location?.city || '').trim();
+  const subdivision = String(parsed.subdivision || location?.subdivision || '').trim();
+  const country = explicitCountry || String(parsed.country || '').trim();
+  const compact = (...parts) => parts.map(value => String(value || '').trim()).filter(Boolean).join(', ');
+  let level = '';
+  let value = '';
+  if (city) {
+    level = 'city';
+    value = compact(city, subdivision, country);
+  } else if (subdivision) {
+    level = 'state';
+    value = compact(subdivision, country);
+  } else if (country) {
+    level = 'country';
+    value = country;
+  }
+  if (!level || !value || parsed.countryConflict || location?.countryConflict) return null;
+  return {
+    ...location,
+    country,
+    city,
+    subdivision,
+    level,
+    value,
+    // Research should query the same canonical ladder component used by the
+    // key, rather than a verbose/raw board location which fragments cohorts.
+    display: value,
+  };
+}
+
+/** Board Combine can carry a different saved residence for each origin hub. */
+export function compensationResidencesForJob(job = {}, fallback = {}) {
+  const scoped = job?.compensationRemoteResidences;
+  return scoped && typeof scoped === 'object' && !Array.isArray(scoped) ? scoped : fallback;
+}
+
 export function resolveCompensationLocation(job = {}, context = {}, remoteResidences = {}) {
-  const jobText = `${job.location || ''} ${job.snippet || ''}`;
+  const rawLocation = String(job.location || '').trim();
   const statedWorkMode = String(context.workMode || '').trim().toLowerCase();
-  const workMode = ['remote', 'hybrid', 'onsite', 'on_site'].includes(statedWorkMode)
-    ? statedWorkMode
-    : (job.remote === true || /\bremote\b/i.test(jobText) ? 'remote' : 'unknown');
+  // Raw scraper evidence is primary for this decision. A stale/incorrect LLM
+  // context that says onsite must never turn an affirmative Remote listing
+  // into the fake city cohort "Remote".
+  // The location field is scraper-sourced and compact, so an explicit remote
+  // marker there ("Toronto, ON (Remote)") is affirmative evidence. Do not
+  // inspect the free-form snippet here: prose mentions of remote work can be
+  // conditional or unrelated and must not silently override a work location.
+  const rawRemote = job.remote === true || /\bremote\b/i.test(rawLocation);
+  const workMode = rawRemote
+    ? 'remote'
+    : ['remote', 'hybrid', 'onsite', 'on_site'].includes(statedWorkMode)
+      ? statedWorkMode
+      : 'unknown';
   if (workMode !== 'remote') {
-    const location = String(job.location || '').trim();
-    return location ? { kind: 'job_location', display: location } : null;
+    const location = stripNonRemoteWorkModeLabels(rawLocation);
+    // Work-mode placeholders are not places. Better to fail open than create
+    // a city-level cohort such as "Hybrid" or "Onsite".
+    if (/^(?:remote|hybrid|on[-\s]?site|onsite|anywhere|worldwide|global)$/i.test(location)) return null;
+    return location ? canonicalizeCompensationLocation({ kind: 'job_location', display: location }) : null;
   }
   const region = String(context.remoteRegion || '').trim().toLowerCase();
-  const permittedCountry = String(context.remoteCountry || '').trim();
+  // Structured restrictions are authoritative. Only an absent/unknown
+  // structured restriction may be repaired from an explicit raw form such as
+  // "Remote - Canada"; bare "Remote" remains intentionally unresolved.
+  const structuredPermittedCountry = normalizeCountry(context.remoteCountry);
+  const permittedCountry = structuredPermittedCountry || recognizedRemoteLocationCountry(rawLocation);
   const key = region === 'usa' || region === 'us'
     ? 'usa'
     : region === 'canada' || region === 'ca'
@@ -273,7 +420,7 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
               ? 'other'
               : '';
   const value = key ? remoteResidences?.[key] : null;
-  const country = String(value?.country || value?.countryCode || '').trim();
+  const country = normalizeCountry(value?.country || value?.countryCode);
   // A malformed saved residence must only make this optional comparison
   // uncertain; it must never be treated as a credible salary market.
   if (!key || !country || value?.countryConflict) return null;
@@ -281,7 +428,10 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
     && !/^(?:worldwide|global|anywhere|multiple|unspecified|unknown)$/i.test(permittedCountry)
     && permittedCountry.localeCompare(country, undefined, { sensitivity: 'base' }) !== 0) return null;
   const bits = [value.city, value.subdivision, country].map(v => String(v || '').trim()).filter(Boolean);
-  return { kind: `remote_${key}_residence`, key, country, display: bits.join(', ') };
+  return canonicalizeCompensationLocation({
+    kind: `remote_${key}_residence`, key, country, city: value.city, subdivision: value.subdivision,
+    countryConflict: value?.countryConflict, display: bits.join(', '),
+  });
 }
 
 /**
@@ -311,16 +461,82 @@ export function classifyCompensationFitEligibility(rawScore, { minScore, unscore
   return rawScore >= minScore ? 'eligible' : 'below-threshold';
 }
 
-export function compensationCohortKey({ job, context, location, offer }) {
+function positiveFiniteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : null;
+  // Reported years are intentionally human-readable ("3–5 years", "about
+  // 6"). A range represents the candidate's highest documented numeric years,
+  // so select its upper numeric value rather than parseFloat's first endpoint.
+  const values = [...String(value || '').matchAll(/\d+(?:\.\d+)?/g)]
+    .map(match => Number(match[0]))
+    .filter(number => Number.isFinite(number) && number > 0);
+  return values.length ? Math.max(...values) : null;
+}
+
+/**
+ * Compensation is priced for the most demanding material experience ask.
+ * Prefer the listing's stated numeric requirements. If none are stated, use
+ * the candidate's highest documented years among the assessed material
+ * categories—not total career tenure, which can be unrelated to the role.
+ */
+export function selectCompensationExperienceYears(experienceAssessment = {}) {
+  const categories = Array.isArray(experienceAssessment?.categorySpecificExperience)
+    ? experienceAssessment.categorySpecificExperience
+    : [];
+  const required = categories
+    .map(category => positiveFiniteNumber(category?.requiredMinimumYears))
+    .filter(Boolean);
+  if (required.length) {
+    return { years: Math.max(...required), basis: 'job-stated-minimum' };
+  }
+  const reported = categories
+    .map(category => positiveFiniteNumber(category?.reportedYears))
+    .filter(Boolean);
+  if (reported.length) {
+    return { years: Math.max(...reported), basis: 'candidate-reported-material-category' };
+  }
+  return { years: null, basis: 'not-established' };
+}
+
+/**
+ * A reusable role-family ladder must safely classify every whole-number
+ * headline ask from 0 through the open-ended 99 bucket. This deliberately
+ * rejects partial, overlapping, decimal, or gapped ladders instead of picking
+ * a nearest band and silently pricing the wrong seniority market.
+ */
+export function isValidCompensationExperienceBandLadder(bands) {
+  if (!Array.isArray(bands) || !bands.length) return false;
+  let nextMinimum = 0;
+  for (const band of bands) {
+    const label = String(band?.label || '').trim();
+    const minYears = Number(band?.minYears);
+    const maxYears = Number(band?.maxYears);
+    if (!label || !Number.isInteger(minYears) || !Number.isInteger(maxYears)
+      || minYears < 0 || maxYears < minYears || minYears !== nextMinimum) return false;
+    nextMinimum = maxYears + 1;
+  }
+  return nextMinimum === 100;
+}
+
+/** Pick the researched inclusive ladder band for one resolved headline ask. */
+export function selectCompensationExperienceBand(bands, years) {
+  if (!Number.isFinite(years) || !isValidCompensationExperienceBandLadder(bands)) return null;
+  return bands.find((band) => years >= Number(band.minYears) && years <= Number(band.maxYears)) || null;
+}
+
+export function compensationCohortKey({ job, context, location, offer, experienceBand }) {
+  const canonicalLocation = canonicalizeCompensationLocation(location);
+  const bandLabel = typeof experienceBand === 'string'
+    ? experienceBand
+    : experienceBand?.label;
   return [
     String(context?.roleFamily || job?.title || '').trim().toLowerCase(),
     String(context?.seniority || 'unspecified').toLowerCase(),
-    // A "senior" role asking for 3 years is not interchangeable with one
-    // asking for 10. This also prevents the 30-day live-research cache from
-    // serving an evidence set for materially different experience asks.
-    String(context?.requiredYears || 'unspecified').trim().toLowerCase(),
+    // The role-family ladder is the cohort dimension. Exact years are used
+    // only to select this label, so 5y/6y jobs in the same researched band
+    // share one market lookup instead of fragmenting into duplicate searches.
+    `band:${String(bandLabel || 'unresolved').trim().toLowerCase()}`,
     String(context?.employmentType || 'unspecified').toLowerCase(),
-    String(location?.display || '').toLowerCase(),
+    `${canonicalLocation?.level || 'unknown'}:${String(canonicalLocation?.value || '').trim().toLowerCase()}`,
     String(offer?.currency || '').toUpperCase(),
   ].join('|');
 }
@@ -336,6 +552,42 @@ export function isAuditableCompensationSource(source) {
   } catch {
     return false;
   }
+}
+
+function canonicalHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
+  } catch { return ''; }
+}
+
+/**
+ * A schema-valid URL is not evidence by itself. Preserve only source rows
+ * whose canonical HTTP URL was actually emitted by the grounded research
+ * response, preventing an extraction pass from inventing provenance.
+ */
+export function sourcesPresentInGroundedResearch(sources, groundedResearch) {
+  // New provider adapters prefix an authoritative metadata appendix. When it
+  // exists, arbitrary model prose (or hostile copied page text) cannot bless
+  // a URL as provenance. Legacy cached/provider text has no appendix, so keep
+  // the conservative whole-prose scan for backward compatibility only.
+  const researchText = String(groundedResearch || '');
+  const hasMetadataAppendix = researchText === GROUNDED_SOURCE_METADATA_MARKER
+    || researchText.startsWith(`${GROUNDED_SOURCE_METADATA_MARKER}\n`)
+    || researchText.startsWith(`${GROUNDED_SOURCE_METADATA_MARKER}\r\n`);
+  const metadataUrls = groundedMetadataUrls(researchText);
+  const mentioned = new Set(metadataUrls);
+  if (!hasMetadataAppendix) {
+    for (const match of researchText.matchAll(/https?:\/\/[^\s<>"'`\])}]+/gi)) {
+      const canonical = canonicalHttpUrl(match[0].replace(/[.,;:!?]+$/, ''));
+      if (canonical) mentioned.add(canonical);
+    }
+  }
+  return (Array.isArray(sources) ? sources : []).flatMap((source) => {
+    const url = canonicalHttpUrl(source?.url || source?.sourceUrl);
+    if (!url || !mentioned.has(url)) return [];
+    return [{ ...source, url }];
+  });
 }
 
 /**

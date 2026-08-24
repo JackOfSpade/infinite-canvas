@@ -34,7 +34,7 @@ export { normalizeMarketplaceWatchUrls } from '../src/utils/marketplaceWatchUrls
 export { deepUpdateNode, deepAddElements, getCanvasData } from '../src/utils/navigationUtils.js';
 export { buildCustomizationDialogData, filterNodeCustomizationUpdates, nodeSupportsCustomization } from '../src/utils/nodeCustomization.js';
 export { buildJobTreeNodes, computeLayoutPositions, computeJobTreeView, countMatchingDescendantCards, COL_X, canonicalSalaryRangeLabel, normalizeBandsWithRepairs, normalizeRangesWithRepairs, parseSalaryToNumeric, salaryRangeAnomaly, sanitizeJobTaxonomy } from '../src/nodes/jobsearch/buildJobTree.js';
-export { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
+export { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
 export { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterWholeFeedJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, jobRelevanceRejection, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, extractDiceSalaryBadge, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement, isPlaceholderIndeedJobKey } from '../electron/extractors/apiExtractors.js';
 export { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 export { assertCandidateDashPunctuation, buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, getDesignSystemDir, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle, sanitizeDocumentMainHtml } from '../electron/ipc/resumeHtml.js';
@@ -74,7 +74,9 @@ export { makeJobPageStop, STOP_STREAK, MIN_DATED_EVIDENCE } from '../electron/ip
 export { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 export { GEMINI_MODEL_FALLBACKS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_TIER_LADDER, GEMINI_ALL_MODEL_IDS, VERTEX_GEMINI_MODEL_FALLBACKS, geminiModelsInTier, classifyGeminiFailure, describeGeminiFailure, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroQuota, isGeminiZeroOrDailyQuota, orderGeminiModels, orderVertexGeminiModels } from '../electron/ipc/geminiModels.js';
 export { entitledTiersFor, recordEntitlement, gatedTiers, probeModelForTier, refreshEntitlementInBackground, settleEntitlementProbes, resetEntitlement, entitlementSnapshot } from '../electron/ipc/geminiEntitlement.js';
-export { VERTEX_LOCATION, callGeminiTextRaw, geminiGroundingTools, normalizeGeminiApiKey, toGeminiSchema, vertexGenerateContentUrl } from '../electron/ipc/gemini.js';
+export { VERTEX_LOCATION, callGeminiTextRaw, formatGeminiGroundedResponse, geminiGroundingTools, normalizeGeminiApiKey, toGeminiSchema, vertexGenerateContentUrl } from '../electron/ipc/gemini.js';
+export { formatClaudeGroundedResponse } from '../electron/ipc/claude.js';
+export { appendGroundedSourceAppendix, groundedMetadataUrls } from '../electron/ipc/groundedSourceAppendix.js';
 export { parseAiJson } from '../electron/ipc/jsonRepair.js';
 export { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 export { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
@@ -134,7 +136,8 @@ export { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
 export { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src/utils/statusCheckActionQueue.js';
 export { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
 export { recordTokenUsage, recordTruncation, effectiveCap, getTokenBudgetSnapshot, TOKEN_HARD_CAP } from '../electron/ipc/tokenBudget.js';
-export { encryptSecret, decryptSecret, normalizeAIProvider, normalizeClaudeModels, mergeSettingsSection, getAISettings } from '../electron/ipc/settings.js';
+export { encryptSecret, decryptSecret, normalizeAIProvider, normalizeClaudeModels, normalizeGeminiModelRuntimeState, getGeminiModelRuntimeState, saveGeminiModelRuntimeState, normalizeRoleFamilyExperienceBandCache, roleFamilyExperienceBandCacheEntry, mergeSettingsSection, getAISettings } from '../electron/ipc/settings.js';
+export { getKnownTaskIds, modelForTask, providerForTask, taskMaxTokensFor, taskModelRoutingSnapshot } from '../electron/ipc/llm.js';
 export { default as electronPkg } from 'electron';
 export { wrapUntrustedText } from '../electron/ipc/promptSafety.js';
 export { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
@@ -148,7 +151,6 @@ export { pickEdgeHandles, structuralEdge } from '../src/nodes/_shared/edgeHelper
 export { WORD_DOC_EXT, isWordDoc } from '../electron/ipc/docUtils.js';
 export { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
 export { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
-export { getKnownTaskIds, modelForTask, providerForTask, taskModelRoutingSnapshot } from '../electron/ipc/llm.js';
 export { claudeModelsInUse, getClaudeBatchResults, webSearchToolType } from '../electron/ipc/claude.js';
 export { CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, claudeReasoningMaxTokens, getClaudeDefaultReasoningConfig, MODEL_FLOOR } from '../electron/ipc/claudeModels.js';
 export { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';

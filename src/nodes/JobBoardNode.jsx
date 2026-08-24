@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { LayoutGrid, Plug, Briefcase, Combine as CombineIcon } from 'lucide-react';
 
@@ -10,7 +10,7 @@ import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { EventLogger } from '../utils/EventLogger';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from './jobboard/mergeJobs';
+import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 
@@ -40,6 +40,32 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const hubState = data.hubState || 'empty';
   const [combining, setCombining] = useState(false);
+  // `setCombining(true)` is not synchronous. A rapid double click (or an
+  // imperative duplicate call before React has rendered) would otherwise let
+  // two combines start from the same stale closure, race their LLM work, and
+  // let the later settlement replace the other cascade. Keep the active run
+  // token in a ref so the admission check takes effect within this call stack.
+  const combineRunRef = useRef(null);
+  // Progress events need a request-level identity too. Node ids alone cannot
+  // distinguish a newly started Combine from an older cancelled IPC call that
+  // is still unwinding and emitting its final progress events.
+  const compensationRequestIdRef = useRef(null);
+  const compensationRequestSequenceRef = useRef(0);
+  // The compensation stage begins only after global taxonomy validation. Its
+  // progress uses the same main-process event as a Job Search node, but the
+  // node id below keeps concurrent boards/searches completely isolated.
+  const [compensationProgress, setCompensationProgress] = useState(null);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onCompensationProgress) return undefined;
+    return window.electronAPI.onCompensationProgress((payload) => {
+      // Board work is always scoped. Do not accept legacy/unscoped events here:
+      // an unrelated search's progress is worse than no cosmetic indicator.
+      const activeRequestId = compensationRequestIdRef.current;
+      if (!activeRequestId || payload?.nodeId !== id || payload?.requestId !== activeRequestId) return;
+      setCompensationProgress({ processed: payload.processed ?? 0, total: payload.total ?? 0 });
+    });
+  }, [id]);
 
   // Reactively track which Job Search Modules are wired into this board (either
   // edge direction — ConnectionMode.Loose). Returns a STRING signature so the
@@ -137,7 +163,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const setScoreThreshold = useCallback((val) => {
     updateGlobal(id, { scoreThreshold: val });
     applyCardFilters({ scoreThreshold: val });
-    EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}/100 id=${id}`);
+    EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}% id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
   // Re-apply filters on mount — card opacities are stripped from save files.
@@ -240,6 +266,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const cleanupBoard = useCallback(() => {
     epoch.bump();
+    combineRunRef.current = null;
+    compensationRequestIdRef.current = null;
     window.electronAPI?.cancelNodeTask?.(id);
     clearBoardChildren();
   }, [clearBoardChildren, epoch, id]);
@@ -248,8 +276,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const handleClear = useCallback(() => {
     epoch.bump();
+    combineRunRef.current = null;
+    compensationRequestIdRef.current = null;
     window.electronAPI?.cancelNodeTask?.(id);
     setCombining(false);
+    setCompensationProgress(null);
     document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
     clearBoardChildren();
     updateGlobal(id, {
@@ -263,7 +294,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [id, clearBoardChildren, updateGlobal, epoch]);
 
   const handleCombine = useCallback(async () => {
-    if (combining) return;
+    // State alone cannot make this atomic: React applies setState after the
+    // handler returns, so two calls in one event turn both see combining=false.
+    if (combineRunRef.current) return;
     if (readyModules.length === 0 && allConnectedModulesDone) {
       // A source may legitimately complete with no matching/new jobs. Replace
       // the hidden previous cascade with a truthful empty board instead of
@@ -289,7 +322,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       addToast({ title: 'Nothing to combine', description: 'Connect Job Search Modules that have finished scoring, then try again.', type: 'error' });
       return;
     }
+    const combineToken = Symbol('job-board-combine');
+    // UUID makes this safe across an unmount/remount of the same board id;
+    // the counter keeps the fallback unique within one mounted component.
+    const entropy = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${++compensationRequestSequenceRef.current}-${Math.random().toString(36).slice(2)}`;
+    const compensationRequestId = `board-compensation:${id}:${entropy}`;
+    combineRunRef.current = combineToken;
+    compensationRequestIdRef.current = compensationRequestId;
     setCombining(true);
+    setCompensationProgress(null);
     const cancelled = epoch.start();
     try {
       // Capture the input signature NOW so a connection change mid-combine is
@@ -307,7 +349,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           .map((j) => ({ ...j, originHubId: j.originHubId || m.id }));
       });
       const mergeStats = {};
-      const union = unionScoredJobs(jobArrays, mergeStats);
+      let union = unionScoredJobs(jobArrays, mergeStats);
       const perModule = completedModules.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
       EventLogger.log(
@@ -361,6 +403,44 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       }
 
       if (cancelled() || !getNode(id)) return;
+
+      // Compensation has to run while `union` still carries the scorer-only
+      // context (especially compensationContext). Job cards intentionally do
+      // not persist that internal prompt material, so researching after spawn
+      // would fragment or skip the cohort work. The main-process cache makes a
+      // repeat Combine reuse unchanged cohorts when the provider supports it.
+      try {
+        const remoteResidencesByOrigin = Object.fromEntries(readyModules.map((module) => {
+          const sourceData = byId.get(module.id)?.data || {};
+          return [module.id, sourceData.locationSnapshot?.remoteResidences || sourceData.remoteResidences || {}];
+        }));
+        // Keep this transient routing input on the full union rather than
+        // choosing one module's residence for every remote listing. The card
+        // builder's explicit whitelist omits it after research is complete.
+        union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin);
+        const compensationResult = await window.electronAPI?.researchJobCompensation?.({
+          jobs: union,
+          nodeId: id,
+          requestId: compensationRequestId,
+        });
+        if (cancelled() || !getNode(id)) {
+          EventLogger.log(`[JobBoard] combine cancelled during compensation research id=${id}`);
+          return;
+        }
+        if (!compensationResult?.success || !Array.isArray(compensationResult.jobs)) {
+          const error = new Error(compensationResult?.error || 'Job Board compensation research failed.');
+          error.code = compensationResult?.errorCode;
+          throw error;
+        }
+        union = compensationResult.jobs;
+      } catch (err) {
+        if (cancelled() || !getNode(id)) return;
+        // Like failed taxonomy, a failed research invocation must leave the
+        // previously displayed board intact rather than replacing it with a
+        // partial set of cards.
+        EventLogger.error('[JobBoard] Compensation research failed; preserving prior board:', err);
+        throw err;
+      }
 
       const originalPos = getNode(id)?.position || { x: 0, y: 0 };
       const baseNodeId = `board-${id}-${Date.now()}`;
@@ -426,9 +506,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       EventLogger.error('[JobBoard] Combine failed:', err);
       addToast({ title: 'Combine failed', description: err?.message || String(err), type: 'error' });
     } finally {
-      if (!cancelled() && getNode(id)) setCombining(false);
+      // Clear only the run that acquired this token. A Clear/unmount releases
+      // the lock synchronously; a late former run must never unlock, clear
+      // progress, or otherwise alter a newer Combine.
+      if (combineRunRef.current === combineToken) {
+        combineRunRef.current = null;
+        compensationRequestIdRef.current = null;
+        setCompensationProgress(null);
+        if (!cancelled() && getNode(id)) setCombining(false);
+      }
     }
-  }, [combining, completedModules, readyModules, allConnectedModulesDone, getNodes, getNode, id, clearBoardChildren, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath]);
+  }, [completedModules, readyModules, allConnectedModulesDone, getNodes, getNode, id, clearBoardChildren, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath]);
 
   return (
     <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dropsBlocked>
@@ -442,6 +530,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           <p className="text-white/30 text-[9px] leading-tight">Merge connected searches</p>
         </div>
       </div>
+
+      {combining && compensationProgress?.total > 0 && (
+        <p className="px-3 pb-2 text-center text-blue-300/70 text-[10px]">
+          Researching pay for {compensationProgress.processed} / {compensationProgress.total} jobs…
+        </p>
+      )}
 
       {hubState === 'empty' && (
         <div className="flex flex-col items-stretch px-3 pb-4 gap-2">

@@ -1,4 +1,4 @@
-import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, appliedKeysFor, appliedRecordMatches, applyRefuteVerdicts, assert, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, canonicalizeCompany, canonicalizeJobUrl, canonicalizeLocation, canonicalizeTitle, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, filterOutApplied, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, markJobApplied, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeQuoteText, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, appliedKeysFor, appliedRecordMatches, applyRefuteVerdicts, assert, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, canonicalizeCompany, canonicalizeJobUrl, canonicalizeLocation, canonicalizeTitle, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, filterOutApplied, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, markJobApplied, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 
 export default [
   {
@@ -705,7 +705,7 @@ export default [
 {
     name: 'tokenBudget: seed/hard-cap pure paths + non-finite samples rejected',
     run: () => {
-      assert(TOKEN_HARD_CAP > 0, 'hard cap is a positive ceiling');
+      assert(TOKEN_HARD_CAP === 40000, 'hard cap is raised to 40,000 for the larger scoring floor');
       // No recorded data → returns the seed unchanged (the common path).
       assert(effectiveCap('tb-unit-seed', 5000) === 5000, 'no data → seed unchanged');
       // A non-positive seed falls back to the hard cap (max headroom).
@@ -717,6 +717,68 @@ export default [
       recordTruncation('tb-unit-inf', Infinity);
       assert(effectiveCap('tb-unit-inf', 4000) === 4000, 'Infinity/NaN samples do not poison the cap');
       return { ok: true };
+    },
+  },
+{
+    name: 'settings: Gemini model-health snapshots persist active quota suppression for hydration on restart',
+    run: () => {
+      const now = 1_000_000;
+      const key = 'ai:credential-hash\x00gemini-3.7-flash';
+      const persisted = normalizeGeminiModelRuntimeState({
+        [key]: {
+          suppressedUntil: now + 60_000,
+          runtime: {
+            model: 'gemini-3.7-flash', classification: 'daily-quota', message: 'Daily quota exhausted.',
+            observedAt: now - 5_000, suppressedUntil: now + 60_000, warnUntil: now + 60_000,
+          },
+        },
+        expired: {
+          suppressedUntil: now - 1,
+          runtime: { model: 'old', classification: 'daily-quota', message: 'old', observedAt: now - 10, warnUntil: now - 1 },
+        },
+      }, now);
+      assert(Object.keys(persisted).join(',') === key, 'expired runtime rows are pruned before a later app launch can reload them');
+      assert(persisted[key].suppressedUntil === now + 60_000 && persisted[key].runtime?.classification === 'daily-quota',
+        'an active daily-quota suppression and its warning survive the persistence round-trip');
+      assert(Object.keys(normalizeGeminiModelRuntimeState(null, now)).length === 0,
+        'a missing or malformed persisted snapshot safely hydrates as an empty model-health cache');
+      const before = getGeminiModelRuntimeState();
+      try {
+        assert(saveGeminiModelRuntimeState(persisted), 'the electron-store-backed Gemini runtime snapshot writes successfully');
+        const reread = getGeminiModelRuntimeState();
+        assert(JSON.stringify(reread) === JSON.stringify(normalizeGeminiModelRuntimeState(persisted)),
+          'a fresh settings read receives the durable suppression and warning snapshot for process-start hydration');
+      } finally {
+        saveGeminiModelRuntimeState(before);
+      }
+      return { retained: Object.keys(persisted).length };
+    },
+  },
+{
+    name: 'settings: role-family cache treats prototype property names as ordinary own keys',
+    run: () => {
+      const raw = JSON.parse('{"__proto__":{"roleFamily":"__proto__"},"constructor":{"roleFamily":"constructor"}}');
+      const cache = normalizeRoleFamilyExperienceBandCache(raw);
+      assert(Object.getPrototypeOf(cache) === null,
+        'role-family entries are copied into a null-prototype dictionary');
+      assert(Object.hasOwn(cache, '__proto__') && Object.hasOwn(cache, 'constructor'),
+        'persisted special-name entries remain ordinary own properties');
+      assert(roleFamilyExperienceBandCacheEntry(cache, '__proto__')?.roleFamily === '__proto__'
+        && roleFamilyExperienceBandCacheEntry(cache, ' CONSTRUCTOR ')?.roleFamily === 'constructor',
+      'prototype-like role-family names round-trip through normalized, case-insensitive lookup');
+      assert(roleFamilyExperienceBandCacheEntry({}, '__proto__') === null
+        && roleFamilyExperienceBandCacheEntry({}, 'constructor') === null,
+      'inherited Object.prototype properties are never mistaken for cached research');
+      assert(roleFamilyExperienceBandCacheEntry(cache, '   ') === null,
+        'an empty normalized role-family key is rejected');
+
+      cache.__proto__ = { roleFamily: 'updated safely' };
+      assert(Object.getPrototypeOf(cache) === null && cache.__proto__.roleFamily === 'updated safely',
+        'saving an own __proto__ entry cannot mutate the cache dictionary prototype');
+      const persisted = JSON.parse(JSON.stringify(cache));
+      assert(Object.hasOwn(persisted, '__proto__') && persisted.__proto__.roleFamily === 'updated safely',
+        'a special-name entry survives the same JSON persistence boundary used by electron-store');
+      return { keys: Object.keys(cache) };
     },
   },
 {
@@ -1113,21 +1175,33 @@ export default [
     },
   },
 {
-    name: 'settings: normalizeClaudeModels keeps only live API groups and backfills invalid tokens',
+    name: 'settings: normalizeClaudeModels migrates Analysis and keeps only live API groups',
     run: () => {
-      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
+      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
         'an older config with no claudeModels key at all gets the live default set');
-      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
+      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
         'null input is treated the same as absent');
-      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
+      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
         'an empty object still backfills every group');
 
-      // A valid non-default live pick is preserved verbatim...
-      const partiallyValid = normalizeClaudeModels({ generation: 'FABLE', analysis: 'nonsense-typo', light: null });
-      assert(!('generation' in partiallyValid), 'the retired generation token is dropped instead of reaching live settings/diagnostics');
-      // ...while an unrecognized token in a SIBLING group falls back to ONLY
-      // that group's default, not the whole object.
-      assert(partiallyValid.analysis === 'SONNET', 'an unrecognized token in one group falls back to that group\'s own default');
+      // A valid non-default legacy Analysis pick remains a deliberate choice
+      // for both successor groups; the retired generation token is dropped.
+      const migrated = normalizeClaudeModels({ generation: 'FABLE', analysis: 'HAIKU', light: null });
+      assert(migrated.judgment === 'HAIKU' && migrated.extraction === 'HAIKU',
+        'a deliberate legacy Analysis selection migrates to both Judgment and Extraction');
+      assert(migrated.light === 'HAIKU', 'an unchanged Light selection retains its own default');
+      assert(!('generation' in migrated) && !('analysis' in migrated), 'retired generation and legacy analysis keys are dropped');
+
+      // A legacy SONNET selection is indistinguishable from the old default,
+      // so it adopts the stronger new Judgment default instead of weakening it.
+      const legacyDefault = normalizeClaudeModels({ analysis: 'SONNET', light: 'FABLE' });
+      assert(legacyDefault.judgment === 'OPUS' && legacyDefault.extraction === 'SONNET' && legacyDefault.light === 'FABLE',
+        'legacy default Analysis migrates to the redesigned defaults while retaining Light');
+
+      // An invalid value in one group falls back to only that group.
+      const partiallyValid = normalizeClaudeModels({ judgment: 'nonsense-typo', extraction: 'FABLE', light: null });
+      assert(partiallyValid.judgment === 'OPUS', 'an unrecognized token in one group falls back to that group\'s own default');
+      assert(partiallyValid.extraction === 'FABLE', 'a valid sibling group is preserved verbatim');
       assert(partiallyValid.light === 'HAIKU', 'a null token falls back to that group\'s default');
       return { ok: true };
     },
@@ -1137,7 +1211,7 @@ export default [
     run: () => {
       const ai = getAISettings();
       assert(ai.claudeModels && typeof ai.claudeModels === 'object', 'getAISettings() always includes a claudeModels object');
-      for (const group of ['analysis', 'light']) {
+      for (const group of ['judgment', 'extraction', 'light']) {
         assert(typeof ai.claudeModels[group] === 'string' && ai.claudeModels[group].length > 0,
           `getAISettings().claudeModels.${group} is a non-empty string (got ${JSON.stringify(ai.claudeModels[group])})`);
       }
@@ -1145,26 +1219,27 @@ export default [
     },
   },
 {
-    name: 'settings: mergeSettingsSection deep-merges live claudeModels and removes legacy generation',
+    name: 'settings: mergeSettingsSection deep-merges redesigned Claude groups and migrates legacy Analysis',
     run: () => {
       const current = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' } };
 
       // Regression: a single-family update (exactly what SettingsPanel's
       // updateClaudeModelGroup sends) must NOT wipe the other two groups —
       // a naive top-level `{ ...current, ...value }` shallow merge would
-      // replace `claudeModels` wholesale with `{ analysis: 'FABLE' }`,
-      // silently dropping analysis/light back to undefined.
-      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { analysis: 'FABLE' } });
-      assert(afterOneFamilyChange.claudeModels.analysis === 'FABLE', 'the changed group is applied');
+      // replace `claudeModels` wholesale with `{ judgment: 'FABLE' }`,
+      // silently dropping sibling groups back to undefined.
+      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { judgment: 'FABLE' } });
+      assert(afterOneFamilyChange.claudeModels.judgment === 'FABLE', 'the changed group is applied');
+      assert(afterOneFamilyChange.claudeModels.extraction === 'SONNET', 'a migrated sibling group survives an unrelated single-group update');
       assert(afterOneFamilyChange.claudeModels.light === 'HAIKU', 'a sibling group (light) survives an unrelated single-group update');
-      assert(!('generation' in afterOneFamilyChange.claudeModels), 'a settings write removes legacy generation from persisted data');
+      assert(!('generation' in afterOneFamilyChange.claudeModels) && !('analysis' in afterOneFamilyChange.claudeModels), 'a settings write removes retired model-group keys');
 
       // A normal top-level key (e.g. serviceAccountPath) still shallow-merges
       // as before — the nested-merge exception is scoped to claudeModels only.
       const afterUnrelatedKey = mergeSettingsSection('ai', current, { serviceAccountPath: '/tmp/sa.json' });
       assert(afterUnrelatedKey.serviceAccountPath === '/tmp/sa.json', 'an unrelated ai key merges normally');
-      assert(afterUnrelatedKey.claudeModels.analysis === 'SONNET' && afterUnrelatedKey.claudeModels.light === 'HAIKU', 'live claudeModels survive an unrelated update');
-      assert(!('generation' in afterUnrelatedKey.claudeModels), 'even an unrelated AI update cleans legacy generation');
+      assert(afterUnrelatedKey.claudeModels.judgment === 'OPUS' && afterUnrelatedKey.claudeModels.extraction === 'SONNET' && afterUnrelatedKey.claudeModels.light === 'HAIKU', 'live claudeModels survive an unrelated update');
+      assert(!('generation' in afterUnrelatedKey.claudeModels) && !('analysis' in afterUnrelatedKey.claudeModels), 'even an unrelated AI update cleans retired keys');
 
       // A non-'ai' section never applies the nested-merge special case, even
       // if it happens to carry a key named claudeModels (defensive: the

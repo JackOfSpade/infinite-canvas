@@ -845,11 +845,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div
           className="shrink-0 mt-0.5 w-[52px] h-10 rounded-lg flex flex-col items-center justify-center leading-none"
           style={{ backgroundColor: accentColor + '20', color: accentColor }}
-          title={`Hiring fit: ${score}/100. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
-          aria-label={`Hiring fit ${score} out of 100. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
+          title={`Hiring fit: ${score}%. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
+          aria-label={`Hiring fit ${score} percent. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
         >
           <span className="text-[9px] font-medium uppercase tracking-wide">Hiring fit</span>
-          <span className="mt-0.5 text-xs font-bold">{score}/100</span>
+          <span className="mt-0.5 text-xs font-bold">{score}%</span>
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
@@ -1048,7 +1048,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {(hiringFitAudit.confidence || hiringFitAudit.calibrated) && (
             <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-white/40">
               {hiringFitAudit.confidence && <span>Assessment confidence: {hiringFitAudit.confidence}</span>}
-              {hiringFitAudit.calibrated && <span>Score calibrated: {hiringFitAudit.calibrated.rawScore} → {hiringFitAudit.calibrated.adjustedScore}/100</span>}
+              {hiringFitAudit.calibrated && <span>Score calibrated: {hiringFitAudit.calibrated.rawScore}% → {hiringFitAudit.calibrated.adjustedScore}%</span>}
             </div>
           )}
         </div>

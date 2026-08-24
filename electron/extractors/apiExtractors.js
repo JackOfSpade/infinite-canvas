@@ -2208,24 +2208,53 @@ function extractDomJobs(html) {
   return dedupeIndeedJobs(jobs);
 }
 
+// Embedded JSON is valuable because Indeed sometimes hydrates more results
+// than are visible as cards, so it must remain the primary extraction path.
+// The exception is a record with *no* description at all: that is the shape
+// of the template/companion phantoms we have observed.  Such a weak JSON
+// record gets one extra, intentionally narrow, corroboration requirement: a
+// card with the same source-stable identity must be present in this response's
+// DOM.  Described JSON records are never gated here; they can legitimately be
+// JSON-only when the page only renders its above-the-fold cards.
+function anchorDescriptionlessIndeedJsonJobs(jsonJobs, domJobs) {
+  const domKeys = new Set((domJobs || []).map(sourceJobKey));
+  const kept = [];
+  let rejectedUnanchoredDescriptionlessCount = 0;
+  for (const job of jsonJobs || []) {
+    if (String(job?.snippet || '').trim().length > 0 || domKeys.has(sourceJobKey(job))) {
+      kept.push(job);
+    } else {
+      rejectedUnanchoredDescriptionlessCount++;
+      logger.debug(`[Indeed/extract] Rejected description-less JSON-only record "${job.title}" @ "${job.company || 'unknown company'}" (${job.location || 'no location'}, jobkey=${job.jobkey || 'none'}) — no matching DOM card`);
+    }
+  }
+  kept.rejectedPlaceholderCount = jsonJobs?.rejectedPlaceholderCount || 0;
+  kept.rejectedUnanchoredDescriptionlessCount = rejectedUnanchoredDescriptionlessCount;
+  return kept;
+}
+
 // windowMosaicResults: pre-extracted array from window.mosaic.providerData
 // ['mosaic-provider-jobcards'].metaData.mosaicProviderJobCardsModel.results
 // passed in by the Puppeteer scraper via page.evaluate(). When provided it
 // replaces the broken HTML marker approach (which hits a CSS URL, not data).
 export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
-  const nextData = extractNextDataJobs(html);
-  const mosaic   = windowMosaicResults
+  const nextDataRaw = extractNextDataJobs(html);
+  const mosaicRaw = windowMosaicResults
     ? collectIndeedJobsFromObject(windowMosaicResults)
     : extractMosaicJobs(html);
   const dom      = extractDomJobs(html);
+  const nextData = anchorDescriptionlessIndeedJsonJobs(nextDataRaw, dom);
+  const mosaic = anchorDescriptionlessIndeedJsonJobs(mosaicRaw, dom);
   // nextData/mosaic each carry a .rejectedPlaceholderCount from the JSON-walk
   // guard (collectIndeedJobsFromObject) — the DOM path never sets one, since
   // it doesn't walk Indeed's embedded JSON and isn't exposed to the phantom
   // template/companion blocks that guard rejects.
   const rejectedPlaceholders = (nextData.rejectedPlaceholderCount || 0) + (mosaic.rejectedPlaceholderCount || 0);
-  logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}${rejectedPlaceholders > 0 ? `, rejected-placeholder: ${rejectedPlaceholders}` : ''}`);
+  const rejectedUnanchoredDescriptionless = (nextData.rejectedUnanchoredDescriptionlessCount || 0) + (mosaic.rejectedUnanchoredDescriptionlessCount || 0);
+  logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}${rejectedPlaceholders > 0 ? `, rejected-placeholder: ${rejectedPlaceholders}` : ''}${rejectedUnanchoredDescriptionless > 0 ? `, rejected-descriptionless-json-only: ${rejectedUnanchoredDescriptionless}` : ''}`);
   const merged = dedupeIndeedJobs([...nextData, ...mosaic, ...dom]);
   merged.rejectedPlaceholderCount = rejectedPlaceholders;
+  merged.rejectedUnanchoredDescriptionlessCount = rejectedUnanchoredDescriptionless;
   return merged;
 }
 

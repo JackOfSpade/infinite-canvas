@@ -89,6 +89,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   discardJobBatch: (args) => ipcRenderer.invoke('discard-job-batch', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
+  // Board Combine runs this after global taxonomy validation and before cards
+  // are built, so compensation context is still available on the full jobs.
+  researchJobCompensation: (args) => ipcRenderer.invoke('research-job-compensation', args),
 
   // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
@@ -151,7 +154,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkAIAvailability: (args) => ipcRenderer.invoke('check-ai-availability', args),
   getAIStatus: () => ipcRenderer.invoke('get-ai-status'),
   // Live Claude family -> resolved model id map, for the Settings panel's
-  // per-live-group (analysis/light) family dropdowns — see llm.js
+  // per-live-group (Judgment/Extraction/Light) family dropdowns — see llm.js
   // registerLlmHandlers().
   getClaudeModelMap: () => ipcRenderer.invoke('get-claude-model-map'),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),

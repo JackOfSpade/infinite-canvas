@@ -1,25 +1,33 @@
 import { assert, COMPENSATION_MIN_FIT_SCORE } from '../test-dependencies.js';
+import { readFileSync } from 'node:fs';
 import {
   classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
   mergeCompetitiveRanges,
   compensationAssessment,
   resolveCompensationLocation,
+  compensationResidencesForJob,
+  canonicalizeCompensationLocation,
   compensationCohortKey,
+  selectCompensationExperienceYears,
+  isValidCompensationExperienceBandLadder,
+  selectCompensationExperienceBand,
   isAuditableCompensationSource,
   selectComparableEvidence,
+  sourcesPresentInGroundedResearch,
 } from '../../electron/ipc/jobCompensation.js';
 import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
+import { ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
-  name: 'classifyCompensationFitEligibility: the 70 boundary is inclusive and an unscored job is not a low-scoring job',
+  name: 'classifyCompensationFitEligibility: the 75 boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
     const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
-    // Boundary. The user asked for "70% match or above", so 70 must be
+    // Boundary. The user asked for "75% match or above", so 75 must be
     // INCLUSIVE — an off-by-one here silently denies the check to exactly the
     // jobs sitting on the bar they named.
-    assert(classifyCompensationFitEligibility(70, opts) === 'eligible', '70 must be eligible (threshold is inclusive)');
-    assert(classifyCompensationFitEligibility(69, opts) === 'below-threshold', '69 must be below the threshold');
+    assert(classifyCompensationFitEligibility(75, opts) === 'eligible', '75 must be eligible (threshold is inclusive)');
+    assert(classifyCompensationFitEligibility(74, opts) === 'below-threshold', '74 must be below the threshold');
     assert(classifyCompensationFitEligibility(100, opts) === 'eligible', '100 must be eligible');
     assert(classifyCompensationFitEligibility(0, opts) === 'below-threshold', '0 must be below the threshold');
     // An unscored job must NEVER be reported as a weak match. The scorer's
@@ -36,6 +44,59 @@ export default [{
     assert(classifyCompensationFitEligibility(50, { minScore: COMPENSATION_MIN_FIT_SCORE }) === 'below-threshold',
       'with no sentinel configured, 50 is an ordinary below-threshold score');
     return { threshold: COMPENSATION_MIN_FIT_SCORE };
+  },
+}, {
+  name: 'Role-family band extraction permits honest empty evidence and retains only grounded URLs',
+  run: () => {
+    assert(!('minItems' in ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA.properties.bands)
+      && !('minItems' in ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA.properties.sources),
+    'role-band schema must permit empty arrays so insufficient research blocks honestly instead of forcing fabricated rows');
+    const bandSchema = ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA.properties.bands.items.properties;
+    assert(bandSchema.minYears.type === 'integer' && bandSchema.maxYears.type === 'integer',
+      'the provider schema requires the same whole-year boundaries enforced by the persisted contiguous-ladder validator');
+    const retained = sourcesPresentInGroundedResearch([
+      { name: 'Grounded framework', url: 'https://careers.example.test/framework' },
+      { name: 'Invented but plausible', url: 'https://invented.example.test/ladder' },
+      { name: 'Unsafe scheme', url: 'file:///etc/passwd' },
+    ], 'The grounded search found https://careers.example.test/framework.');
+    assert(retained.length === 1 && retained[0].url === 'https://careers.example.test/framework',
+      'only a direct HTTP URL actually present in grounded raw research may enter the experience-band cache');
+    const salaryRanges = sourcesPresentInGroundedResearch([
+      { comparable: true, min: 90000, max: 110000, currency: 'USD', sourceName: 'Grounded salary source', sourceUrl: 'https://salary.example.test/role' },
+      { comparable: true, min: 1, max: 999999, currency: 'USD', sourceName: 'Invented salary source', sourceUrl: 'https://invented.example.test/pay' },
+    ], 'The grounded search found https://salary.example.test/role.');
+    assert(salaryRanges.length === 1 && salaryRanges[0].sourceUrl === 'https://salary.example.test/role'
+      && selectComparableEvidence(salaryRanges, 5, 'USD').length === 1,
+    'a schema-valid salary URL absent from the grounded response cannot drive a compensation verdict');
+    const metadataOnly = sourcesPresentInGroundedResearch([
+      { comparable: true, min: 90000, max: 110000, currency: 'USD', sourceName: 'Provider citation', sourceUrl: 'https://provider.example.test/cited' },
+      { comparable: true, min: 1, max: 999999, currency: 'USD', sourceName: 'Prose-only URL', sourceUrl: 'https://prose.example.test/untrusted' },
+    ], `Grounded source URLs (provider metadata):
+- https://provider.example.test/cited — Provider citation
+
+Model prose happens to mention https://prose.example.test/untrusted.`);
+    assert(metadataOnly.length === 1 && metadataOnly[0].sourceUrl === 'https://provider.example.test/cited',
+      'when provider metadata exists, a URL mentioned only in model prose cannot satisfy compensation provenance');
+    assert(sourcesPresentInGroundedResearch(
+      [{ sourceUrl: 'https://prose.example.test/untrusted' }],
+      'Grounded source URLs (provider metadata):\n\nMalformed metadata with https://prose.example.test/untrusted.',
+    ).length === 0,
+    'a present but malformed provider appendix fails closed instead of falling back to model prose');
+    return { retained: retained.length, salaryRanges: salaryRanges.length, metadataOnly: metadataOnly.length };
+  },
+}, {
+  name: 'Role-family experience-band lookup keeps grounded research separate from schema extraction',
+  run: () => {
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const start = source.indexOf('async function getExperienceBandsForRoleFamily');
+    const end = source.indexOf('\n/**\n * Research cash salary', start);
+    const resolver = source.slice(start, end);
+    assert(start >= 0 && end > start, 'the role-family experience-band resolver must remain a distinct audited path');
+    assert(/callLLMRaw\([\s\S]*?grounding:\s*true/.test(resolver),
+      'experience-band research must use the raw grounded path; structured calls cannot activate Claude web search');
+    assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA/.test(resolver),
+      'grounded role-family prose must still go through schema-constrained extraction before persistence');
+    return { grounded: true };
   },
 }, {
   name: 'Cash compensation parsing, source union, and exact market-floor verdict',
@@ -140,6 +201,16 @@ export default [{
     );
     assert(worldwideCanadianRemote?.display === 'Toronto, Ontario, Canada',
       'a worldwide outside-region remote role may use a Canadian residence for compensation');
+    const originScopedResidence = compensationResidencesForJob(
+      { compensationRemoteResidences: { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } } },
+      { usa: { city: 'Austin', subdivision: 'Texas', country: 'United States' } },
+    );
+    assert(resolveCompensationLocation(
+      { remote: true, location: 'Remote' },
+      { workMode: 'remote', remoteRegion: 'usa' },
+      originScopedResidence,
+    )?.display === 'Denver, Colorado, United States',
+    'a board job uses its transient origin-hub residence before a board-level fallback');
     const conflictingRemoteResidence = normalizeRemoteResidences({
       other: { city: 'Toronto', subdivision: 'Ontario', country: 'United States' },
     });
@@ -154,10 +225,149 @@ export default [{
       { workMode: 'remote', remoteRegion: 'other', remoteCountry: 'Germany' },
       { other: { city: 'London', subdivision: 'England', country: 'United Kingdom' } },
     ) === null, 'an incompatible other-country residence must stay uncertain');
-    const cohortCommon = { job: { title: 'Senior Designer' }, location: loc, offer: canadian };
-    assert(compensationCohortKey({ ...cohortCommon, context: { seniority: 'senior', requiredYears: '3 years' } })
-      !== compensationCohortKey({ ...cohortCommon, context: { seniority: 'senior', requiredYears: '8 years' } }),
-    'different experience asks cannot share a cached compensation cohort');
+    const contradictoryRemote = resolveCompensationLocation(
+      { remote: true, location: 'Remote' },
+      { workMode: 'onsite', remoteRegion: 'usa' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    );
+    assert(contradictoryRemote?.display === 'Denver, Colorado, United States'
+      && contradictoryRemote.level === 'city',
+    'affirmative scraped remote evidence overrides contradictory onsite context and uses the saved residence');
+    assert(resolveCompensationLocation(
+      { location: 'Toronto, ON (Remote)' },
+      { workMode: 'onsite', remoteRegion: 'usa' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    )?.display === 'Denver, Colorado, United States',
+    'a compact location with an explicit remote marker uses the residence even when context says onsite');
+    assert(resolveCompensationLocation(
+      { location: 'Austin, TX', snippet: 'Remote work is not available for this onsite position.' },
+      { workMode: 'unknown', remoteRegion: 'usa' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    )?.display === 'Austin, Texas, United States',
+    'a prose mention of remote work must not override an onsite listing location when structured work mode is unknown');
+    assert(resolveCompensationLocation(
+      { location: 'Hybrid' },
+      { workMode: 'onsite' },
+    ) === null, 'a non-geographic work-mode token must not become a city-level compensation cohort');
+    const hybridToronto = resolveCompensationLocation({ location: 'Hybrid - Toronto, ON' }, { workMode: 'hybrid' });
+    const onsiteAustin = resolveCompensationLocation({ location: 'On-site: Austin, TX' }, { workMode: 'onsite' });
+    assert(hybridToronto?.value === 'Toronto, Ontario, Canada'
+      && onsiteAustin?.value === 'Austin, Texas, United States',
+    'hybrid/on-site prefixes are removed before canonical city grouping');
+    const trailingHybridToronto = resolveCompensationLocation({ location: 'Toronto, ON (Hybrid)' }, { workMode: 'hybrid' });
+    const trailingOnsiteAustin = resolveCompensationLocation({ location: 'Austin, TX - On-site' }, { workMode: 'onsite' });
+    assert(trailingHybridToronto?.value === 'Toronto, Ontario, Canada'
+      && trailingOnsiteAustin?.value === 'Austin, Texas, United States',
+    'parenthesized and trailing hybrid/on-site labels cannot fragment a city cohort');
+    for (const placeholder of ['Multiple Locations', 'Location Negotiable After Selection', 'TBD', 'Not specified']) {
+      assert(resolveCompensationLocation({ location: placeholder }, { workMode: 'onsite' }) === null,
+        `${placeholder} is not a compensation market`);
+    }
+    assert(resolveCompensationLocation({ location: 'Anywhere in Canada' }, { workMode: 'onsite' })?.value === 'Canada',
+      'an explicit anywhere-in-country listing safely uses the country cohort');
+    assert(resolveCompensationLocation({ location: 'Anywhere in Atlantis' }, { workMode: 'onsite' }) === null,
+      'an unrecognized anywhere-in-country phrase cannot become a fictional city cohort');
+    for (const [placeholder, country] of [
+      ['Nationwide, Canada', 'Canada'],
+      ['Multiple Locations, United States', 'United States'],
+      ['Various Locations - Canada', 'Canada'],
+    ]) {
+      assert(resolveCompensationLocation({ location: placeholder }, { workMode: 'onsite' })?.value === country,
+        `${placeholder} retains its explicit country boundary without inventing a city`);
+    }
+    for (const placeholder of ['Multiple Locations', 'Various Locations - Atlantis', 'Nationwide, El Dorado']) {
+      assert(resolveCompensationLocation({ location: placeholder }, { workMode: 'onsite' }) === null,
+        `${placeholder} cannot become a fake country or city cohort`);
+    }
+    assert(resolveCompensationLocation(
+      { location: 'Remote - Canada' },
+      { workMode: 'unknown', remoteRegion: 'unknown', remoteCountry: '' },
+      { canada: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } },
+    )?.value === 'Toronto, Ontario, Canada',
+    'an explicit raw remote-country marker repairs an otherwise unknown remote restriction');
+    assert(resolveCompensationLocation(
+      { location: 'Remote, U.S.' },
+      { workMode: 'unknown', remoteRegion: 'unknown', remoteCountry: '' },
+      { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
+    )?.value === 'Denver, Colorado, United States',
+    'U.S. aliases in raw remote locations select the U.S. residence');
+    assert(resolveCompensationLocation(
+      { location: 'Remote' },
+      { workMode: 'unknown', remoteRegion: 'unknown', remoteCountry: '' },
+      { canada: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } },
+    ) === null,
+    'a bare Remote listing stays unavailable without a structured or raw country restriction');
+    assert(resolveCompensationLocation(
+      { location: 'Remote - Canada' },
+      { workMode: 'remote', remoteRegion: 'other', remoteCountry: 'UK' },
+      { other: { city: 'London', subdivision: 'England', country: 'United Kingdom' } },
+    )?.country === 'United Kingdom',
+    'structured UK restrictions override contradictory raw location hints and normalize country aliases');
+    const cohortCommon = { job: { title: 'Senior Designer' }, location: loc, offer: canadian, context: { seniority: 'senior' } };
+    const roleBands = [
+      { label: 'Entry (0–2 years)', minYears: 0, maxYears: 2 },
+      { label: 'Mid-level (3–6 years)', minYears: 3, maxYears: 6 },
+      { label: 'Senior (7–11 years)', minYears: 7, maxYears: 11 },
+      { label: 'Lead+ (12+ years)', minYears: 12, maxYears: 99 },
+    ];
+    const fiveYearHeadline = selectCompensationExperienceYears({ categorySpecificExperience: [{ requiredMinimumYears: 5 }] });
+    const sixYearHeadline = selectCompensationExperienceYears({ categorySpecificExperience: [{ requiredMinimumYears: 6 }] });
+    const fiveYearKey = compensationCohortKey({ ...cohortCommon, experienceBand: selectCompensationExperienceBand(roleBands, fiveYearHeadline.years) });
+    const sixYearKey = compensationCohortKey({ ...cohortCommon, experienceBand: selectCompensationExperienceBand(roleBands, sixYearHeadline.years) });
+    const sevenYearKey = compensationCohortKey({ ...cohortCommon, experienceBand: selectCompensationExperienceBand(roleBands, 7) });
+    assert(fiveYearHeadline.years === 5 && sixYearHeadline.years === 6
+      && fiveYearKey === sixYearKey && fiveYearKey !== sevenYearKey,
+      'jobs at 5y and 6y in one researched band share a cohort, while a different band does not');
+    const fullLadder = [
+      { label: 'Early', minYears: 0, maxYears: 2 },
+      { label: 'Mid', minYears: 3, maxYears: 6 },
+      { label: 'Senior+', minYears: 7, maxYears: 99 },
+    ];
+    assert(isValidCompensationExperienceBandLadder(fullLadder), 'a 0–99 ordered contiguous ladder is cacheable');
+    assert(!isValidCompensationExperienceBandLadder([
+      { label: 'Early', minYears: 0, maxYears: 2 },
+      { label: 'Senior+', minYears: 4, maxYears: 99 },
+    ]), 'a gap invalidates a persisted role-family ladder rather than assigning a nearest band');
+    assert(!isValidCompensationExperienceBandLadder([
+      { label: 'Early', minYears: 0, maxYears: 2 },
+      { label: 'Mid', minYears: 3, maxYears: 6 },
+    ]), 'a ladder that does not reach the open-ended 99 bucket is invalid');
+    assert(selectCompensationExperienceBand(fullLadder, 100) === null
+      && selectCompensationExperienceBand(fullLadder, 2.5) === null,
+    'out-of-range and uncontained fractional experience returns no band instead of a nearest one');
+    const reportedOnly = selectCompensationExperienceYears({ categorySpecificExperience: [
+      { requiredMinimumYears: null, reportedYears: '3 years' },
+      { requiredMinimumYears: null, reportedYears: '4–6.5 years' },
+    ] });
+    assert(reportedOnly.years === 6.5 && reportedOnly.basis === 'candidate-reported-material-category',
+      'when no category states a minimum, the highest material reported years is used');
+    const statedWins = selectCompensationExperienceYears({ categorySpecificExperience: [
+      { requiredMinimumYears: 2, reportedYears: '12' },
+      { requiredMinimumYears: 5, reportedYears: '3' },
+    ] });
+    assert(statedWins.years === 5 && statedWins.basis === 'job-stated-minimum',
+      'the highest job-stated category minimum wins over reported and total tenure');
+    const city = canonicalizeCompensationLocation({ display: 'Denver, Colorado, United States' });
+    const state = canonicalizeCompensationLocation({ display: 'Colorado, United States' });
+    const country = canonicalizeCompensationLocation({ display: 'Canada' });
+    assert(city?.level === 'city' && city.value === 'Denver, Colorado, United States'
+      && state?.level === 'state' && state.value === 'Colorado, United States'
+      && country?.level === 'country' && country.value === 'Canada',
+    'location cohorts use deterministic city → state → country canonical ladder');
+    const torontoForms = [
+      canonicalizeCompensationLocation({ display: 'Toronto, ON' }),
+      canonicalizeCompensationLocation({ display: 'Toronto, ON M5V 1K4' }),
+      canonicalizeCompensationLocation({ display: 'Toronto, Ontario, Canada' }),
+    ];
+    assert(torontoForms.every(place => place?.level === 'city' && place.value === 'Toronto, Ontario, Canada'),
+      'trailing Canadian postal codes cannot split an otherwise identical city cohort');
+    const austinForms = [
+      canonicalizeCompensationLocation({ display: 'Austin, TX' }),
+      canonicalizeCompensationLocation({ display: 'Austin, TX 78701-1234' }),
+      canonicalizeCompensationLocation({ display: 'Austin, Texas, United States' }),
+    ];
+    assert(austinForms.every(place => place?.level === 'city' && place.value === 'Austin, Texas, United States'),
+      'trailing US ZIP and ZIP+4 forms cannot split an otherwise identical city cohort');
     return { unionFloor: merged.min };
   },
 }, {
@@ -176,7 +386,7 @@ export default [{
   // researched verdict via reasonCode.
   name: 'Compensation fit gate: threshold constant and below_fit_threshold skip shape',
   run: () => {
-    assert(COMPENSATION_MIN_FIT_SCORE === 70, `COMPENSATION_MIN_FIT_SCORE must be 70 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
+    assert(COMPENSATION_MIN_FIT_SCORE === 75, `COMPENSATION_MIN_FIT_SCORE must be 75 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
 
     // Mirrors jobs.js's compensationFallback(job, 'below_fit_threshold', ...)
     // for a job that DOES have a real, parseable salary but scored below the
@@ -211,12 +421,12 @@ export default [{
     assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,
       'a known-low-score skip and an unscored skip must never render identical text on the card — that would erase the only signal that distinguishes them');
 
-    // A boundary-inclusive pass (score === 70) never reaches this fallback path
+    // A boundary-inclusive pass (score === 75) never reaches this fallback path
     // at all in jobs.js; it is asserted here only as the documented contract on
     // the constant itself, since the real branch is not independently callable
     // (see the risk note above).
-    assert(70 >= COMPENSATION_MIN_FIT_SCORE && 69 < COMPENSATION_MIN_FIT_SCORE,
-      'the fit gate must be boundary-inclusive: 70 eligible, 69 not — pinned against the real constant');
+    assert(75 >= COMPENSATION_MIN_FIT_SCORE && 74 < COMPENSATION_MIN_FIT_SCORE,
+      'the fit gate must be boundary-inclusive: 75 eligible, 74 not — pinned against the real constant');
 
     return { minFitScore: COMPENSATION_MIN_FIT_SCORE };
   },

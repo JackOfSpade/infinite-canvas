@@ -283,19 +283,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // finished run's final count never lingers; the render gate (hubState==='scoring')
   // also hides it outside the scoring phase.
   const [scoringProgress, setScoringProgress] = useState(null);
-  const [compensationProgress, setCompensationProgress] = useState(null);
   useEffect(() => {
     if (!window.electronAPI?.onScoringProgress) return undefined;
     return window.electronAPI.onScoringProgress((payload) => {
       if (payload?.nodeId && payload.nodeId !== id) return;
       setScoringProgress({ scored: payload.scored ?? 0, total: payload.total ?? 0 });
-    });
-  }, [id]);
-  useEffect(() => {
-    if (!window.electronAPI?.onCompensationProgress) return undefined;
-    return window.electronAPI.onCompensationProgress((payload) => {
-      if (payload?.nodeId && payload.nodeId !== id) return;
-      setCompensationProgress({ processed: payload.processed ?? 0, total: payload.total ?? 0 });
     });
   }, [id]);
 
@@ -472,7 +464,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hiddenAppliedRef.current = nextHiddenApplied;
         if (freshJobs.length > 0) {
           setScoringProgress(null); // clear prior counter; backend re-paints "0 / M"
-          setCompensationProgress(null);
           updateGlobal(currentId, {
             hubState: 'scoring',
             scrapeWarnings: filteredWarnings,
@@ -913,7 +904,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     // Step 4: Scoring
     setScoringProgress(null); // clear any prior run's counter; backend re-paints "0 / M"
-    setCompensationProgress(null);
     updateGlobal(currentId, { hubState: 'scoring', jobCount: jobs.length });
     const effectiveLocationSnapshot = locationSnapshot || data.locationSnapshot || {
       searchLocation: getSearchLocation({
@@ -2749,7 +2739,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             hubState={hubState}
             totalSourceJobs={totalSourceJobs}
             scoringProgress={scoringProgress}
-            compensationProgress={compensationProgress}
             resumeSummary={data.resumeSummary}
             activeSourceId={lastActiveSource}
             onReset={resetHandler}

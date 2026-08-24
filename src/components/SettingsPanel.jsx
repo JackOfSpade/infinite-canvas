@@ -43,12 +43,16 @@ const CLAUDE_FAMILY_OPTIONS = [
 // hint in each dropdown stays accurate without an extra IPC round trip.
 const CLAUDE_MODEL_GROUPS = [
   {
-    key: 'analysis', label: 'Analysis', defaultToken: 'SONNET',
-    note: 'Vision identification, pricing judgment, résumé parsing, job scoring/query-gen/bucketing.',
+    key: 'judgment', label: 'Judgment', defaultToken: 'OPUS',
+    note: 'Job scoring and compensation research, plus pricing and bundle-price decisions.',
+  },
+  {
+    key: 'extraction', label: 'Extraction', defaultToken: 'SONNET',
+    note: 'Vision, résumé/career parsing, query generation, job bucketing, and fallback work.',
   },
   {
     key: 'light', label: 'Light', defaultToken: 'HAIKU',
-    note: 'Status checks, platform-fit checks, light text edits — short structured outputs.',
+    note: 'Platform-fit and page-status checks, marketplace hub scans, and light text edits.',
   },
 ];
 
@@ -719,7 +723,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     window.electronAPI.updateSettings({ ai: { [key]: value } });
   }, [aiSettings]);
 
-  // Sets ONE live API group's Claude family (Analysis/Light — llm.js
+  // Sets ONE live API group's Claude family (Judgment/Extraction/Light — llm.js
   // TASK_GROUPS). Persist only the changed group. Sending the entire local
   // object looks harmless, but two quick picker changes can have stale React
   // closures and the second request would overwrite the first group's new
@@ -911,7 +915,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {aiSettings.provider === 'claude' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/40 text-[10px] leading-snug">
-                      Within whichever tier you pick below for each work group, the app always resolves to the latest model in that family automatically — never a pinned id.
+                      The app resolves the newest compatible model in each selected family automatically. The displayed id is the current resolved model, not a setting you need to pin.
                     </div>
 
                     {/* Per-group Claude family — replaces the old hard-coded
@@ -941,6 +945,11 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                               })}
                             </select>
                             <p className="text-white/30 text-[9px] mt-1">{note}</p>
+                            {key === 'judgment' && selected === 'HAIKU' && (
+                              <p className="text-amber-300/80 text-[9px] mt-1">
+                                Haiku is usable, but its lighter web-search support can weaken grounded compensation research. Sonnet or Opus is recommended here.
+                              </p>
+                            )}
                           </div>
                         );
                       })}
