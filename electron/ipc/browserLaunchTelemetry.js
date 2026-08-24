@@ -46,8 +46,15 @@ const _state = { total: 0, recovered: 0, events: [] };
  * @param {boolean} [o.recovered] whether a retry eventually succeeded
  * @param {unknown} [o.error]
  * @param {number|null} [o.ts]  epoch ms (caller passes Date.now())
+ * @param {boolean|null} [o.askedSingletonToYield]  whether this SAME call asked
+ *   the retained stealth-browser singleton to close so it would yield the
+ *   shared profile — the fact that separates "our own idle browser held the
+ *   lock (and was asked to step aside)" from "something else held it and was
+ *   never asked to, or never let go" (a visible window, another process).
+ *   `null` means the caller didn't report it (not the same as `false`, which
+ *   means it reported "no, this attempt did not ask").
  */
-export function recordLaunchCollision({ context, url = null, attempts = 1, recovered = false, error = '', ts = null } = {}) {
+export function recordLaunchCollision({ context, url = null, attempts = 1, recovered = false, error = '', ts = null, askedSingletonToYield = null } = {}) {
   _state.total += 1;
   if (recovered) _state.recovered += 1;
   _state.events.push({
@@ -57,6 +64,7 @@ export function recordLaunchCollision({ context, url = null, attempts = 1, recov
     recovered: !!recovered,
     error: String(error?.message || error || '').replace(/\s+/g, ' ').slice(0, 200),
     ts,
+    askedSingletonToYield: askedSingletonToYield === true ? true : askedSingletonToYield === false ? false : null,
   });
   // Ring: keep only the most recent MAX_EVENTS.
   if (_state.events.length > MAX_EVENTS) _state.events.shift();

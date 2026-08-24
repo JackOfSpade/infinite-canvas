@@ -1497,15 +1497,10 @@ export function registerGeminiHandlers() {
       } else {
         // Probe all models in parallel — each is a 1-token ping (~free).
         //
-        // Pass the user's per-group family picks so a NON-DEFAULT choice is
-        // actually probed. Without this the check only ever covers the three
-        // auto-tracked families (Opus/Sonnet/Haiku), so a user who selects
-        // Fable for the generation group — a choice Settings now offers — gets
-        // a green "available" verdict that never touched the model which will
-        // actually write their résumé. Fable is the case that matters: it's the
-        // one family whose access can differ (higher tier, and it 400s outright
-        // for orgs below 30-day data retention), so "it worked for Sonnet"
-        // proves nothing about it.
+        // Pass the user's live per-group family picks so a NON-DEFAULT choice
+        // is actually probed. Fable access can differ (higher tier, and it can
+        // 400 outright for orgs below 30-day data retention), so "it worked
+        // for Sonnet" proves nothing about a selected Fable API task.
         const selectedFamilies = Object.values(settings.claudeModels || {});
         const models = await Promise.all(
           claudeModelsInUse(selectedFamilies, settings.anthropicApiKey).map((m) => probeClaude(settings.anthropicApiKey, m)),

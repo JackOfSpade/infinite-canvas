@@ -1,5 +1,6 @@
 import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
+import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
 
 /**
  * Pure helpers for turning scored jobs + taxonomy metadata into the React
@@ -8,19 +9,18 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  * up the IPC plumbing and passes the results to ReactFlow.
  *
  * The results hierarchy is THREE grouping levels, deepest last:
- *   1. Likelihood band — interview-likelihood (matchScore), ordered HIGH→LOW.
+ *   1. Hiring-fit band — evidence-based full-process fit (matchScore), ordered HIGH→LOW.
  *   2. Salary range    — ordered HIGH→LOW (Unspecified last).
  *   3. Job role        — ordered A→Z.
  * …then the job cards (ordered by score desc).
  *
- * Likelihood bands are fixed to the scoring rubric (85+ excellent, 65–84 good,
- * 40–64 possible/stretch, below 40 long shot). The AI bucketing pass creates the
+ * Hiring-fit bands are fixed to the scoring rubric (85+ excellent, 65–84 good,
+ * 40–64 partial/stretch, below 40 limited). The AI bucketing pass creates the
  * salary ranges and role partition; the renderer places each job into its band
  * (by matchScore) and salary range (by parsed salary) DETERMINISTICALLY, so a
- * weak model can't drop or duplicate jobs across the three nested levels. Only
- * the role grouping (the creative consolidation) comes from the AI's partition;
- * malformed or incomplete partitions are repaired from the scorer's direction
- * hints before they reach the renderer.
+ * weak model can't drop or duplicate jobs across the three nested levels. The
+ * role grouping is model-produced and must completely cover every input before
+ * this renderer can build a replacement board.
  *
  * Exports:
  *  - parseSalaryToNumeric     → salary text → annual USD
@@ -29,7 +29,7 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
 
-// Column x-offsets per tree level + row heights. One layout: likelihood is
+// Column x-offsets per tree level + row heights. One layout: hiring-fit band is
 // always the first level (no target-role branch column).
 export const COL_X = { likelihood: 400, salary: 700, role: 1000, job: 1400 };
 const ROW_H = { group: 70, job: 280 }; // module-local: only used within this file
@@ -45,17 +45,17 @@ export const ROLE_VISIBLE_DEFAULT = 10;
 
 // One scoring rubric, shared by every run and every saved taxonomy. Allowing the
 // bucketing model to move these thresholds made a score of 55 "Good fit" even
-// though the scorer explicitly defines 40–64 as a stretch/possible outcome.
+// though the scoring rubric defines 40–64 as a partial/stretch outcome.
 // Not imported elsewhere — normalizeBandsWithRepairs is the sole enforcement
 // point, so this stays module-private.
 const FIXED_LIKELIHOOD_BANDS = Object.freeze([
-  Object.freeze({ label: 'Excellent fit (85–100%)', minScore: 85, maxScore: 100 }),
-  Object.freeze({ label: 'Good fit (65–84%)',       minScore: 65, maxScore: 84 }),
-  Object.freeze({ label: 'Possible (40–64%)',       minScore: 40, maxScore: 64 }),
-  Object.freeze({ label: 'Long shot (0–39%)',       minScore: 0,  maxScore: 39 }),
+  Object.freeze({ label: 'Excellent hiring fit (85–100)', minScore: 85, maxScore: 100 }),
+  Object.freeze({ label: 'Good hiring fit (65–84)',       minScore: 65, maxScore: 84 }),
+  Object.freeze({ label: 'Partial hiring fit (40–64)',    minScore: 40, maxScore: 64 }),
+  Object.freeze({ label: 'Limited hiring fit (0–39)',     minScore: 0,  maxScore: 39 }),
 ]);
 
-// Fallbacks only when the AI omits salary ranges (likelihood is fixed above).
+// Fallbacks only when the AI omits salary ranges (hiring-fit bands are fixed above).
 const DEFAULT_RANGES = [
   { label: '$150k+',     minSalary: 150000, maxSalary: 0 },
   { label: '$100–150k',  minSalary: 100000, maxSalary: 150000 },
@@ -65,7 +65,7 @@ const DEFAULT_RANGES = [
 ];
 
 // Salary research is additive metadata on a scored job, not part of its
-// interview-likelihood score or hierarchy placement. Keep the compatibility
+// hiring-fit score or hierarchy placement. Keep the compatibility
 // boundary here (rather than in JobCardNode) so every path that creates a card
 // can preserve a single, safe representation. A missing/unknown assessment is
 // deliberately a neutral legacy state: opening an old canvas must never imply
@@ -382,7 +382,7 @@ export function normalizeBandsWithRepairs(bands) {
         && Number(band?.maxScore) === fixed.maxScore;
     });
   if (input.length > 0 && !isCanonical) {
-    repairs.push('replaced likelihood bands with fixed scoring rubric');
+    repairs.push('replaced hiring-fit bands with fixed scoring rubric');
   }
   return {
     bands: FIXED_LIKELIHOOD_BANDS.map(band => ({ ...band })),
@@ -431,6 +431,7 @@ export function normalizeRangesWithRepairs(ranges) {
     real.push({
       minSalary: 1,
       maxSalary: lowest.minSalary,
+      synthetic: true,
     });
     repairs.push(`added low-salary catch-all below ${formatSalaryShort(lowest.minSalary)}`);
   }
@@ -450,8 +451,13 @@ export function normalizeRangesWithRepairs(ranges) {
     }
     range.maxSalary = expectedMax;
     range.label = canonicalSalaryRangeLabel(range.minSalary, range.maxSalary);
-    if (range.rawLabel !== range.label) repairs.push(`canonicalized salary label "${range.rawLabel || '(blank)'}"`);
+    // The low-salary catch-all above is authored by this sanitizer and therefore
+    // has no model label to canonicalize. Do not report its missing rawLabel as a
+    // provider defect; the preceding "added low-salary catch-all" repair already
+    // explains exactly what happened.
+    if (!range.synthetic && range.rawLabel !== range.label) repairs.push(`canonicalized salary label "${range.rawLabel || '(blank)'}"`);
     delete range.rawLabel;
+    delete range.synthetic;
   });
   return { real, unspecified, repairs };
 }
@@ -738,11 +744,11 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
   };
   rootGroups.forEach(r => walk(r.id));
 
-  // Flat-spawn fallback (bucketing failed → no jobgroups): those jobcards are
-  // wired directly to the hub with no group tree, so the walk above never reaches
-  // them and they'd ALL be forced hidden (a blank board on filter/restore). Treat
-  // each hub-owned jobcard that isn't any group's child as top-level and reveal it
-  // iff it matches the filter — mirroring walk's jobcard branch. No-op on the
+  // Legacy flat boards (saved before deterministic taxonomy recovery) have
+  // jobcards wired directly to the hub with no group tree, so the walk above
+  // never reaches them and would force them ALL hidden on filter/restore. Treat
+  // each hub-owned jobcard that isn't any group's child as top-level and reveal
+  // it iff it matches the filter — mirroring walk's jobcard branch. No-op on the
   // grouped path (those cards ARE in allChildIds, so the guard skips them).
   list.forEach(n => {
     if (n.type === 'jobcard' && n.data?.hubId === hubId && !allChildIds.has(n.id) && cardMatch(n.data)) {
@@ -790,12 +796,13 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
 
 /**
  * Build the ReactFlow `newNodes` / `newEdges` arrays for the whole job subtree
- * (likelihood band → salary range → role → cards). Pure: emits arrays, calls no
+ * (hiring-fit band → salary range → role → cards). Pure: emits arrays, calls no
  * ReactFlow setters.
  *
  * @param {object[]} displayedJobs  the scored jobs to show (post target-select)
- * @param {object|null} bucketTree  { likelihoodBands, salaryRanges, roles } from
- *                                   the AI, or null to flat-spawn on failure
+ * @param {object} bucketTree  { likelihoodBands, salaryRanges, roles } from the
+ *                              AI. Missing or incomplete taxonomy is rejected so
+ *                              the caller can preserve the existing board.
  */
 export function buildJobTreeNodes({
   displayedJobs,
@@ -804,6 +811,14 @@ export function buildJobTreeNodes({
   hubId,
   baseNodeId,
 }) {
+  // A board must never manufacture cards from an absent or partial provider
+  // response. Normalization below is limited to a successful taxonomy's
+  // canonical labels/ranges; missing, duplicate, or unassigned roles are a
+  // failed Combine and must leave the previous board untouched.
+  const taxonomyCheck = validateJobBoardTaxonomy(bucketTree, displayedJobs.length);
+  if (!taxonomyCheck.valid) {
+    throw new Error(`Job Board taxonomy is invalid: ${taxonomyCheck.reason}`);
+  }
   const newNodes = [];
   const newEdges = [];
   const edgeProps = structuralEdge('rgba(96,165,250,0.5)');
@@ -823,9 +838,22 @@ export function buildJobTreeNodes({
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
+        // Preserve the scorer's audit trail so a merged board never turns an
+        // evidence-grounded hiring-fit assessment back into an opaque number. Some fields
+        // are optional for legacy scores, but are copied verbatim when present.
+        requirementAssessments: job.requirementAssessments,
+        materialGaps: job.materialGaps,
+        strengths: job.strengths,
+        experienceAssessment: job.experienceAssessment,
+        confidence: job.confidence,
+        fitAssessment: job.fitAssessment,
+        rawScore: job.rawScore,
+        adjustedScore: job.adjustedScore,
+        adjustments: job.adjustments,
+        calibration: job.calibration,
         // Preserve the compensation research verbatim. JobCardNode normalizes
-        // it defensively for legacy/future schemas, but it must travel through
-        // both the grouped and flat fallback trees.
+        // it defensively for legacy/future schemas, and it must travel through
+        // every valid AI-taxonomized board tree.
         compensationAssessment: job.compensationAssessment,
         source: job.source, url: job.url, posted: job.posted, language: job.language,
         // The ORIGIN search module's id (the board merges cards from several
@@ -853,113 +881,91 @@ export function buildJobTreeNodes({
     });
   };
 
-  const hasTaxonomy = bucketTree && Array.isArray(bucketTree.roles);
+  // This is a validated provider taxonomy. Normalization retains fixed score
+  // bands and canonical salary placement, while the caller rejects missing or
+  // incomplete role assignments before this renderer can replace a board.
+  const taxonomy = sanitizeJobTaxonomy(
+    bucketTree,
+    displayedJobs.length,
+    displayedJobs.map(job => job?.salary),
+    displayedJobs,
+  );
+  const bands = taxonomy.likelihoodBands;
+  const { real: realRanges, unspecified } = normalizeRanges(taxonomy.salaryRanges);
 
-  if (hasTaxonomy) {
-    const bands = normalizeBands(bucketTree.likelihoodBands);
-    const { real: realRanges, unspecified } = normalizeRanges(bucketTree.salaryRanges);
+  // index → role name. validateJobBoardTaxonomy guarantees complete, unique coverage.
+  const roleByIdx = new Map();
+  taxonomy.roles.forEach(role => {
+    role.jobIndices.forEach(index => roleByIdx.set(index, role.name));
+  });
 
-    // index → role name (first occurrence wins if the AI duplicated an index)
-    const roleByIdx = new Map();
-    (bucketTree.roles || []).forEach(r => {
-      (r.jobIndices || []).forEach(i => { if (!roleByIdx.has(i)) roleByIdx.set(i, r.name || 'Other'); });
-    });
+  // Group every displayed job: band → range → role → jobs[]
+  const tree = new Map(); // bandLabel -> Map(rangeLabel -> Map(roleName -> jobs[]))
+  displayedJobs.forEach((job, index) => {
+    const band = placeBand(job.matchScore, bands);
+    const range = placeRange(parseSalaryToNumeric(job.salary), realRanges, unspecified);
+    const role = roleByIdx.get(index);
+    if (!tree.has(band.label)) tree.set(band.label, new Map());
+    const byRange = tree.get(band.label);
+    if (!byRange.has(range.label)) byRange.set(range.label, new Map());
+    const byRole = byRange.get(range.label);
+    if (!byRole.has(role)) byRole.set(role, []);
+    byRole.get(role).push(job);
+  });
 
-    // Group every displayed job: band → range → role → jobs[]
-    const tree = new Map(); // bandLabel -> Map(rangeLabel -> Map(roleName -> jobs[]))
-    displayedJobs.forEach((job, i) => {
-      const band = placeBand(job.matchScore, bands);
-      const range = placeRange(parseSalaryToNumeric(job.salary), realRanges, unspecified);
-      const role = roleByIdx.get(i) || 'Other';
-      if (!tree.has(band.label)) tree.set(band.label, new Map());
-      const byRange = tree.get(band.label);
-      if (!byRange.has(range.label)) byRange.set(range.label, new Map());
+  // Emit in canonical order: bands high→low, ranges high→low (Unspecified
+  // last), roles A→Z, cards score-desc.
+  const orderedRanges = [...realRanges, unspecified];
+  let bi = 0;
+  for (const band of bands) {
+    const byRange = tree.get(band.label);
+    if (!byRange) continue;
+    const bandId = `${baseNodeId}-L${bi++}`;
+    const bandChildIds = [];
+    let bandCount = 0;
+    let si = 0;
+    for (const range of orderedRanges) {
       const byRole = byRange.get(range.label);
-      if (!byRole.has(role)) byRole.set(role, []);
-      byRole.get(role).push(job);
-    });
-
-    // Emit in canonical order: bands high→low, ranges high→low (Unspecified
-    // last), roles A→Z, cards score-desc.
-    const orderedRanges = [...realRanges, unspecified];
-    let bi = 0;
-    for (const band of bands) {
-      const byRange = tree.get(band.label);
-      if (!byRange) continue;
-      const bandId = `${baseNodeId}-L${bi++}`;
-      const bandChildIds = [];
-      let bandCount = 0;
-      let si = 0;
-      for (const range of orderedRanges) {
-        const byRole = byRange.get(range.label);
-        if (!byRole) continue;
-        const rangeId = `${bandId}-S${si++}`;
-        const rangeChildIds = [];
-        let rangeCount = 0;
-        const roleNames = [...byRole.keys()].sort((a, b) => a.localeCompare(b));
-        let ri = 0;
-        for (const roleName of roleNames) {
-          const jobs = [...byRole.get(roleName)].sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
-          const roleId = `${rangeId}-R${ri++}`;
-          const cardIds = jobs.map(j => { const cid = pushCard(j); pushEdge(roleId, cid); return cid; });
-          pushGroup(roleId, 'role', roleName, cardIds, cardIds.length);
-          pushEdge(rangeId, roleId);
-          rangeChildIds.push(roleId);
-          rangeCount += cardIds.length;
-        }
-        pushGroup(rangeId, 'salary', range.label, rangeChildIds, rangeCount, {
-          minSalary: range.minSalary, maxSalary: range.maxSalary,
-        });
-        pushEdge(bandId, rangeId);
-        bandChildIds.push(rangeId);
-        bandCount += rangeCount;
+      if (!byRole) continue;
+      const rangeId = `${bandId}-S${si++}`;
+      const rangeChildIds = [];
+      let rangeCount = 0;
+      const roleNames = [...byRole.keys()].sort((a, b) => a.localeCompare(b));
+      let ri = 0;
+      for (const roleName of roleNames) {
+        const jobs = [...byRole.get(roleName)].sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+        const roleId = `${rangeId}-R${ri++}`;
+        const cardIds = jobs.map(j => { const cid = pushCard(j); pushEdge(roleId, cid); return cid; });
+        pushGroup(roleId, 'role', roleName, cardIds, cardIds.length);
+        pushEdge(rangeId, roleId);
+        rangeChildIds.push(roleId);
+        rangeCount += cardIds.length;
       }
-      // Band nodes are the visible roots; everything below starts collapsed.
-      pushGroup(bandId, 'likelihood', band.label, bandChildIds, bandCount, {
-        hidden: false, minScore: band.minScore, maxScore: band.maxScore,
+      pushGroup(rangeId, 'salary', range.label, rangeChildIds, rangeCount, {
+        minSalary: range.minSalary, maxSalary: range.maxSalary,
       });
-      pushEdge(hubId, bandId);
+      pushEdge(bandId, rangeId);
+      bandChildIds.push(rangeId);
+      bandCount += rangeCount;
     }
-  } else {
-    // Bucketing failed entirely — flat spawn under the hub so the user still
-    // sees their jobs (score-desc), just without the band/range/role tree.
-    [...displayedJobs]
-      .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))
-      .forEach((job, index) => {
-        const id = `${baseNodeId}-job-flat-${index}`;
-        newNodes.push({
-          id,
-          type: 'jobcard',
-          position: { x: originalPos.x + COL_X.job, y: originalPos.y + index * ROW_H.job },
-          data: {
-            hubId,
-            title: job.title, company: job.company, location: job.location,
-            salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
-            reasoning: job.reasoning, careerDirection: job.careerDirection,
-            compensationAssessment: job.compensationAssessment,
-            source: job.source, url: job.url, posted: job.posted, language: job.language,
-            originHubId: job.originHubId || null, isNew: false,
-          },
-        });
-        pushEdge(hubId, id);
-      });
+    // Band nodes are the visible roots; everything below starts collapsed.
+    pushGroup(bandId, 'likelihood', band.label, bandChildIds, bandCount, {
+      hidden: false, minScore: band.minScore, maxScore: band.maxScore,
+    });
+    pushEdge(hubId, bandId);
   }
 
   // ── Lay out the collapsed tree ───────────────────────────────────────────
   // Everything spawns COLLAPSED — the band roots are visible (hidden:false) but
   // closed, and all ranges/roles/cards stay hidden until the user expands. One
   // layout pass stacks the band roots (they all spawn at the same y otherwise).
-  // The flat-spawn fallback has no groups → no-op.
-  const hasGroups = newNodes.some(n => n.type === 'jobgroup');
-  if (hasGroups) {
-    const layoutPos = computeLayoutPositions(newNodes, hubId, COL_X, originalPos);
-    newNodes.forEach(n => { if (layoutPos[n.id]) n.position = layoutPos[n.id]; });
-  }
+  const layoutPos = computeLayoutPositions(newNodes, hubId, COL_X, originalPos);
+  newNodes.forEach(n => { if (layoutPos[n.id]) n.position = layoutPos[n.id]; });
 
   // Slider iterates over spawned scores.
   const spawnedScores = displayedJobs.map(j => j.matchScore || 0);
   const scoreRangeMin = spawnedScores.length > 0 ? Math.min(...spawnedScores) : 0;
   const scoreRangeMax = spawnedScores.length > 0 ? Math.max(...spawnedScores) : 100;
 
-  return { newNodes, newEdges, scoreRangeMin, scoreRangeMax };
+  return { newNodes, newEdges, scoreRangeMin, scoreRangeMax, taxonomy };
 }

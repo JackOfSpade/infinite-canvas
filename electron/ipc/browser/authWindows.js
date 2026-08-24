@@ -5,6 +5,7 @@ import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
 import { execFile as execFileCb, spawn } from 'child_process';
 import fs from 'fs';
+import path from 'path';
 import { promisify } from 'util';
 
 // ── Auth-window cadence ───────────────────────────────────────────────────────
@@ -17,7 +18,150 @@ const LOGIN_POLL_INTERVAL_MS    = 500;           // login-window auto-close poll
 const AUTH_WINDOW_AUTO_CLOSE_MS = 5 * 60 * 1000; // max time a hidden auth/captcha window stays open
 const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic heartbeat interval
 const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
+// ── Native-window cookie checkpoint ─────────────────────────────────────────
+// Chromium does NOT write a cookie straight through to the profile's SQLite
+// store: SQLitePersistentCookieStore batches pending operations and commits
+// them on a timer (kCommitIntervalMs, 30s) or when the batch gets large.
+//
+// The Puppeteer-launched windows get a checkpoint for free — browser.close()
+// drives a CDP-level shutdown that flushes the store. The NATIVE windows below
+// have no CDP handle at all (that is the whole point: Google SSO rejects a
+// CDP-controlled browser), so their only close mechanism is SIGTERM, and
+// Chrome's POSIX SIGTERM path blocks on writing *preferences*, not on the
+// cookie store's flush. Closing a fixed NATIVE_LOGIN_COOKIE_FLUSH_MS after
+// login therefore killed Chrome well inside the commit window, and everything
+// the login had just set was still only in memory.
+//   Observed: a native Indeed login window that completed Google SSO and
+//   reached secure.indeed.com/settings/account, open 21.8s and SIGTERM'd 2.7s
+//   after success, left ZERO cookie rows on the shared profile — while two
+//   Puppeteer login windows in the same minute persisted theirs normally.
+// So don't guess a duration: wait for the OBSERVABLE checkpoint (the profile's
+// cookie-store files changing on disk) and close on that. The ceiling sits just
+// past Chromium's commit interval so a profile that never checkpoints still
+// closes and gets reported rather than hanging.
+const NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS = 34_000;
+const NATIVE_LOGIN_COOKIE_COMMIT_POLL_MS = 500;
+const LOGIN_BROWSER_GRACEFUL_EXIT_MS = 12_000;   // successful auth must get a real profile checkpoint
+const LOGIN_BROWSER_TERM_EXIT_MS = 3_000;
+const LOGIN_BROWSER_KILL_EXIT_MS = 2_000;
 const execFile = promisify(execFileCb);
+
+// ── Cookie-encryption parity between Puppeteer and native Chrome windows ─────
+// BUG: two mutually-unreadable cookie-encryption domains on ONE shared Chrome
+// profile.
+//
+// puppeteer-core's ChromeLauncher.defaultArgs() (node_modules/puppeteer-core/
+// lib/puppeteer/node/ChromeLauncher.js:185-186) ALWAYS includes
+// --password-store=basic and --use-mock-keychain — every launchWithProfileLockRetry
+// / launchVisibleWindow call in this app passes ignoreDefaultArgs:
+// ["--enable-automation"], and per computeLaunchArguments() (same file, ~line
+// 47-57) an array ignoreDefaultArgs only FILTERS OUT the flags it names from
+// defaultArgs() — it strips just --enable-automation and keeps every other
+// default flag, including these two. So every Puppeteer-launched Chrome in this
+// app encrypts profile cookies (Chrome's OSCrypt layer) with Chromium's STATIC,
+// hardcoded mock-keychain key, not a real OS credential.
+//
+// The native login/challenge windows below are raw child_process.spawn — no
+// Puppeteer, no defaultArgs, no ignoreDefaultArgs — so absent these flags they
+// use the REAL macOS Keychain "Chrome Safe Storage" item to derive the OSCrypt
+// key instead.
+//
+// Both write into the SAME userDataDir (one shared browser-data profile). Two
+// different OSCrypt keys on one SQLite Cookies file means a cookie encrypted
+// under one key is simply undecryptable garbage to the other — a native-window
+// login session is invisible to every later Puppeteer scrape/read of that
+// profile, and vice versa. This is what silently dropped the Indeed login: the
+// native window completed Google SSO and landed on secure.indeed.com/settings/
+// account, but wrote zero cookie rows the Puppeteer-read scraper could ever see.
+//
+// Fix direction: the native windows adopt these Puppeteer flags, not the other
+// way round. Stripping them from the Puppeteer side instead would move the
+// WHOLE shared profile onto the real Keychain — risking a blocking macOS
+// Keychain-access prompt during a headless/background scrape, and instantly
+// invalidating every cookie already written under the mock key across every
+// platform, not just Indeed.
+//
+// These two strings MUST stay byte-for-byte identical to puppeteer-core's
+// defaultArgs() output (there is a unit test pinning that equality) — if a
+// puppeteer-core upgrade ever renames/removes either flag, this constant has to
+// move with it or the two Chrome families silently diverge again.
+export const PUPPETEER_OSCRYPT_PARITY_ARGS = ['--password-store=basic', '--use-mock-keychain'];
+
+/**
+ * Every on-disk file Chromium may use for the profile's cookie store. Chrome has
+ * moved it between <profile>/Default/Cookies and <profile>/Default/Network/Cookies
+ * across versions, and the SQLite side-files (-journal / -wal) change on commit
+ * too, so stamp all of them and let the absent variants fall through. PURE.
+ */
+export function profileCookieStorePaths(userDataDir) {
+  const base = String(userDataDir || '');
+  if (!base) return [];
+  return [
+    path.join(base, 'Default', 'Cookies'),
+    path.join(base, 'Default', 'Cookies-journal'),
+    path.join(base, 'Default', 'Cookies-wal'),
+    path.join(base, 'Default', 'Network', 'Cookies'),
+    path.join(base, 'Default', 'Network', 'Cookies-journal'),
+    path.join(base, 'Default', 'Network', 'Cookies-wal'),
+  ];
+}
+
+/**
+ * Size/mtime fingerprint of the cookie store. File metadata only — the store is
+ * never opened, so no cookie value is ever read here.
+ */
+export function readProfileCookieStoreStamp(userDataDir) {
+  let mtimeMs = 0;
+  let size = 0;
+  let found = 0;
+  for (const filePath of profileCookieStorePaths(userDataDir)) {
+    try {
+      const stat = fs.statSync(filePath);
+      found += 1;
+      if (stat.mtimeMs > mtimeMs) mtimeMs = stat.mtimeMs;
+      size += stat.size;
+    } catch { /* this layout variant doesn't exist in this Chrome version */ }
+  }
+  return { mtimeMs, size, found };
+}
+
+/**
+ * Did the cookie store checkpoint since `baseline` was taken? Size is compared
+ * as well as mtime because a commit that rewrites in place can land inside the
+ * same filesystem mtime granularity. PURE, so the decision is unit-testable.
+ */
+export function hasProfileCookieCommitAdvanced(baseline, current) {
+  if (!baseline || !current || !(current.found > 0)) return false;
+  return current.mtimeMs > baseline.mtimeMs || current.size !== baseline.size;
+}
+
+/**
+ * Hold a native (CDP-less) auth window open until Chromium checkpoints the
+ * profile's cookie store, so SIGTERM can't discard the session that was just
+ * established. See NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS for why a fixed wait
+ * was not enough. Heartbeats while it waits — a silent multi-second pause here
+ * reads to the user as a hung window.
+ */
+async function waitForNativeProfileCookieCommit(userDataDir, label) {
+  const baseline = readProfileCookieStoreStamp(userDataDir);
+  const startedAt = Date.now();
+  let lastHeartbeat = startedAt;
+  while (Date.now() - startedAt < NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS) {
+    await new Promise(resolve => setTimeout(resolve, NATIVE_LOGIN_COOKIE_COMMIT_POLL_MS));
+    if (hasProfileCookieCommitAdvanced(baseline, readProfileCookieStoreStamp(userDataDir))) {
+      const waitedMs = Date.now() - startedAt;
+      logger.info(`[StealthBrowser] ${label} profile cookie store checkpointed after ${waitedMs}ms — closing native window`);
+      return { committed: true, waitedMs };
+    }
+    if (Date.now() - lastHeartbeat > AUTH_HEARTBEAT_LOG_MS) {
+      lastHeartbeat = Date.now();
+      logger.info(`[StealthBrowser] ${label} waiting for Chrome to checkpoint the profile cookie store (${Math.round((Date.now() - startedAt) / 1000)}s) — the window stays open until it does`);
+    }
+  }
+  const waitedMs = Date.now() - startedAt;
+  logger.warn(`[StealthBrowser] ${label} profile cookie store did not checkpoint within ${waitedMs}ms of the auth landing — closing the native window anyway; the post-close auth-cookie check reports whether the session actually persisted`);
+  return { committed: false, waitedMs };
+}
 
 /**
  * Wrap an async interval body so a slow tick is skipped rather than overlapped.
@@ -253,7 +397,12 @@ export function captchaResolveHostMismatchDiagnostic(originalHost, currentUrl, c
 export const NATIVE_LOGIN_PLATFORMS = new Set(['indeed', 'swappa', 'mercari']);
 const NATIVE_LOGIN_SUCCESS_URLS = {
   indeed: [
-    'www.indeed.com/jobs',
+    // /jobs is public: an anonymous user (or a Cloudflare interstitial that
+    // eventually redirects home) can land there.  Treating it as a login
+    // success made the native window close and cached a connection that the
+    // scraper could not actually use.  This is the same account-only route the
+    // post-login verifier uses in stealthBrowser.js.
+    'secure.indeed.com/settings/account',
   ],
   // Login URL carries ?next=/my/swappa, so a completed login lands on the seller
   // hub — a precise, logged-in-only marker the osascript tab poll can detect.
@@ -355,6 +504,22 @@ let lastAuthWindowDiagnostic = null;
 // actually confirmed success (result=auto-detected) or never did (closed/timeout).
 const AUTH_HISTORY_CAP = 16;
 const authWindowHistory = [];
+const activeAuthWindowClosers = new Map();
+
+/** Gracefully close every app-owned visible auth/captcha browser during quit. */
+export async function closeAllAuthWindows() {
+  const closers = [...activeAuthWindowClosers.values()];
+  if (closers.length === 0) return;
+  logger.info(`[StealthBrowser] Closing ${closers.length} active auth/captcha window(s) for app shutdown`);
+  await Promise.allSettled(closers.map(close => Promise.resolve().then(close)));
+}
+
+function registerAuthWindowCloser(key, close) {
+  activeAuthWindowClosers.set(key, close);
+  return () => {
+    if (activeAuthWindowClosers.get(key) === close) activeAuthWindowClosers.delete(key);
+  };
+}
 
 /**
  * Compact, render-safe record of one completed login window — the fields that
@@ -380,6 +545,24 @@ export function buildAuthAttemptRecord(diag = {}) {
     startedAt,
     finishedAt,
     openMs,
+    executable: (String(diag.executable || '').slice(0, 240)) || null,
+    profileDir: (String(diag.userDataDir || '').slice(0, 320)) || null,
+    closeDisposition: diag.closeDisposition || null,
+    cookieFlushMs: Number.isFinite(diag.cookieFlushMs) ? diag.cookieFlushMs : null,
+    // Whether Chromium was OBSERVED to checkpoint the profile's cookie store
+    // before this window was closed (native windows only — the Puppeteer path
+    // gets a flush from browser.close()). null = not applicable / not observed.
+    // false is the signature of a session that was established in the window
+    // and then thrown away by the close, which is otherwise invisible.
+    cookieStoreCommitted: typeof diag.cookieStoreCommitted === 'boolean' ? diag.cookieStoreCommitted : null,
+    processExitObserved: typeof diag.processExitObserved === 'boolean' ? diag.processExitObserved : null,
+    authCookiesBeforeClose: Array.isArray(diag.authCookiesBeforeClose)
+      ? diag.authCookiesBeforeClose.slice(0, 8).map(cookie => ({
+          name: String(cookie?.name || '').slice(0, 80),
+          persistent: !!cookie?.persistent,
+          expiresAt: Number.isFinite(cookie?.expiresAt) ? cookie.expiresAt : null,
+        }))
+      : [],
   };
 }
 
@@ -475,6 +658,11 @@ function nativeLoginTabDomains(platformId) {
 export function isNativeLoginSuccess(platformId, url, title = '') {
   const lower = String(url || '').toLowerCase();
   const titleLower = String(title || '').toLowerCase();
+  // A Cloudflare-managed challenge can retain the original destination in the
+  // path/query.  It is never a completed login, even when that destination is
+  // otherwise an authenticated-only URL.
+  if (/__cf_chl|cf_chl|cf-chl|cloudflare.*challenge|challenge.*cloudflare/i.test(lower)
+    || /just a moment|additional verification required|verify you are human|checking your browser/i.test(titleLower)) return false;
   if (/\/account\/googleauth\b/i.test(lower)) return false;
   if (!lower || /accounts\.google\.com|\/auth\b|\/login\b|\/signin\b|sign-in/i.test(lower)) return false;
   // Reject the logged-out inline login form that some platforms (Mercari) serve
@@ -505,7 +693,10 @@ export const PLATFORM_LOGIN_URLS = {
   // 'myaccount.google.com').
   google:        'https://myaccount.google.com/',
   linkedin:      'https://www.linkedin.com/login',
-  indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fwww.indeed.com%2Fjobs%3Fq%3Dsoftware%2520engineer%26fromage%3D1',
+  // Continue to an authenticated account page, not public /jobs.  The native
+  // auto-close may only claim success once Indeed itself admits this session to
+  // its account settings.
+  indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fsecure.indeed.com%2Fsettings%2Faccount',
   glassdoor:     'https://www.glassdoor.com/profile/login_input.htm',
   ziprecruiter:  'https://www.ziprecruiter.com/login',
   dice:          'https://www.dice.com/dashboard/login',
@@ -560,6 +751,15 @@ export const PLATFORM_LOGIN_URLS = {
 export const PLATFORM_AUTH_COOKIES = {
   facebook:    ['c_user'],          // numeric user id; absent or "0" when logged out
   linkedin:    ['li_at'],           // long-lived session token
+  indeed:      ['PPID'],            // Indeed's logged-in session cookie — already the SOLE authentication
+                                    // proof used by the Indeed scrape preflight (indeedBrowser.js
+                                    // classifyIndeedSessionPreflight). Registering it here is what lets
+                                    // accounts.js annotateCookieSurvival report "PPID ABSENT on disk →
+                                    // login did not persist locally" for Indeed. Indeed logs in through the
+                                    // NATIVE window (NATIVE_LOGIN_PLATFORMS), so the Puppeteer-visible
+                                    // auto-close cookie poll above (which also reads PLATFORM_AUTH_COOKIES)
+                                    // never actually runs for it — this entry only feeds the on-disk
+                                    // survival check, not that poll.
   glassdoor:   ['at'],              // access token (HttpOnly, ~1yr expiry); written only after a successful login.
                                     // Confirmed by profile diff: present in a logged-in profile, absent in an anonymous
                                     // one. gdId / gdsid / cass / GSESSIONID appear in BOTH states, so they are NOT
@@ -600,7 +800,13 @@ export const PLATFORM_COOKIE_DOMAINS = {
   // Job platforms
   google:        ['.google.com'],
   linkedin:      ['.linkedin.com'],
-  indeed:        ['.indeed.com'],
+  // page.cookies(url) returns only cookies that APPLY to that url, so a
+  // host-only cookie on secure.indeed.com is invisible to an apex-only lookup.
+  // Which host Indeed scopes PPID to is not established here, and guessing wrong
+  // reads a logged-in profile as logged out — so mirror the host set the Indeed
+  // scrape preflight already queries (indeedBrowser.js: search host + www +
+  // secure) rather than betting on one.
+  indeed:        ['.indeed.com', 'www.indeed.com', 'secure.indeed.com'],
   glassdoor:     ['.glassdoor.com'],
   ziprecruiter:  ['.ziprecruiter.com'],
   dice:          ['.dice.com'],
@@ -630,18 +836,36 @@ export function cookieListHasAuth(cookies, names) {
 // body-text verify races the client auth swap. Returns false on any error — never
 // a false "logged in".
 export async function hasPlatformAuthCookie(platformId) {
+  return (await readPlatformAuthCookieState(platformId)).present;
+}
+
+/**
+ * Tri-state form of the same read: `{ known, present }`.
+ *
+ * hasPlatformAuthCookie above deliberately collapses "the cookie is absent" and
+ * "the check itself failed" into a single `false`, because its callers only ever
+ * use it to GRANT a logged-in shortcut — a false there costs a redundant verify.
+ * A caller that uses absence to REVOKE a login verdict cannot use that same
+ * false: a launch hiccup, a page that threw mid-navigation, or a profile still
+ * locked by the just-exited native Chrome would be reported to the user as
+ * "your login did not persist" and send them round a login loop with a perfectly
+ * good cookie already on disk. `known:false` marks exactly that case so the
+ * caller can decline to draw a conclusion instead of drawing the wrong one.
+ */
+export async function readPlatformAuthCookieState(platformId) {
   const names = PLATFORM_AUTH_COOKIES[platformId];
   const domains = PLATFORM_COOKIE_DOMAINS[platformId];
-  if (!names?.length || !domains?.length) return false;
+  if (!names?.length || !domains?.length) return { known: false, present: false };
   let page;
   try {
     const browser = await getStealthBrowser();
     page = await browser.newPage();
     const urls = domains.map(d => `https://${d.replace(/^\./, '')}`);
     const cookies = await page.cookies(...urls);
-    return cookieListHasAuth(cookies, names);
-  } catch {
-    return false;
+    return { known: true, present: cookieListHasAuth(cookies, names) };
+  } catch (error) {
+    logger.warn(`[StealthBrowser] Auth-cookie read for ${platformId} could not run: ${error?.message || error}`);
+    return { known: false, present: false };
   } finally {
     if (page) await page.close().catch(() => {});
   }
@@ -662,26 +886,64 @@ export async function hasPlatformAuthCookie(platformId) {
  *      (so a stuck close is visible in the bug report instead of looking clean)
  *      and SIGKILL it so the window can never linger forever.
  */
-async function closeLoginBrowserSafely(browser, label) {
+export function isBrowserProcessExited(proc) {
+  return !proc || proc.exitCode != null || proc.signalCode != null;
+}
+
+export function waitForBrowserProcessExit(proc, timeoutMs) {
+  if (isBrowserProcessExited(proc)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let timer;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      proc.removeListener?.('exit', done);
+      resolve(true);
+    };
+    proc.once('exit', done);
+    // Close the tiny race between the pre-check and listener registration.
+    if (isBrowserProcessExited(proc)) {
+      done();
+      return;
+    }
+    timer = setTimeout(() => {
+      proc.removeListener?.('exit', done);
+      resolve(isBrowserProcessExited(proc));
+    }, timeoutMs);
+  });
+}
+
+async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false } = {}) {
   const proc = browser.process?.();
+  const cookieFlushMs = loginConfirmed ? NATIVE_LOGIN_COOKIE_FLUSH_MS : 0;
+  if (cookieFlushMs > 0) {
+    logger.info(`[StealthBrowser] ${label} login confirmed — waiting ${cookieFlushMs}ms for the auth cookie/profile checkpoint before closing`);
+    await new Promise(resolve => setTimeout(resolve, cookieFlushMs));
+  }
   try {
     const pages = await browser.pages().catch(() => []);
     await Promise.all(pages.map(p =>
       p.evaluate(() => { window.onbeforeunload = null; }).catch(() => {})
     ));
   } catch { /* best effort — page may be navigating/closed */ }
+  // Subscribe BEFORE browser.close(): Chrome commonly exits while close() is
+  // still resolving. The old post-close subscription missed that event, waited
+  // three seconds, and logged/attempted a bogus SIGKILL on every healthy close.
+  const gracefulExit = waitForBrowserProcessExit(proc, LOGIN_BROWSER_GRACEFUL_EXIT_MS);
   await browser.close().catch(() => {});
-  if (proc && !proc.killed) {
-    const exited = await new Promise((res) => {
-      const done = () => res(true);
-      proc.once('exit', done);
-      setTimeout(() => { proc.removeListener('exit', done); res(false); }, 3000);
-    });
-    if (!exited) {
-      logger.warn(`[StealthBrowser] ${label} login window did NOT terminate within 3s of close() — visible Chrome was likely stuck on a beforeunload prompt or hung renderer (the "wheel of death"); force-killing so it can't linger.`);
-      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
-    }
+  if (await gracefulExit) {
+    return { closeDisposition: 'graceful-exit', cookieFlushMs, processExitObserved: true };
   }
+
+  logger.warn(`[StealthBrowser] ${label} login window did NOT terminate within ${LOGIN_BROWSER_GRACEFUL_EXIT_MS / 1000}s of close() — sending SIGTERM before the final kill fallback.`);
+  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
+  if (await waitForBrowserProcessExit(proc, LOGIN_BROWSER_TERM_EXIT_MS)) {
+    return { closeDisposition: 'sigterm-exit', cookieFlushMs, processExitObserved: true };
+  }
+
+  logger.warn(`[StealthBrowser] ${label} login window ignored graceful close and SIGTERM — force-killing as the final fallback.`);
+  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
+  const killedExit = await waitForBrowserProcessExit(proc, LOGIN_BROWSER_KILL_EXIT_MS);
+  return { closeDisposition: 'sigkill-fallback', cookieFlushMs, processExitObserved: killedExit };
 }
 
 /**
@@ -846,16 +1108,27 @@ export async function openLoginWindow(platformId, sender = null) {
     // so the caller can skip the HTTP re-verify when we already confirmed login.
     let autoDetectedLoginUrl = null;
     let autoDetectedLoginSignal = null;
+    let authCookiesBeforeClose = [];
     let loginBrowserCloseRequested = false;
     let loginBrowserClosePromise = null;
+    let loginBrowserCloseOutcome = null;
 
     const requestLoginBrowserClose = async () => {
       loginBrowserCloseRequested = true;
       if (!loginBrowserClosePromise) {
-        loginBrowserClosePromise = closeLoginBrowserSafely(loginBrowser, platformId);
+        loginBrowserClosePromise = closeLoginBrowserSafely(loginBrowser, platformId, {
+          loginConfirmed: !!autoDetectedLoginUrl,
+        }).then(outcome => {
+          loginBrowserCloseOutcome = outcome;
+          return outcome;
+        });
       }
       await loginBrowserClosePromise;
     };
+    const unregisterShutdownCloser = registerAuthWindowCloser(
+      `login:${platformId}`,
+      requestLoginBrowserClose,
+    );
 
     const runAutoClosePoll = createNonOverlappingRunner(async () => {
       if (isTerminated) return;
@@ -879,10 +1152,22 @@ export async function openLoginWindow(platformId, sender = null) {
         // cookie and marked the platform connected. Preferred for SPAs (Facebook etc.)
         // where the account menu is lazy-rendered and "Log out" text isn't in the DOM.
         let cookieSignal = false;
+        let matchingAuthCookies = [];
         const expectedCookies = PLATFORM_AUTH_COOKIES[platformId];
         if (expectedCookies?.length) {
           try {
-            cookieSignal = cookieListHasAuth(await page.cookies(), expectedCookies);
+            const pageCookies = await page.cookies();
+            cookieSignal = cookieListHasAuth(pageCookies, expectedCookies);
+            if (cookieSignal) {
+              const expected = new Set(expectedCookies);
+              matchingAuthCookies = pageCookies
+                .filter(cookie => expected.has(cookie?.name) && cookie?.value && cookie.value !== '0')
+                .map(cookie => ({
+                  name: cookie.name,
+                  persistent: Number(cookie.expires) > 0,
+                  expiresAt: Number(cookie.expires) > 0 ? Number(cookie.expires) : null,
+                }));
+            }
           } catch { /* page may be navigating */ }
         }
 
@@ -922,6 +1207,7 @@ export async function openLoginWindow(platformId, sender = null) {
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via auth-gated URL ${currentUrl} — closing window`);
           autoDetectedLoginUrl = currentUrl;
           autoDetectedLoginSignal = 'auth-gated-url';
+          authCookiesBeforeClose = matchingAuthCookies;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           await requestLoginBrowserClose();
@@ -951,6 +1237,7 @@ export async function openLoginWindow(platformId, sender = null) {
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via ${via} at ${currentUrl} — closing window`);
           autoDetectedLoginUrl = currentUrl;
           autoDetectedLoginSignal = cookieSignal ? 'auth-cookie' : 'dom';
+          authCookiesBeforeClose = matchingAuthCookies;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           // Programmatic close fires the 'disconnected' event → cleanup
@@ -1004,6 +1291,7 @@ export async function openLoginWindow(platformId, sender = null) {
       if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (sender) sender.removeListener('destroyed', cleanup);
+      unregisterShutdownCloser();
       try {
         await requestLoginBrowserClose();
       } catch { /* ignored */ }
@@ -1023,8 +1311,19 @@ export async function openLoginWindow(platformId, sender = null) {
         loginDetected: !!autoDetectedLoginUrl,
         loginSignal: autoDetectedLoginSignal,
         currentUrl: autoDetectedLoginUrl || undefined,
+        authCookiesBeforeClose,
+        ...(loginBrowserCloseOutcome || {}),
       });
-      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.(), loginDetected: !!autoDetectedLoginUrl, loginUrl: autoDetectedLoginUrl, loginSignal: autoDetectedLoginSignal });
+      resolve({
+        success: true,
+        platform: platformId,
+        closedByApp: sender?.isDestroyed?.(),
+        loginDetected: !!autoDetectedLoginUrl,
+        loginUrl: autoDetectedLoginUrl,
+        loginSignal: autoDetectedLoginSignal,
+        authCookiesBeforeClose,
+        ...(loginBrowserCloseOutcome || {}),
+      });
     };
 
     if (sender) {
@@ -1045,7 +1344,7 @@ export async function openLoginWindow(platformId, sender = null) {
 async function openNativeLoginWindow({ platformId, url, executablePath, sender = null }) {
   const userDataDir = await getUserDataDir();
   const nativeExecutablePath = await findGoogleSafeChromePath(executablePath);
-  logger.info(`[StealthBrowser] Opening native Chrome login window for ${platformId} (no CDP automation)`);
+  logger.info(`[StealthBrowser] Opening native Chrome login window for ${platformId} (no CDP automation, executable: ${nativeExecutablePath}, profile: ${userDataDir})`);
   updateAuthWindowDiagnostic(platformId, {
     mode: 'native-chrome',
     loginUrl: url,
@@ -1061,6 +1360,12 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     '--no-default-browser-check',
     '--window-size=1100,800',
     '--lang=en-US,en',
+    // See PUPPETEER_OSCRYPT_PARITY_ARGS above: without these, this raw-spawned
+    // Chrome derives its cookie OSCrypt key from the real macOS Keychain, while
+    // every Puppeteer-launched Chrome on this same userDataDir uses Chromium's
+    // static mock-keychain key — the two families would write mutually
+    // undecryptable cookies into one shared profile.
+    ...PUPPETEER_OSCRYPT_PARITY_ARGS,
     `--app=${url}`,
   ];
   updateAuthWindowDiagnostic(platformId, { chromeArgs });
@@ -1074,19 +1379,19 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     let settled = false;
     let timeout = null;
     let poll = null;
-    let closeAfterSuccessTimer = null;
     let pendingSuccessResult = null;
     let lastSeenUrl = '';
     let lastHeartbeatLog = 0;
+    let nativeCloseInFlight = false;
+    let unregisterShutdownCloser = () => {};
 
     const settle = async (result) => {
       if (settled) return;
       settled = true;
       if (poll) clearInterval(poll);
       if (timeout) clearTimeout(timeout);
-      if (closeAfterSuccessTimer) clearTimeout(closeAfterSuccessTimer);
       if (sender) sender.removeListener('destroyed', onSenderDestroyed);
-      await new Promise(r => setTimeout(r, 800));
+      unregisterShutdownCloser();
       finishAuthWindowDiagnostic(platformId, result);
       resolve({
         success: true,
@@ -1099,10 +1404,34 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       });
     };
 
-    const onSenderDestroyed = () => {
-      try { child.kill('SIGTERM'); } catch { /* already closed */ }
-      settle({ result: 'app-window-destroyed', closedByApp: true });
+    const requestNativeClose = async (result) => {
+      if (settled) return;
+      if (nativeCloseInFlight) return;
+      nativeCloseInFlight = true;
+      // A CONFIRMED login must survive an interrupting close. 'app-window-destroyed'
+      // (and any other close reason that arrives after auto-detect) explains WHY
+      // the window went away — it is not evidence the login didn't happen. Letting
+      // it overwrite the auto-detected result made a completed sign-in fail
+      // isTrustedNativeLoginResult downstream and fall back to an HTTP re-verify
+      // that can only ever preserve the stale "not connected" it started from.
+      const closing = pendingSuccessResult?.result === 'auto-detected' && result?.result !== 'auto-detected'
+        ? { ...pendingSuccessResult, interruptedBy: result?.result || null }
+        : result;
+      pendingSuccessResult = closing;
+      try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already closed */ }
+      let exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_TERM_EXIT_MS);
+      let disposition = 'sigterm-exit';
+      if (!exited) {
+        disposition = 'sigkill-fallback';
+        logger.warn(`[StealthBrowser] Native ${platformId} Chrome ignored SIGTERM — using final SIGKILL fallback`);
+        try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already closed */ }
+        exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_KILL_EXIT_MS);
+      }
+      await settle({ ...closing, closeDisposition: disposition, processExitObserved: exited });
     };
+
+    const onSenderDestroyed = () => requestNativeClose({ result: 'app-window-destroyed', closedByApp: true });
+    unregisterShutdownCloser = registerAuthWindowCloser(`native-login:${platformId}`, onSenderDestroyed);
 
     child.once('error', (error) => {
       if (settled) return;
@@ -1114,15 +1443,16 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       // leaves the native-tab poll running forever, calling getNativeChromeTabs()
       // (an osascript spawn) every LOGIN_POLL_INTERVAL_MS*2 with nothing to do.
       if (poll) { clearInterval(poll); poll = null; }
-      if (closeAfterSuccessTimer) clearTimeout(closeAfterSuccessTimer);
       if (timeout) clearTimeout(timeout);
       if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+      unregisterShutdownCloser();
       finishAuthWindowDiagnostic(platformId, { result: 'launch-error', error: error?.message || String(error) });
       reject(error);
     });
 
     child.once('exit', (code, signal) => {
       logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+      if (nativeCloseInFlight) return;
       settle(pendingSuccessResult || { result: 'closed', exitCode: code, signal });
     });
 
@@ -1156,17 +1486,32 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
           clearInterval(poll);
           poll = null;
         }
+        // Disarm the open-window ceiling. It has been counting down since the
+        // window opened, and the checkpoint wait below can hold the window for
+        // another NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS — so a login completed
+        // near the end of a slow SSO/2FA flow would otherwise have the ceiling
+        // fire mid-wait, SIGTERM Chrome before it checkpoints, and settle as a
+        // plain 'timeout' that discards pendingSuccessResult entirely. Login is
+        // already confirmed here; from now on only the checkpoint decides when
+        // this window closes.
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
         pendingSuccessResult = { result: 'auto-detected', currentUrl: matchingTab.url, title: matchingTab.title };
         updateAuthWindowDiagnostic(platformId, {
           result: 'auto-detected',
           currentUrl: matchingTab.url,
           title: matchingTab.title,
         });
-        logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via native URL ${matchingTab.url} — waiting ${NATIVE_LOGIN_COOKIE_FLUSH_MS}ms before closing window`);
-        closeAfterSuccessTimer = setTimeout(() => {
-          try { child.kill('SIGTERM'); } catch { /* already closed */ }
-          settle(pendingSuccessResult);
-        }, NATIVE_LOGIN_COOKIE_FLUSH_MS);
+        logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via native URL ${matchingTab.url} — holding the window open until the profile cookie store checkpoints (ceiling ${NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS}ms)`);
+        // Not a fixed timer: SIGTERM does not flush Chromium's batched cookie
+        // store, so closing on a duration guess is what silently discarded the
+        // login. Close on the observed checkpoint instead.
+        void waitForNativeProfileCookieCommit(userDataDir, platformId).then(({ committed, waitedMs }) => {
+          if (settled) return;
+          void requestNativeClose({ ...pendingSuccessResult, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+        });
         return;
       }
 
@@ -1184,8 +1529,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
 
     timeout = setTimeout(() => {
       logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} timed out — closing process`);
-      try { child.kill('SIGTERM'); } catch { /* already closed */ }
-      settle({ result: 'timeout', timedOut: true });
+      void requestNativeClose({ result: 'timeout', timedOut: true });
     }, AUTH_WINDOW_AUTO_CLOSE_MS);
 
     if (sender) {
@@ -1196,6 +1540,202 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       sender.once('destroyed', onSenderDestroyed);
     }
   });
+}
+
+// A successful native challenge handoff must have had enough time to paint its
+// first response. Without this small floor, a fresh --app window can report its
+// requested /jobs URL before Cloudflare replaces it with the challenge.
+const NATIVE_CHALLENGE_SETTLE_MS = 3_000;
+
+export function isStrictIndeedHttpsUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return parsed.protocol === 'https:'
+      && (parsed.hostname === 'indeed.com' || parsed.hostname.endsWith('.indeed.com'));
+  } catch {
+    return false;
+  }
+}
+
+export function isNativeIndeedChallengeHardBlock(url, title = '') {
+  if (!isStrictIndeedHttpsUrl(url)) return false;
+  return /security check|attention required|access denied|request blocked/i.test(String(title || ''));
+}
+
+export function isNativeIndeedChallengeCleared(url, title = '') {
+  const lowerUrl = String(url || '').toLowerCase();
+  const lowerTitle = String(title || '').toLowerCase().trim();
+  if (!isStrictIndeedHttpsUrl(url) || !lowerTitle) return false;
+  if (isAuthChallengeUrl(lowerUrl) || isLoginUrlPath(lowerUrl)) return false;
+  if (isNativeIndeedChallengeHardBlock(url, title)) return false;
+  return !/just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i.test(lowerTitle);
+}
+
+export function isNativeIndeedChallengePending(url, title = '') {
+  if (!isStrictIndeedHttpsUrl(url)) return false;
+  return isAuthChallengeUrl(url)
+    || /just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i.test(String(title || '').toLowerCase());
+}
+
+// AppleScript exposes every restored Chrome tab, not just the --app process
+// spawned for this handoff. Restrict polling to the exact first-party hostname
+// and prefer the same path as the requested challenge URL, so an older Indeed
+// search tab cannot accidentally clear this recovery flow.
+export function selectNativeIndeedChallengeTab(tabs, challengeUrl) {
+  let target;
+  try { target = new URL(String(challengeUrl || '')); } catch { return null; }
+  if (!isStrictIndeedHttpsUrl(target.toString())) return null;
+  const sameHost = (Array.isArray(tabs) ? tabs : []).filter(tab => {
+    try {
+      const parsed = new URL(String(tab?.url || ''));
+      return isStrictIndeedHttpsUrl(parsed.toString()) && parsed.hostname === target.hostname;
+    } catch {
+      return false;
+    }
+  });
+  const samePath = sameHost.filter(tab => {
+    try { return new URL(String(tab.url)).pathname === target.pathname; } catch { return false; }
+  });
+  const candidates = samePath.length ? samePath : sameHost;
+  return candidates.find(tab => isNativeIndeedChallengePending(tab.url, tab.title))
+    || candidates.find(tab => isNativeIndeedChallengeHardBlock(tab.url, tab.title))
+    || candidates.find(tab => isNativeIndeedChallengeCleared(tab.url, tab.title))
+    || candidates[0]
+    || null;
+}
+
+/**
+ * Hand an already-blocked Indeed page to an actual Chrome process, with no CDP
+ * attachment. This is deliberately separate from the login auto-close flow:
+ * /jobs is public, but it is a valid destination after a captcha has cleared.
+ * The caller must release its Puppeteer profile reservation before invoking it.
+ */
+export async function openNativeIndeedChallengeWindow(url, sender = null, { challengeObserved = false, signal = null } = {}) {
+  if (!isStrictIndeedHttpsUrl(url)) {
+    throw new Error('Native Indeed challenge handoff requires an https Indeed URL.');
+  }
+  const releaseProfileReservation = reserveSharedProfile('indeed-native-challenge');
+  try {
+    // An idle singleton may still own browser-data even when no scrape is
+    // active. Release it before the raw Chrome spawn, just as native login does.
+    await closeStealthBrowser(false);
+    const userDataDir = await getUserDataDir();
+    const executablePath = await findGoogleSafeChromePath(await findSystemChromePath() ?? await findChromePath());
+    const chromeArgs = [
+      `--user-data-dir=${userDataDir}`,
+      '--profile-directory=Default', '--no-first-run', '--no-default-browser-check',
+      '--window-size=1100,800', '--lang=en-US,en',
+      // See PUPPETEER_OSCRYPT_PARITY_ARGS above — keeps this raw-spawned native
+      // window's cookie OSCrypt key aligned with the Puppeteer scrape browser
+      // that shares this same userDataDir.
+      ...PUPPETEER_OSCRYPT_PARITY_ARGS,
+      `--app=${url}`,
+    ];
+    logger.info(`[StealthBrowser] Opening native Chrome challenge handoff for Indeed (no CDP, executable: ${executablePath}, profile: ${userDataDir}): ${url}`);
+    const diagnosticPlatformId = 'indeed-native-challenge';
+    updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', loginUrl: url, currentUrl: url, executable: executablePath, userDataDir, chromeArgs });
+    const child = spawn(executablePath, chromeArgs, { stdio: 'ignore', detached: false });
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let poll = null;
+      let timeout = null;
+      const startedAt = Date.now();
+      let observedChallenge = challengeObserved || isNativeIndeedChallengePending(url);
+      let cleanSince = 0;
+      let nativeCloseInFlight = false;
+      let unregisterShutdownCloser = () => {};
+      const settle = async (result) => {
+        if (settled) return;
+        settled = true;
+        if (poll) clearInterval(poll);
+        if (timeout) clearTimeout(timeout);
+        if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        unregisterShutdownCloser();
+        finishAuthWindowDiagnostic(diagnosticPlatformId, { ...result, mode: 'native-chrome' });
+        resolve({ nativeChrome: true, ...result });
+      };
+      const requestNativeClose = async (result) => {
+        if (settled || nativeCloseInFlight) return;
+        nativeCloseInFlight = true;
+        try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already gone */ }
+        let exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_TERM_EXIT_MS);
+        let disposition = 'sigterm-exit';
+        if (!exited) {
+          disposition = 'sigkill-fallback';
+          try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already gone */ }
+          exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_KILL_EXIT_MS);
+        }
+        await settle({ ...result, closeDisposition: disposition, processExitObserved: exited });
+      };
+      const onSenderDestroyed = () => requestNativeClose({ result: 'app-window-destroyed', closedByApp: true });
+      const onAbort = () => requestNativeClose({ result: 'aborted' });
+      unregisterShutdownCloser = registerAuthWindowCloser(`native-challenge:${diagnosticPlatformId}`, onSenderDestroyed);
+      child.once('error', (error) => {
+        if (settled) return;
+        if (poll) clearInterval(poll);
+        if (timeout) clearTimeout(timeout);
+        if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+        settled = true;
+        if (signal) signal.removeEventListener('abort', onAbort);
+        unregisterShutdownCloser();
+        finishAuthWindowDiagnostic(diagnosticPlatformId, { result: 'launch-error', error: error?.message || String(error), mode: 'native-chrome' });
+        reject(error);
+      });
+      child.once('exit', (code, signal) => {
+        if (nativeCloseInFlight) return;
+        settle({ result: 'closed', exitCode: code, signal });
+      });
+      const runPoll = createNonOverlappingRunner(async () => {
+        if (settled) return;
+        const tab = selectNativeIndeedChallengeTab(await getNativeChromeTabs(), url);
+        if (!tab) return;
+        updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', currentUrl: tab.url || '', title: tab.title || '', nativePollError: tab.error || null });
+        if (isNativeIndeedChallengeHardBlock(tab.url, tab.title)) {
+          logger.warn(`[StealthBrowser] Native Indeed challenge handoff hard-blocked at ${tab.url}: ${tab.title || 'untitled'}`);
+          void requestNativeClose({ result: 'hard-block', currentUrl: tab.url, title: tab.title });
+          return;
+        }
+        if (isNativeIndeedChallengePending(tab.url, tab.title)) {
+          observedChallenge = true;
+          cleanSince = 0;
+          return;
+        }
+        if (observedChallenge && Date.now() - startedAt >= NATIVE_CHALLENGE_SETTLE_MS && isNativeIndeedChallengeCleared(tab.url, tab.title)) {
+          cleanSince ||= Date.now();
+          if (Date.now() - cleanSince < 1_500) return; // require a stable clean page, not a redirect flicker
+          logger.info(`[StealthBrowser] Native Indeed challenge handoff cleared at ${tab.url}; holding the window open until the profile cookie store checkpoints so cf_clearance survives the close.`);
+          if (poll) { clearInterval(poll); poll = null; }
+          // Disarm the open-window ceiling for the same reason the login window
+          // does: the checkpoint wait below can outlast whatever is left of it,
+          // and a ceiling that fires mid-wait would kill Chrome before the
+          // clearance cookie is committed and report a bare 'timeout'.
+          if (timeout) { clearTimeout(timeout); timeout = null; }
+          // Same checkpoint rule as the native login window: a SIGTERM'd Chrome
+          // can drop the clearance cookie the user just earned, which would send
+          // the resumed scrape straight back into the challenge.
+          void waitForNativeProfileCookieCommit(userDataDir, 'indeed challenge handoff').then(({ committed, waitedMs }) => {
+            if (settled) return;
+            void requestNativeClose({ result: 'cleared', currentUrl: tab.url, title: tab.title, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+          });
+        }
+      });
+      poll = setInterval(() => void runPoll().catch(error => logger.warn(`[StealthBrowser] Native Indeed challenge poll failed: ${error?.message || error}`)), LOGIN_POLL_INTERVAL_MS * 2);
+      timeout = setTimeout(() => {
+        void requestNativeClose({ result: 'timeout', timedOut: true });
+      }, AUTH_WINDOW_AUTO_CLOSE_MS);
+      if (sender) {
+        if (sender.isDestroyed()) onSenderDestroyed();
+        else sender.once('destroyed', onSenderDestroyed);
+      }
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  } finally {
+    releaseProfileReservation();
+  }
 }
 
 /**
@@ -1406,6 +1946,10 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       }
       return captchaBrowserClosePromise;
     };
+    const unregisterShutdownCloser = registerAuthWindowCloser(
+      `captcha:${diagKey}`,
+      requestCaptchaBrowserClose,
+    );
     // ── Resolve diagnostics — answer "Solve opened, I saw the page, but the card
     // still failed: why?" The resolve telemetry otherwise records only a count, so
     // a 0 can't be told apart from a stale-selector miss, a thrown extractor, or a
@@ -1885,6 +2429,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (signal) signal.removeEventListener?.('abort', onAbort);
       if (sender) sender.removeListener('destroyed', cleanup);
+      unregisterShutdownCloser();
       await requestCaptchaBrowserClose().catch(() => {});
       releaseProfileReservation();
       releaseBrowserPoolPause();

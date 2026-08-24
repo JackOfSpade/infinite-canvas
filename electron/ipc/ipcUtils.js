@@ -169,6 +169,14 @@ function ipcErrorCode(error) {
   return normalized ? normalized.slice(0, 128) : undefined;
 }
 
+/** Preserve a compact capability identifier when an IPC route is unsupported. */
+function ipcErrorCapability(error) {
+  const value = error?.capability;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, 128) : undefined;
+}
+
 /**
  * Wraps an IPC handler with standardized error handling, lifecycle-aware abort signaling,
  * and standard `{ success, data, error }` return payloads.
@@ -205,6 +213,7 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
         success: false, 
         error: e?.message || String(e),
         errorCode: ipcErrorCode(e),
+        capability: ipcErrorCapability(e),
         isRateLimit: e?.isRateLimit,
         provider: e?.provider
       };

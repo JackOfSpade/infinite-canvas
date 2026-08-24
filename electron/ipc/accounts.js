@@ -14,7 +14,11 @@ import {
   fetchHtmlClean,
   getLoginAutoCloseWaitReason,
   hasPlatformAuthCookie,
+  readPlatformAuthCookieState,
   isNativeLoginSuccess,
+  getStealthBrowserInfo,
+  closeStealthBrowser,
+  getBrowserSessionResetBlocker,
 } from './stealthBrowser.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
 import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, isLoginUrlPath } from './browser/authWindows.js';
@@ -61,6 +65,20 @@ const STATUS_CACHE_STORE_KEY = 'marketplaceSessionCache';
 const STATUS_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 let _statusCacheLoaded = false;
 
+// One released Indeed build treated its public /jobs results page as a native
+// login success. That verdict was not session evidence and, unlike all other
+// cached connected states, must not be allowed to survive the migration.
+// Keep this deliberately exact: it applies only to Indeed and the retired
+// wording plus public www.indeed.com/jobs URL, never to a valid account-page
+// confirmation or another platform's reason text.
+const LEGACY_INDEED_PUBLIC_JOBS_VERDICT = /^Native Chrome reached logged-in indeed job-search page at https:\/\/www\.indeed\.com\/jobs(?:[/?#]|$)/i;
+
+function isLegacyIndeedPublicJobsVerdict(platformId, lastReason) {
+  return platformId === 'indeed'
+    && typeof lastReason === 'string'
+    && LEGACY_INDEED_PUBLIC_JOBS_VERDICT.test(lastReason);
+}
+
 // Pure restore policy (unit-tested): from a persisted blob, keep ONLY recent
 // `connected: true` entries. A stale or not-connected prior must never mask a
 // fresh verify, and an old connected is likely dead. A fresh verify overwrites
@@ -71,6 +89,7 @@ export function selectRestorableStatuses(stored, now = Date.now(), maxAgeMs = ST
   if (!stored || typeof stored !== 'object') return out;
   for (const [id, v] of Object.entries(stored)) {
     if (!v || typeof v !== 'object' || v.connected !== true) continue;
+    if (isLegacyIndeedPublicJobsVerdict(id, v.lastReason)) continue;
     const ts = Number(v.ts) || 0;
     if (!ts || (now - ts) >= maxAgeMs) continue;
     out[id] = { connected: true, ts, lastReason: typeof v.lastReason === 'string' ? v.lastReason : undefined, restoredFromDisk: true };
@@ -181,9 +200,12 @@ export async function verifySellMonitorLogin(platformId) {
     const annotateCookieSurvival = async (result) => {
       const names = PLATFORM_AUTH_COOKIES[platformId];
       if (!names?.length) return result;
-      let present = null;
-      try { present = await hasPlatformAuthCookie(platformId); } catch { /* leave unknown */ }
-      if (present === null) return result;
+      // Tri-state, not hasPlatformAuthCookie's collapsed boolean: that helper
+      // reports a check it could not RUN as `false`, which would print the
+      // flatly wrong "login did not persist locally" on a profile whose cookie
+      // is sitting right there. An unrunnable check adds no annotation at all.
+      const { known, present } = await readPlatformAuthCookieState(platformId);
+      if (!known) return result;
       result.trace = { ...(result.trace || {}), authCookiePresent: present, authCookieNames: names };
       result.reason += present
         ? ` Auth cookie ${names.join(',')} IS present on disk → session invalidated server-side (not a local persistence loss).`
@@ -391,6 +413,26 @@ export async function writeStatusCache(platformId, connected, extras = {}) {
   persistStatusCache();
 }
 
+// Session reset is an intentional, local logout. Unlike an inconclusive
+// verifier result it must replace (not preserve) the last-known-good cache
+// value, otherwise the Settings pill can keep claiming a just-cleared session
+// is connected until a later verification happens to succeed.
+export async function invalidatePlatformSessionStatus(platformId, reason = 'Session reset by user.') {
+  // Jobs handlers are registered before Accounts handlers during app startup.
+  // Normally Accounts has already loaded this by the time a renderer can call
+  // IPC, but loading defensively here ensures a narrow reset never replaces
+  // persisted statuses for unrelated platforms with an otherwise-empty map.
+  loadPersistedStatusCache();
+  await writeStatusCache(platformId, false, { lastReason: reason });
+}
+
+/** Clear every cached verdict after an explicitly global profile reset. */
+export function clearAllSessionStatusCache() {
+  loadPersistedStatusCache();
+  _statusCache = {};
+  persistStatusCache();
+}
+
 export function isTrustedNativeLoginResult(platformId, result) {
   if (!result?.nativeChrome || result?.result !== 'auto-detected') return false;
   // Inline-login platforms (mercari) serve the login FORM at the same URL as the
@@ -417,8 +459,8 @@ export function isTrustedNativeLoginResult(platformId, result) {
   return isNativeLoginSuccess(platformId, result.currentUrl, result.title);
 }
 
-function buildTrustedNativeLoginVerdict(platformId, result) {
-  const pageKind = getSellMonitorConfig(platformId) ? 'marketplace account page' : 'job-search page';
+export function buildTrustedNativeLoginVerdict(platformId, result) {
+  const pageKind = getSellMonitorConfig(platformId) ? 'marketplace account page' : 'job-platform account page';
   return {
     connected: true,
     reason: `Native Chrome reached logged-in ${platformId} ${pageKind} at ${result.currentUrl}.`,
@@ -469,6 +511,91 @@ async function verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResu
 async function completeLoginWindowVerification(platformId, result) {
   if (isTrustedNativeLoginResult(platformId, result)) {
     const verdict = buildTrustedNativeLoginVerdict(platformId, result);
+    // A native login window uses the REAL macOS Keychain to encrypt cookies
+    // (it launches via a plain child_process.spawn, unlike every Puppeteer
+    // launch here, which forces the Chromium MOCK keychain). Both write into
+    // the SAME shared browser-data profile, so the auto-detected landing page
+    // above is not proof the session reached that profile — a native login can
+    // report success while persisting zero cookies the Puppeteer-read scrape
+    // can ever decrypt. For any platform with a known auth cookie
+    // (PLATFORM_AUTH_COOKIES), confirm that cookie actually landed before
+    // trusting the verdict; platforms with no entry there are unaffected and
+    // take the same path as before this check existed.
+    const authCookieNames = PLATFORM_AUTH_COOKIES[platformId];
+    if (authCookieNames?.length) {
+      // Snapshot the singleton's IDENTITY before the check — see the finally
+      // below. Generation, not just `connected`: a plain boolean goes stale.
+      // If the singleton was up as generation N when we sampled, then some
+      // unrelated caller tore it down (launchWithProfileLockRetry's on-collision
+      // yield does exactly that) before our read ran, our read relaunches it as
+      // generation N+1 — and a `wasRunning === true` boolean would conclude
+      // "someone else's browser, leave it alone" about a process only WE caused
+      // to exist, re-creating the profile-lock hang this whole change fixes.
+      const stealthBefore = getStealthBrowserInfo();
+      try {
+        const { known: authCookieKnown, present: authCookiePresent } = await readPlatformAuthCookieState(platformId);
+        // Only a check that actually RAN can revoke a confirmed native login. If
+        // the read could not run (browser launch hiccup, profile still settling
+        // after the native Chrome exit), saying "the login did not persist" would
+        // send a user who just signed in successfully straight back into a login
+        // loop. Keep the trusted verdict and record that the survival check was
+        // not observed, rather than inventing an answer for it.
+        if (!authCookieKnown) {
+          logger.warn(`[Accounts] ${platformId} native login trusted without an auth-cookie survival check — the on-disk read could not run`);
+          verdict.trace = { ...verdict.trace, authCookiePresent: null, authCookieNames };
+        } else if (!authCookiePresent) {
+          // Definitive, not inconclusive: we positively checked and the cookie is
+          // absent. State only what was observed — landed URL + missing cookie —
+          // never guess why (server rejected it, disk write raced the window
+          // close, etc.); that keeps this a local-persistence-failure verdict
+          // rather than the "connected: true" trap that produced the bug report
+          // (Settings said Indeed connected while every scrape read logged out).
+          const reason = `Native Chrome reached ${result.currentUrl}, but the ${authCookieNames.join(',')} cookie is absent from the shared browser profile — the login did not persist locally.`;
+          const trace = { ...verdict.trace, authCookiePresent: false, authCookieNames };
+          await writeStatusCache(platformId, false, { lastReason: reason, lastTrace: trace });
+          logger.warn(`[Accounts] ${platformId} native login reported success but left no cookie on disk: ${reason}`);
+          return { ...(result || {}), connected: false, reason };
+        } else {
+          verdict.trace = { ...verdict.trace, authCookiePresent: true, authCookieNames };
+        }
+      } finally {
+        // readPlatformAuthCookieState reads cookies off the shared userDataDir via
+        // the retained stealth-browser singleton, launching it if it was not
+        // already up. This check runs immediately after a login window released
+        // that same shared profile, and the very next thing a user does is
+        // re-run their search — a browser scrape launch on the same profile.
+        // Chrome OS-locks a userDataDir to ONE process, so a singleton left
+        // running here (present/absent/unknown outcome — this is a finally,
+        // not tacked onto one branch) holds the profile and makes that next
+        // scrape burn its whole retry ladder on "Chrome launch blocked by the
+        // shared browser profile lock". launchWithProfileLockRetry now also
+        // recovers from that collision, but leaving the profile exactly as we
+        // found it here avoids paying for the collision at all. Only close a
+        // browser THIS check brought into existence: either it was not running
+        // before, or it is a different generation than the one we sampled.
+        const stealthAfter = getStealthBrowserInfo();
+        const weStartedIt = stealthAfter.connected
+          && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
+        if (weStartedIt) {
+          // Even then, never yank a browser someone else is mid-operation on.
+          // getBrowserSessionResetBlocker is the existing answer to "is it safe
+          // to close the shared browser right now" — it already accounts for a
+          // held profile reservation, an in-flight launch/close, and live
+          // (non-blank) pages. Our own cookie read closed its page before
+          // returning, so the normal path here is "idle, safe to close"; a
+          // non-null blocker means a concurrent caller picked this browser up
+          // and closing it would abort their in-flight work. Skipping is safe:
+          // launchWithProfileLockRetry still recovers if this ends up holding
+          // the profile against a later scrape.
+          const busy = await getBrowserSessionResetBlocker();
+          if (busy) {
+            logger.info(`[Accounts] Leaving the shared browser up after ${platformId}'s cookie check — ${busy}`);
+          } else {
+            await closeStealthBrowser(false);
+          }
+        }
+      }
+    }
     await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
     logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
     return { ...(result || {}), connected: true, reason: verdict.reason };
@@ -652,7 +779,12 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       // listing cards to needs-login.
       const keepPrior = browserKilled || (!verdict.connected && verdict.inconclusive);
       if (keepPrior) {
-        const cause = browserKilled ? 'interrupted by browser teardown' : 'verify inconclusive (transient fetch failure)';
+        const verdictReason = String(verdict.reason || 'reason unavailable')
+          .replace(/\s+/g, ' ')
+          .slice(0, 300);
+        const cause = browserKilled
+          ? 'interrupted by browser teardown'
+          : `verify inconclusive (${verdictReason})`;
         logger.warn(`[Accounts] Startup verify ${platformId} ${cause} — keeping prior status, not caching spurious not-connected`);
       } else {
         await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
@@ -727,6 +859,77 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
 // settles (window closed + verify cached).
 const activeLoginFlows = new Map(); // platformId → Promise<verdict>
 
+/** A reset must wait for the user to finish any visible login flow. */
+export function getActiveLoginFlowInfo() {
+  if (activeLoginFlows.size === 0) return null;
+  return { platformIds: [...activeLoginFlows.keys()] };
+}
+
+/**
+ * The full login-window flow: single-flight dedupe against a concurrent
+ * click/verify for the same platform, opening the visible Chrome window, and
+ * verifying the result. Extracted out of the 'open-login-window' IPC handler
+ * (which is now a thin wrapper below) and EXPORTED so the Job Search source
+ * card's own "Log in" action (jobs.js, resume-job-source mode:"native-login")
+ * can call this directly and get the IDENTICAL flow — including the dedupe
+ * against a simultaneous Settings login racing the same userDataDir — instead
+ * of a second, divergent copy.
+ */
+export async function runPlatformLoginFlow(platformId, sender) {
+  // Always open the login window — even when the cache says connected.
+  // The cache-shortcut (re-verify silently, skip window) was removed because
+  // stale cookies can make verifySellMonitorLogin return a false positive,
+  // leaving the user with no way to force a fresh browser login from the UI.
+
+  // Single-flight: if a login flow for this platform is already in flight
+  // (window open OR verify running), return the same promise. Rapid double-
+  // clicks no longer launch a second puppeteer process on the same
+  // userDataDir, and a click during verify no longer races closeStealthBrowser
+  // against the verify's in-flight page.goto.
+  const existing = activeLoginFlows.get(platformId);
+  if (existing) {
+    logger.info(`[Accounts] Login flow already in flight for ${platformId} — deduping click`);
+    return await existing;
+  }
+
+  const flow = (async () => {
+    try {
+      const result = await openLoginWindow(platformId, sender);
+      return await completeLoginWindowVerification(platformId, result);
+    } catch (error) {
+      // Catch path: openLoginWindow itself blew up BEFORE any verification ran
+      // (Chrome failed to launch, profile-lock contention, unknown platform,
+      // etc.) — a tooling/launch failure, not evidence that the user's EXISTING
+      // session is invalid. This handler intentionally opens the window even
+      // when the cache already says connected (see the comment above — it's
+      // how a user forces a fresh login), so unconditionally caching
+      // connected:false here used to flip an already-logged-in platform to
+      // "needs login" purely because Chrome hiccuped on THIS attempt — which
+      // then trips the hard login preflight and blocks price checks on every
+      // in-scope marketplace, not just this one. Mirror the file's own
+      // inconclusive-preserve rule (see verifyAllPlatforms' browser-teardown
+      // handling): keep the prior cached connected value, only refreshing the
+      // diagnostic trace, and report the verdict as inconclusive so the
+      // renderer's toast still surfaces the real error.
+      const msg = error?.message || String(error);
+      logger.error(`[Accounts] Login window failed for ${platformId}:`, msg);
+      const trace = { error: msg, stack: error?.stack?.slice(0, 600), stage: 'openLoginWindow' };
+      const prior = _statusCache[platformId]?.connected ?? false;
+      await writeStatusCache(platformId, prior, { lastReason: msg, lastTrace: trace });
+      return { connected: prior, reason: msg, error: msg, inconclusive: true };
+    }
+  })();
+
+  activeLoginFlows.set(platformId, flow);
+  try {
+    return await flow;
+  } finally {
+    // Always clear so the next genuine click (after this flow fully settles
+    // — window closed AND verify resolved) starts a fresh flow.
+    activeLoginFlows.delete(platformId);
+  }
+}
+
 /**
  * Register all Accounts IPC handlers.
  */
@@ -757,59 +960,13 @@ export function registerAccountsHandlers() {
   // optimistically cached on window-close regardless of whether the user
   // actually completed login — closing without signing in still got
   // marked as connected.
+  //
+  // Thin wrapper — the actual flow (single-flight dedupe, open window,
+  // verify) lives in the exported runPlatformLoginFlow above so the Job
+  // Search source card's "Log in" action can call the exact same flow
+  // directly, without going through IPC or duplicating this logic.
   handleSafe('open-login-window', async (_event, { platformId }) => {
-    // Always open the login window — even when the cache says connected.
-    // The cache-shortcut (re-verify silently, skip window) was removed because
-    // stale cookies can make verifySellMonitorLogin return a false positive,
-    // leaving the user with no way to force a fresh browser login from the UI.
-
-    // Single-flight: if a login flow for this platform is already in flight
-    // (window open OR verify running), return the same promise. Rapid double-
-    // clicks no longer launch a second puppeteer process on the same
-    // userDataDir, and a click during verify no longer races closeStealthBrowser
-    // against the verify's in-flight page.goto.
-    const existing = activeLoginFlows.get(platformId);
-    if (existing) {
-      logger.info(`[Accounts] Login flow already in flight for ${platformId} — deduping click`);
-      return await existing;
-    }
-
-    const flow = (async () => {
-      try {
-        const result = await openLoginWindow(platformId, _event.sender);
-        return await completeLoginWindowVerification(platformId, result);
-      } catch (error) {
-        // Catch path: openLoginWindow itself blew up BEFORE any verification ran
-        // (Chrome failed to launch, profile-lock contention, unknown platform,
-        // etc.) — a tooling/launch failure, not evidence that the user's EXISTING
-        // session is invalid. This handler intentionally opens the window even
-        // when the cache already says connected (see the comment above — it's
-        // how a user forces a fresh login), so unconditionally caching
-        // connected:false here used to flip an already-logged-in platform to
-        // "needs login" purely because Chrome hiccuped on THIS attempt — which
-        // then trips the hard login preflight and blocks price checks on every
-        // in-scope marketplace, not just this one. Mirror the file's own
-        // inconclusive-preserve rule (see verifyAllPlatforms' browser-teardown
-        // handling): keep the prior cached connected value, only refreshing the
-        // diagnostic trace, and report the verdict as inconclusive so the
-        // renderer's toast still surfaces the real error.
-        const msg = error?.message || String(error);
-        logger.error(`[Accounts] Login window failed for ${platformId}:`, msg);
-        const trace = { error: msg, stack: error?.stack?.slice(0, 600), stage: 'openLoginWindow' };
-        const prior = _statusCache[platformId]?.connected ?? false;
-        await writeStatusCache(platformId, prior, { lastReason: msg, lastTrace: trace });
-        return { connected: prior, reason: msg, error: msg, inconclusive: true };
-      }
-    })();
-
-    activeLoginFlows.set(platformId, flow);
-    try {
-      return await flow;
-    } finally {
-      // Always clear so the next genuine click (after this flow fully settles
-      // — window closed AND verify resolved) starts a fresh flow.
-      activeLoginFlows.delete(platformId);
-    }
+    return await runPlatformLoginFlow(platformId, _event.sender);
   });
 
   // Check-and-login flow: check session → if not logged in, open login → verify

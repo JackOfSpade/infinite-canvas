@@ -88,28 +88,24 @@ export default [
     },
   },
   {
-    name: 'Compensation assessments propagate through grouped and flat job trees',
+    name: 'Compensation assessments propagate through AI-taxonomized job trees',
     run: () => {
       const jobs = [{
         title: 'Senior Designer', company: 'Acme', location: 'Toronto, ON', salary: 'C$70k–C$85k',
         matchScore: 88, reasoning: 'Strong match.', compensationAssessment: assessment,
       }];
       const common = { displayedJobs: jobs, originalPos: { x: 0, y: 0 }, hubId: 'hub', baseNodeId: 'run' };
-      const flat = buildJobTreeNodes({ ...common, bucketTree: null });
-      assert(flat.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment === assessment,
-        'flat fallback cards must retain compensation research');
-
       const grouped = buildJobTreeNodes({
         ...common,
         bucketTree: {
-          likelihoodBands: [],
+          likelihoodBands: [{ label: 'Excellent hiring fit (85–100)', minScore: 85, maxScore: 100 }],
           salaryRanges: [{ label: 'C$60–100k', minSalary: 60000, maxSalary: 100000 }],
           roles: [{ name: 'Design', jobIndices: [0] }],
         },
       });
       assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment === assessment,
         'grouped hierarchy cards must retain compensation research');
-      return { flatCards: flat.newNodes.filter((node) => node.type === 'jobcard').length };
+      return { groupedCards: grouped.newNodes.filter((node) => node.type === 'jobcard').length };
     },
   },
 ];

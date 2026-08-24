@@ -106,7 +106,10 @@ export function migrateGroupNodes(nodes) {
 // output / buildJobTree pushCard). Used by the legacy-results migration below.
 const JOBCARD_SCORED_FIELDS = [
   'title', 'company', 'location', 'salary', 'snippet', 'matchScore',
-  'reasoning', 'careerDirection', 'source', 'url', 'posted', 'language', 'resumeProfile',
+  'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps',
+  'strengths', 'experienceAssessment', 'confidence', 'fitAssessment', 'rawScore',
+  'adjustedScore', 'adjustments', 'calibration', 'source', 'url', 'posted',
+  'language', 'resumeProfile',
 ];
 
 /**

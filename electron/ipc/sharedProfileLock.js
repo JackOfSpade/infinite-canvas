@@ -7,11 +7,8 @@
 // fetchIndeedListingsBrowser (Indeed) — are dispatched CONCURRENTLY by jobs.js
 // (`Promise.all([scrapeManualSources(...), fetchApiSources(...)])`, and Indeed
 // lives inside fetchApiSources). Without serialization they race the profile
-// lock, AND Indeed's teardown runs `pkill -f <profileDir>` (indeedBrowser.js
-// killChromeHoldingProfile) which matches EVERY Chrome launched with
-// `--user-data-dir=<that dir>` — so it kills the manual scraper's LIVE browser
-// mid-scrape. Serializing each launcher's whole launch→scrape→close makes the
-// browser job scrapes run strictly in sequence and removes both hazards.
+// lock. Serializing each launcher's whole launch→scrape→close makes the browser
+// job scrapes run strictly in sequence and prevents profile-lock collisions.
 //
 // Pure-HTTP job sources (LinkedIn guest API, RemoteOK, WeWorkRemotely, USAJobs,
 // Dice) never touch the profile and MUST NOT acquire this — they stay fully

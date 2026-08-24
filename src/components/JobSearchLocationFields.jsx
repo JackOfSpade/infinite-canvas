@@ -50,10 +50,11 @@ export function JobSearchLocationFields({
       <LocationInputs value={searchLocation} onChange={setSearchLocation} />
 
       <div className="pt-1 border-t border-white/5">
-        <p className="text-[10px] text-blue-200/60 font-medium mb-1">Where would you live while working remotely?</p>
+        <p className="text-[10px] text-blue-200/60 font-medium mb-1">Remote salary comparison</p>
+        <p className="text-[9px] text-white/35 mb-1">Where will you stay when the job starts? Optional; does not affect search results or eligibility.</p>
         <div className="flex flex-col gap-1.5">
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Job is in USA</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: United States</p>
             <LocationInputs
               value={remoteResidences?.usa}
               onChange={(next) => setRemoteResidence?.('usa', next)}
@@ -61,7 +62,7 @@ export function JobSearchLocationFields({
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Job is in Canada</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: Canada</p>
             <LocationInputs
               value={remoteResidences?.canada}
               onChange={(next) => setRemoteResidence?.('canada', next)}
@@ -69,11 +70,11 @@ export function JobSearchLocationFields({
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Job is outside US/Canada</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: worldwide or other (U.S. and Canada allowed)</p>
             <LocationInputs
               value={remoteResidences?.other}
               onChange={(next) => setRemoteResidence?.('other', next)}
-              countryPlaceholder="Country (required; not US or Canada)"
+              countryPlaceholder="Country (optional)"
             />
           </div>
         </div>

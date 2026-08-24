@@ -23,15 +23,15 @@ post-processes it into the right print variant for the recipient.
 | `styles.css`                  | Global entry point — re-exports the token closure.                                 |
 | `colors_and_type.css`         | Design tokens — colour, typography, spacing, page geometry, all variants.          |
 | `resume.css`                  | Components — page chrome, header, sections, roles, bullets, projects, skills. |
-| `resume.html`                 | The résumé template + a fully-populated realistic sample. Adapt this per candidate. |
+| `resume.html`                 | The résumé template + a fully-populated layout fixture. Reuse its structure, never its facts, wording, sentence shapes, or domain framing. |
 | `cover-letter.css`            | The letter surface (serif body, date / salutation / close, no recipient block). Load after `resume.css`. |
-| `cover-letter.html`           | The paired cover-letter template + sample. Same paper, ink, and geometry.           |
+| `cover-letter.html`           | The paired cover-letter layout fixture. Reuse its structure and geometry, never its prose.           |
 | `build/dual-mode-pdf.js`      | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
 | `build/test.js` · `build/browser-check.html` | Self-test for the dual-mode PDF module: `test.js` is wired into `npm test`; `browser-check.html` is the **manual** browser-path companion. |
 | `build/annotation-typography-test.js` | Typography regression: the inline `.scope` / `.tradeoff` / `.annotation-label` spans must inherit the owning bullet's type, and `.tradeoff` must not be italic (STYLE.md §5.4). Static; no browser needed. |
 | `build/annotation-budget-test.js`     | Restraint + length regression: at most one annotation per bullet (one `.tradeoff` max), and every bullet — annotated or not — stays under the 180-visible-character budget so a `.tradeoff` can't substitute for evidence or turn a bullet into a paragraph (STYLE.md §5.4). Static; no browser needed. |
 | `build/bullet-length-check.html`       | **Manual** browser check behind that budget: renders worst-case bullet text at 180/100 characters in the real page structure (Letter/A4 × default/compact) and asserts each holds ≤ 2 wrapped lines (STYLE.md §5.4). Open it in a browser — nothing runs it for you. |
-| `build/parallelism-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 5 parallel-construction gate: fails if the failure-mode count reverts to four or five, the coordination shapes (`from X through Y`, `both`/`either`/`not only`) or the noun-phrase/gerund-phrase repair examples are dropped from `STYLE.md`, or the résumé-facing enumerations in `SKILL.md`/`readme.md` regress to covering only colon-dumps/overloaded-sentences/metaphors. No browser needed. |
+| `build/parallelism-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 5 parallel-construction gate: fails if the failure-mode count reverts to four or five, the coordination shapes (`from X through Y`, `both`/`either`/`not only`) or the general same-form repair are dropped from `STYLE.md`, or the résumé-facing enumerations in `SKILL.md`/`readme.md` regress to covering only colon-dumps/overloaded-sentences/metaphors. No browser needed. |
 | `build/synthesis-scope-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 6 earned-generalization gate: fails if the failure-mode count reverts, or if `STYLE.md`/`SKILL.md`/`readme.md` drop the evidence-scope requirement, the named-connector requirement, the bridge-noun clause, the one-antecedent rule at paragraph boundaries, the rewrite-or-delete repair, or the "filler is not a repair" prohibition. No browser needed. |
 | `build/ats-parse-test.js`     | Parse-safety gate (STYLE.md §8.1): fails on tables, imagery in `<main>`, absolute positioning, CSS columns, hidden text, tabular figures, `&nbsp;` in copy, contact outside `<main>`, and reading-order inversions. Takes file paths; defaults to the shipped samples. |
 | `build/education-placement-test.js` | Static regression: no Education section anywhere, and the degree rides in the header subtitle (STYLE.md §5.8). Wired into `npm test`. |
@@ -102,6 +102,15 @@ End-to-end, given candidate data + job description:
    invents relevance a bullet doesn't have. Full rule: `STYLE.md
    §5.3.2`.
 
+   **Make every highlight bullet self-contained.** A recruiter or ATS
+   preview may read any `<li>` without its neighbors. Name the concrete
+   platform, database, system, dataset, or actor inside that bullet; never
+   rely on a preceding bullet or role summary through backward references
+   such as "those platforms" or "that database." Repeat the shortest clear
+   noun phrase instead. In data-flow copy, name the producer, consumer,
+   vendor, agency, database, or platform instead of "their APIs" or "data they
+   returned." Keep "before" and "after" beside the action they modify.
+
    **Prose fields obey the synthesis rules too.** Role summaries and
    project descriptions are subject to `STYLE.md §11.2.3` exactly as
    the letter is: no colon followed by an inventory of technologies,
@@ -115,15 +124,37 @@ End-to-end, given candidate data + job description:
    career, and a summary noun ("shape", "pattern", "approach") must
    name the responsibility or sequence it stands for in the same
    sentence.
+   Do not compress a multi-step workflow into an opaque endpoint range; name
+   its supported actions directly.
 
    **Facts are binding; source wording is not.** Preserve the evidence and its
    scope while varying distinctive constructions across the résumé and cover
    letter. Establish why a new employer, project, or period belongs before its
    details; never use a temporal contrast such as “now” without stating the
    contrasted state. Prefer common contemporary verbs (“closed the gap,” not
-   “answered the gap”), and avoid repeating an ordinary prior employer name
+   "answered the gap"), and avoid repeating an ordinary prior employer name
    once the role or system is unambiguous. Narrow connective or causal language
    entailed by the evidence is allowed for cohesion; new candidate facts are not.
+   Treat an employer, team, product, or operational assertion that comes only
+   from the job listing as the listing's description, not as independently
+   verified fact. Frame its source plainly; use an unqualified assertion about
+   the employer only when reliable research verifies it, without turning the
+   attribution into repetitive hedging. Make the source document, not the
+   target position or work being described, the grammatical subject of any
+   reporting verb. Refer to the position attached to the application with a
+   proximal determiner unless explicitly contrasting it with another role.
+   Read every sentence once as a recruiter seeing it for the first time. Reject
+   idiom, figurative personification, or an implied actor, artifact, or action
+   when the reader must translate it or reconstruct what it literally means.
+   In interface or ownership claims, name the concrete actor, artifact, and
+   action instead.
+   When the letter's opening first names an unfamiliar prior employer, identify
+   the candidate's role or relationship in the same sentence rather than opening
+   with a bare "At [employer]." Describe cross-domain evidence through the
+   concrete software, system, or responsibility; never use a broad possessive
+   industry label that can imply unsupported domain or operational scope. In the close, say which
+   experience, skills, or work the candidate would bring; do not call the
+   capabilities themselves "the evidence" brought to a role.
 
    **The header subtitle** is `[current professional role] ·
    [highest completed degree], [institution]` — e.g. `Staff Engineer
@@ -154,8 +185,7 @@ End-to-end, given candidate data + job description:
    carry transitions; a coordinated construction (`from X through
    Y`, `both X and Y`, `either X or Y`, `not only X but also Y`, or a
    list) whose paired elements don't share a grammatical form — most
-   often a noun phrase spliced to a gerund phrase ("from the quote
-   request through presenting findings"); and a concluding or
+   often a noun phrase spliced to a gerund phrase; and a concluding or
    transitional sentence that generalizes past the evidence under it
    or without naming the concrete responsibility, system, decision,
    process, or mechanism that connects it (one example or one role
@@ -181,6 +211,12 @@ End-to-end, given candidate data + job description:
    this way"), which leaves the reference just as ambiguous.
    Evidence should read as two or three well-argued examples, not a
    résumé converted to prose.
+
+   **Then read the final sentence as a role-facing invitation.** If it invites
+   a conversation, it must connect the candidate's relevant contribution to the
+   target work. Do not end solely on what the candidate wants to learn, hear, or
+   discuss. Keep the invitation direct and present-tense, without conditional or
+   deferential boilerplate.
 
    **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
    the first sentence must lead with a job-specific thesis, a concrete

@@ -53,15 +53,12 @@ assert(/from X through\/to Y/.test(style) || /`from X through\/to Y`/.test(style
 assert(/noun phrase.{0,40}gerund phrase|gerund phrase.{0,40}noun phrase/i.test(style),
   'STYLE.md names the noun-phrase / gerund-phrase mismatch as the common failure',
   'no noun-phrase/gerund-phrase language found');
-assert(/from requesting quotes\s+through\s+presenting findings/i.test(style),
-  'STYLE.md gives the gerund-repair example from the defect brief',
-  'gerund-repair example missing');
-assert(/from the initial request for\s+quotes through the presentation of findings/i.test(style),
-  'STYLE.md gives the noun-phrase-repair example from the defect brief',
-  'noun-phrase-repair example missing');
-assert(/from the time of/i.test(style),
-  'STYLE.md explicitly rejects bureaucratic padding ("from the time of…") as a non-repair',
-  '"from the time of" padding example missing — the rule must call this out as a non-fix');
+assert(/noun\s+phrase\s+with\s+noun\s+phrase[^\p{L}\p{N}]+action\s+with\s+action/iu.test(style),
+  'STYLE.md gives the general repair: coordinate like grammatical forms',
+  'general parallel-construction repair missing');
+assert(/Padding the seam[^.]*not a repair/i.test(style),
+  'STYLE.md rejects bureaucratic padding as a non-repair',
+  'padding non-repair principle missing');
 
 console.log('\nScope — applies beyond the cover letter');
 assert(/r\u00e9sum\u00e9 bullets, role summaries, and\s*project descriptions/i.test(style) ||
@@ -76,9 +73,9 @@ console.log('\nSKILL.md pipeline coverage');
 assert(/no coordinated (phrase|construction)/i.test(skill),
   'SKILL.md mentions the coordinated-phrase / parallelism check',
   'no "no coordinated phrase/construction" language found in SKILL.md');
-assert(/from the quote\s+request through presenting findings/i.test(skill),
-  'SKILL.md cites the observed defect sentence as the diagnostic example',
-  'defect example not referenced in SKILL.md');
+assert(/noun phrase spliced to a gerund phrase/i.test(skill),
+  'SKILL.md names the grammatical mismatch without embedding a domain-specific specimen',
+  'general mismatch description missing in SKILL.md');
 
 console.log('\nreadme.md coverage');
 assert(/broken parallelism|coordinated (phrase|construction)/i.test(readme),

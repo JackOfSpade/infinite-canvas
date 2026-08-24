@@ -6,6 +6,7 @@ const AUDIT_LIMIT = 50;
 const REASON_LIMIT = 240;
 const URL_LIMIT = 240;
 const LARGE_DELTA = 15;
+const ADJUSTMENT_LIMIT = 4;
 
 function normalizedText(value) {
   return String(value || '')
@@ -64,7 +65,19 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
       source: String(job.source || '').slice(0, 40),
       url: String(job.url || '').slice(0, URL_LIMIT),
       score: Number.isFinite(Number(job.matchScore)) ? Number(job.matchScore) : null,
+      rawScore: Number.isFinite(Number(job.rawScore)) ? Number(job.rawScore) : null,
+      adjustedScore: Number.isFinite(Number(job.adjustedScore)) ? Number(job.adjustedScore) : null,
+      adjustments: (Array.isArray(job.fitAssessment?.adjustments) ? job.fitAssessment.adjustments : [])
+        .slice(0, ADJUSTMENT_LIMIT)
+        .map(adjustment => ({
+          code: String(adjustment?.code || '').slice(0, 80),
+          from: Number.isFinite(Number(adjustment?.from)) ? Number(adjustment.from) : null,
+          to: Number.isFinite(Number(adjustment?.to)) ? Number(adjustment.to) : null,
+        })),
       direction: String(job.careerDirection || '').slice(0, 100),
+      // Live scoring replaces potentially unsupported model prose with a
+      // deterministic grounded explanation. Deliberately never retain the
+      // provider's raw narrative in compact diagnostics.
       reason: String(job.reasoning || '').replace(/\s+/g, ' ').trim().slice(0, REASON_LIMIT),
       descriptionChars: fp.normalized.length,
       descriptionFingerprint: fp.hash,
@@ -106,6 +119,9 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
       source: row.source,
       url: row.url,
       score: row.score,
+      rawScore: row.rawScore,
+      adjustedScore: row.adjustedScore,
+      adjustments: row.adjustments,
       direction: row.direction,
       reason: row.reason,
       descriptionChars: row.descriptionChars,

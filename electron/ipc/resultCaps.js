@@ -36,6 +36,20 @@ const JOB_TOKENS_PER_JOB          = 300;
 // priceSynthesisMaxTokens so the count fed and the budget granted stay in lockstep.
 const BUDGET_SAFETY         = 0.8;
 
+// ── Compensation-research fit gate ────────────────────────────────────────────
+// Minimum matchScore a job must clear before the competitive-pay check runs
+// on it. Compensation research is NOT cheap: each cohort (jobs grouped by
+// role/seniority/experience/employment-type/location/currency) costs TWO LLM
+// calls — one grounded market-research call plus one assessment call — and
+// cohorts fragment by the job's own city, so a single multi-employer, multi-city
+// search can fragment into dozens of cohorts. Every one of those calls starts at
+// the SAME shared Gemini ladder head, whose free tier is a flat 20 requests/day
+// — so an ungated run can exhaust that quota and starve unrelated scoring/
+// bucketing calls in the same run. Gating on fit score keeps the comparison to
+// jobs the user could realistically pursue: a competitive-pay verdict only
+// changes a decision on a job worth applying to.
+export const COMPENSATION_MIN_FIT_SCORE = 70;
+
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
 // returns the whole pool unchanged, so cappedForBudget is always 0.

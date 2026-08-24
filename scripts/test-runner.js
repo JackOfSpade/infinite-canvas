@@ -15,10 +15,15 @@ import job_search_queries from './tests/job-search-queries.js';
 import electron_regressions from './tests/electron-regressions.js';
 import renderer_content_security from './tests/renderer-content-security.js';
 import local_ai_application from './tests/local-ai-application.js';
+import local_ai_deletion from './tests/local-ai-deletion.js';
 import login_url_markers from './tests/login-url-markers.js';
 import compensation_assessment from './tests/compensation-assessment.js';
 import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_search_locations from './tests/job-search-locations.js';
+import job_board_provider from './tests/job-board-provider.js';
+import job_fit_assessment from './tests/job-fit-assessment.js';
+import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
+import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -38,10 +43,15 @@ const tests = [
   ...electron_regressions,
   ...renderer_content_security,
   ...local_ai_application,
+  ...local_ai_deletion,
   ...login_url_markers,
   ...compensation_assessment,
   ...job_compensation_pipeline,
   ...job_search_locations,
+  ...job_board_provider,
+  ...job_fit_assessment,
+  ...auth_cookie_checkpoint,
+  ...browser_launch_lock_regression,
 ];
 
 async function run() {

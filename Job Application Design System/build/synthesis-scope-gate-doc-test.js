@@ -63,16 +63,18 @@ assert(/only when it explicitly names/i.test(rule6),
 });
 
 console.log('\nRule 6 — evidence scope ceiling');
-assert(/most of my work/i.test(rule6), 'Rule 6 rejects "most of my work" breadth from one example',
-  '"most of my work" scope-inflation example missing');
-assert(/throughout\s+my career/i.test(rule6), 'Rule 6 rejects "throughout my career" breadth',
-  '"throughout my career" scope-inflation example missing');
+assert(/one example\s+supports a claim about that example/i.test(rule6),
+  'Rule 6 limits a single example to a claim about that example',
+  'single-example scope ceiling missing');
+assert(/one\s+role\s+supports\s+a\s+claim\s+about\s+that\s+role/i.test(rule6),
+  'Rule 6 limits one role to a claim about that role',
+  'single-role scope ceiling missing');
 assert(/general working style|general(ise|ize)? about .{0,30}career|working style/i.test(rule6),
   'Rule 6 rejects a general-working-style claim drawn from one role',
   'no working-style breadth language found');
-assert(/one role supports a claim about that role/i.test(rule6),
-  'Rule 6 states the in-scope ceiling (one role → a claim about that role)',
-  'no explicit in-scope statement found');
+assert(/career-wide breadth[^.]*requires\s+source evidence[^.]*career-wide/i.test(rule6),
+  'Rule 6 requires career-wide evidence for career-wide breadth',
+  'career-wide evidence requirement missing');
 
 console.log('\nRule 6 — bridge nouns must define themselves');
 ['shape', 'pattern', 'approach'].forEach(function (noun) {
@@ -105,13 +107,13 @@ assert(/Filler is not a repair/i.test(rule6),
   'no "filler is not a repair" prohibition found');
 assert(/That said|Additionally|In this\s+way/.test(rule6),
   'Rule 6 names the filler-transition shapes it rejects', 'no filler examples given');
-assert(/explanatory examples, never mandatory/i.test(rule6),
-  'Rule 6 marks its repair sentences as explanatory, not mandatory copy',
-  'example sentences not marked as illustrative');
-assert(/That was the broader pattern in the\s+role/i.test(rule6),
-  'Rule 6 shows the evidence-scoped repair pattern', 'repair example missing');
-assert(/That end-to-end responsibility/i.test(rule6),
-  'Rule 6 shows the explicit-transition repair pattern', 'transition example missing');
+assert(/name the\s+responsibility or mechanism/i.test(rule6) &&
+  /keep the breadth inside what the\s+evidence supports/i.test(rule6),
+  'Rule 6 defines the evidence-scoped repair without prescribing copy',
+  'semantic rewrite instructions missing');
+assert(/transition earns its place by naming the thing it carries\s+forward/i.test(rule6),
+  'Rule 6 defines an explicit-transition repair without prescribing copy',
+  'semantic transition repair missing');
 
 console.log('\nRule 6 — stated scope across surfaces');
 assert(/Rule 6 \(earned generalization\) binds/i.test(style),
@@ -159,8 +161,10 @@ assert(/Five prose failures/i.test(readme),
 assert(/exactly one plausible antecedent/i.test(readme),
   'readme.md states the one-antecedent rule for paragraph transitions',
   'no antecedent rule in readme.md');
-assert(/that end-to-end responsibility/i.test(readme),
-  'readme.md shows the explicit-transition repair', 'no transition repair example in readme.md');
+assert(/repeat the\s+precise noun phrase instead/i.test(readme) &&
+  /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme),
+  'readme.md defines the explicit-transition repair without prescribing copy',
+  'semantic transition repair missing in readme.md');
 
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering),

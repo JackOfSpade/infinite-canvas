@@ -1113,18 +1113,18 @@ export default [
     },
   },
 {
-    name: 'settings: normalizeClaudeModels backfills missing/invalid per-group family tokens, never throws',
+    name: 'settings: normalizeClaudeModels keeps only live API groups and backfills invalid tokens',
     run: () => {
-      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
-        'an older config with no claudeModels key at all gets the full default set');
-      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
+      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
+        'an older config with no claudeModels key at all gets the live default set');
+      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
         'null input is treated the same as absent');
-      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
+      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ analysis: 'SONNET', light: 'HAIKU' }),
         'an empty object still backfills every group');
 
-      // A valid non-default pick is preserved verbatim...
+      // A valid non-default live pick is preserved verbatim...
       const partiallyValid = normalizeClaudeModels({ generation: 'FABLE', analysis: 'nonsense-typo', light: null });
-      assert(partiallyValid.generation === 'FABLE', 'a recognized, non-default token is preserved as-is');
+      assert(!('generation' in partiallyValid), 'the retired generation token is dropped instead of reaching live settings/diagnostics');
       // ...while an unrecognized token in a SIBLING group falls back to ONLY
       // that group's default, not the whole object.
       assert(partiallyValid.analysis === 'SONNET', 'an unrecognized token in one group falls back to that group\'s own default');
@@ -1137,7 +1137,7 @@ export default [
     run: () => {
       const ai = getAISettings();
       assert(ai.claudeModels && typeof ai.claudeModels === 'object', 'getAISettings() always includes a claudeModels object');
-      for (const group of ['generation', 'analysis', 'light']) {
+      for (const group of ['analysis', 'light']) {
         assert(typeof ai.claudeModels[group] === 'string' && ai.claudeModels[group].length > 0,
           `getAISettings().claudeModels.${group} is a non-empty string (got ${JSON.stringify(ai.claudeModels[group])})`);
       }
@@ -1145,25 +1145,26 @@ export default [
     },
   },
 {
-    name: 'settings: mergeSettingsSection deep-merges ai.claudeModels instead of replacing it wholesale',
+    name: 'settings: mergeSettingsSection deep-merges live claudeModels and removes legacy generation',
     run: () => {
       const current = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' } };
 
       // Regression: a single-family update (exactly what SettingsPanel's
       // updateClaudeModelGroup sends) must NOT wipe the other two groups —
       // a naive top-level `{ ...current, ...value }` shallow merge would
-      // replace `claudeModels` wholesale with `{ generation: 'FABLE' }`,
+      // replace `claudeModels` wholesale with `{ analysis: 'FABLE' }`,
       // silently dropping analysis/light back to undefined.
-      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { generation: 'FABLE' } });
-      assert(afterOneFamilyChange.claudeModels.generation === 'FABLE', 'the changed group is applied');
-      assert(afterOneFamilyChange.claudeModels.analysis === 'SONNET', 'a sibling group (analysis) survives an unrelated single-group update');
+      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { analysis: 'FABLE' } });
+      assert(afterOneFamilyChange.claudeModels.analysis === 'FABLE', 'the changed group is applied');
       assert(afterOneFamilyChange.claudeModels.light === 'HAIKU', 'a sibling group (light) survives an unrelated single-group update');
+      assert(!('generation' in afterOneFamilyChange.claudeModels), 'a settings write removes legacy generation from persisted data');
 
       // A normal top-level key (e.g. serviceAccountPath) still shallow-merges
       // as before — the nested-merge exception is scoped to claudeModels only.
       const afterUnrelatedKey = mergeSettingsSection('ai', current, { serviceAccountPath: '/tmp/sa.json' });
       assert(afterUnrelatedKey.serviceAccountPath === '/tmp/sa.json', 'an unrelated ai key merges normally');
-      assert(afterUnrelatedKey.claudeModels.generation === 'OPUS', 'claudeModels is untouched when the update carries no claudeModels key at all');
+      assert(afterUnrelatedKey.claudeModels.analysis === 'SONNET' && afterUnrelatedKey.claudeModels.light === 'HAIKU', 'live claudeModels survive an unrelated update');
+      assert(!('generation' in afterUnrelatedKey.claudeModels), 'even an unrelated AI update cleans legacy generation');
 
       // A non-'ai' section never applies the nested-merge special case, even
       // if it happens to carry a key named claudeModels (defensive: the

@@ -198,8 +198,9 @@ export const MARKETPLACE_HUB_SCAN_SCHEMA = {
 };
 
 // ── Job bucketing: scored jobs → results taxonomy metadata ──────────────────
-// Runs after job-scoring. Likelihood bands are fixed to the scorer's rubric;
-// the model creates only the remaining taxonomy metadata:
+// Runs after job-scoring. The persisted legacy `likelihoodBands` field stores
+// fixed hiring-fit bands; it is not a forecast of hiring likelihood. The model
+// creates only the remaining taxonomy metadata:
 //   1. salaryRanges    — salary bands fitted to the distribution; renderer
 //      places jobs by parsed salary. Always include an "Unspecified" range.
 //   2. roleByIndex     — exactly one role-family label per input job. The
@@ -250,7 +251,7 @@ export function buildJobBucketingSchema(jobCount = 0) {
 // ── Resume parse: file → structured profile ────────────────────────────────
 export const RESUME_PARSE_SCHEMA = {
   type: 'object',
-  required: ['titles', 'skills', 'experience_years', 'soft_skills', 'industries', 'locations', 'education', 'summary'],
+  required: ['titles', 'skills', 'experience_years', 'soft_skills', 'industries', 'locations', 'education', 'summary', 'workHistory'],
   properties: {
     titles:           { type: 'array', items: { type: 'string' }, description: 'Exact job titles held, most recent first' },
     skills:           { type: 'array', items: { type: 'string' } },
@@ -260,6 +261,21 @@ export const RESUME_PARSE_SCHEMA = {
     locations:        { type: 'array', items: { type: 'string' } },
     education:        { type: 'array', items: { type: 'string' } },
     summary:          { type: 'string', description: '2-sentence professional summary' },
+    workHistory: {
+      type: 'array',
+      description: 'Every dated professional role, most recent first. This supports deterministic tenure calculations, so preserve the source-stated dates and do not invent missing dates.',
+      items: {
+        type: 'object',
+        required: ['id', 'title', 'employer', 'startDate', 'endDate'],
+        properties: {
+          id: { type: 'string', description: 'Stable role identifier, unique within this profile and derived consistently from the role order/source.' },
+          title: { type: 'string', description: 'Job title as stated in the career data.' },
+          employer: { type: 'string', description: 'Employer or organization as stated; empty when absent.' },
+          startDate: { type: 'string', description: 'Start date as stated, preferably YYYY-MM when the source clearly supplies month/year; empty when absent.' },
+          endDate: { type: 'string', description: 'End date as stated, preferably YYYY-MM when the source clearly supplies month/year; use "present" only when the source says current/present; empty when absent.' },
+        },
+      },
+    },
   },
 };
 
@@ -491,7 +507,7 @@ export const LETTER_GROUNDING_AUDIT_SCHEMA = {
         type: 'object',
         required: ['kind', 'claim', 'reason', 'repair'],
         properties: {
-          kind: { type: 'string', enum: ['unclear-antecedent', 'unexplained-shift', 'chronological-backtracking', 'unmoored-temporal-contrast', 'inventory-paragraph', 'overloaded-sentence', 'faulty-parallelism', 'repeated-metaphor', 'awkward-register', 'unnecessary-employer-repetition', 'detached-synthesis', 'volunteered-gap', 'delayed-relevance', 'second-thesis', 'unnecessary-evidence', 'dangling-transition', 'unearned-causal', 'literalized-frame'], description: 'The cohesion, grammar, or persuasive-prose defect found in the letter.' },
+          kind: { type: 'string', enum: ['unclear-antecedent', 'unexplained-shift', 'chronological-backtracking', 'unmoored-temporal-contrast', 'inventory-paragraph', 'overloaded-sentence', 'faulty-parallelism', 'misattached-modifier', 'introductory-punctuation', 'literal-metaphorical-precision', 'conditional-closing', 'repeated-metaphor', 'awkward-register', 'unnecessary-employer-repetition', 'unframed-employer', 'ambiguous-domain-label', 'dependent-reference', 'detached-synthesis', 'volunteered-gap', 'delayed-relevance', 'second-thesis', 'unnecessary-evidence', 'dangling-transition', 'unearned-causal', 'literalized-frame'], description: 'The cohesion, grammar, precision, or persuasive-prose defect found in the letter.' },
           claim: { type: 'string', description: 'Exact verbatim span from the cover-letter paragraphs containing the cohesion defect.' },
           reason: { type: 'string', description: 'Why this span weakens clarity, grammatical flow, or the reader’s ability to follow one controlling argument.' },
           repair: { type: 'string', description: 'Concise editorial action: make coordinated syntax parallel, replace an unclear reference, ground a synthesis in the preceding evidence, establish the relationship before details, consolidate, cut, or explicitly tie the span to the thesis.' },
@@ -533,8 +549,7 @@ export const APPLICATION_DIRECT_COVER_LETTER_SCHEMA = {
 };
 
 // ── Achievement ledger: derive accomplishments by joining career-data facts ──
-// career-achievement-mining, run once per jobhub (job-independent, see
-// docs/resume-achievement-mining-design.md §3.2). The model's job is to FIND
+// Historical achievement-ledger import/review schema. The model's job is to FIND
 // the join (e.g. a 2019 balance sheet + a 2023 balance sheet + a tenure span)
 // and describe it in prose — it never authors the derived number. `claim` is
 // deliberately figure-less; code computes `computed.display` from `metric`
@@ -611,8 +626,7 @@ export const ACHIEVEMENT_LEDGER_SCHEMA = {
 };
 
 // ── Achievement refute: independent adversarial pass over the ledger ───────
-// career-achievement-refute, run by a DIFFERENT model than the miner
-// (independence is the point — see design doc §3.5). Given the checked
+// Historical achievement-ledger adversarial-review schema. Given the checked
 // ledger, attacks each item: is the join real, is attribution overstated, is
 // there a confounder that explains the delta better than the candidate's own
 // work? This is the one failure class neither deterministic code nor a light
@@ -654,14 +668,80 @@ export const JOB_SCORING_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['index', 'matchScore', 'reasoning', 'careerDirection'],
+        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps', 'experienceAssessment', 'confidence'],
         properties: {
           index:           { type: 'integer', description: 'Position in input batch (0-based)' },
-          matchScore:      { type: 'integer', description: '0-100 fit score' },
-          reasoning:       { type: 'string', description: 'Complete, specific justification of the fit — as long as it needs to be (usually 2-4 sentences), citing concrete signals from both the JD and the candidate. No filler.' },
+          matchScore:      { type: 'integer', description: '0-100 evidence-based hiring fit score. This is a comparative, uncalibrated fit measure—not a statistically calibrated prediction of any hiring outcome.' },
+          reasoning:       { type: 'string', description: 'Concise evidence-based hiring-fit explanation. State the strongest direct evidence and the material gap(s); assess the full hiring decision rather than only early screening; do not imply support that is absent from the supplied candidate evidence.' },
           careerDirection: { type: 'string', description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
+          requirementAssessments: {
+            type: 'array',
+            description: 'One assessment for every material requirement found in the job listing. Use exact job and candidate evidence; do not infer unsupported equivalence.',
+            minItems: 1,
+            items: {
+              type: 'object',
+              required: ['requirementText', 'priority', 'jobEvidence', 'status', 'candidateEvidence', 'explanation'],
+              properties: {
+                requirementText: { type: 'string', description: 'A concise statement of the requirement being assessed.' },
+                priority: { type: 'string', enum: ['required', 'important', 'preferred', 'contextual'], description: 'How the listing presents this requirement. Preferred is not automatically disqualifying.' },
+                jobEvidence: { type: 'string', description: 'Verbatim excerpt from this job listing that supports the requirement; do not paraphrase or fabricate it.' },
+                status: { type: 'string', enum: ['direct', 'adjacent', 'not_documented', 'contradicted', 'unclear'], description: 'direct = explicitly evidenced; adjacent = transferable but not equivalent; not_documented = this concise supplied career data does not establish the requirement and does not resolve unlisted experience; contradicted = verbatim candidate evidence explicitly conflicts with the requirement; unclear = supplied evidence is ambiguous. Never infer contradicted from an absence.' },
+                candidateEvidence: { type: 'string', description: 'Verbatim excerpt from supplied candidate career evidence. Required for direct, adjacent, and contradicted; empty for not_documented; for unclear, quote the ambiguity when present or leave empty.' },
+                explanation: { type: 'string', description: 'Evidence-qualified explanation of why this status follows from the excerpts, including the boundary between adjacent and direct evidence. For not_documented, say only that the supplied career data does not document the requirement; do not state a categorical conclusion about unlisted experience.' },
+              },
+            },
+          },
+          materialGaps: {
+            type: 'array',
+            description: 'Every required or important requirement assessed as not_documented, contradicted, or unclear. May be empty only when no such material gap exists; do not include a preferred item merely because it is not documented.',
+            items: {
+              type: 'object',
+              required: ['requirementText', 'priority', 'jobEvidence', 'status', 'candidateEvidence', 'impact'],
+              properties: {
+                requirementText: { type: 'string' },
+                priority: { type: 'string', enum: ['required', 'important', 'preferred', 'contextual'] },
+                jobEvidence: { type: 'string', description: 'Verbatim job-listing excerpt.' },
+                status: { type: 'string', enum: ['not_documented', 'contradicted', 'unclear'] },
+                candidateEvidence: { type: 'string', description: 'Empty for not_documented; verbatim conflicting candidate evidence for contradicted; verbatim ambiguity evidence for unclear when present.' },
+                impact: { type: 'string', description: 'Evidence-qualified account of why this gap affects fit. Describe not_documented only as an evidence gap in the supplied concise career data, not a conclusion about actual experience; do not treat a preferred qualification as a hard requirement.' },
+              },
+            },
+          },
+          experienceAssessment: {
+            type: 'object',
+            required: ['totalProfessionalExperience', 'categorySpecificExperience'],
+            properties: {
+              totalProfessionalExperience: {
+                type: 'object',
+                required: ['years', 'candidateEvidence', 'explanation'],
+                properties: {
+                  years: { type: 'string', description: 'Documented total professional years, a range, or "not established". Do not calculate unstated dates as fact.' },
+                  candidateEvidence: { type: 'string', description: 'Verbatim candidate evidence supporting the total; empty only when not established.' },
+                  explanation: { type: 'string', description: 'How the total was determined and any date uncertainty.' },
+                },
+              },
+              categorySpecificExperience: {
+                type: 'array',
+                description: 'Separate assessment for each material experience category or years requirement in the listing; never substitute total tenure for category-specific experience.',
+                items: {
+                  type: 'object',
+                  required: ['category', 'requiredMinimumYears', 'roleIds', 'years', 'candidateEvidence', 'jobEvidence', 'explanation'],
+                  properties: {
+                    category: { type: 'string' },
+                    requiredMinimumYears: { type: 'number', description: 'The listing’s explicit numeric minimum for this category; use 0 only when the listing states no numeric minimum.' },
+                    roleIds: { type: 'array', items: { type: 'string' }, description: 'Stable candidate workHistory ids whose dated tenure is relevant to this category. Empty when no supported role can be selected.' },
+                    years: { type: 'string', description: 'Documented years/range for this category, or "not established".' },
+                    candidateEvidence: { type: 'string', description: 'Verbatim supplied candidate evidence; empty only when not established.' },
+                    jobEvidence: { type: 'string', description: 'Verbatim job-listing excerpt that makes this experience category material.' },
+                    explanation: { type: 'string', description: 'Comparison of the category-specific evidence with the job requirement.' },
+                  },
+                },
+              },
+            },
+          },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Confidence in this assessment based on the completeness and clarity of the supplied job and candidate evidence.' },
           // Optional so a provider that returns an older scoring shape never
-          // loses an otherwise-valid interview-fit result. Compensation falls
+          // loses an otherwise-valid fit result. Compensation falls
           // back to a neutral, explained state when this is absent.
           compensationContext: {
             type: 'object',

@@ -252,9 +252,9 @@ export const CODE_DEFINITIONS = {
 
   APPLICATION: {
     label: 'Application Generation',
-    description: 'Tailored résumé/cover-letter generation audit — the last application attempt’s lifecycle, per-task provider/model route, terminal stage/error, PDF render outcome, and application-save events. Use when Generate fails, hangs, produces no document/PDF, or cannot save its artifacts. Included automatically in FULL.',
+    description: 'Local application handoff audit — queued-job lifecycle, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, hangs, produces no document/PDF, or cannot save its artifacts. Included automatically in FULL.',
     logFilter: line =>
-      /JobApplication|generate-application|save-application|ApplicationSync|application-(?:resume|cover-letter|skill-opportunity)|company.?research|achievement (?:ledger|mining)|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
+      /\[LocalAI(?:-Fallback)?\]|queue-local-application|get-local-application-status|import-local-application|save-application|ApplicationSync|JobApplication.*(?:Saved|import)|fit-feedback|result\.json|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
@@ -268,9 +268,17 @@ export const CODE_DEFINITIONS = {
 
   AUTH: {
     label: 'Login/Auth Windows',
-    description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, and account-related main-process logs. Use for Google/Indeed/marketplace login loops or “browser may not be secure” errors.',
+    description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, account-related main-process logs, and (since AUTH now implies PERSIST) the close-lifecycle table with each window’s Chrome executable, profile directory, and whether the cookie store was checkpointed before close. Use for Google/Indeed/marketplace login loops, “browser may not be secure” errors, or a login that reports success but still reads logged out.',
     logFilter: line =>
       /auth|login|log.?in|logged|sign.?in|session|account|cookie|verify|verified|not connected|connected|StealthBrowser|Accounts|google|indeed|glassdoor|ziprecruiter|facebook|ebay|poshmark|mercari|swappa/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  PERSIST: {
+    label: 'Session Persistence',
+    description: 'Cross-restart login durability diagnostics — browser-profile file checkpoints, restored cache provenance, per-platform auth-cookie-on-disk presence (never values), the close-lifecycle table (including which Chrome executable and profile directory each login window used), and startup verification. Use when login works until the app closes/reopens, OR when a login window and a later scrape/read used a different Chrome binary or profile within the SAME session (they cannot share cookies — e.g. a native login window vs. a Puppeteer-launched scrape). Included automatically in FULL.',
+    logFilter: line =>
+      /auth|login|log.?in|session|cookie|profile|checkpoint|persist|restor|startup verify|browser.*(?:close|exit|kill)|SIGTERM|SIGKILL|StealthBrowser|Accounts/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

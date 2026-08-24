@@ -398,6 +398,16 @@ was the bug, not the grid.
   marker. **Never** an emoji.
 - Aim for 3–6 bullets per role. Fewer than 3 looks thin; more than 6
   reads as a list, not a story.
+- **Every bullet stands alone.** Recruiters and ATS previews scan bullets
+  out of sequence, so an `<li>` may not depend on the preceding bullet or
+  role summary for its subject. Repeat the shortest concrete noun phrase
+  for the platform, database, system, dataset, or actor; never write
+  backward references such as "those platforms" or "that database."
+  Pronouns are acceptable only when their antecedent is unambiguous inside
+  the same bullet. In data-flow bullets, name the producer, consumer, vendor,
+  agency, database, or platform instead of writing "their APIs" or "data they
+  returned." Put temporal modifiers beside the action they modify; avoid a
+  late "after testing" that can attach to the wrong verb.
 - Each bullet should contain at least one specific number (QPS,
   p99, team size, $ volume, percentage change). Adjectives without
   numbers are wasted lines. A `.tradeoff` annotation (§5.4) is **not**
@@ -420,11 +430,12 @@ was the bug, not the grid.
   more parallel technology phrases is a keyword list wearing a
   sentence's punctuation. Name the technologies where they carry the
   claim instead, and cut the ones that only pad it. The parallelism
-  rule catches a related tic in role summaries and process bullets: a
-  span like "from the quote request through presenting findings"
-  pairs a noun phrase against a gerund phrase — repair by putting both
-  ends in the same form ("from requesting quotes through presenting
-  findings"). The generalization rule catches the matching tic in a
+  rule catches a related tic in role summaries and process bullets: an
+  endpoint range that pairs a noun phrase against a gerund phrase. Repair by
+  putting both ends in the same grammatical form. Even when both endpoints
+  are nouns, do not hide a multi-step workflow inside an opaque range; name
+  the supported actions directly. The
+  generalization rule catches the matching tic in a
   role summary that concludes about a career rather than about the
   role: one role's evidence supports "the broader pattern in the
   role", never "most of my work", and a summary noun like "shape" or
@@ -1369,6 +1380,10 @@ Body         ── 3–4 paragraphs, Source Serif 4. Specifics over
              job-specific thesis, an evidence-to-need connection, or
              a supported observation about the company's work — never
              an announcement of the application itself (§11.2.2).
+             Read every sentence once as a new recruiter: prefer
+             literal first-read language and name the concrete actor,
+             artifact, and action when an interface or ownership claim
+             would otherwise require interpretation (§11.2.3).
              <strong> (SemiBold, never 700) on only the one or two
              headline figures.
 Close        ── valediction + signature (the name, nothing else),
@@ -1383,8 +1398,8 @@ modern tech-industry applications specifically:
 
 - **Redundant with the salutation.** Most postings name no contact,
   so the block's addressee line reads "Hiring Team" — the same two
-  words the salutation repeats one line below ("Dear Vireo Data
-  Hiring Team,"). Stacking them is not formality, it's padding.
+  words the company-specific salutation repeats one line below.
+  Stacking them is not formality, it's padding.
 - **Redundant with what the submission already carries.** The ATS
   upload, the filename, and the job record already tell the reader
   which role and company this is; the salutation repeats the company
@@ -1400,10 +1415,9 @@ modern tech-industry applications specifically:
   — the block has no job left to do.
 - **Costs space a one-page letter can't spare** (§11.4).
 
-**Named contact known:** put the name in the salutation only —
-"Dear Jane Smith," — never in a standalone block. **No name known:**
-the salutation carries the company instead of a bare "Dear Hiring
-Team," — "Dear Vireo Data Hiring Team," — naming the company is the
+**Named contact known:** put the name in the salutation only, never in a
+standalone block. **No name known:** the salutation carries the company
+instead of a bare generic hiring-team greeting; naming the company is the
 whole reason that line exists.
 
 ### 11.2.2 The opening sentence (hard gate)
@@ -1427,6 +1441,11 @@ The opening sentence must begin with one of:
    read on what the company is building, connected to where the
    candidate's own work has been pointed.
 
+When that sentence first introduces an unfamiliar prior employer, it
+must also identify the candidate's role or relationship there. A bare
+organization-first opening is too abrupt because the recruiter has no reason
+to recognize that organization.
+
 **Never open by announcing the document's purpose or the act of
 applying.** The following constructions, and anything equivalent, are
 forbidden as an opening:
@@ -1436,19 +1455,10 @@ forbidden as an opening:
 - "I am writing to express my interest…"
 - "Please accept my application…"
 
-Reject, then rewrite:
-
-| Reject (announces the application) | Write instead (leads with substance) |
-|---|---|
-| "I'm writing to apply for the Principal Engineer role on the storage platform." | "The storage platform problem you're hiring for, making a multi-tenant analytical store behave predictably for tenants whose workloads share nothing, is the one I've spent the last four years solving." |
-| "I am writing to express my interest in the Staff Engineer position." | "Your engineering blog's account of the sharding rewrite reads like a problem I already solved once at smaller scale, and got wrong the first time." |
-
 **This is not a ban on naming the company or the role.** Both may
 appear in the opening sentence — even in the first few words — when
 they are grammatically load-bearing inside the thesis or the
-evidence-to-need connection itself ("Vireo's bet that a multi-tenant
-store can behave predictably…" is a thesis that happens to name the
-company; nothing wrong with that). What is forbidden is naming them
+evidence-to-need connection itself. What is forbidden is naming them
 *only* to announce that a document about them follows. The test is
 structural, not lexical: would the sentence survive with the company
 and role name removed and replaced with almost any other company and
@@ -1456,6 +1466,16 @@ role, and still read as generic throat-clearing? If yes, it is an
 announcement and must be rewritten. If the sentence falls apart
 without the specific company and role in it, because the substance
 depends on them, it passes.
+
+**Frame the source of employer context accurately.** A statement about an
+employer, team, product, or operational practice that comes only from the job
+listing is the listing's description, not independently verified fact. Attribute
+that description plainly; reserve an unqualified external assertion for reliable
+research. The attribution should clarify provenance, not become repetitive
+hedging. A reporting verb belongs to the source document, never to the target
+position or work being described. Refer to the position attached to the
+application with a proximal determiner unless the sentence explicitly contrasts
+it with another role.
 
 Audit before shipping: grep the filled letter for the forbidden
 openers before rendering, the same discipline as the dash gate:
@@ -1550,6 +1570,15 @@ talks to what, who owned which boundary, where the data came from and
 where it went. A figure of speech is allowed only where it does real
 work inside one sentence.
 
+**Read literally on the first pass.** Reject idiom, figurative personification,
+or an implied actor, artifact, or action when a recruiter must translate the
+sentence or reconstruct what it literally means. This matters especially for
+interface and ownership claims: name the concrete actor, artifact, and action
+rather than implying that an interface acts on its own or that responsibility
+belongs to an undefined surface. Literal language may still be concise; the
+test is whether a new reader can identify what did what to which thing without
+supplying missing context.
+
 **5. Keep coordinated elements grammatically parallel.** Coordination
 signals — `from X through/to Y`, `both X and Y`, `either X or Y`,
 `not only X but also Y`, and any list construction — promise the
@@ -1557,22 +1586,14 @@ reader that the elements on either side of the signal are the same
 kind of thing. Reject any instance where they aren't: a noun phrase
 paired with a gerund phrase, an infinitive paired with a finite
 clause, an action paired with a thing. The most common offender is
-the process span *from [noun phrase] through [verb-ing phrase]* —
-"from the quote request through presenting findings to management"
-pairs a bare noun phrase ("the quote request") against a gerund
-phrase ("presenting findings"), so the sentence changes grammatical
-lane mid-construction without announcing it.
+the process span *from [noun phrase] through [verb-ing phrase]*, which
+changes grammatical form between its endpoints without announcing it.
 
 Repair by putting every coordinated element in the same form — noun
 phrase with noun phrase, action with action — and prefer whichever
-repair changes the fewest words: "from requesting quotes through
-presenting findings" (both gerund) or "from the initial request for
-quotes through the presentation of findings" (both noun phrase) are
-both valid; picking one is a matter of which reads more natural in
-context, not a further rule. Padding the seam instead of fixing the
-mismatch is not a repair — "from the time of the quote request
-through presenting findings" still coordinates a noun phrase with a
-gerund phrase, it just buries the seam in bureaucratic filler. This
+repair changes the fewest words. Padding the seam instead of fixing the
+mismatch is not a repair; it only buries the grammatical change in
+bureaucratic filler. This
 rule applies everywhere Rules 2–4 apply: cover-letter paragraphs and
 résumé bullets, role summaries, and project descriptions alike.
 
@@ -1585,26 +1606,19 @@ conclusion without naming what it is a conclusion *about* is detached
 synthesis: it sounds like an argument and carries none. Three
 symptoms, which usually arrive together.
 
-*Scope inflation.* Reject any sentence that widens one example, or
-one role, into a claim the source does not support — patterns of the
-form *"[single example] is the shape most of my work has taken"*,
-*"[one project] is how I have always worked"*, *"throughout my
-career…"* drawn from a single engagement. One example supports a
-claim about that example; one role supports a claim about that role
-("that was the broader pattern in the role" is in scope, "most of my
-work" is not). Career-wide breadth — "most of my work", "throughout
-my career", "my general working style", or any equivalent — requires
-source evidence that is itself career-wide.
+*Scope inflation.* Reject any sentence that widens one example or one
+role into a broader claim the source does not support. One example
+supports a claim about that example; one role supports a claim about
+that role. Career-wide breadth, including claims about a general
+working style, requires source evidence that is itself career-wide.
 
 *Undefined bridge nouns.* Abstract nouns whose job is to stand in for
 the relationship being summarized — "shape", "pattern", "approach",
 "theme", "throughline" — are permitted only when the same sentence
 immediately defines the concrete actions or relationship they
-summarize. *"[X] at one end and [Y] at the other is the shape my work
-has taken"* names no relationship: it gestures at two endpoints and
-leaves the reader to supply the connection between them. Naming the
-sequence, the ownership, or the hand-off is what turns the bridge noun
-into a claim.
+summarize. A bridge noun that merely gestures at endpoints names no
+relationship and leaves the reader to supply the connection. Naming
+the sequence, ownership, or hand-off is what turns it into a claim.
 
 *Ambiguous backward reference at a paragraph boundary.* A paragraph
 that opens with "this", "that", or "it" pointing back at the previous
@@ -1612,8 +1626,7 @@ paragraph must have **exactly one** plausible antecedent. When the
 previous paragraph offered several — an evaluation, an integration, a
 decision, and an abstract summary noun — the pronoun silently picks
 none of them, and the transition the sentence was supposed to make
-does not happen. Repeat the precise noun phrase instead ("that
-end-to-end responsibility", "that evaluation"), even at the cost of a
+does not happen. Repeat the precise noun phrase instead, even at the cost of a
 few words. The same test applies inside a paragraph whenever more than
 one candidate antecedent precedes the reference.
 
@@ -1632,16 +1645,6 @@ nothing leaves the antecedent just as ambiguous and costs a line —
 exactly the non-repair that padding a coordination seam is under Rule
 5. A transition earns its place by naming the thing it carries
 forward.
-
-For orientation only — **explanatory examples, never mandatory
-copy** — a repair of the form *"That was the broader pattern in the
-role: taking ambiguous operational needs through evaluation and
-integration to systems running in production"* names the
-responsibility and holds the breadth to the one role, and a following
-transition of the form *"That end-to-end responsibility is also what
-draws me to…"* replaces an ambiguous "It" with the single noun phrase
-it meant. Diagnose and repair by shape, as with every rule in this
-section; do not pattern-match on these sentences.
 
 **Write from the evidence, not from its phrasing.** Preserve every fact and
 its scope, but vary distinctive source constructions across the résumé and
@@ -1664,6 +1667,14 @@ prose, not a converted résumé-bullet list trying to mention every
 related system. Pick the strongest one or two pieces of evidence per
 paragraph and develop them; a paragraph that name-checks five systems
 to be thorough is weaker than one that explains one system well.
+
+**Close by connecting contribution to work.** When the final paragraph invites
+a conversation, its final sentence should connect the candidate's relevant
+contribution to the target work. A sentence that ends only on what the candidate
+wants to learn, hear, or discuss leaves the argument pointed inward; revise it
+so the invitation carries the role-facing contribution forward. Keep the
+invitation direct and present-tense without relying on conditional or deferential
+boilerplate.
 
 ### 11.3 Accent &amp; the close
 
@@ -1721,6 +1732,15 @@ for any letter that runs long.
   sentence; and a paragraph opening on "this", "that", or "it" has
   exactly one possible antecedent, or repeats the noun phrase instead
   (§11.2.3 Rule 6).
+- **Name cross-domain work through the concrete artifact or responsibility.**
+  A bare possessive industry label can imply operational work or broader
+  industry tenure than the evidence supports. Name both the supported domain
+  and the actual function of the work.
+- **Name every data-flow actor.** Avoid ambiguous plural references such as
+  "data they used" or "through their APIs" when several systems or vendors
+  are in view. State who produced, consumed, or exposed the data. In the close,
+  say what experience, skills, or work the candidate would bring; those
+  capabilities are not themselves "the evidence" brought to a role.
 
 ### 11.5 Short letters stay top-aligned
 

@@ -22,8 +22,8 @@
  *    `snapshot` this module reads from is swapped ONLY inside
  *    primeClaudeModels(); claudeModelFor() is a pure, synchronous read of
  *    whatever snapshot is currently live. Callers are expected to call
- *    primeClaudeModels() once at the start of a logical run (a hub run, a
- *    generate-application invocation) and let every call within that run
+ *    primeClaudeModels() once at the start of a logical multi-call run and let
+ *    every call within that run
  *    read the same resolved id via claudeModelFor(). `modelResolutionSnapshot
  *    ().epoch` increments on every swap so a caller/bug-report can detect a
  *    mid-run flip after the fact.

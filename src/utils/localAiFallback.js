@@ -24,7 +24,7 @@ export const LOCAL_AI_STATUS_ERROR_STREAK_LIMIT = 3;
 // Statuses the MOUNTED CARD's poll loop leaves alone (JobCardNode's effect).
 // 'importing' is here because the card is itself mid-import when it holds it.
 export const LOCAL_AI_CARD_POLL_IDLE_STATUSES = Object.freeze([
-  'saved', 'failed', 'importing', 'render-retry-required', 'revision-exhausted',
+  'saved', 'failed', 'importing', 'render-retry-required',
 ]);
 
 // Statuses the FALLBACK MANAGER leaves alone. Deliberately narrower than the
@@ -34,7 +34,7 @@ export const LOCAL_AI_CARD_POLL_IDLE_STATUSES = Object.freeze([
 // running in the main process rejects the retry with LOCAL_AI_IMPORT_IN_FLIGHT,
 // which the manager treats as "wait for the next tick".
 export const LOCAL_AI_FALLBACK_IDLE_STATUSES = Object.freeze([
-  'saved', 'failed', 'render-retry-required', 'revision-exhausted',
+  'saved', 'failed', 'render-retry-required',
 ]);
 
 // ── Mounted-card registry ────────────────────────────────────────────────────

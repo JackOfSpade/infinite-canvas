@@ -4,9 +4,9 @@
  * Records semantic user actions as timestamped strings.
  * Used by the Bug Report feature to reconstruct reproduction steps.
  *
- * Memory safety: enforces a 500 KB ring buffer (~6,000 lines).
- * At export time, the Bug Report handler budgets up to 500 KB for events
- * within the file (see electron/ipc/bugReport.js).
+ * Memory safety: enforces a 500 KB ring buffer (~6,000 lines). File export
+ * preserves that captured ring in full; clipboard export applies its own
+ * character budget (see electron/ipc/bugReport.js).
  *
  * Also auto-captures JS errors and unhandled promise rejections so they
  * appear in the event timeline alongside user actions.

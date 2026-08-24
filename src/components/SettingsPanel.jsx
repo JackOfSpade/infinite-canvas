@@ -13,6 +13,7 @@ import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } fr
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
 import { updateModalCount } from './modalStack';
+import { ConfirmDialog } from './ConfirmDialog';
 
 const SPEED_OPTIONS = [
   { key: 'snappy',   label: 'Snappy',   desc: `${ANIMATION_DURATIONS.snappy}ms`,   icon: Zap,      color: 'text-amber-400' },
@@ -37,14 +38,10 @@ const CLAUDE_FAMILY_OPTIONS = [
   { token: 'HAIKU',  label: 'Haiku',  desc: 'fastest & cheapest' },
 ];
 
-// The three task GROUPS a Claude family is picked for (llm.js TASK_GROUPS) —
+// The live API task GROUPS a Claude family is picked for (llm.js TASK_GROUPS) —
 // `defaultToken` mirrors llm.js's GROUP_DEFAULT_FAMILY so the "(default)"
 // hint in each dropdown stays accurate without an extra IPC round trip.
 const CLAUDE_MODEL_GROUPS = [
-  {
-    key: 'generation', label: 'Generation', defaultToken: 'OPUS',
-    note: 'Governs résumé + cover-letter generation, and the achievement mining/refute passes that feed them.',
-  },
   {
     key: 'analysis', label: 'Analysis', defaultToken: 'SONNET',
     note: 'Vision identification, pricing judgment, résumé parsing, job scoring/query-gen/bucketing.',
@@ -56,7 +53,6 @@ const CLAUDE_MODEL_GROUPS = [
 ];
 
 const AI_PROVIDER_OPTIONS = [
-  { key: 'local', label: 'Local AI' },
   { key: 'gemini', label: 'Gemini API' },
   { key: 'claude', label: 'Claude API' },
 ];
@@ -285,6 +281,7 @@ const NATIVE_READ_MARKETPLACE_NAMES = SELL_PLATFORMS
 function JobPlatformLoginsSection() {
   const [authByPlatform, setAuthByPlatform] = useState({});
   const [pendingByPlatform, setPendingByPlatform] = useState({});
+  const [resetTarget, setResetTarget] = useState(null);
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -308,6 +305,31 @@ function JobPlatformLoginsSection() {
     addToast,
   }), [addToast]);
 
+  const handleReset = useCallback(async () => {
+    const platformId = resetTarget;
+    if (!platformId) return;
+    setResetTarget(null);
+    setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
+    try {
+      const res = await window.electronAPI?.resetPlatformSession?.({ platformId });
+      if (!res?.success) throw new Error(res?.reason || res?.error || 'The session could not be reset.');
+      setAuthByPlatform(prev => ({ ...prev, [platformId]: false }));
+      addToast({
+        title: 'Indeed session reset',
+        description: 'Indeed cookies and saved site data were cleared. Other platform sessions were left unchanged; log in to Indeed again before searching.',
+        type: 'success',
+      });
+    } catch (err) {
+      addToast({
+        title: 'Indeed reset failed',
+        description: err?.message || String(err),
+        type: 'error',
+      });
+    } finally {
+      setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
+    }
+  }, [resetTarget, addToast]);
+
   return (
     <div className="space-y-3">
       {JOB_LOGIN_PLATFORMS.map(platform => (
@@ -315,6 +337,17 @@ function JobPlatformLoginsSection() {
           <div className="flex items-center gap-2">
             <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
             <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
+            {platform.id === 'indeed' && (
+              <button
+                onClick={() => setResetTarget(platform.id)}
+                disabled={!!pendingByPlatform[platform.id]}
+                className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-white/[0.03] border-white/10 text-white/40 hover:bg-white/[0.08] hover:text-white/70 disabled:opacity-40"
+                title="Sign out of Indeed and clear only Indeed cookies and saved site data"
+              >
+                <RotateCcw size={10} />
+                Reset site
+              </button>
+            )}
             <LoginStatusPill
               pending={!!pendingByPlatform[platform.id]}
               connected={authByPlatform[platform.id]}
@@ -324,6 +357,17 @@ function JobPlatformLoginsSection() {
           </div>
         </div>
       ))}
+      {resetTarget && (
+        <ConfirmDialog
+          title="Reset Indeed session?"
+          message="This signs you out of Indeed and clears cookies and saved site data for indeed.com only. Google, LinkedIn, and marketplace sessions are unchanged. Close any open Indeed login or verification window first."
+          confirmLabel="Reset Indeed"
+          cancelLabel="Keep session"
+          variant="warning"
+          onConfirm={handleReset}
+          onCancel={() => setResetTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -675,7 +719,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     window.electronAPI.updateSettings({ ai: { [key]: value } });
   }, [aiSettings]);
 
-  // Sets ONE group's Claude family (Generation/Analysis/Light — llm.js
+  // Sets ONE live API group's Claude family (Analysis/Light — llm.js
   // TASK_GROUPS). Persist only the changed group. Sending the entire local
   // object looks harmless, but two quick picker changes can have stale React
   // closures and the second request would overwrite the first group's new
@@ -777,7 +821,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               <div className="space-y-4">
                 {/* Provider Selection */}
                 <div>
-                  <div className="text-white/50 text-[11px] mb-1.5">Primary AI Provider</div>
+                  <div className="text-white/50 text-[11px] mb-1.5">API Provider</div>
                   <div className="flex gap-1.5">
                     {AI_PROVIDER_OPTIONS.map(({ key, label }) => (
                       <button
@@ -793,30 +837,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                       </button>
                     ))}
                   </div>
+                  <p className="mt-1.5 text-white/30 text-[9px] leading-relaxed">
+                    Used by in-app AI features. Application Generate uses the separate local application handoff.
+                  </p>
                 </div>
-
-                {/* Local AI is deliberately a human-in-the-loop workflow:
-                    the app creates a self-contained generation job, and the
-                    user's local Claude Code routine completes it. Keeping
-                    this separate from API configuration makes the cost and
-                    completion model obvious before a user switches. */}
-                {aiSettings.provider === 'local' && (
-                  <div className="space-y-2.5 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div className="text-white/70 text-[11px] font-medium">Claude Code handoff</div>
-                    <div className="text-white/40 text-[10px] leading-relaxed">
-                      Generate writes a self-contained job beside the saved canvas under .local-ai/jobs. Run local_ai/CLAUDE_CODE_ROUTINE.md with your subscription-authenticated Claude Code session; the canvas validates and imports its result automatically.
-                    </div>
-                    <div className="bg-black/25 border border-white/5 rounded-md px-2.5 py-2 text-white/35 text-[9px] leading-relaxed font-mono">
-                      Edit INPUT_JOBS_ROOT and OUTPUT_BUNDLE_ROOT in the routine. Output is relative to the saved canvas folder.
-                    </div>
-                    <div className="text-white/30 text-[9px] leading-relaxed">
-                      Completed jobs are removed after their final bundle is saved. Unfinished jobs are retained for up to 30 days, with a 20-job limit per canvas.
-                    </div>
-                    <p className="text-amber-300/65 text-[9px] leading-relaxed">
-                      This mode is manual and asynchronous. It uses no Gemini or Anthropic API key; keep one of the API modes selected when you need immediate in-app generation.
-                    </p>
-                  </div>
-                )}
 
                 {/* Gemini Settings */}
                 {aiSettings.provider === 'gemini' && (

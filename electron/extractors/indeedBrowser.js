@@ -4,22 +4,20 @@
  *
  * Replaces fetchIndeedListings (Scrapfly, ~$21/run).
  * Profile lives in the shared browser-data userDataDir used by Settings login.
- * First-time setup: open Settings → Job Sources → Connect Indeed and log in.
+ * First-time setup: open Settings → Job Platform Logins → Indeed and log in.
  */
 
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
-import { execFile } from 'node:child_process';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
-import { findChromePath, findSystemChromePath, getUserDataDir } from '../ipc/stealthBrowser.js';
+import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
 import { normalizeJobCollectionLimits, resolvePageCeiling, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
-import { humanCooldown } from '../utils/humanDelay.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
 
@@ -95,26 +93,77 @@ async function waitWithCountdown(ms, onTick) {
   }
 }
 
-// Clears CF bot-score cookie, closes the browser, waits out the backoff, then launches
-// a fresh browser and returns the new { browser, page }.
-async function restartBrowserForCF(page, browser, backoffMs, { userDataDir, launchOpts, onProgress }) {
-  await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
-  await browser.close().catch(() => {});
-  await killChromeHoldingProfile(userDataDir);
-  await waitWithCountdown(backoffMs, (s) => onProgress?.(`CF cooldown ${s}s…`));
-  const newBrowser = await puppeteer.launch(launchOpts);
-  const newPage    = await newBrowser.newPage();
-  await newPage.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-  await newPage.evaluateOnNewDocument(OVERLAY_SCRIPT);
-  return { browser: newBrowser, page: newPage };
+// Kept as a pure decision seam for the resume flow and its tests. A native
+// Chrome handoff is needed because the reported challenge loop persisted even
+// after the user completed it inside the Puppeteer-controlled window.
+export function shouldHandoffIndeedChallengeToNative(reason) {
+  // Text-only CF walls cannot be completed in the controlled page, but they
+  // are precisely the cases worth one real-Chrome attempt. This is a handoff
+  // decision, not a decision to wait in the automation process.
+  return [
+    'cloudflare-challenge-url',
+    'challenge-shell',
+    'cloudflare-challenge-frame',
+    'cf-verify-text',
+  ].includes(String(reason || ''));
 }
 
-// Kill any Chrome process holding the given userDataDir (zombie cleanup after a crash).
-// Uses pkill -f on macOS/Linux; silently no-ops on failure or unsupported platforms.
-function killChromeHoldingProfile(dir) {
+export function classifyIndeedSessionPreflight({ hasPPID = false, authenticatedUrl = false, landedUrl = '', challengeReason = null } = {}) {
+  const url = String(landedUrl || '');
+  if (!url || url === 'about:blank') return { status: 'unreachable' };
+  // This must precede every auth inference for REAL challenges. A CF URL can
+  // still be an indeed.com URL, but it says nothing about either account
+  // authentication or clearance. "indeed-login-wall" is deliberately excluded
+  // here: this preflight navigates to an auth-gated URL
+  // (secure.indeed.com/settings/account) on purpose, so a redirect to Indeed's
+  // OWN sign-in page is the ORDINARY logged-out signal, not a bot wall — routing
+  // it through "challenge" told a logged-out user to wait and retry while hiding
+  // the actual login path.
+  if (challengeReason && challengeReason !== 'indeed-login-wall') return { status: 'challenge', reason: challengeReason };
+  if (hasPPID || authenticatedUrl) return { status: 'authenticated', proof: hasPPID ? 'PPID' : 'authenticated-url' };
+  if (challengeReason === 'indeed-login-wall' || /\/(auth|login|signin)(\?|$)/i.test(url)) {
+    return { status: 'needs-login', reason: 'redirected-to-sign-in' };
+  }
+  // Public Indeed pages are intentionally NOT an authentication signal.
+  return { status: 'needs-login', reason: 'auth-cookie-missing' };
+}
+
+function ownedProcessExited(proc) {
+  return !proc || proc.exitCode != null || proc.signalCode != null;
+}
+
+function waitForOwnedProcessExit(proc, timeoutMs) {
+  if (ownedProcessExited(proc)) return Promise.resolve(true);
   return new Promise(resolve => {
-    execFile('pkill', ['-f', dir], () => resolve());
+    let timer;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      proc.removeListener?.('exit', done);
+      resolve(true);
+    };
+    proc.once('exit', done);
+    if (ownedProcessExited(proc)) return done();
+    timer = setTimeout(() => {
+      proc.removeListener?.('exit', done);
+      resolve(ownedProcessExited(proc));
+    }, timeoutMs);
   });
+}
+
+// Close only the Chrome process this extractor launched. The retired `pkill -f
+// <userDataDir>` cleanup matched every login/scrape window sharing the profile
+// and could terminate a live login while it was checkpointing auth cookies.
+async function closeOwnedIndeedBrowser(browser, label) {
+  if (!browser) return;
+  const proc = browser.process?.();
+  const gracefulExit = waitForOwnedProcessExit(proc, 10_000);
+  await browser.close().catch(error => logger.warn(`[Indeed/Browser] ${label} browser.close() failed: ${error.message}`));
+  if (await gracefulExit) return;
+  logger.warn(`[Indeed/Browser] ${label} Chrome did not exit gracefully — terminating the owned process only`);
+  try { if (!ownedProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
+  if (await waitForOwnedProcessExit(proc, 3_000)) return;
+  try { if (!ownedProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
+  await waitForOwnedProcessExit(proc, 2_000);
 }
 
 // Page and query delays mirror the probe script step 7 (7.9s/page avg achieved).
@@ -268,8 +317,9 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
 
 async function getChallengeSignals(page) {
   const url = page.url();
+  const challengeUrl = /__cf_chl|cf_chl|cf-chl/i.test(url);
   if (url.includes('secure.indeed.com/auth') || url.includes('/auth?co=')) {
-    return { isChallenge: true, reason: 'indeed-login-wall' };
+    return { isChallenge: true, reason: 'indeed-login-wall', interactive: false, autoProgressing: false };
   }
   try {
     return await page.evaluate(() => {
@@ -285,13 +335,22 @@ async function getChallengeSignals(page) {
       else if (challengeShell) reason = 'challenge-shell';
       else if (cfFrame)  reason = 'cloudflare-challenge-frame';
       else if (cfText)   reason = 'cf-verify-text';
+      return { bodyChallenge: !!(reason || (!normalContent && (challengeShell || cfFrame))), reason, interactive: challengeShell || cfFrame };
+    }).then(({ bodyChallenge, reason, interactive }) => {
+      const finalReason = reason || (challengeUrl ? 'cloudflare-challenge-url' : null);
+      // URL-only CF hops can complete automatically; a text-only CF hard wall
+      // cannot. `cf-verify-text` is deliberately not auto-progressing.
       return {
-        isChallenge: !!(reason || (!normalContent && (challengeShell || cfFrame))),
-        reason,
+        isChallenge: !!(bodyChallenge || challengeUrl),
+        reason: finalReason,
+        interactive,
+        autoProgressing: challengeUrl && !reason,
       };
     });
   } catch {
-    return { isChallenge: false, reason: null };
+    return challengeUrl
+      ? { isChallenge: true, reason: 'cloudflare-challenge-url', interactive: false, autoProgressing: true }
+      : { isChallenge: false, reason: null, interactive: false, autoProgressing: false };
   }
 }
 
@@ -311,6 +370,12 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     return { jobs: rows, attempted: 0, recovered: 0, remaining: 0, unavailable: [], challengeReason: null };
   }
 
+  const existingReservation = getSharedProfileReservationInfo();
+  if (existingReservation) {
+    logger.warn(`[Indeed/Browser] Description retry deferred — shared profile is reserved for ${existingReservation.reason}`);
+    return { jobs: rows, attempted: 0, recovered: 0, remaining: targets.length, unavailable: [], challengeReason: 'shared-profile-reserved' };
+  }
+
   const userDataDir = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const executablePath = await findSystemChromePath() || await findChromePath();
   const launchOpts = {
@@ -323,20 +388,20 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     ignoreHTTPSErrors: true,
   };
 
+  let releaseProfileReservation;
+  try {
+    releaseProfileReservation = reserveSharedProfile('indeed-description-retry');
+  } catch (error) {
+    logger.warn(`[Indeed/Browser] Description retry could not reserve shared profile: ${error?.message || error}`);
+    return { jobs: rows, attempted: 0, recovered: 0, remaining: targets.length, unavailable: [], challengeReason: 'shared-profile-reserved' };
+  }
+
   let browser;
   let recovered = 0;
   let challengeReason = null;
   const unavailable = [];
   try {
-    try {
-      browser = await puppeteer.launch(launchOpts);
-    } catch (launchErr) {
-      if (!/browser is already running/i.test(launchErr.message)) throw launchErr;
-      logger.warn('[Indeed/Browser] Description retry found a Chrome zombie — killing it and retrying launch');
-      await killChromeHoldingProfile(userDataDir);
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      browser = await puppeteer.launch(launchOpts);
-    }
+    browser = await launchWithProfileLockRetry(launchOpts, 'indeed-description-retry');
 
     const page = await browser.newPage();
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
@@ -410,10 +475,8 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
     return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };
   } finally {
-    if (browser) {
-      await browser.close().catch(error => logger.warn(`[Indeed/Browser] retry browser.close() failed: ${error.message}`));
-      await killChromeHoldingProfile(userDataDir);
-    }
+    await closeOwnedIndeedBrowser(browser, 'description retry');
+    releaseProfileReservation?.();
   }
 }
 
@@ -428,6 +491,21 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
 export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null) {
+  const reservation = getSharedProfileReservationInfo();
+  if (reservation) {
+    return {
+      items: [],
+      warning: {
+        code: 'scrape-failed',
+        severity: 'block',
+        evidence: `Indeed could not start because the shared browser profile is reserved for ${reservation.reason}.`,
+        actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
+        suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
+        resumeState: { remainingQueries: Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean), startPage },
+      },
+      gathered: 0,
+    };
+  }
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
@@ -471,21 +549,48 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     ignoreHTTPSErrors: true,
   };
 
+  let releaseProfileReservation;
+  try {
+    releaseProfileReservation = reserveSharedProfile('indeed-browser-scrape');
+  } catch (error) {
+    return {
+      items: [],
+      warning: {
+        code: 'scrape-failed', severity: 'block',
+        evidence: error?.message || 'Indeed could not reserve the shared browser profile.',
+        actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
+        suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
+        resumeState: { remainingQueries: queryList, startPage },
+      },
+      gathered: 0,
+    };
+  }
+
   let browser;
   try {
     try {
-      browser = await puppeteer.launch(launchOpts);
-    } catch (launchErr) {
-      if (/browser is already running/i.test(launchErr.message)) {
-        // A Chrome zombie from a previous crashed session is holding the profile lock.
-        // Kill it and retry once.
-        logger.warn('[Indeed/Browser] Chrome zombie detected — killing stale process and retrying launch');
-        await killChromeHoldingProfile(userDataDir);
-        await new Promise(r => setTimeout(r, 1500));
-        browser = await puppeteer.launch(launchOpts);
-      } else {
-        throw launchErr;
-      }
+      browser = await launchWithProfileLockRetry(launchOpts, 'indeed-browser-scrape');
+    } catch (launchError) {
+      // Indeed is dispatched from inside fetchApiSources, whose generic catch
+      // labels ANY throw `api-failed` with "API call failed. Check logs for the
+      // full response." Indeed has no API — it is a browser scraper — so a
+      // Chrome launch failure surfaced to the user as an API error and sent them
+      // looking for a response that never existed. Return the same structured,
+      // resumable shape the profile-RESERVATION conflict above already returns,
+      // so the card names the real cause and offers Continue instead of dead-
+      // ending. Rethrow nothing: the finally below still releases the reservation.
+      logger.warn(`[Indeed/Browser] Chrome launch failed: ${launchError?.message || launchError}`);
+      return {
+        items: [],
+        warning: {
+          code: 'scrape-failed', severity: 'block',
+          evidence: `Indeed's Chrome could not start: ${String(launchError?.message || launchError).slice(0, 400)}`,
+          actionTitle: 'Retries the Indeed scrape — this failure was a browser that could not start, not your Indeed login',
+          suggestion: 'Close any open login or verification window, then click Continue to resume Indeed.',
+          resumeState: { remainingQueries: queryList, startPage },
+        },
+        gathered: 0,
+      };
     }
 
     let page = await browser.newPage();
@@ -494,23 +599,66 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     // Verify auth state before running any queries.
     let navError = null;
-    await page.goto(`https://${host}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch((e) => { navError = e; });
+    const accountVerifyUrl = 'https://secure.indeed.com/settings/account';
+    await page.goto(accountVerifyUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch((e) => { navError = e; });
     const landedUrl = page.url();
     await injectOverlay(page);
     await updateOverlay(page, { srcName: 'Indeed', srcLabel: 'Checking session…', count: 0, status: 'Verifying login…' });
     await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 600)));
-    const cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
-    const hasPPID        = cookies.some(c => c.name === 'PPID' && c.domain?.includes('indeed.com'));
-    const hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
-    const hasCfBm        = cookies.some(c => c.name === '__cf_bm');
-    const allCookieNames = cookies.map(c => c.name).join(', ') || '(none)';
-    // PPID may be absent from the CDP cookie store even when authenticated: Chrome's
-    // --app mode can keep session cookies only in the session-restore DB (not the
-    // persistent Cookies SQLite file that CDP reads). Fall back to the landing URL —
-    // a sign-in redirect is definitive proof of no session; staying on indeed.com is not.
-    const redirectedToSignIn = /\/(auth|login|signin)(\?|$)/i.test(landedUrl);
-    const sessionOk = hasPPID || (!redirectedToSignIn && landedUrl.includes('indeed.com'));
-    logger.info(`[Indeed/Browser] Session check — PPID:${hasPPID} cf_clearance:${hasCfClearance} __cf_bm:${hasCfBm} | all cookies: ${allCookieNames} | landedUrl: ${landedUrl} | ok: ${sessionOk}`);
+    let cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
+    let hasPPID = cookies.some(c => c.name === 'PPID' && c.domain?.includes('indeed.com'));
+    let hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
+    let hasCfBm = cookies.some(c => c.name === '__cf_bm');
+    let cookieNameList = cookies.map(c => c.name);
+    let allCookieNames = cookieNameList.join(', ') || '(none)';
+    let preflightSignals = await getChallengeSignals(page);
+    let preflight = classifyIndeedSessionPreflight({
+      hasPPID,
+      authenticatedUrl: /^https:\/\/secure\.indeed\.com\/settings\/account(?:[/?#]|$)/i.test(landedUrl),
+      landedUrl,
+      challengeReason: preflightSignals.isChallenge ? preflightSignals.reason : null,
+    });
+    // Observed-state snapshot, attached to every return from this point on so a
+    // bug report can always show what the scrape actually saw (landed URL,
+    // cookie names, PPID) rather than only the classified outcome. Built once,
+    // right after the preflight classification — nothing below changes these
+    // values.
+    const sessionDiagnostics = {
+      landedUrl,
+      preflightStatus: preflight.status,
+      preflightReason: preflight.reason || null,
+      hasPPID,
+      cookieNames: cookieNameList,
+      executablePath,
+      userDataDir,
+      host,
+    };
+    // Emitted before every early return below (not after) so a run that never
+    // reaches the query loop still leaves this diagnostic line for a bug report.
+    logger.info(`[Indeed/Browser] Session check — PPID:${hasPPID} cf_clearance:${hasCfClearance} __cf_bm:${hasCfBm} | all cookies: ${allCookieNames} | landedUrl: ${landedUrl} | preflight:${preflight.status}${preflight.reason ? ` (${preflight.reason})` : ''}`);
+
+    // A challenge solved in this Puppeteer-controlled window can still be rejected
+    // by CF. Return an explicit native-Chrome handoff instead of retrying here;
+    // the caller closes this controlled browser, opens real Chrome on this exact
+    // URL, and resumes only after the native page is stably clean.
+    if (preflight.status === 'challenge') {
+      return {
+        items: [],
+        warning: {
+          code: 'scrape-failed', severity: 'block',
+          evidence: `Indeed initial ${preflight.reason || 'Cloudflare'} challenge requires a native Chrome verification handoff; the controlled browser will not be retried.`,
+          suggestion: shouldHandoffIndeedChallengeToNative(preflight.reason)
+            ? 'Click Continue and complete the check in the real Chrome window that opens.'
+            : 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.',
+          resumeState: {
+            mode: shouldHandoffIndeedChallengeToNative(preflight.reason) ? 'native-challenge' : 'retry-later',
+            challengeUrl: page.url(), remainingQueries: queryList, startPage,
+          },
+        },
+        gathered: 0,
+        sessionDiagnostics,
+      };
+    }
 
     // The navigation never landed anywhere (no internet, DNS failure, dead VPN):
     // the page is still about:blank, so nothing was observed about the session.
@@ -518,75 +666,72 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // say what was actually observed instead. A timeout that still landed keeps
     // the sign-in-redirect check below, and a PPID cookie still proves the
     // session regardless of a transient nav failure.
-    if (!hasPPID && landedUrl === 'about:blank') {
+    if (preflight.status === 'unreachable') {
       logger.warn(`[Indeed/Browser] Landing navigation never completed — session state unknown${navError ? ` (${navError.message})` : ''}`);
       return {
         items: [],
         warning: {
           code: 'scrape-failed',
           severity: 'block',
-          evidence: `Could not reach ${host}${navError ? ` — ${String(navError.message || navError).slice(0, 200)}` : ''}. Session state unknown.`,
+          evidence: `Could not reach Indeed account verification${navError ? ` — ${String(navError.message || navError).slice(0, 200)}` : ''}. Session state unknown.`,
           suggestion: 'Check your internet connection (or VPN) and retry.',
         },
         gathered: 0,
+        sessionDiagnostics,
       };
     }
 
-    if (!sessionOk) {
-      logger.warn('[Indeed/Browser] Not logged in — PPID missing and page redirected to sign-in');
+    if (preflight.status !== 'authenticated') {
+      logger.warn(`[Indeed/Browser] Not authenticated — PPID missing (${preflight.reason || 'no authenticated session proof'})`);
       return {
         items: [],
         warning: {
           code: 'needs-login',
           severity: 'block',
-          evidence: 'Indeed session not authenticated — page redirected to sign-in.',
-          suggestion: 'Open Settings → Job Sources → Connect Indeed and log into your Indeed account.',
+          actionLabel: 'Log in',
+          actionTitle: 'Opens a real Chrome window to sign in to Indeed, then resumes this search automatically',
+          evidence: `Indeed session check landed at ${landedUrl}. Cookies observed: ${allCookieNames}. PPID — the session proof — was absent.`,
+          suggestion: 'Click "Log in" on this card to sign in to Indeed in a real Chrome window — the search resumes automatically afterward.',
+          resumeState: { mode: 'native-login', remainingQueries: queryList, startPage },
         },
         gathered: 0,
+        sessionDiagnostics,
       };
     }
-    if (!hasPPID) {
-      logger.warn('[Indeed/Browser] PPID not in persistent cookie store — proceeding based on landing URL (session cookies from native Chrome --app mode may not appear in CDP store)');
-    }
-
     // Say "All" explicitly (with its backstop) rather than just printing the
     // resolved ceiling number — otherwise a user who chose "All" sees a plain
     // "up to 1000 pages" log line that reads like a deliberate 1000-page setting.
     logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${describeJobCollectionLimits(limits).pages} pages`);
 
-    // ── Escalation table ────────────────────────────────────────────────────
-    // Cooldown after the Nth failure before the (N+1)th attempt. Other queries
-    // run during this window, so actual elapsed time may be longer.
-    // Index = retryCount of the entry that just failed.
-    // retryCount ≥ CF_ESCALATION_MS.length → all retries exhausted, give up.
-    // No trailing 0: a zero-cooldown entry here would fire one immediate
-    // retry right before giving up, into a still-active block — the
-    // opposite of escalation, and likely to harden it further.
-    const CF_ESCALATION_MS = [5_000, 30_000, 60_000];
-
     const allJobs = [];
     const seenKeys = new Set();
     const providerSeenKeys = new Set();
     let totalChallenges = 0;
-    let gaveUpCount = 0;
-    const gaveUpPages = []; // { q, p } for each page that exhausted all retries
     let loginWallHit = false;
     let challengedQi = -1;
     let challengedPage = 0;
+    let manualChallenge = null; // actionable return state when the visible solve did not clear
     // Per-query CF telemetry — logged as compact summaries at run end so the
     // full picture fits in the 60-line ring buffer regardless of run length.
     const perQueryChallenges = {}; // qi → challenge count
-    const perQueryGaveUp     = {}; // qi → give-up page count
 
-    // workList drives all work: initial queries plus deferred retries pushed by
-    // the CF escalation logic. retryCount=0 means first attempt; availableAt=0
-    // means ready immediately. Multiple entries can have independent cooldowns
-    // running simultaneously — the outer loop always picks the soonest-ready one.
+    const stopForIndeedChallenge = async ({ q, qi, p, reason, label }) => {
+      totalChallenges++;
+      perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
+      const challengeUrl = page.url();
+      const nativeHandoff = shouldHandoffIndeedChallengeToNative(reason);
+      manualChallenge = { q, qi, p, reason: reason || 'challenge', status: nativeHandoff ? 'native-handoff-required' : 'hard-block', challengeUrl, nativeHandoff };
+      logger.warn(`[Indeed/Browser] ${label} requires ${nativeHandoff ? 'native Chrome handoff' : 'a later retry'}; preserving the profile and stopping this controlled-browser run.`);
+      return false;
+    };
+
+    // One pass per requested query. A CF hit stops this controlled browser and
+    // returns a native-Chrome handoff state; it never resets cookies or retries
+    // inside Puppeteer.
     const workList = queryList.map((q, qi) => ({
       q, qi,
       startPage: qi === 0 ? startPage : 0,
       retryCount: 0,
-      availableAt: 0,
     }));
 
     // Data-driven per-page stop, one instance PER QUERY (indexed by qi, not per
@@ -602,89 +747,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       makeJobPageStop({ maxAgeDays: days, unlimited: unlimitedPages, sourceLabel: 'Indeed' })
     );
 
-    // nextPageAdvanced tracks which (qi, startPage) pairs have already been
-    // injected as opportunistic next-page entries so the same advance isn't
-    // created twice during a single cooldown window (Bug: without this guard,
-    // a completed next-page entry returns to a still-cooling original, finds
-    // the same candidate again, and re-creates the identical entry).
-    const nextPageAdvanced = new Set();
-
-    // Defined once here (not inside the loop) — only needs workList,
-    // totalChallenges, gaveUpCount, and CF_ESCALATION_MS from this scope.
-    // q/qi/hitCount are passed explicitly so the function isn't tied to
-    // whichever entry happens to be current when it's called.
-    //
-    // hitCount = entry.retryCount + any inline restarts already done this pass.
-    // Returns:
-    //   'restart-inline' — caller must await restartBrowserForCF(backoff=CF_ESCALATION_MS[0]),
-    //                       increment hitCount, p--, continue (no other queries run during wait)
-    //   'deferred'       — entry pushed to workList; caller should break inner loop
-    //   'give-up'        — all escalation levels exhausted; caller should break inner loop
-    const handleCFHit = (q, qi, hitCount, trigger, p) => {
-      totalChallenges++;
-      perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
-      if (hitCount === 0) {
-        // First hit on a fresh entry — restart inline so no other queries run during the 5s wait.
-        logger.info(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — restarting browser (${CF_ESCALATION_MS[0] / 1000}s inline backoff)`);
-        return 'restart-inline';
-      }
-      if (hitCount >= CF_ESCALATION_MS.length) {
-        logger.warn(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — all retries exhausted, giving up on this page`);
-        gaveUpCount++;
-        gaveUpPages.push({ q, p: p + 1 });
-        perQueryGaveUp[qi] = (perQueryGaveUp[qi] || 0) + 1;
-        return 'give-up';
-      }
-      const cooldownMs = humanCooldown(CF_ESCALATION_MS[hitCount]);
-      const nextRetry = hitCount + 1;
-      logger.warn(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — defer retry ${nextRetry}/${CF_ESCALATION_MS.length} (cooldown ${(cooldownMs / 1000).toFixed(1)}s)`);
-      workList.push({ q, qi, startPage: p, retryCount: nextRetry, availableAt: Date.now() + cooldownMs });
-      return 'deferred';
-    };
-
     let wi = 0;
     outer:
     while (wi < workList.length) {
       if (signal?.aborted) break;
 
       const entry = workList[wi];
-
-      // ── Ready check: skip entries still in their cooldown window ──────────
-      if (entry.availableAt > Date.now()) {
-        // Find the next already-ready entry later in the list and bring it forward.
-        const readyIdx = workList.findIndex((e, i) => i > wi && e.availableAt <= Date.now());
-        if (readyIdx !== -1) {
-          workList.splice(wi, 0, workList.splice(readyIdx, 1)[0]);
-          continue; // re-evaluate workList[wi] (the newly moved entry) without advancing wi
-        }
-
-        // All remaining entries are still cooling down.
-        // Before idle-waiting, try advancing a deferred query to its next page —
-        // a different URL is less likely to hit the same CF sliding-window block.
-        const nextPageCandidate = workList.slice(wi).find(e => {
-          const nextPage = e.startPage + 1;
-          return nextPage < maxPages && !nextPageAdvanced.has(`${e.qi}:${nextPage}`);
-        });
-        if (nextPageCandidate) {
-          const nextPage = nextPageCandidate.startPage + 1;
-          nextPageAdvanced.add(`${nextPageCandidate.qi}:${nextPage}`);
-          workList.splice(wi, 0, {
-            q: nextPageCandidate.q, qi: nextPageCandidate.qi,
-            startPage: nextPage,
-            retryCount: 0, availableAt: 0,
-          });
-          continue; // process the fresh next-page entry immediately
-        }
-
-        // No next pages available — idle-wait until the soonest entry is ready.
-        const soonestAt = Math.min(...workList.slice(wi).map(e => e.availableAt));
-        const waitMs = Math.max(0, soonestAt - Date.now());
-        if (waitMs > 0) {
-          logger.info(`[Indeed/Browser] All pending entries cooling down — idle ${Math.ceil(waitMs / 1000)}s`);
-          await waitWithCountdown(waitMs, (s) => onProgress?.(`CF idle cooldown ${s}s…`));
-        }
-        continue; // don't advance wi
-      }
 
       // ── Liveness check ────────────────────────────────────────────────────
       // Cloudflare challenge pages can detach the Puppeteer frame mid-navigation.
@@ -697,41 +765,16 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      // ── Browser restart for deferred entries ──────────────────────────────
-      // The cooldown already elapsed while other queries were running, so
-      // backoffMs=0 — we still need a fresh fingerprint (close + reopen, clear __cf_bm).
-      if (entry.retryCount > 0) {
-        logger.info(`[Indeed/Browser] Resuming deferred q="${entry.q}" p=${entry.startPage + 1} (retry ${entry.retryCount}/${CF_ESCALATION_MS.length})`);
-        ({ browser, page } = await restartBrowserForCF(page, browser, 0, { userDataDir, launchOpts, onProgress }));
-      }
-
       const { q, qi, retryCount } = entry;
-      // hitCount starts at entry.retryCount and increments for each inline restart done
-      // this pass, so the escalation level stays correct if a retry also hits CF inline.
-      let hitCount = retryCount;
 
       const overlayBase = {
         srcName:  'Indeed',
-        srcLabel: retryCount > 0
-          ? `Retry ${retryCount}/${CF_ESCALATION_MS.length} q${qi + 1}/${queryList.length}`
-          : `Query ${qi + 1} of ${queryList.length}`,
+        srcLabel: `Query ${qi + 1} of ${queryList.length}`,
         qLabel:   'Searching',
         qText:    q,
       };
 
-      // Which page hitCount's budget currently belongs to. A CF hit retries the
-      // SAME page via `p--; continue`, so the reset below must fire only when
-      // the walk actually advances to a new page — keying it on `p >
-      // entry.startPage` reset the counter on every retry too, and the pass
-      // could then restart inline forever without ever escalating.
-      let escalationPage = entry.startPage;
-
       for (let p = entry.startPage; p < maxPages; p++) {
-        // Each page beyond the originally-deferred startPage is a fresh page —
-        // reset hitCount so it gets its own full escalation budget rather than
-        // inheriting the exhausted retryCount from the entry that was deferred.
-        if (p !== escalationPage) { hitCount = 0; escalationPage = p; }
-
         if (signal?.aborted) break outer;
         if (allJobs.length >= resultCap) break outer;
 
@@ -764,67 +807,21 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           logger.warn(`[Indeed/Browser] Challenge (${signals.reason}) q="${q}" p=${p + 1}${rayId ? ` Ray=${rayId}` : ''}`);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `⚠️ ${signals.reason}`, challenge: true });
 
-          if (signals.reason !== 'indeed-login-wall') {
-            const cfAction = handleCFHit(q, qi, hitCount, `cf-challenge (${signals.reason})`, p);
-            if (cfAction === 'restart-inline') {
-              hitCount++;
-              ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
-              p--;
-              continue;
-            }
-            break;
+          if (signals.reason === 'indeed-login-wall') {
+            // Never allow Google/Indeed SSO inside the Puppeteer-controlled
+            // scrape window. Close it through finally and direct the user to
+            // the native Settings login flow, which owns the real Chrome profile.
+            challengedQi = qi;
+            challengedPage = p;
+            loginWallHit = true;
+            logger.warn(`[Indeed/Browser] Indeed login wall q="${q}" p=${p + 1} — refusing CDP login; use native Settings login instead.`);
+            break outer;
           }
 
-          // Login wall — keep the CDP window open and let the user log in directly.
-          // Disable overlay so it doesn't block the login form.
-          await page.evaluate(() => {
-            const panel = document.getElementById('__ic-panel');
-            if (panel) panel.style.pointerEvents = 'none';
-          }).catch(() => {});
-          await updateOverlay(page, {
-            ...overlayBase,
-            count: allJobs.length,
-            status: 'Sign in to Indeed to continue — waiting…',
-            challenge: true,
+          await stopForIndeedChallenge({
+            q, qi, p, reason: signals.reason, label: `Cloudflare challenge q="${q}" p=${p + 1}`,
           });
-
-          const LOGIN_POLL_MS = 2000;
-          const LOGIN_HEARTBEAT_MS = 30_000;
-          let loggedIn = false;
-          const loginWaitStart = Date.now();
-          let loginHeartbeatAt = Date.now();
-
-          // Wait INDEFINITELY for the user to sign in — never skip on a timer. The
-          // escape hatches are an abort (Reset / hub close) or the user closing the
-          // window; a heartbeat keeps an unattended wait visible in the logs.
-          while (true) {
-            if (signal?.aborted || page.isClosed()) break;
-            await new Promise(r => setTimeout(r, LOGIN_POLL_MS));
-            if (signal?.aborted || page.isClosed()) break;
-            const currentUrl = page.url();
-            const isAuthPage = /secure\.indeed\.com\/(auth|login)|indeed\.com\/(auth|login|signin)/i.test(currentUrl);
-            if (currentUrl.includes('indeed.com') && !isAuthPage) {
-              loggedIn = true;
-              logger.info(`[Indeed/Browser] Login complete — resuming q=${qi + 1} p=${p + 1}`);
-              break;
-            }
-            if (Date.now() - loginHeartbeatAt >= LOGIN_HEARTBEAT_MS) {
-              loginHeartbeatAt = Date.now();
-              logger.info(`[Indeed/Browser] still waiting for Indeed sign-in (${Math.round((Date.now() - loginWaitStart) / 60000)} min elapsed)`);
-            }
-          }
-
-          if (!loggedIn || signal?.aborted) {
-            challengedQi = qi; challengedPage = p; loginWallHit = true; break outer;
-          }
-
-          // Re-enable overlay and retry this page (p-- makes the loop revisit same index)
-          await page.evaluate(() => {
-            const panel = document.getElementById('__ic-panel');
-            if (panel) panel.style.pointerEvents = 'auto';
-          }).catch(() => {});
-          p--;
-          continue;
+          break outer;
         }
 
         let html;
@@ -863,14 +860,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
         if (html.length < 150_000 && rawPageJobs.length === 0) {
           logger.warn(`[Indeed/Browser] Soft block suspected — ${htmlKB}KB, 0 jobs q="${q}" p=${p + 1}`);
-          const cfAction = handleCFHit(q, qi, hitCount, 'soft-block', p);
-          if (cfAction === 'restart-inline') {
-            hitCount++;
-            ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
-            p--;
-            continue;
-          }
-          break;
+          totalChallenges++;
+          perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
+          manualChallenge = { q, qi, p, reason: 'soft-block', status: 'hard-block' };
+          break outer;
         }
 
         // Check for a next-page link as a more reliable last-page signal than result count.
@@ -902,14 +895,23 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         if (enrichResult.cfBlankAt != null) {
           logger.warn(`[Indeed/Browser] CF blank at card ${enrichResult.cfBlankAt + 1} q=${qi + 1} p=${p + 1}`);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: '⚠️ cf-blank-enrichment', challenge: true });
-          const cfAction = handleCFHit(q, qi, hitCount, 'cf-blank-enrichment', p);
-          if (cfAction === 'restart-inline') {
-            hitCount++;
-            ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
-            p--;
-            continue;
+          const blankSignals = await getChallengeSignals(page);
+          if (blankSignals.isChallenge) {
+            const cleared = await stopForIndeedChallenge({
+              q, qi, p, reason: blankSignals.reason || 'cf-blank-enrichment', label: `Cloudflare description challenge q="${q}" p=${p + 1}`,
+            });
+            if (cleared) {
+              p--;
+              continue;
+            }
+          } else {
+            totalChallenges++;
+            perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
+            manualChallenge = { q, qi, p, reason: 'cf-blank-enrichment', status: 'hard-block' };
           }
-          break;
+          if (manualChallenge) {
+            break outer;
+          }
         }
 
         if (signal?.aborted) break outer;
@@ -1002,7 +1004,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // Heuristic: 30s per 10 challenges, capped at 120s.
     const missingDescJobs = allJobs.filter(j => !j.description || j.description.trim() === '');
     let reEnriched = 0;
-    if (missingDescJobs.length > 0 && !signal?.aborted) {
+    if (missingDescJobs.length > 0 && !signal?.aborted && !manualChallenge) {
       if (totalChallenges > 0) {
         const cooldownMs = Math.min(120_000, Math.ceil(totalChallenges / 10) * 30_000);
         logger.info(`[Indeed/Browser] Re-enrich: waiting ${cooldownMs / 1000}s CF cooldown before re-enrichment (${totalChallenges} challenges this run)`);
@@ -1072,10 +1074,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // within the 60-line ring buffer regardless of how long the scrape ran.
     for (let i = 0; i < queryList.length; i++) {
       const cf      = perQueryChallenges[i] || 0;
-      const skipped = perQueryGaveUp[i]     || 0;
       const cfNote      = cf      ? ` ${cf} CF`            : ' clean';
-      const skippedNote = skipped ? ` ⚠️ ${skipped} skipped` : '';
-      logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}${skippedNote}`);
+      logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}`);
     }
     logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
 
@@ -1083,13 +1083,31 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const items    = inWindow.slice(0, resultCap);
 
     let warning = null;
-    if (loginWallHit) {
+    if (manualChallenge) {
+      warning = {
+        code: 'scrape-failed',
+        severity: 'block',
+        evidence: `Indeed ${manualChallenge.reason} at "${manualChallenge.q}" page ${manualChallenge.p + 1} did not clear (${manualChallenge.status}). The browser profile and Cloudflare cookies were preserved.`,
+        suggestion: manualChallenge.status === 'hard-block'
+          ? 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.'
+          : 'Click Continue, then complete the check in the real Chrome window that opens.',
+        resumeState: {
+          mode: manualChallenge.nativeHandoff ? 'native-challenge' : 'retry-later',
+          challengeUrl: manualChallenge.challengeUrl,
+          remainingQueries: queryList.slice(manualChallenge.qi),
+          startPage: manualChallenge.p,
+        },
+      };
+    } else if (loginWallHit) {
       warning = {
         code: 'needs-login',
         severity: 'block',
-        evidence: 'Indeed session expired — login wall hit during pagination.',
-        suggestion: 'Open Settings → Job Sources → Connect Indeed to refresh your login, then click Continue on the source card.',
+        actionLabel: 'Log in',
+        actionTitle: 'Opens a real Chrome window to sign in to Indeed, then resumes this search automatically',
+        evidence: `Indeed redirected to its sign-in page mid-pagination at "${queryList[challengedQi]}" page ${challengedPage + 1}.`,
+        suggestion: 'Click "Log in" on this card to sign in to Indeed in a real Chrome window — the search resumes automatically afterward.',
         resumeState: {
+          mode: 'native-login',
           remainingQueries: queryList.slice(challengedQi),
           startPage: challengedPage,
         },
@@ -1101,13 +1119,6 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: `${totalChallenges} Cloudflare challenge(s) — no jobs extracted.`,
         suggestion: 'Try again in a few minutes.',
       };
-    } else if (gaveUpCount > 0) {
-      warning = {
-        code: 'scrape-partial',
-        severity: 'warn',
-        evidence: `${gaveUpCount} page(s) skipped after persistent Cloudflare challenges — some results may be missing.${gaveUpPages.length ? ` Skipped: ${gaveUpPages.map(({ q, p }) => `"${q}" p${p}`).join(', ')}.` : ''}`,
-        suggestion: null,
-      };
     }
 
     return {
@@ -1118,15 +1129,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       relevanceDropped: 0,
       preCapRelevanceDropped: 0,
       relevanceRejected: [],
+      sessionDiagnostics,
     };
 
   } finally {
-    if (browser) {
-      await browser.close().catch(e => logger.warn(`[Indeed/Browser] browser.close() failed: ${e.message}`));
-      // Kill by profile path rather than Puppeteer's process reference — CDP disconnect
-      // can null out browser._process before we reach here, making kill() a no-op and
-      // leaving Chrome alive to hold the SingletonLock for the next launch.
-      await killChromeHoldingProfile(userDataDir);
-    }
+    await closeOwnedIndeedBrowser(browser, 'listing scrape');
+    releaseProfileReservation?.();
   }
 }

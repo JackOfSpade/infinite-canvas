@@ -18,7 +18,7 @@ import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { safeApiFetch } from '../ipc/antiBotDetector.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
-import { sourceJobKey } from '../../src/utils/jobIdentity.js';
+import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
@@ -704,6 +704,19 @@ const JOB_ROLE_CONCEPT_ALIASES = new Map([
   ['technician', [['tech'], ['worker']]],
 ]);
 
+// Technical architecture titles vary their domain qualifier much more than
+// ordinary role titles do: employers use Software/Solutions/Systems/Cloud/etc.
+// Architect for overlapping work. Treat those qualifiers as one concept only
+// when BOTH the query and the candidate title contain the `architect` head.
+// This keeps the two-concept safety rule intact (qualifier + architect) and
+// avoids admitting unrelated single-word matches such as Landscape Architect
+// or an arbitrary Systems Analyst.
+const TECHNICAL_ARCHITECTURE_QUALIFIERS = new Set([
+  'software', 'solution', 'system', 'platform', 'application', 'cloud',
+  'infrastructure', 'enterprise', 'technical', 'technology', 'digital',
+  'data', 'analytics', 'security', 'network', 'integration', 'observability',
+]);
+
 // A small number of job-title words have established meanings in unrelated
 // fields. The broad-board matcher intentionally permits a single meaningful
 // word for a query such as "Lead Server" (the modifier `lead` is generic), but
@@ -847,6 +860,18 @@ function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
   // a stemmer: a real stemmer conflates unrelated roles (operations/operator).
   const roleTokenSingulars = roleTokenList.map(singularizeRoleToken);
   const queryTokens = new Set(terms.map(norm).filter(Boolean));
+  const queryTokenSingulars = new Set([...queryTokens].map(singularizeRoleToken));
+  const technicalArchitectureContext = queryTokenSingulars.has('architect')
+    && roleTokenSingulars.includes('architect');
+  const aliasesFor = (term) => {
+    const aliases = [...(JOB_ROLE_CONCEPT_ALIASES.get(term) || [])];
+    if (technicalArchitectureContext && TECHNICAL_ARCHITECTURE_QUALIFIERS.has(singularizeRoleToken(term))) {
+      for (const qualifier of TECHNICAL_ARCHITECTURE_QUALIFIERS) {
+        if (qualifier !== singularizeRoleToken(term)) aliases.push([qualifier]);
+      }
+    }
+    return aliases;
+  };
   const tokenEq = (roleIdx, queryWord) => roleTokenList[roleIdx] === queryWord
     || roleTokenSingulars[roleIdx] === singularizeRoleToken(queryWord);
   const spansFor = (phrase) => {
@@ -867,7 +892,7 @@ function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
     if (exact.length > 0) return {
       queryTerm: term, matched: matchedText(exact[0]), matchedTokens: [term], kind: 'exact',
     };
-    for (const alias of JOB_ROLE_CONCEPT_ALIASES.get(term) || []) {
+    for (const alias of aliasesFor(term)) {
       const aliasSpans = spansFor(alias);
       if (aliasSpans.length > 0) {
         return {
@@ -937,7 +962,7 @@ function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
     // occurrence chosen above for compact telemetry.
     const conceptSpans = (concept) => [
       spansFor([concept.queryTerm]),
-      ...(JOB_ROLE_CONCEPT_ALIASES.get(concept.queryTerm) || []).map(spansFor),
+      ...aliasesFor(concept.queryTerm).map(spansFor),
     ].flat();
     const locallyCorroborated = matchedConcepts.some((left, i) =>
       matchedConcepts.slice(i + 1).some(right =>
@@ -1880,6 +1905,57 @@ function normalizeIndeedJobKey(value) {
   return /^[a-z0-9_-]{8,}$/i.test(key) ? key : '';
 }
 
+// Recognizes a placeholder-shaped jobkey — template/companion blocks buried in
+// Indeed's own embedded JSON (skeleton cards, carousel filler, …) that get
+// walked into candidates alongside real listings but were never assigned a
+// real per-listing hash. Real Indeed jobkeys are effectively random 16-hex
+// ids; these are the opposite — recognizably synthetic/sequential filler.
+// Deliberately narrow to the exact families observed (see FACT 2 in the
+// investigation this guards against): a false POSITIVE here silently
+// discards a real job, which is worse than letting a rare phantom through,
+// so this does not attempt to catch every conceivable synthetic id — only
+// the ones actually seen, plus their immediate family. Verified against all
+// 42 real jobkeys in a live scrape and 75 real Indeed rows sampled from
+// canvas.jobs-history.csv: zero false positives.
+export function isPlaceholderIndeedJobKey(key) {
+  const k = String(key || '').trim().toLowerCase();
+  if (k.length < 8) return false;
+
+  // Family: the whole key is one character repeated (any charset) —
+  // "aaaaaaaaaaaaaaaa", "00000000", ...
+  if (/^(.)\1+$/.test(k)) return true;
+
+  // Everything below only applies to pure lowercase-hex keys — Indeed's real
+  // jobkey charset. A genuine random hex id could only coincidentally hit one
+  // of these exact shapes with vanishing probability.
+  if (!/^[0-9a-f]+$/.test(k)) return false;
+
+  // Family: a 16-hex key whose nibble PAIRS (positions 0&1, 2&3, ...) are each
+  // a hex digit and its 4-bit complement, i.e. every pair sums to 15 —
+  // 0f1e2d3c4b5a6978.
+  if (k.length === 16) {
+    let allComplementary = true;
+    for (let i = 0; i < k.length; i += 2) {
+      if (parseInt(k[i], 16) + parseInt(k[i + 1], 16) !== 15) { allComplementary = false; break; }
+    }
+    if (allComplementary) return true;
+  }
+
+  // Family: the entire key is a strictly ascending or descending run of hex
+  // digits, cyclically wrapping mod 16. This covers every rotation of
+  // "0123456789abcdef" (789abcdef0123456, cdef0123456789ab, ...) and its
+  // reverse, without special-casing "rotation" separately — a rotation IS a
+  // cyclic run starting partway through.
+  let ascending = true;
+  let descending = true;
+  for (let i = 1; i < k.length; i++) {
+    const diff = (parseInt(k[i], 16) - parseInt(k[i - 1], 16) + 16) % 16;
+    if (diff !== 1) ascending = false;
+    if (diff !== 15) descending = false;
+  }
+  return ascending || descending;
+}
+
 function salaryText(salary, fallback = '') {
   if (!salary) return compactText(fallback, 160);
   if (typeof salary === 'string') return compactText(salary, 160);
@@ -1936,6 +2012,48 @@ function normalizeIndeedCandidate(record) {
   };
 }
 
+// Second, INDEPENDENT guard against the same phantom-record problem
+// isPlaceholderIndeedJobKey targets, but on a structural signal instead of an
+// id shape: a real listing's payload always carries SOME description text: a
+// template/companion block does not. This still catches a future phantom
+// whose id happens to look like a genuine hash and the id-shape guard would
+// miss. Only collapses a group when at least one member has NO description at
+// all — two genuinely distinct postings that merely share a title+company
+// (different reqs, different cities) normally both carry their own
+// description and are left untouched.
+function collapseDescriptionlessIndeedDuplicates(jobs) {
+  const groups = new Map();
+  for (const job of jobs) {
+    // Title + company + LOCATION, not just title + company. One employer
+    // legitimately posts the same role in several cities, and description
+    // enrichment can genuinely fail on a real card (a click that timed out) —
+    // grouping on title+company alone would let one such city's real posting
+    // be discarded because a sibling city's row happened to enrich. Silently
+    // losing a real job is far worse than letting a phantom through; the
+    // placeholder-id predicate is the primary defence, this is the backstop.
+    const key = jobTitleCompanyLocationKey(job);
+    let group = groups.get(key);
+    if (!group) { group = []; groups.set(key, group); }
+    group.push(job);
+  }
+
+  const out = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) { out.push(group[0]); continue; }
+    const described = group.filter(job => String(job.snippet || '').trim().length > 0);
+    const undescribed = group.filter(job => !String(job.snippet || '').trim().length);
+    if (described.length > 0 && undescribed.length > 0) {
+      for (const job of undescribed) {
+        logger.debug(`[Indeed/extract] Dropped description-less duplicate "${job.title}" @ "${job.company}" (${job.location || 'no location'}, jobkey=${job.jobkey || 'none'}) — a described row for the same title+company+location was kept`);
+      }
+      out.push(...described);
+    } else {
+      out.push(...group);
+    }
+  }
+  return out;
+}
+
 function dedupeIndeedJobs(jobs) {
   const seen = new Set();
   const out = [];
@@ -1946,7 +2064,7 @@ function dedupeIndeedJobs(jobs) {
     seen.add(key);
     out.push(job);
   }
-  return out;
+  return collapseDescriptionlessIndeedDuplicates(out);
 }
 
 function collectIndeedJobsFromObject(root) {
@@ -1954,6 +2072,14 @@ function collectIndeedJobsFromObject(root) {
   const seenObjects = new WeakSet();
   const stack = [root];
   let inspected = 0;
+  // Placeholder-shaped candidates rejected during this walk (see
+  // isPlaceholderIndeedJobKey) — exposed as .rejectedPlaceholderCount on the
+  // returned array so a caller can report the drop instead of it silently
+  // vanishing into a lower job count. Keyed by jobkey (like the accepted side's
+  // own dedup) because the same wrapper object's `{ job: {...} }` shape and its
+  // inner `job` value are each separate nodes the walk visits in turn — one
+  // phantom record must not be double-counted as two rejections.
+  const rejectedPlaceholderKeys = new Set();
 
   while (stack.length && inspected < 60000) {
     const node = stack.pop();
@@ -1963,7 +2089,16 @@ function collectIndeedJobsFromObject(root) {
     seenObjects.add(node);
 
     const normalized = normalizeIndeedCandidate(node);
-    if (normalized) jobs.push(normalized);
+    if (normalized) {
+      if (isPlaceholderIndeedJobKey(normalized.jobkey)) {
+        if (!rejectedPlaceholderKeys.has(normalized.jobkey)) {
+          rejectedPlaceholderKeys.add(normalized.jobkey);
+          logger.debug(`[Indeed/extract] Rejected placeholder-shaped jobkey "${normalized.jobkey}" title="${normalized.title}" — template/companion block, not a real listing`);
+        }
+      } else {
+        jobs.push(normalized);
+      }
+    }
 
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) stack.push(node[i]);
@@ -1974,7 +2109,9 @@ function collectIndeedJobsFromObject(root) {
     }
   }
 
-  return dedupeIndeedJobs(jobs);
+  const result = dedupeIndeedJobs(jobs);
+  result.rejectedPlaceholderCount = rejectedPlaceholderKeys.size;
+  return result;
 }
 
 function extractNextDataJobs(html) {
@@ -2081,8 +2218,15 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
     ? collectIndeedJobsFromObject(windowMosaicResults)
     : extractMosaicJobs(html);
   const dom      = extractDomJobs(html);
-  logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}`);
-  return dedupeIndeedJobs([...nextData, ...mosaic, ...dom]);
+  // nextData/mosaic each carry a .rejectedPlaceholderCount from the JSON-walk
+  // guard (collectIndeedJobsFromObject) — the DOM path never sets one, since
+  // it doesn't walk Indeed's embedded JSON and isn't exposed to the phantom
+  // template/companion blocks that guard rejects.
+  const rejectedPlaceholders = (nextData.rejectedPlaceholderCount || 0) + (mosaic.rejectedPlaceholderCount || 0);
+  logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}${rejectedPlaceholders > 0 ? `, rejected-placeholder: ${rejectedPlaceholders}` : ''}`);
+  const merged = dedupeIndeedJobs([...nextData, ...mosaic, ...dom]);
+  merged.rejectedPlaceholderCount = rejectedPlaceholders;
+  return merged;
 }
 
 /**

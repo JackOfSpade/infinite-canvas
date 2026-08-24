@@ -12,29 +12,37 @@ import {
   checkClaimedEquivalence,
   checkCompanySpecificity,
   checkCompoundHyphenation,
+  checkDirectWelcomeClosing,
   checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
   checkExperienceInfinitiveGrammar,
   checkFigureDiscipline,
   checkGenericPhrases,
+  checkIntroductoryWorkplaceComma,
   checkLegalStatus,
   checkLogisticsContainment,
   checkLogisticsGrounding,
   checkLogisticsLegalStatus,
+  checkModifierAttachment,
   checkNeedGrounding,
   checkNeedsPortfolio,
   checkOpeningDemonstrative,
+  checkParallelStructure,
   checkPlainRegister,
   checkPlanGate,
   checkPostingReference,
+  checkPriorEmployerOpening,
   checkPunctuationStyle,
   checkRedundancy,
+  checkReferenceClarity,
   checkSalientPhraseEcho,
   checkRequestedWorkSampleLink,
   checkRoleThesis,
   checkSentenceLength,
   checkShape,
   checkTopNeedDisposition,
+  checkVagueDomainWorkLabel,
+  checkVisualReferencePrecision,
   COMPOUND_HYPHENATION_RULES,
   coverLetterCheckSummary,
   directArgumentContractObservation,
@@ -67,7 +75,11 @@ function fixtureBulletText(fixture) {
 }
 
 const evidence = {
-  identity: { name: 'Maya Chen', tagline: 'Operations leader', contact: ['Toronto, ON', 'maya@example.test'] },
+  identity: {
+    name: 'Maya Chen', tagline: 'Operations leader · B.S. Operations, Example University',
+    subtitleRole: 'Operations leader', credential: 'B.S. Operations, Example University',
+    contact: ['Toronto, ON', 'maya@example.test'],
+  },
   bulletTexts: [
     'Triaged incomplete emergency reports under time pressure for a municipal operations team.',
     'Reduced response backlog by 32% while coordinating field crews across six districts.',
@@ -569,6 +581,56 @@ export default [
     },
   },
   {
+    name: 'cover letter harness: parallel ranges, prior-employer openings, and domain labels receive concrete repairs',
+    run: () => {
+      const faulty = checkParallelStructure(['I evaluated each product from the quote request through presenting findings to management.']);
+      const opaque = checkParallelStructure(['I evaluated third-party products, running each from the quote request through a findings presentation to management.']);
+      const parallel = checkParallelStructure([
+        'I evaluated each product from requesting quotes through presenting findings to management.',
+        'I evaluated each product from the initial request for quotes through the presentation of findings.',
+        'I requested quotes, assessed each product, and presented findings to management.',
+      ]);
+      assert(!faulty.passed && faulty.id === 'parallel-structure'
+        && faulty.detail.includes('from the quote request through presenting')
+        && !opaque.passed && opaque.detail.includes('run each from X through Y')
+        && parallel.passed,
+      'the runtime check rejects noun-to-gerund and opaque run-range defects while accepting parallel or explicit actions');
+
+      const abrupt = checkPriorEmployerOpening(
+        ['At Thomson School District, I evaluated third-party products before district-wide adoption.'],
+        ['Thomson School District'],
+      );
+      const framed = checkPriorEmployerOpening(
+        ['In my previous software engineering role at Thomson School District, I evaluated third-party products before district-wide adoption.'],
+        ['Thomson School District'],
+      );
+      assert(!abrupt.passed && abrupt.detail.includes('introduce the candidate\'s prior role or relationship')
+        && framed.passed,
+      'a prior employer in the opening is contextualized for a reader who does not know the organization');
+
+      const broadDomain = checkVagueDomainWorkLabel(['My aviation work extends this evidence with software design.']);
+      const concreteDomain = checkVagueDomainWorkLabel(['My work on flight-route-optimization software extends this evidence with software design.']);
+      assert(!broadDomain.passed && broadDomain.detail.includes('name the supported software, system, or responsibility')
+        && concreteDomain.passed,
+      'cross-domain evidence names the concrete work rather than implying broad industry or operational tenure');
+      const vagueActors = checkReferenceClarity([
+        'I moved ticketing across with their data.',
+        'The platforms produced data they used and data they returned.',
+        'I synchronized FAA releases through their APIs.',
+      ]);
+      const namedActors = checkReferenceClarity(['I ingested vendor data, delivered feeds to each vendor, and synchronized FAA releases through the agency APIs.']);
+      assert(!vagueActors.passed && vagueActors.detail.includes('name the data owner, producer, consumer, vendor, or agency explicitly')
+        && namedActors.passed,
+      'data-flow prose names producers, consumers, vendors, and agencies instead of plural pronouns');
+      const detachedModifier = checkModifierAttachment(['Modified A*, applying it to flight routing after testing candidate algorithms.']);
+      const attachedModifier = checkModifierAttachment(['After testing candidate algorithms, I adapted A* for flight routing.']);
+      assert(!detachedModifier.passed && detachedModifier.detail.includes('move the earlier action beside “after”')
+        && attachedModifier.passed,
+      'temporal modifiers remain beside the action they modify');
+      return { faulty: faulty.detail, opaque: opaque.detail, abrupt: abrupt.detail, broadDomain: broadDomain.detail, vagueActors: vagueActors.detail, detachedModifier: detachedModifier.detail };
+    },
+  },
+  {
     name: 'cover letter harness: anchor relevance licenses posting-named tools and flags an off-posting stack tour',
     run: () => {
       const posting = [
@@ -674,14 +736,29 @@ export default [
         && posting.detail.includes('paragraph 2 addresses the advertisement itself (“job ad”)')
         && posting.detail.includes('(“as advertised”)'),
       'each advertisement-object noun is reported once per paragraph with the phrase that produced it');
+      const contextualReference = checkPostingReference([
+        'This position emphasizes reliable handoffs during service recovery.',
+        'The position description identifies incident response as a core responsibility.',
+        'The job posting describes the service team as responsible for release coordination.',
+      ]);
+      assert(contextualReference.passed,
+        `the attached position uses a proximal reference, while source documents may own reporting verbs for listing-only context: ${contextualReference.detail}`);
+      const detachedOrUngrammatical = checkPostingReference([
+        "The role's focus on service reliability rewards careful prioritization.",
+        'The position states that engineers rotate through incident response.',
+      ]);
+      assert(!detachedOrUngrammatical.passed
+        && detachedOrUngrammatical.detail.includes('detached target-position reference')
+        && detachedOrUngrammatical.detail.includes('makes the target position the source of a statement'),
+      'a target position is referenced proximally and never made the grammatical source of reported information');
       const workNouns = checkPostingReference([
-        'The role requires steady prioritization when reports arrive incomplete.',
+        'This role requires steady prioritization when reports arrive incomplete.',
         'This position sits between the field crews and the district office.',
         'Your listing quality team ships the ranking model.',
         'The listing page I rebuilt cut abandoned carts.',
         'I rewrote the job description parser your team maintains.',
       ]);
-      assert(workNouns.passed, `“the role” and “this position” name the work itself, and “listing” and “job description” are marketplace and job-board product vocabulary rather than references to this advertisement: ${workNouns.detail}`);
+      assert(workNouns.passed, `proximal role references name the work itself, while “listing” and “job description” may remain marketplace and job-board product vocabulary: ${workNouns.detail}`);
       const equivalence = checkClaimedEquivalence([
         'The way the district core-and-integrations work maps onto your platform is the part I would bring first.',
         'That responsibility translates directly into this team, and it is exactly what the work needs.',
@@ -764,13 +841,81 @@ export default [
       'the fixed bureaucratic formulas ask for plain first-person English');
       const plain = checkPlainRegister(['I have a valid driver licence, and I can work weekends in the district.']);
       assert(plain.passed, `plain first-person logistics facts must never become revision work: ${plain.detail}`);
+      const missingIntroComma = checkIntroductoryWorkplaceComma([
+        'At the district I delivered software through traditional and AI-assisted workflows.',
+      ]);
+      const introCommaPresent = checkIntroductoryWorkplaceComma([
+        'At the district, I delivered software through traditional and AI-assisted workflows.',
+        'At times I chose a traditional workflow.',
+      ]);
+      const namedWorkplaceMissingComma = checkIntroductoryWorkplaceComma([
+        'At Northstar Systems I led a platform migration.',
+      ], ['Northstar Systems']);
+      assert(!missingIntroComma.passed
+        && missingIntroComma.detail.includes('insert a comma after “At the district”')
+        && !namedWorkplaceMissingComma.passed
+        && namedWorkplaceMissingComma.detail.includes('insert a comma after “At Northstar Systems”')
+        && introCommaPresent.passed,
+      'introductory workplace phrases cover generic organization types and supplied employer names without turning every short adjunct into a mandatory-comma rule');
+      const ambiguousPoint = checkVisualReferencePrecision([
+        'An agent walking someone through an on-screen task cannot point at the control it means.',
+      ]);
+      const ambiguousVariant = checkVisualReferencePrecision([
+        'The AI assistant cannot point out which button opens the panel.',
+      ]);
+      const visualPoint = checkVisualReferencePrecision([
+        'An automated guide cannot visually point to the relevant part of the window.',
+      ]);
+      assert(!ambiguousPoint.passed
+        && ambiguousPoint.detail.includes('visually indicate the on-screen control')
+        && !ambiguousVariant.passed
+        && visualPoint.passed,
+      'screen-guidance prose recognizes varied actors, targets, and pointing constructions while accepting an explicit visible limitation');
+      const conditionalClose = checkDirectWelcomeClosing(['I would welcome the chance to talk about that work.']);
+      const deferentialVariant = checkDirectWelcomeClosing(['I would be pleased to discuss the migration.']);
+      const directClose = checkDirectWelcomeClosing(['I welcome the opportunity to discuss how that work applies here.']);
+      const nonClosingUse = checkDirectWelcomeClosing([
+        'I would welcome the chance to review that question during discovery.',
+        'The migration work is the contribution I want to continue here.',
+      ]);
+      const selfDirectedClose = checkDirectWelcomeClosing([
+        'I hope to learn more about how the team approaches release review.',
+      ]);
+      const bareLookForwardClose = checkDirectWelcomeClosing([
+        'I look forward to learning more about how the team approaches release review.',
+      ]);
+      const prospectiveClose = checkDirectWelcomeClosing([
+        'I look forward to discussing how my release-workflow experience could support the team’s deployment process.',
+      ]);
+      const selfDirectedContribution = checkDirectWelcomeClosing([
+        'I hope to discuss how my operations experience could support the team’s service transition.',
+      ]);
+      const nonFinalIntent = checkDirectWelcomeClosing([
+        'I plan to discuss the implementation during onboarding. I look forward to discussing how my operations experience could support the service team.',
+      ]);
+      assert(!conditionalClose.passed
+        && conditionalClose.detail.includes('make the invitation direct')
+        && !deferentialVariant.passed
+        && directClose.passed
+        && nonClosingUse.passed
+        && !selfDirectedClose.passed
+        && selfDirectedClose.detail.includes('ends with conversation or learning intent')
+        && !bareLookForwardClose.passed
+        && bareLookForwardClose.detail.includes('but no candidate contribution')
+        && prospectiveClose.passed
+        && selfDirectedContribution.passed
+        && nonFinalIntent.passed,
+      'the closing check catches final invitations that stop at conversation or learning while leaving contribution-connected and non-final intent alone');
       const awkwardGap = checkPlainRegister(['I answered that gap with a native overlay.']);
       assert(!awkwardGap.passed && awkwardGap.detail.includes('use “closed the gap” or “addressed the gap”'),
         'unnatural gap wording must receive a plain contemporary repair');
+      const evidenceBring = checkPlainRegister(['Product evaluation, operational migration, and Python ETL are the evidence I would bring.']);
+      assert(!evidenceBring.passed && evidenceBring.detail.includes('say what experience, skills, or work the candidate would bring'),
+        'a closing distinguishes the candidate\'s capabilities from the evidence supporting the argument');
       assert(sentences('The desk logged forms at 9 a.m. for Cedar Ridge Inc. and closed at noon.').length === 1
         && sentences('').length === 0,
       'the shared segmenter keeps abbreviations in one sentence so every sentence-level check counts the same units');
-      return { long: long.detail, punctuation: punctuation.detail, register: register.detail };
+      return { long: long.detail, punctuation: punctuation.detail, register: register.detail, introComma: missingIntroComma.detail, visualPoint: ambiguousPoint.detail, directClose: conditionalClose.detail };
     },
   },
   {
@@ -891,7 +1036,7 @@ export default [
       const checks = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: groundedRange }], companyHook: { detail: '' } },
         paragraphs: [
-          'The registrar at Brightpath District kept losing signed permission forms because intake ran on paper. The role requires someone who can find that failure point and close it. My experience to date is in that kind of repair work.',
+          'The registrar at Brightpath District kept losing signed permission forms because intake ran on paper. This role requires someone who can find that failure point and close it. My experience to date is in that kind of repair work.',
           'I rebuilt the intake path against the React interface and the Postgres schema the registrar already trusted. The rebuild kept one in-house core, so a single team owned end-to-end delivery. I led that work from 2019–2022 without a gap.',
           'Paper forms vanished between three desks, so I gave every form a single owner record. The same gap explained why grading feedback arrived late, which is why the second tool answered a need the first one had exposed.',
           'I have a valid driver licence for the district fleet. I can say what the rebuild cost in review time and what it saved at the front desk, and I would rather argue the mechanism than the resemblance.',
@@ -1069,6 +1214,8 @@ export default [
       assert(envelope.recipient === '' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields use the salutation rather than a redundant recipient block');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Sincerely,', 'code-authored closing omits an implied target title');
       assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
+      assert(envelope.subtitleRole === 'Operations leader' && envelope.credential === 'B.S. Operations, Example University',
+        'the authored envelope preserves the résumé header role and credential as structured letterhead fields');
       const contactNormalized = authorCoverLetterEnvelope({
         job: { company: 'Acme' }, evidence: { identity: { contact: [' Toronto, ON ', '   ', '\n', 'maya@example.test'] } },
       });
@@ -1077,9 +1224,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 18, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 26, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,anchor-relevance,additive-seam,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,legal-status,opening-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

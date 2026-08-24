@@ -57,11 +57,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveJobAnalysisSnapshot: (args) => ipcRenderer.invoke('save-job-analysis-snapshot', args),
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
-  generateApplication: (args) => ipcRenderer.invoke('generate-application', args),
   // Local AI is intentionally a manual, file-based handoff. These handlers
   // never invoke or automate Claude Code; the user runs the documented local
   // routine and returns here to validate/import result.json.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
+  discardLocalApplication: (args) => ipcRenderer.invoke('discard-local-application', args),
   getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
   openLocalApplicationFolder: (args) => ipcRenderer.invoke('open-local-application-folder', args),
   importLocalApplication: (args) => ipcRenderer.invoke('import-local-application', args),
@@ -138,8 +138,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return res.success ? res : { platform: args.platformId, connected: false, loginOpened: false };
   },
   clearBrowserSession: async () => {
-    const res = await ipcRenderer.invoke('clear-browser-session');
-    return res?.success ?? false;
+    return await ipcRenderer.invoke('clear-browser-session');
+  },
+  resetPlatformSession: async (args) => {
+    return await ipcRenderer.invoke('reset-platform-session', args);
   },
 
   // ── AI Tools ────────────────────────────────────────────────────────────
@@ -149,7 +151,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkAIAvailability: (args) => ipcRenderer.invoke('check-ai-availability', args),
   getAIStatus: () => ipcRenderer.invoke('get-ai-status'),
   // Live Claude family -> resolved model id map, for the Settings panel's
-  // per-group (generation/analysis/light) family dropdowns — see llm.js
+  // per-live-group (analysis/light) family dropdowns — see llm.js
   // registerLlmHandlers().
   getClaudeModelMap: () => ipcRenderer.invoke('get-claude-model-map'),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),

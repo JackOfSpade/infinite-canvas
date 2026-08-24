@@ -12,6 +12,7 @@ import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree'
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
+import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 
 // Human label for a connected Job Search Module, from its search params.
 function moduleLabel(d) {
@@ -136,7 +137,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const setScoreThreshold = useCallback((val) => {
     updateGlobal(id, { scoreThreshold: val });
     applyCardFilters({ scoreThreshold: val });
-    EventLogger.log(`[JobBoard] score filter ≥${val}% id=${id}`);
+    EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}/100 id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
   // Re-apply filters on mount — card opacities are stripped from save files.
@@ -182,6 +183,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // current connections as their baseline instead of falsely going stale.
   useEffect(() => {
     if (hubState !== 'done' || data.locked) return; // locked = frozen snapshot
+    // A released flat-board build persisted direct cards with no taxonomy.
+    // They were never successfully bucketed, so hide them after upgrade and
+    // require one successful API-backed Re-combine to restore board results.
+    // (Locked boards remain historical snapshots by design.)
+    if (isLegacyUnbucketedJobBoard(data, getNodes(), id)) {
+      const legacyReason = 'This legacy board was never taxonomized — re-combine successfully to restore results';
+      hideBoardChildren();
+      if (!data.stale || data.staleReason !== legacyReason) {
+        updateGlobal(id, { stale: true, staleReason: legacyReason });
+        EventLogger.log(`[JobBoard] hid legacy unbucketed results id=${id}`);
+      }
+      return;
+    }
     // No stored signature (pre-staleness boards) OR a signature in the legacy
     // pre-versioned fingerprint format (its math can't be compared against
     // live fingerprints) → adopt the current connections as the baseline
@@ -217,7 +231,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       showBoardChildren();
       EventLogger.log(`[JobBoard] results restored after stale state cleared id=${id}`);
     }
-  }, [hubState, data.locked, liveSignature, data.combineSignature, data.stale, data.staleReason, completedModules, connectedModules, id, updateGlobal, hideBoardChildren, showBoardChildren]);
+  }, [hubState, data, data.locked, liveSignature, data.combineSignature, data.stale, data.staleReason, completedModules, connectedModules, id, getNodes, updateGlobal, hideBoardChildren, showBoardChildren]);
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
   const clearBoardChildren = useCallback(() => {
@@ -312,7 +326,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // (the handler strips to exactly these fields anyway) — the full union
       // carries snippets/reasoning and used to serialize hundreds of KB over
       // IPC for nothing. Index alignment with `union` is what matters.
-      let bucketTree = null;
+      let bucketTree;
       try {
         const compactJobs = union.map((j) => ({
           careerDirection: j.careerDirection || '',
@@ -326,25 +340,31 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.log(`[JobBoard] combine cancelled before spawn id=${id}`);
           return;
         }
-        if (res?.success && Array.isArray(res.roles)) {
-          bucketTree = {
-            likelihoodBands: res.likelihoodBands || [],
-            salaryRanges: res.salaryRanges || [],
-            roles: res.roles || [],
-          };
-        } else {
-          EventLogger.error('[JobBoard] Bucketing returned no taxonomy — flat spawn');
+        if (!res?.success) {
+          const error = new Error(res?.error || 'Job Board taxonomy generation failed.');
+          error.code = res?.errorCode;
+          throw error;
         }
+        bucketTree = {
+          likelihoodBands: res.likelihoodBands,
+          salaryRanges: res.salaryRanges,
+          roles: res.roles,
+        };
+        const taxonomyCheck = validateJobBoardTaxonomy(bucketTree, union.length);
+        if (!taxonomyCheck.valid) throw new Error(`Job Board taxonomy was invalid: ${taxonomyCheck.reason}`);
       } catch (err) {
         if (cancelled() || !getNode(id)) return;
-        EventLogger.error('[JobBoard] Bucketing failed — flat spawn:', err);
+        // Do not replace the existing board when its required taxonomy could
+        // not be generated. Clearing only happens after this whole try block.
+        EventLogger.error('[JobBoard] Bucketing failed; preserving prior board:', err);
+        throw err;
       }
 
       if (cancelled() || !getNode(id)) return;
 
       const originalPos = getNode(id)?.position || { x: 0, y: 0 };
       const baseNodeId = `board-${id}-${Date.now()}`;
-      const { newNodes, newEdges, scoreRangeMin, scoreRangeMax } = buildJobTreeNodes({
+      const { newNodes, newEdges, scoreRangeMin, scoreRangeMax, taxonomy } = buildJobTreeNodes({
         displayedJobs: union,
         bucketTree,
         originalPos,
@@ -376,7 +396,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         scoreRangeMax,
         scoreThreshold: scoreRangeMin,
         sourceFilter: null,
-        jobTaxonomy: bucketTree ? { likelihoodBands: bucketTree.likelihoodBands, salaryRanges: bucketTree.salaryRanges } : null,
+        // Only a validated API taxonomy reaches this point, so diagnostics and
+        // reload state describe the hierarchy the provider actually generated.
+        jobTaxonomy: { likelihoodBands: taxonomy.likelihoodBands, salaryRanges: taxonomy.salaryRanges },
         finalSourceCounts,
         // Merge provenance for the bug report — the dedup is otherwise invisible.
         mergeStats: { ...mergeStats, modules: completedModules.length, perModule },

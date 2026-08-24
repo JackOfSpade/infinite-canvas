@@ -22,6 +22,10 @@ export const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
 export const MAX_SALIENT_ECHO_OBSERVATIONS = 4;
 export const MAX_LEGAL_STATUS_OBSERVATIONS = 4;
 export const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
+export const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
+export const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
+export const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
+export const MAX_COPY_PRECISION_OBSERVATIONS = 4;
 export const MAX_SENTENCE_WORDS = 40;
 // One off-posting tool name is a paragraph's single concrete anchor; a second
 // one is a stack list. Across the letter, three names is a stack tour even
@@ -859,6 +863,111 @@ export function checkCompoundHyphenation(paragraphs = []) {
     `${list.length} paragraph(s) hyphenate the covered compound modifiers`);
 }
 
+/**
+ * A process range promises grammatically parallel endpoints. This deliberately
+ * checks the high-confidence generated-prose failure only: a noun-like left
+ * endpoint followed by a gerund right endpoint. Wider coordination needs a
+ * prose audit; this narrow form is safe enough to reject before publication.
+ */
+export function checkParallelStructure(passages = []) {
+  const list = Array.isArray(passages) ? passages : [];
+  const observations = [];
+  const processRange = /\bfrom\s+([^,.;:!?]{1,80}?)\s+(to|through)\s+([\p{L}][\p{L}'’-]*ing)\b/giu;
+  const opaqueRunRange = /\b(?:ran|run|running)\s+(?:each|every)(?:\s+one)?\s+from\s+([^,.;:!?]{1,60}?)\s+(?:to|through)\s+([^,.;:!?]{1,60})/giu;
+  for (let index = 0; index < list.length; index++) {
+    const passage = text(list[index]);
+    const opaque = opaqueRunRange.exec(passage);
+    if (opaque) {
+      observations.push(`passage ${index + 1} uses “${boundedDetailValue(opaque[0])}”; name the process steps with explicit action verbs instead of “run each from X through Y”`);
+      opaqueRunRange.lastIndex = 0;
+    }
+    let match;
+    while ((match = processRange.exec(passage))) {
+      const leftWords = words(match[1]);
+      if (leftWords[0]?.endsWith('ing')) continue;
+      observations.push(`passage ${index + 1} uses “${boundedDetailValue(match[0])}”; coordinate parallel nouns or parallel actions`);
+      if (observations.length >= MAX_PARALLEL_STRUCTURE_OBSERVATIONS) break;
+    }
+    if (observations.length >= MAX_PARALLEL_STRUCTURE_OBSERVATIONS) break;
+  }
+  return observationResult('parallel-structure', observations, MAX_PARALLEL_STRUCTURE_OBSERVATIONS,
+    `${list.length} passage(s) keep process-range endpoints grammatically parallel`);
+}
+
+/**
+ * The first cover-letter sentence must orient an unfamiliar prior employer.
+ * A bare "At <employer>" opener assumes the reader already knows why that
+ * organization belongs in the argument; naming the prior role or relationship
+ * supplies that missing context. Later evidence paragraphs may use the shorter
+ * form once the letter's argument is established.
+ */
+export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
+  const firstSentence = sentences(Array.isArray(paragraphs) ? paragraphs[0] : '')[0] || '';
+  const observations = [];
+  for (const employer of (Array.isArray(employerNames) ? employerNames : [])
+    .map(text).filter(Boolean).sort((left, right) => right.length - left.length)) {
+    if (!new RegExp(`^At\\s+${escapeRegExp(employer)}\\s*,`, 'iu').test(firstSentence)) continue;
+    observations.push(`opening sentence begins “${leadingWordsSnippet(firstSentence, 6)}”; introduce the candidate's prior role or relationship at ${employer} before the evidence`);
+    break;
+  }
+  return observationResult('prior-employer-opening', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
+    'the opening sentence contextualizes any prior employer it introduces');
+}
+
+// Bare industry labels can imply operational or domain tenure the evidence
+// does not establish ("My aviation work" can sound like work on aircraft).
+// Keep the lexicon closed and require a concrete system/task instead.
+const BROAD_DOMAIN_WORK_LABEL = /^(?:My|This|That)\s+(?:aviation|aerospace|automotive|banking|defen[cs]e|education|energy|finance|fintech|government|healthcare|insurance|logistics|manufacturing|medical|public[- ]sector|retail|telecom)\s+work\b/iu;
+
+export function checkVagueDomainWorkLabel(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  list.forEach((paragraph, index) => {
+    const firstSentence = sentences(paragraph)[0] || '';
+    const match = BROAD_DOMAIN_WORK_LABEL.exec(firstSentence);
+    if (!match) return;
+    observations.push(`paragraph ${index + 1} opens with “${boundedDetailValue(match[0])}”; name the supported software, system, or responsibility instead of the industry alone`);
+  });
+  return observationResult('vague-domain-work-label', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
+    `${list.length} paragraph(s) describe cross-domain evidence through concrete work`);
+}
+
+const UNCLEAR_DATA_FLOW_REFERENCES = Object.freeze([
+  /\bacross with (?:its|their) data\b/iu,
+  /\bdata they (?:consumed|ingested|produced|provided|returned|used)\b/iu,
+  /\bthrough their APIs?\b/iu,
+]);
+
+/** Require explicit actors in data-flow prose instead of plural pronouns. */
+export function checkReferenceClarity(passages = []) {
+  const list = Array.isArray(passages) ? passages : [];
+  const observations = [];
+  list.forEach((passage, index) => {
+    const source = text(passage);
+    for (const pattern of UNCLEAR_DATA_FLOW_REFERENCES) {
+      const match = pattern.exec(source);
+      if (!match) continue;
+      observations.push(`passage ${index + 1} uses “${boundedDetailValue(match[0])}”; name the data owner, producer, consumer, vendor, or agency explicitly`);
+    }
+  });
+  return observationResult('reference-clarity', observations, MAX_REFERENCE_CLARITY_OBSERVATIONS,
+    `${list.length} passage(s) name data-flow actors explicitly`);
+}
+
+/** Keep a temporal modifier beside the action it actually modifies. */
+export function checkModifierAttachment(passages = []) {
+  const list = Array.isArray(passages) ? passages : [];
+  const observations = [];
+  list.forEach((passage, index) => {
+    const source = text(passage);
+    const match = /\bapplying (?:it|them|this|that)\b[^.]{0,100}\bafter\s+[\p{L}][\p{L}'’-]*ing\b/iu.exec(source);
+    if (!match) return;
+    observations.push(`passage ${index + 1} uses “${boundedDetailValue(match[0])}”; move the earlier action beside “after” or split the sequence into two sentences`);
+  });
+  return observationResult('modifier-attachment', observations, MAX_REFERENCE_CLARITY_OBSERVATIONS,
+    `${list.length} passage(s) attach temporal modifiers to the intended action`);
+}
+
 // Widely recognized stack tokens only. Technologies whose names are ordinary
 // English words or common given names (Go, Swift, R, C, D) are deliberately
 // absent: matching is case-sensitive, and capitalization alone cannot tell
@@ -992,30 +1101,47 @@ export function checkAdditiveSeam(paragraphs = []) {
     `${list.length} paragraph(s) join their evidence without a bare additive connective`);
 }
 
-// Only advertisement-object nouns. “The role”, “this position”, and “the team”
-// name the work itself and stay legal; the defect is addressing the posting as
-// a thing the employer wrote rather than the need the employer has. Bare
-// “listing” and “job description” were dropped: they are marketplace and
-// job-board product vocabulary, so “your listing quality team”, “the listing
-// page I rebuilt”, and “the job description parser your team maintains” name
-// a product surface the candidate worked on, not this advertisement.
+// Advertisement-object nouns are usually a sign that the letter is talking to
+// the source document instead of the employer. One narrow exception is needed
+// for honest provenance: a source document may own a reporting verb when the
+// sentence attributes listing-only employer context. Keep that grammatical
+// source distinct from the position itself, which cannot describe, state, or
+// report anything.
 const POSTING_REFERENCE_PATTERN = /\b(?:your|the|this)\s+(?:job\s+)?(?:posting|advert(?:isement)?)\b|\bjob\s+ad\b|\bas\s+advertised\b/giu;
+const SOURCE_DOCUMENT_ATTRIBUTION = /^(?:the|this)\s+(?:(?:job|role|position)\s+)?(?:posting|listing|description|advert(?:isement)?)\s+(?:describes?|states?|notes?|identifies?|specifies?|indicates?|outlines?|explains?)\b/iu;
+const NON_SOURCE_REPORTING_SUBJECT = /^(?:the|this)\s+(?:role|position|job)\s+(?:describes?|states?|says?|notes?|mentions?|indicates?|specifies?|outlines?|explains?)\b/iu;
+const DETACHED_TARGET_POSITION = /^the\s+(?:role|position)(?:'s|\s+(?:needs?|requires?|focus(?:es)?|centers?|involves?|offers?|calls?|is|would|can|will|seeks?))\b/iu;
 
-/** Keeps the letter addressed to the employer, not to the advertisement. */
+/** Keeps target-position references proximal and source attribution grammatical. */
 export function checkPostingReference(paragraphs = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
   for (let index = 0; index < list.length; index++) {
     const seen = new Set();
-    for (const match of text(list[index]).matchAll(POSTING_REFERENCE_PATTERN)) {
-      const phrase = normalized(match[0]);
-      if (seen.has(phrase)) continue;
-      seen.add(phrase);
-      observations.push(`paragraph ${index + 1} addresses the advertisement itself (“${boundedDetailValue(match[0])}”); name the employer's need directly instead of citing where it was written`);
+    for (const sentence of sentences(list[index])) {
+      const sourceAttribution = SOURCE_DOCUMENT_ATTRIBUTION.exec(sentence);
+      const invalidSource = NON_SOURCE_REPORTING_SUBJECT.exec(sentence);
+      if (invalidSource) {
+        observations.push(`paragraph ${index + 1} makes the target position the source of a statement (“${boundedDetailValue(invalidSource[0])}”); make the source document the grammatical subject when attribution is required`);
+      }
+      const detachedTarget = DETACHED_TARGET_POSITION.exec(sentence);
+      if (detachedTarget) {
+        observations.push(`paragraph ${index + 1} opens with a detached target-position reference (“${boundedDetailValue(detachedTarget[0])}”); use a proximal reference for the position attached to this application unless contrasting it with another role`);
+      }
+      for (const match of sentence.matchAll(POSTING_REFERENCE_PATTERN)) {
+        // A leading source attribution owns its reporting verb legitimately.
+        // Do not grant the exception to later advertisement references in the
+        // same sentence, which still address the source document as an object.
+        if (sourceAttribution && Number(match.index) < sourceAttribution[0].length) continue;
+        const phrase = normalized(match[0]);
+        if (seen.has(phrase)) continue;
+        seen.add(phrase);
+        observations.push(`paragraph ${index + 1} addresses the advertisement itself (“${boundedDetailValue(match[0])}”); name the employer's need directly unless the sentence is explicitly attributing listing-only context to its source document`);
+      }
     }
   }
   return observationResult('posting-reference', observations, MAX_POSTING_REFERENCE_OBSERVATIONS,
-    `${list.length} paragraph(s) name the employer's need without citing the advertisement`);
+    `${list.length} paragraph(s) use proximal target-position references and grammatical source attribution`);
 }
 
 // An asserted analogy is a claim the reader is invited to test, and the test
@@ -1149,6 +1275,10 @@ export function checkPlainRegister(paragraphs = []) {
     if (answeredGap) {
       observations.push(`paragraph ${index + 1} uses unnatural wording (“${boundedDetailValue(answeredGap[0])}”); use “closed the gap” or “addressed the gap”`);
     }
+    const evidenceBring = /\b(?:are|is) the evidence I would bring\b/iu.exec(paragraph);
+    if (evidenceBring) {
+      observations.push(`paragraph ${index + 1} treats capabilities as “${boundedDetailValue(evidenceBring[0])}”; say what experience, skills, or work the candidate would bring`);
+    }
     for (const pattern of PLAIN_REGISTER_PATTERNS) {
       const match = pattern.exec(paragraph);
       if (!match) continue;
@@ -1157,6 +1287,95 @@ export function checkPlainRegister(paragraphs = []) {
   }
   return observationResult('plain-register', observations, MAX_PLAIN_REGISTER_OBSERVATIONS,
     `${list.length} paragraph(s) state logistics facts in plain first person`);
+}
+
+// A sentence-initial workplace phrase followed directly by “I” needs a comma
+// to keep the organization and the subject from running together. The generic
+// lexicon covers organization types, while supplied résumé employers cover
+// proper names without teaching the check one candidate's domain vocabulary.
+// Ordinary short adjuncts remain outside this high-confidence check.
+const INTRODUCTORY_WORKPLACE_COMMA = /^(At\s+(?:(?:the|my|our)\s+)?(?:[\p{L}&.'’()-]+\s+){0,5}(?:district|company|organisation|organization|agency|school|university|college|employer|office|firm|department|ministry|council|bank|hospital|clinic|laboratory|lab|startup|team))\s+I\b/iu;
+
+/** Sets off a sentence-initial workplace phrase when the first-person subject follows. */
+export function checkIntroductoryWorkplaceComma(paragraphs = [], workplaceNames = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const namedWorkplaces = (Array.isArray(workplaceNames) ? workplaceNames : [])
+    .map(text).filter(Boolean).sort((left, right) => right.length - left.length)
+    .map(name => new RegExp(`^(At\\s+${escapeRegExp(name)})\\s+I\\b`, 'iu'));
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const genericMatch = INTRODUCTORY_WORKPLACE_COMMA.exec(sentence);
+      const namedMatch = namedWorkplaces.map(pattern => pattern.exec(sentence)).find(Boolean);
+      const phrase = genericMatch?.[1] || namedMatch?.[1];
+      if (!phrase) continue;
+      observations.push(`paragraph ${index + 1} begins a sentence “${leadingWordsSnippet(sentence, 7)}” without setting off the introductory workplace phrase; insert a comma after “${boundedDetailValue(phrase)}”`);
+    }
+  }
+  return observationResult('introductory-workplace-comma', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) set off sentence-initial workplace phrases before “I”`);
+}
+
+// In UI-guidance prose, bare “point” is ambiguous because an agent can point
+// in the metaphorical sense of referring to something. The limitation being
+// argued is visible on-screen indication, so require that distinction only in
+// sentences that name both an agent-like actor and a concrete UI target.
+const BARE_AGENT_UI_POINT = /\b(?:(?:AI\s+)?(?:agent|assistant)|Claude|automated\s+guide)\b[^.!?]{0,220}\b(?:cannot|can't)\s+(?!visually\b)(?:physically\s+)?(?:point|gesture)(?:\s+(?:at|to)\s+(?:the\s+)?|\s+out\s+(?:which\s+|the\s+))(?:control|button|field|menu|icon|element|link|tab|toggle|checkbox|input|panel|dialog|window|option|area|region|part)\b/iu;
+
+/** Distinguishes a visible UI indication from metaphorical reference. */
+export function checkVisualReferencePrecision(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const match = BARE_AGENT_UI_POINT.exec(sentence);
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(match[0])}”; name the literal limitation as an inability to visually indicate the on-screen control, not a bare inability to “point”`);
+    }
+  }
+  return observationResult('visual-reference-precision', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) distinguish visible UI indication from metaphorical reference`);
+}
+
+// “I would welcome the chance …” is polite boilerplate that weakens the last
+// line with an unnecessary conditional. This check is intentionally limited
+// to that stock cover-letter formula; other valid uses of “would welcome” are
+// not rewritten by a general lexical ban.
+const CONDITIONAL_WELCOME_CLOSE = /\bI\s+(?:(?:would|'d)\s+welcome\s+(?:the\s+)?(?:chance|opportunity)|(?:would|'d)\s+be\s+(?:glad|happy|pleased)\s+to\s+(?:discuss|talk|speak|connect|share|explore))\b/iu;
+
+// A closing can be grammatically direct yet still leave the reader with only
+// the writer's wish to have a conversation or learn more. Keep this family
+// deliberately bounded to first-person intention/desire plus a conversational
+// or learning endpoint. It does not judge ordinary uses of want/hope/plan, or
+// invitations that occur before the final sentence of the letter.
+const SELF_DIRECTED_CONVERSATION_CLOSE = /\bI\s+(?:want|hope|plan|aim|intend)\s+to\s+(?:talk|speak|discuss|connect|learn|explore)\b/iu;
+const LOOK_FORWARD_CONVERSATION_CLOSE = /\bI\s+look\s+forward\s+to\s+(?:talking|speaking|discussing|connecting|learning|exploring)\b/iu;
+const CANDIDATE_CONTRIBUTION_CLOSE = /\bmy\s+(?:(?:[\p{L}’'-]+\s+){0,3})(?:experience|skills?|work|background|perspective|practice)\b[^.!?]{0,180}\b(?:can|could|would|will)\s+(?:support|contribute(?:\s+to)?|help|advance|strengthen|improve|build|deliver|apply)\b/iu;
+
+// A future-facing discussion can be an effective close when it makes the
+// candidate's contribution concrete. The positive guard is deliberately
+// modest: it recognizes an explicit candidate asset connected to an action
+// that advances the employer's work, rather than trying to infer relevance
+// from every sentence containing a conversation verb.
+function hasCandidateContributionClose(value) {
+  return CANDIDATE_CONTRIBUTION_CLOSE.test(value);
+}
+
+/** Keeps the invitation in the closing direct and specific. */
+export function checkDirectWelcomeClosing(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  const index = list.length - 1;
+  const finalSentence = index >= 0 ? (sentences(list[index]).at(-1) || '') : '';
+  const conditionalMatch = CONDITIONAL_WELCOME_CLOSE.exec(finalSentence);
+  if (conditionalMatch) observations.push(`paragraph ${index + 1} uses a conditional or deferential invitation (“${boundedDetailValue(conditionalMatch[0])}”); make the invitation direct and name the specific work or contribution to discuss`);
+  const selfDirectedMatch = SELF_DIRECTED_CONVERSATION_CLOSE.exec(finalSentence)
+    || LOOK_FORWARD_CONVERSATION_CLOSE.exec(finalSentence);
+  if (selfDirectedMatch && !hasCandidateContributionClose(finalSentence)) {
+    observations.push(`paragraph ${index + 1} ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; close by connecting the candidate's experience, skills, or work to the specific work they could support`);
+  }
+  return observationResult('direct-welcome-closing', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) use a direct, specific invitation when they close with “welcome”`);
 }
 
 // Legal work status is application-form data, never letter prose: the form
@@ -1314,6 +1533,8 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
 export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '' } = {}) {
   const plannedCompanyDetail = text(plan?.companyHook?.detail);
+  const priorEmployers = (Array.isArray(evidence?.roles) ? evidence.roles : [])
+    .map(role => text(role?.company)).filter(Boolean);
   const companySpecificity = researchText && !plannedCompanyDetail
     ? result('company-specificity', true, 'skipped: argument plan intentionally omitted a company-specific hook')
     : checkCompanySpecificity(paragraphs, researchText, companyName, plannedCompanyDetail);
@@ -1331,6 +1552,11 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     // paragraphs only, so they still run in the plan-degraded path where the
     // call site filters out the plan-dependent 'shape' result.
     checkCompoundHyphenation(paragraphs),
+    checkParallelStructure(paragraphs),
+    checkPriorEmployerOpening(paragraphs, priorEmployers),
+    checkVagueDomainWorkLabel(paragraphs),
+    checkReferenceClarity(paragraphs),
+    checkModifierAttachment(paragraphs),
     checkAnchorRelevance(paragraphs, jobText, researchText),
     checkAdditiveSeam(paragraphs),
     checkPostingReference(paragraphs),
@@ -1338,6 +1564,9 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkSentenceLength(paragraphs),
     checkPunctuationStyle(paragraphs),
     checkPlainRegister(paragraphs),
+    checkIntroductoryWorkplaceComma(paragraphs, priorEmployers),
+    checkVisualReferencePrecision(paragraphs),
+    checkDirectWelcomeClosing(paragraphs),
     checkLegalStatus(paragraphs),
     checkOpeningDemonstrative(paragraphs),
   ];
@@ -1350,6 +1579,11 @@ export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '' 
   return {
     name: text(identity.name),
     tagline: text(identity.tagline),
+    // These are authored from the accepted résumé, not from model-provided
+    // letter fields. The renderer uses them to recreate the identical shared
+    // letterhead component, including the design-system separator margins.
+    subtitleRole: text(identity.subtitleRole),
+    credential: text(identity.credential),
     // Normalize before filtering: a model/resumé source can contain whitespace
     // entries that are truthy before normalization but render as empty contact
     // separators in the paired cover-letter letterhead.

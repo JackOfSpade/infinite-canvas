@@ -1,4 +1,4 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -81,7 +81,7 @@ export default [
         && JSON.stringify(groundingViolation.items.required) === JSON.stringify(['claim', 'reason'])
         && cohesionObservation.maxItems === 8
         && JSON.stringify(cohesionObservation.items.required) === JSON.stringify(['kind', 'claim', 'reason', 'repair'])
-        && cohesionObservation.items.properties.kind.enum.join(',') === 'unclear-antecedent,unexplained-shift,chronological-backtracking,unmoored-temporal-contrast,inventory-paragraph,overloaded-sentence,faulty-parallelism,repeated-metaphor,awkward-register,unnecessary-employer-repetition,detached-synthesis,volunteered-gap,delayed-relevance,second-thesis,unnecessary-evidence,dangling-transition,unearned-causal,literalized-frame',
+        && cohesionObservation.items.properties.kind.enum.join(',') === 'unclear-antecedent,unexplained-shift,chronological-backtracking,unmoored-temporal-contrast,inventory-paragraph,overloaded-sentence,faulty-parallelism,misattached-modifier,introductory-punctuation,literal-metaphorical-precision,conditional-closing,repeated-metaphor,awkward-register,unnecessary-employer-repetition,unframed-employer,ambiguous-domain-label,dependent-reference,detached-synthesis,volunteered-gap,delayed-relevance,second-thesis,unnecessary-evidence,dangling-transition,unearned-causal,literalized-frame',
       'final audit separates bounded factual violations from exact-span cohesion observations');
       const faultyParallelismFixture = {
         kind: 'faulty-parallelism',
@@ -92,6 +92,10 @@ export default [
       assert(cohesionObservation.items.properties.kind.enum.includes(faultyParallelismFixture.kind)
         && cohesionObservation.items.required.every(key => String(faultyParallelismFixture[key] || '').length > 0),
       'the grounding-audit schema can return an exact-span observation for the reported noun-to-gerund regression');
+      for (const kind of ['misattached-modifier', 'unframed-employer', 'ambiguous-domain-label', 'dependent-reference']) {
+        assert(cohesionObservation.items.properties.kind.enum.includes(kind),
+          `the grounding-audit schema can report ${kind} instead of hiding it under awkward-register`);
+      }
       const detachedSynthesisFixture = {
         kind: 'detached-synthesis',
         claim: 'An ambiguous problem at one end and something running in production at the other is the shape most of my work has taken.',
@@ -179,51 +183,6 @@ export default [
       assert(empty.minItems === 0 && empty.maxItems === 0,
         'dynamic bucketing contract remains valid and deterministic for an empty defensive input');
       return { labels: labels.maxItems };
-    },
-  },
-{
-    name: 'application generation: research quota fallback distinguishes scraped-description from metadata-only context',
-    run: async () => {
-      const quotaError = new Error('All Gemini models failed. 8 model(s) exhausted their daily quota.');
-      const fallback = await getCompanyResearchContext(
-        { company: 'Acme', title: 'Engineer' },
-        null,
-        async () => { throw quotaError; },
-      );
-      assert(fallback.available === false, 'a research quota failure must be non-fatal and marked unavailable');
-      assert(fallback.error.includes('daily quota'), 'the diagnostic should retain the provider failure reason');
-      assert(fallback.text.includes('no scraped job description was captured')
-        && fallback.text.includes('title/company/location/salary metadata'),
-      'an empty scraped description must be labeled metadata-only, not described as scraped-JD context');
-      const withDescription = await getCompanyResearchContext(
-        { company: 'Acme', title: 'Engineer', snippet: 'Build and maintain production systems.' },
-        null,
-        async () => { throw quotaError; },
-      );
-      assert(withDescription.text.includes('scraped target job description')
-        && !withDescription.text.includes('no scraped job description was captured'),
-      'a real scraped description remains the truthful fallback context when research fails');
-      const blankResearch = await getCompanyResearchContext(
-        { company: 'Acme', title: 'Engineer', snippet: 'Build and maintain production systems.' },
-        null,
-        async () => '   \n ',
-      );
-      assert(blankResearch.available === false
-        && blankResearch.error.includes('returned no usable content')
-        && blankResearch.text.includes('scraped target job description'),
-      'a fulfilled but blank research response must degrade explicitly instead of masquerading as live context');
-      let abortPassedThrough = false;
-      try {
-        await getCompanyResearchContext({}, null, async () => {
-          const error = new Error('aborted');
-          error.name = 'AbortError';
-          throw error;
-        });
-      } catch (error) {
-        abortPassedThrough = error?.name === 'AbortError';
-      }
-      assert(abortPassedThrough, 'a user cancellation must not be converted into a no-research generation');
-      return { degradedSafely: true };
     },
   },
 {
@@ -359,7 +318,7 @@ export default [
       try {
         const meta = {};
         const text = await callGeminiTextRaw('Adversarial refute pass.', 'payload-hygiene-test-key', 'gemini-3.7-flash', null, {
-          maxOutputTokens: 128, formulaSeed: 64, task: 'career-achievement-refute', meta,
+          maxOutputTokens: 128, formulaSeed: 64, task: 'career-file-extract', meta,
           excludeModels: ['gemini-3.7-flash'],
         });
         assert(text === 'clean payload', 'the mocked call succeeds on the first non-excluded model');
@@ -773,31 +732,33 @@ export default [
     },
   },
 {
-    name: 'llm: providerForTask purely follows Settings — the old application-generation Claude pin is gone',
+    name: 'llm: generic routing supports only Gemini and Claude APIs; legacy Local AI settings fall back to Gemini',
     run: () => {
       // Fake settings objects, NOT the real store — providerForTask takes an
       // explicit 2nd arg precisely so callers (and tests) can probe routing
       // without mutating global settings.
       const geminiSettings = { provider: 'gemini', anthropicApiKey: 'x' };
       const claudeSettings = { provider: 'claude', anthropicApiKey: 'x' };
-      const localSettings = { provider: 'local' };
+      const legacyLocalSettings = { provider: 'local' };
 
-      // Jack reversed the earlier "application-generation always runs on
-      // Claude" decision — EVERY known task (including the former pin set)
-      // must now follow the user's Settings provider with no exceptions.
+      // Every generic task must use one of the two API providers. A persisted
+      // legacy Local AI selection is intentionally safe: it follows the
+      // historic Gemini default instead of leaving unrelated AI features
+      // unable to make a request.
       for (const task of [...getKnownTaskIds(), 'default']) {
-        assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick (no more Claude pin)`);
+        assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick`);
         assert(providerForTask(task, claudeSettings) === 'claude', `'${task}' follows the Claude Settings pick`);
-        assert(providerForTask(task, localSettings) === 'local', `'${task}' never silently falls back to Gemini when Local AI is selected`);
-        assert(modelForTask(task, localSettings) === 'claude-code-local', `'${task}' exposes the Local AI handoff rather than a remote-model id`);
+        assert(providerForTask(task, legacyLocalSettings) === 'gemini', `'${task}' falls back to Gemini for the removed Local AI provider`);
+        assert(String(modelForTask(task, legacyLocalSettings)).startsWith('gemini-'), `'${task}' resolves a Gemini model for the removed Local AI provider`);
       }
+      assert(normalizeAIProvider('gemini') === 'gemini' && normalizeAIProvider('claude') === 'claude',
+        'the two supported provider settings remain valid');
+      assert(normalizeAIProvider('local') === 'gemini' && normalizeAIProvider('not-a-provider') === 'gemini',
+        'legacy Local AI and invalid persisted provider values normalize to Gemini');
       const geminiQualityTasks = [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
         'resume-parse', 'career-file-extract', 'job-query-generation',
-        'job-scoring', 'job-bucketing', 'job-compensation-research', 'job-compensation-assessment', 'company-research',
-        'application-resume', 'application-letter-needs', 'application-letter-plan',
-        'application-cover-letter', 'application-letter-revise', 'application-skill-opportunity',
-        'career-achievement-mining', 'default',
+        'job-scoring', 'job-bucketing', 'job-compensation-research', 'job-compensation-assessment', 'default',
       ];
       for (const task of geminiQualityTasks) {
         assert(modelForTask(task, geminiSettings) === 'gemini-3.7-flash',
@@ -807,40 +768,23 @@ export default [
         assert(modelForTask(task, geminiSettings) === 'gemini-3.5-flash-lite',
           `'${task}' remains on the deliberate lightweight Gemini tier`);
       }
-      assert(modelForTask('career-achievement-refute', geminiSettings) === 'gemini-3.5-flash',
-        'the Gemini achievement refuter remains independent from the 3.7 miner');
-      assert(modelForTask('application-letter-grounding', geminiSettings) === 'gemini-3.5-flash',
-        'the Gemini letter factual auditor remains independent from the 3.7 writer');
       // Callers that pass an explicit malformed/missing settings snapshot must
       // fail safely to the default provider instead of crashing on
       // `settings.provider` while handling a real task.
-      assert(providerForTask('application-resume', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
-      assert(modelForTask('application-resume', null) === 'gemini-3.7-flash', 'model routing remains usable with an explicit null settings snapshot');
+      assert(providerForTask('job-scoring', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
+      assert(modelForTask('job-scoring', null) === 'gemini-3.7-flash', 'model routing remains usable with an explicit null settings snapshot');
       return { ok: true };
     },
   },
 {
-    name: 'llm: default claudeModels settings reproduce the OLD hard-coded TASK_MODELS table exactly',
+    name: 'llm: default Claude model settings resolve every live API task',
     run: () => {
       // The safety net for the whole task-group refactor: an install with no
       // `claudeModels` configured (settings.js backfills GROUP_DEFAULT_FAMILY)
-      // must resolve every task to the exact same model the old literal
-      // per-task Claude column did — generation=OPUS, analysis=SONNET,
-      // light=HAIKU, with company-research/career-achievement-refute one
-      // step below generation (i.e. SONNET, same as before).
+      // must resolve analysis and light tasks to their respective defaults.
       const settings = { provider: 'claude', anthropicApiKey: 'x' }; // no claudeModels key — defaults apply
-      const { OPUS, SONNET, HAIKU } = MODEL_FLOOR;
+      const { SONNET, HAIKU } = MODEL_FLOOR;
       const expected = {
-        'application-resume':        OPUS,
-        'application-letter-needs':  SONNET, // feeds generation, isn't the artifact
-        'application-letter-plan':   OPUS,
-        'application-cover-letter':  OPUS,
-        'application-letter-grounding': SONNET,
-        'application-letter-revise': OPUS,
-        'application-skill-opportunity': OPUS,
-        'career-achievement-mining': OPUS,
-        'career-achievement-refute': SONNET, // generation stepped down 1 (independence — load-bearing)
-        'company-research':          SONNET, // generation stepped down 1 (feeds generation, isn't the artifact)
         'vision-product-analysis':   SONNET,
         'price-synthesis':           SONNET,
         'bundle-price-synthesis':    SONNET,
@@ -869,46 +813,18 @@ export default [
     },
   },
 {
-    name: 'llm: career-achievement-refute independence survives a non-default generation family, clamps at the ladder floor',
-    run: () => {
-      // The refuter deliberately runs a DIFFERENT model from the miner — an
-      // adversarial check re-run on the SAME model tends to just re-confirm its
-      // own reasoning, which would silently turn "independent verification"
-      // into self-confirmation. This must hold for ANY family the user picks
-      // for Generation, not just the OPUS default.
-      const fableGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'FABLE', analysis: 'SONNET', light: 'HAIKU' } };
-      const minerModel = modelForTask('career-achievement-mining', fableGen);
-      const refuterModel = modelForTask('career-achievement-refute', fableGen);
-      assert(minerModel !== refuterModel, `miner (Fable) and refuter (one step down) must resolve to different models (both got ${minerModel})`);
-      assert(refuterModel === MODEL_FLOOR.OPUS, `refuter one step below FABLE on the ladder should be OPUS (got ${refuterModel})`);
-
-      // Clamp: Generation set to the BOTTOM of the ladder (Haiku) leaves the
-      // step-1 refuter with nowhere lower to go — it must clamp at Haiku
-      // (same as the miner) rather than throw or wrap around the ladder.
-      // This is the documented "independence silently lost" case; it must
-      // not crash, just land flat.
-      const haikuGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'HAIKU', analysis: 'SONNET', light: 'HAIKU' } };
-      const clampedMiner = modelForTask('career-achievement-mining', haikuGen);
-      const clampedRefuter = modelForTask('career-achievement-refute', haikuGen);
-      assert(clampedMiner === MODEL_FLOOR.HAIKU && clampedRefuter === MODEL_FLOOR.HAIKU,
-        `generation=HAIKU clamps the step-1 refuter at HAIKU too (got miner=${clampedMiner}, refuter=${clampedRefuter})`);
-      return { ok: true };
-    },
-  },
-{
     name: 'llm: an unrecognized/missing claudeModels family token falls back to the group default, never throws',
     run: () => {
       // Defensive re-validation inside llm.js itself (belt-and-suspenders on
       // top of settings.js's own normalizeClaudeModels()) — llm.js is
       // reachable with a hand-built settings object that never went through
       // that layer (tests, or a future caller).
-      const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'MYTHOS', analysis: 'nope', light: null } };
-      assert(modelForTask('application-resume', badToken) === MODEL_FLOOR.OPUS, 'an unrecognized generation token falls back to OPUS (the group default)');
+      const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { analysis: 'nope', light: null } };
       assert(modelForTask('job-scoring', badToken) === MODEL_FLOOR.SONNET, 'an unrecognized analysis token falls back to SONNET (the group default)');
       assert(modelForTask('text-polish', badToken) === MODEL_FLOOR.HAIKU, 'a null light token falls back to HAIKU (the group default)');
 
       const noClaudeModelsAtAll = { provider: 'claude', anthropicApiKey: 'x' };
-      assert(modelForTask('application-resume', noClaudeModelsAtAll) === MODEL_FLOOR.OPUS, 'a settings object with no claudeModels key at all still resolves via the group default');
+      assert(modelForTask('job-scoring', noClaudeModelsAtAll) === MODEL_FLOOR.SONNET, 'a settings object with no claudeModels key at all still resolves via the group default');
       return { ok: true };
     },
   },
@@ -918,53 +834,17 @@ export default [
       // The whole point of the group/step refactor is that the FAMILY is a
       // per-group Settings choice, not a hard-code — prove picking a
       // non-default family actually changes the resolved model id, not just
-      // that the plumbing accepts the value without erroring. Only
-      // `generation` is set below; analysis/light are left unset so they
-      // fall through to their own defaults, which also proves the choice is
-      // scoped to the group it names rather than a global override.
-      const sonnetGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'SONNET' } };
-      assert(modelForTask('application-resume', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves application-resume off its OPUS default to the Sonnet floor');
-      assert(modelForTask('application-cover-letter', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves application-cover-letter too');
-      assert(modelForTask('career-achievement-mining', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves career-achievement-mining too');
-      // Unrelated groups, left unset, resolve via THEIR OWN defaults — the
-      // pick above is scoped to `generation`, not applied everywhere.
-      assert(modelForTask('job-scoring', sonnetGen) === MODEL_FLOOR.SONNET, 'job-scoring (analysis, unset) still resolves via its own default (which happens to also be Sonnet)');
-      assert(modelForTask('text-polish', sonnetGen) === MODEL_FLOOR.HAIKU, 'text-polish (light, unset) is untouched by the generation change');
+      // that the plumbing accepts the value without erroring. Analysis is set
+      // below while Light is left unset, proving the choice is group-scoped.
 
       const haikuAnalysis = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { analysis: 'HAIKU' } };
-      assert(modelForTask('application-resume', haikuAnalysis) === MODEL_FLOOR.OPUS, 'generation (unset) is untouched by an analysis-only change');
       assert(modelForTask('job-scoring', haikuAnalysis) === MODEL_FLOOR.HAIKU, 'analysis=HAIKU moves job-scoring off its SONNET default');
+      assert(modelForTask('text-polish', haikuAnalysis) === MODEL_FLOOR.HAIKU, 'light (unset) retains its own HAIKU default');
       return { ok: true };
     },
   },
 {
-    name: 'llm: career-achievement-mining vs -refute independence holds for EVERY generation family, except the ladder floor',
-    run: () => {
-      // Load-bearing invariant (TASK_GROUPS doc, llm.js): the refuter must
-      // resolve to a DIFFERENT model from the miner for any Settings pick, or
-      // the "independent verification" the step exists for silently
-      // degenerates into self-confirmation. Walk the WHOLE ladder — not just
-      // a couple of hand-picked samples — so a future ladder change (a family
-      // inserted, removed, or reordered) is caught here instead of discovered
-      // live. At the ladder floor there is nowhere lower to step, so that one
-      // entry is the sole documented exception: assert the boundary
-      // explicitly rather than skip it.
-      const floorFamily = CLAUDE_FAMILY_LADDER[CLAUDE_FAMILY_LADDER.length - 1];
-      for (const family of CLAUDE_FAMILY_LADDER) {
-        const settings = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: family } };
-        const miner = modelForTask('career-achievement-mining', settings);
-        const refuter = modelForTask('career-achievement-refute', settings);
-        if (family === floorFamily) {
-          assert(miner === refuter, `at the ladder floor (${family}) the refuter has nowhere lower to step, so it lands on the SAME model as the miner (got miner=${miner}, refuter=${refuter})`);
-        } else {
-          assert(miner !== refuter, `generation=${family}: miner and refuter must resolve to DIFFERENT models for independence (both got ${miner})`);
-        }
-      }
-      return { ok: true };
-    },
-  },
-{
-    name: 'llm: taskModelRoutingSnapshot returns a complete {provider, groups, tasks} diagnostic, one row per known task',
+    name: 'llm: taskModelRoutingSnapshot reports only live API groups and tasks',
     run: () => {
       // Replaces the old providerPinnedTasks/applicationGenerationBlocked
       // bug-report fields (which described a pin that no longer exists) — a
@@ -973,28 +853,22 @@ export default [
       const settings = { provider: 'claude', anthropicApiKey: 'x' }; // defaults apply
       const snap = taskModelRoutingSnapshot(settings);
       assert(snap.provider === 'claude', 'snapshot.provider reflects the Settings provider');
-      assert(Object.keys(snap.groups).sort().join(',') === 'analysis,generation,light', 'snapshot.groups covers exactly the three task groups');
-      assert(snap.groups.generation.family === 'OPUS' && snap.groups.generation.model === MODEL_FLOOR.OPUS, 'generation group summary resolves to its default family + model');
+      assert(Object.keys(snap.groups).sort().join(',') === 'analysis,light', 'snapshot.groups excludes the local-only application generation group');
       assert(snap.groups.analysis.family === 'SONNET' && snap.groups.light.family === 'HAIKU', 'analysis/light group summaries resolve to their own defaults');
 
-      const known = getKnownTaskIds();
-      assert(known.size > 0, 'sanity: getKnownTaskIds is non-empty');
-      for (const task of known) {
-        assert(snap.tasks[task], `taskModelRoutingSnapshot is missing a row for known task '${task}'`);
+      const knownTasks = getKnownTaskIds();
+      assert(knownTasks.size > 0, 'sanity: getKnownTaskIds is non-empty');
+      for (const task of knownTasks) {
+        assert(snap.tasks[task], `taskModelRoutingSnapshot is missing a row for registered task '${task}'`);
         assert(snap.tasks[task].provider === 'claude', `'${task}' row reports the active provider`);
         assert(typeof snap.tasks[task].model === 'string' && snap.tasks[task].model.length > 0, `'${task}' row carries a real model id, not undefined/empty`);
       }
-      // Step-offset detail is visible per-task, not just inferable from the
-      // group summary — the whole reason the per-task half of this
-      // diagnostic exists alongside the per-group half.
-      assert(snap.tasks['career-achievement-refute'].step === 1, 'career-achievement-refute row reports its step offset');
-      assert(snap.tasks['career-achievement-refute'].model === MODEL_FLOOR.SONNET, 'career-achievement-refute resolves one step below generation (SONNET) by default');
 
       // provider is task-independent (providerForTask doc) — every row
       // shares the one provider even under a Gemini settings object.
       const geminiSnap = taskModelRoutingSnapshot({ provider: 'gemini', anthropicApiKey: 'x' });
       assert(geminiSnap.provider === 'gemini', 'snapshot.provider follows Settings for Gemini too');
-      for (const task of known) {
+      for (const task of knownTasks) {
         assert(geminiSnap.tasks[task].provider === 'gemini', `'${task}' row follows the Gemini provider — no per-task pin survives`);
       }
       return { ok: true };
@@ -1098,8 +972,8 @@ export default [
     name: 'claude: webSearchToolType picks the search-tool variant each Claude generation actually accepts',
     run: () => {
       // Verified live (module doc): Haiku 400s on the new `_20260209` variant,
-      // so guessing wrong here breaks the ONE grounded call the app makes
-      // (company-research) rather than just under-using a feature.
+      // so guessing wrong here breaks a grounded API call rather than merely
+      // under-using a feature.
       for (const modern of ['claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6']) {
         assert(webSearchToolType(modern) === 'web_search_20260209', `${modern} (Opus/Sonnet 4.6+) gets the dynamic-filtering search tool`);
       }
@@ -1153,7 +1027,8 @@ export default [
       assert(est === Math.ceil(chars / LOCAL_CHARS_PER_TOKEN), 'estimate uses the conservative ratio');
       assert(est > chars / 4, 'estimate over-counts vs the realistic ~4 chars/token');
       // A 22K-token scoring batch (15 enriched jobs) fits BOTH a 200K and a 1M window.
-      const out = 8800; // job-scoring reserve at 15 items: min(24576, 2500+420*15)
+      // Structured requirement/evidence rows reserve min(24576, 2800+1000*15).
+      const out = 17800;
       assert(assessPromptFit({ contextWindow: 200000, modelMaxOutput: 64000, requestedOutput: out, promptTokens: 22000 }).fits, '22K batch fits 200K');
       assert(assessPromptFit({ contextWindow: 1048576, modelMaxOutput: 65536, requestedOutput: out, promptTokens: 22000 }).fits, '22K batch fits 1M');
       // A 195K-token prompt overflows 200K (no room for output+margin) but fits 1M.

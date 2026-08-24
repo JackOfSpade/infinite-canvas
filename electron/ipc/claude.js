@@ -75,7 +75,7 @@ function parseAnthropicRateLimit(headers) {
 // CLAUDE_MODEL_IDS list) so every existing importer of "the models in use"
 // has one place to go. The availability probe checks EACH, because Anthropic
 // rate limits are PER-MODEL: Haiku having headroom says nothing about whether
-// a Sonnet scoring run or an Opus application-generation will hit limits.
+// a Sonnet scoring run or another selected live API task will hit limits.
 export { claudeModelsInUse };
 
 /**
@@ -178,8 +178,8 @@ function repairToolInput(value, schema, repaired = { count: 0 }) {
  *
  * The `_20260209` variant adds DYNAMIC FILTERING — Anthropic runs code
  * server-side to filter search results before they reach the context window,
- * which is a straight accuracy + token-efficiency win for company-research
- * (the only grounded call we make). It is supported on Opus 4.6+ and Sonnet
+ * which is a straight accuracy + token-efficiency win for grounded API calls.
+ * It is supported on Opus 4.6+ and Sonnet
  * 4.6+ ONLY; sending it to an older model — or to Haiku, which never got it —
  * is a 400.
  *

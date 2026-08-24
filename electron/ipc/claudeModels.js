@@ -65,14 +65,14 @@ export const CLAUDE_MODEL_REGISTRY = Object.freeze([
     tier: 'sonnet',
     contextWindow: 1000000,
     maxOutput: 64000,
-    // job scoring/bucketing, resume-parse, query-gen, vision, price-synthesis, company-research
+    // job scoring/bucketing, resume-parse, query-gen, vision, price-synthesis
   },
   {
     id: MODEL_FLOOR.OPUS,
     tier: 'opus',
     contextWindow: 1000000,
     maxOutput: 128000,
-    // application résumé + cover-letter generation, achievement mining
+    // Reserved for an explicit high-quality API task when one is introduced.
   },
   {
     id: MODEL_FLOOR.HAIKU,

@@ -9,7 +9,8 @@ import { computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT 
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
  *
  * Three kinds share this component (different accent; one layout, deepest last):
- *   - kind='likelihood' — interview-likelihood band (top level). Children are
+ *   - kind='likelihood' — hiring-fit band (top level; the persisted kind name
+ *                         remains for compatibility). Children are
  *                         salary-range groups. Reveals all on expand.
  *   - kind='salary'     — salary range inside a band. Children are role groups.
  *                         Reveals all on expand.

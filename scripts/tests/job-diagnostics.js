@@ -1,13 +1,61 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { collapseEventBursts } from '../test-dependencies.js';
+import { buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 
 export default [
+{
+    name: 'Bug report file export keeps every routine node diagnostic row',
+    run: () => {
+      const nodes = Array.from({ length: 20 }, (_, index) => ({
+        id: `card${String(index).padStart(4, '0')}`, type: 'jobcard', data: {},
+      }));
+      const nodeInternals = nodes.map(node => ({
+        id: node.id, type: node.type, position: { x: 0, y: 0 },
+        measured: { width: 240, height: 100 },
+      }));
+      const payload = {
+        description: 'Node export fidelity fixture.', nodes, edges: [], drawings: [],
+        frontEndState: {}, nodeInternals, nodeComponentStates: [], eventLogs: [],
+      };
+      const fileReport = generateMarkdown(payload).markdown;
+      assert(nodes.every(node => fileReport.includes(`| \`${node.id}\``))
+        && !fileReport.includes('routine jobcard row(s) omitted'),
+      'Save to file must retain every routine jobcard row with no clipboard-budget footer');
+
+      const clipboardReport = generateMarkdown(payload, null, { maxChars: 1_000_000 }).markdown;
+      assert(clipboardReport.includes('| `card0014`')
+        && !clipboardReport.includes('| `card0015`')
+        && clipboardReport.includes('5 routine jobcard row(s) omitted to preserve the clipboard budget'),
+      'clipboard generation still samples routine cascade rows before applying its final character cap');
+      return { fileRows: nodes.length, clipboardRows: 15 };
+    },
+  },
+{
+    name: 'FULL and PERSIST reports include redacted session durability diagnostics',
+    run: () => {
+      const base = {
+        description: 'Reopen regression fixture.', nodes: [], edges: [], drawings: [],
+        frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      };
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const persist = generateMarkdown({ ...base, filterCode: 'PERSIST' }).markdown;
+      for (const report of [full, persist]) {
+        assert(report.includes('## Session Persistence Diagnostics')
+          && report.includes('Cookies DB')
+          && report.includes('Completed auth-browser close lifecycle'),
+        'session-persistence reports must include profile checkpoints and structured close outcomes');
+        assert(!/cookie value/i.test(report) || report.includes('cookie values are never read or exported'),
+          'session-persistence diagnostics must never expose cookie values');
+      }
+      return { full: true, persist: true };
+    },
+  },
 {
     name: 'Job-hub Node Diagnostics distinguishes fetched listings from kept scoring input',
     run: () => {
@@ -458,14 +506,18 @@ export default [
         'FULL report must include the bounded destination readback manifest and reveal result');
 
         const filtered = applyBugReportCode([
-          '[JobApplication] Generating application',
-          '[generate-application] failed: quota exhausted',
+          '[LocalAI] queued job for application handoff',
+          '[import-local-application] failed: invalid result.json',
           '[Canvas] node moved',
+          '[Canvas] layout settled',
+          '[Canvas] selection changed',
+          '[generate-application] old remote failure',
         ], {}, 'APPLICATION');
-        assert(filtered.filteredLogs.some(line => /JobApplication/.test(line))
-          && filtered.filteredLogs.some(line => /generate-application/.test(line))
+        assert(filtered.filteredLogs.some(line => /LocalAI/.test(line))
+          && filtered.filteredLogs.some(line => /import-local-application/.test(line))
+          && !filtered.filteredLogs.some(line => /generate-application/.test(line))
           && filtered.sectionExclusions.has('nodeInternals'),
-        'APPLICATION filter selects application lifecycle logs (with causal context) while omitting heavy canvas diagnostics');
+        'APPLICATION filter selects the local handoff/import lifecycle while omitting dead remote-generation patterns (and retains nearby causal context)');
         const handoff = applyBugReportCode([
           '[LocalAI] Résumé PDF render failed',
           '[Canvas] keyboard shortcut',
@@ -802,76 +854,14 @@ export default [
     name: 'Application prompts preserve evidence scope and reject pseudo-growth metrics',
     run: () => {
       const source = fs.readFileSync(path.join(process.cwd(), 'electron', 'ipc', 'jobApplication.js'), 'utf8');
-      assert(source.includes('sequential jobs/employers/clients/sectors are chronology, not percentage growth')
-        && source.includes('Never convert a sequence or count of jobs, employers, clients, sectors, or role changes into percentage growth'),
-      'achievement refutation and résumé writing must both reject sequential-role counts presented as scope growth');
-      assert(source.includes('Do not strengthen "coordinated with emergency personnel" into "served as the municipal point of contact"')
-        && source.includes('General evening/weekend availability may be described only at that same level')
-        && source.includes('never imply that they are local, can commute, or will relocate'),
-      'cover-letter generation must preserve evidence specificity, availability granularity, and geography truthfulness');
-      assert(source.includes('does not make CPR/BLS a high-impact gap unless the target posting explicitly requires or strongly prefers CPR/BLS'),
-        'skill-gap analysis must not elevate an adjacent, unstated CPR/BLS credential into a blocking check');
-      assert(source.includes('COMPRESSED-EVIDENCE SYNTHESIS: the CAREER DATA is shorthand evidence, not finished résumé copy')
-        && source.includes('Combine compatible facts when the data clearly places them in the same role, project, or professional practice')
-        && source.includes('Do not merely dress up familiarity or self-assessed knowledge')
-        && source.includes('Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result')
-        && source.includes('never move a fact between employers or projects'),
-      'résumé generation must permit narrow synthesis of compressed career evidence without manufacturing an achievement, outcome, scope, or attribution');
-      assert(source.includes('const PARALLEL_STRUCTURE_RULE = `PARALLEL STRUCTURE:')
-        && source.includes('Reject a span shaped like “from [noun phrase] through [verb-ing phrase]”')
-        && source.includes('do not repair the mismatch with bureaucratic padding such as “from the time of.”')
-        && source.includes('- ${PARALLEL_STRUCTURE_RULE}')
-        && source.includes('${COVER_LETTER_OPENING_RULE}\n\n${PARALLEL_STRUCTURE_RULE}')
-        && source.includes('${COVER_LETTER_OPENING_RULE} ${PARALLEL_STRUCTURE_RULE}')
-        && source.includes('faulty-parallelism when coordinated elements use mismatched grammatical forms'),
-      'résumé, planned-letter, direct-letter, and semantic-audit prompts must prevent and repair faulty grammatical parallelism');
-      assert(source.includes('Treat breadth and frequency language as factual scope')
-        && source.includes('detached-synthesis when a concluding or transitional sentence introduces a broader abstraction')
-        && source.includes('including a paragraph-opening demonstrative phrase whose referent the previous paragraph never establishes')
-        && source.includes('For detached-synthesis, either rewrite the sentence as a concrete conclusion')
-        && source.includes('For unclear-antecedent, replace the backward reference with the exact responsibility, system, decision, or process it means')
-        && source.includes('every synthesis is explicitly tied to and scoped by its evidence'),
-      'the independent audit and both revision paths must catch unsupported synthesis and ambiguous cross-paragraph references, then repair them concretely');
-      assert(source.includes('const LETTER_COHESION_RULE = `LETTER COHESION:')
-        && source.includes('${LETTER_REGISTER_RULE}\n\n${LETTER_COHESION_RULE}')
-        && source.includes('${LETTER_REGISTER_RULE} ${LETTER_COHESION_RULE}')
-        && source.includes('dangling-transition when a sentence announces a migration, move, or change')
-        && source.includes('unearned-causal when a causal connective such as “that is why,” “which is why,” or “so”')
-        && source.includes('literalized-frame when a rhetorical frame coined for the evidence')
-        && source.includes('For a dangling-transition observation, complete the movement in the same sentence')
-        && source.includes('For an unearned-causal observation, state the missing premise as its own sentence')
-        && source.includes('For a literalized-frame observation, rewrite the span to name the single posted role literally')
-        && source.includes('Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter')
-        && source.includes('For a legal-status observation, delete the citizenship, work-authorization, residency, or visa statement entirely'),
-      'planned-letter, direct-letter, audit, and both revision paths must prevent and repair dangling transitions, unearned causality, literalized frames, and letter-stated legal status');
-      assert(source.includes('it is not permission to volunteer a weakness')
-        && source.includes('Do not unload tools, systems, or achievements after any punctuation mark — colon, semicolon, or dash')
-        && source.includes('const LETTER_REGISTER_RULE = `LETTER REGISTER:')
-        && source.includes('${PARALLEL_STRUCTURE_RULE}\n\n${LETTER_REGISTER_RULE}')
-        && source.includes('${PARALLEL_STRUCTURE_RULE} ${LETTER_REGISTER_RULE}')
-        && source.includes('For a stack-tools observation, keep the single most argument-relevant name')
-        && source.includes('For a punctuation or dash observation, split the clause into separate short sentences')
-        && source.includes('never repeat an abstract metaphor across paragraphs as connective tissue')
-        && source.includes('overloaded-sentence')
-        && source.includes('repeated-metaphor')
-        && source.includes('volunteered-gap'),
-      'cover-letter generation and semantic audit reject volunteered gaps, overloaded evidence lists, and repeated organizing metaphors, and both letter writers carry the shared punctuation-agnostic register rule');
-      const revisionPrompts = [
-        buildResumeLengthRevisionPrompt({ mainHtml: '<main class="page"></main>', pageCount: 2, targetPageCount: 1, compactApplied: true }),
-        buildResumeUnderfillRevisionPrompt({ mainHtml: '<main class="page"></main>', contentUtilization: 0.75, targetPageCount: 1 }),
-        buildResumeRoleEvidenceRevisionPrompt({ mainHtml: '<main class="page"></main>' }),
-      ];
-      assert(source.includes('HIGHLIGHT BULLET PRESENTATION: inside every')
-        && source.includes('<span data-achievement-id="ID">figure</span>')
-        && source.includes('_resumeSampleMain = neutralizeHighlightTextEmphasis(m[0])')
-        && source.includes('Every top-level résumé category is a peer')
-        && revisionPrompts.every(prompt => prompt.includes('HIGHLIGHT BULLET PRESENTATION')
-          && prompt.includes('Never emit `<b>` or `<strong>`')
-          && prompt.includes('<span data-achievement-id="ID">figure</span>')
-          && prompt.includes('TOP-LEVEL SECTION HIERARCHY')
-          && prompt.includes('Every top-level résumé category is a peer')),
-      'the normalized sample, initial generation, and every API résumé revision/repair prompt must preserve uniform-weight highlights, neutral receipt spans, and peer-level section hierarchy');
-      return { achievementScope: true, compressedEvidenceSynthesis: true, parallelStructurePrompts: true, earnedSynthesisAudit: true, coverEvidenceScope: true, cprGate: true, uniformHighlightPrompts: revisionPrompts.length, peerSectionHierarchyPrompts: revisionPrompts.length };
+      const routine = fs.readFileSync(path.join(process.cwd(), 'local_ai', 'CLAUDE_CODE_ROUTINE.md'), 'utf8');
+      assert(!source.includes('_retiredRemoteApplicationGeneration')
+        && !source.includes("from './llm.js'")
+        && routine.includes('Never add an unrecorded outcome')
+        && routine.includes('Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter'),
+      'application truthfulness and letter-scope rules live exclusively in the Local AI routine; the retired API authoring path is absent');
+      return { localOnly: true };
+
     },
   },
 {
@@ -1509,10 +1499,10 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['linkedin-short-snapshot']), null, null);
-        assert(report.includes('Completion telemetry disagrees with the saved scoring snapshot')
+        assert(report.includes('Completion telemetry disagrees with the legacy scoring snapshot')
           && report.includes('Maintenance Technician II')
           && report.includes('https://linkedin.example/jobs/short')
-          && report.includes('do not treat this as a clean full-description finish'),
+          && report.includes('Do not treat this as a clean full-description finish'),
         'saved scoring input is authoritative and the report includes bounded title/URL evidence for the short row');
         assert(!report.includes('Residual: 0 below enrichment threshold'),
           'stale process telemetry cannot bless a saved sub-threshold description as complete');
@@ -1520,6 +1510,261 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+  {
+    name: 'Job scoring: structured evidence contract grounds every material requirement and evaluates hiring fit without false probability',
+    run: () => {
+      const careerData = 'Software Engineer\nBuilt and maintained React and Django services from May 2023 through June 2026.';
+      const { snapshot: grounded } = buildJobAnalysisSnapshot({
+        jobs: [{ title: 'Systems Engineer', company: 'Example', snippet: 'Required: production system design experience.' }],
+        profile: { titles: ['Software Engineer'], experience_years: 3.1 },
+        careerData,
+        nodeId: 'scoring-grounding-fixture',
+        targetRole: 'Systems Engineer',
+        snapshotContext: {},
+      });
+      const { snapshot: legacy } = buildJobAnalysisSnapshot({
+        jobs: [], profile: { titles: ['Software Engineer'] }, nodeId: 'legacy-profile-fixture', snapshotContext: {},
+      });
+      const scoreProperties = JOB_SCORING_SCHEMA.properties.scores.items.properties;
+      const assessment = scoreProperties.requirementAssessments.items;
+      const gap = scoreProperties.materialGaps.items;
+      assert([
+        'CANDIDATE CAREER EVIDENCE (primary citation source)', careerData,
+        'requirementAssessments', 'materialGaps', 'total professional tenure separate',
+        'valid workHistory roleIds',
+        'comparative hiring fit score', 'NOT a statistically calibrated prediction',
+        'full hiring process and management decision', 'preferred qualification is not automatically',
+        'concise recount of the candidate\'s experience',
+        'not documented in the supplied career data',
+        'contradicted requires verbatim candidate evidence',
+        'never infer contradiction from absence',
+      ].every(fragment => grounded.cachedPrefix.includes(fragment)) && grounded.careerData === careerData,
+      'scoring prompt treats concise career data as bounded evidence, requires evidence-qualified gap coverage, and persists it for saved-scrape re-scores');
+      assert(legacy.cachedPrefix.includes('only candidate evidence available for this legacy request'),
+        'legacy direct score calls retain profile-only grounding instead of failing when career data is absent');
+      assert(JOB_SCORING_SCHEMA.properties.scores.items.required.includes('requirementAssessments')
+        && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('materialGaps')
+        && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('experienceAssessment')
+        && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('confidence')
+        && assessment.required.join('|') === 'requirementText|priority|jobEvidence|status|candidateEvidence|explanation'
+        && assessment.properties.status.enum.join('|') === 'direct|adjacent|not_documented|contradicted|unclear'
+        && gap.required.join('|') === 'requirementText|priority|jobEvidence|status|candidateEvidence|impact'
+        && gap.properties.status.enum.join('|') === 'not_documented|contradicted|unclear'
+        && scoreProperties.experienceAssessment.properties.categorySpecificExperience.items.required
+          .join('|') === 'category|requiredMinimumYears|roleIds|years|candidateEvidence|jobEvidence|explanation'
+        && RESUME_PARSE_SCHEMA.required.includes('workHistory')
+        && RESUME_PARSE_SCHEMA.properties.workHistory.items.required.join('|') === 'id|title|employer|startDate|endDate',
+      'schema requires auditable requirement evidence, material gaps, separate experience assessment, and confidence');
+      return { requiredScoreFields: JOB_SCORING_SCHEMA.properties.scores.items.required.length };
+    },
+  },
+  {
+    name: 'Job scoring: a fresh response without grounded requirements becomes a visible placeholder, never a high legacy fit score',
+    run: () => {
+      const job = { title: 'Frontend Engineer', snippet: 'Required: React experience.' };
+      const options = { candidateText: 'Built React interfaces for internal tools.', candidateRoles: [] };
+      const emptyAssessment = {
+        index: 0, matchScore: 95, reasoning: 'Very strong match.', careerDirection: 'Frontend',
+        requirementAssessments: [], materialGaps: [], confidence: 'high', experienceAssessment: {},
+      };
+      const validAssessment = {
+        ...emptyAssessment,
+        requirementAssessments: [{
+          requirementText: 'React experience', priority: 'required', jobEvidence: 'Required: React experience.',
+          status: 'direct', candidateEvidence: 'Built React interfaces for internal tools.', explanation: 'Explicit evidence.',
+        }],
+      };
+      const rejected = calibratedScoreForJob(emptyAssessment, job, options);
+      const prepared = prepareLiveScoringResults([emptyAssessment], [job], options);
+      const accepted = calibratedScoreForJob(validAssessment, job, options);
+      assert(rejected === null && prepared.scores[0] === null
+        && prepared.placeholderCount === 1 && prepared.ungroundedScoreCount === 1 && prepared.allNull,
+      'a fresh empty/legacy-shaped model response cannot retain its raw 95 and increments placeholder telemetry');
+      assert(accepted?.matchScore === 95 && accepted.fitAssessment?.auditStatus === 'audited',
+        'a fresh response with a grounded material requirement remains eligible for live scoring');
+      return { placeholders: prepared.placeholderCount, ungrounded: prepared.ungroundedScoreCount };
+    },
+  },
+  {
+    name: 'Job scoring: concise career data distinguishes not-documented evidence gaps from explicit contradictions',
+    run: () => {
+      const job = {
+        title: 'Platform Engineer',
+        snippet: 'Required: GraphQL production experience. Must be available for overnight on-call.',
+      };
+      const candidateText = 'Built React interfaces for internal tools. Cannot work overnight shifts.';
+      const base = {
+        index: 0, matchScore: 92, reasoning: 'Strong fit.', careerDirection: 'Platform Engineering',
+        confidence: 'high', experienceAssessment: {},
+      };
+      const notDocumented = {
+        ...base,
+        requirementAssessments: [{
+          requirementText: 'GraphQL production experience', priority: 'required',
+          jobEvidence: 'Required: GraphQL production experience.', status: 'not_documented',
+          candidateEvidence: '',
+          explanation: 'GraphQL is not documented in the supplied career data.',
+        }],
+        materialGaps: [{
+          requirementText: 'GraphQL production experience', priority: 'required',
+          jobEvidence: 'Required: GraphQL production experience.', status: 'not_documented',
+          candidateEvidence: '',
+          impact: 'The supplied career data does not document this required experience.',
+        }],
+      };
+      const contradicted = {
+        ...base,
+        requirementAssessments: [{
+          requirementText: 'Overnight on-call availability', priority: 'required',
+          jobEvidence: 'Must be available for overnight on-call.', status: 'contradicted',
+          candidateEvidence: 'Cannot work overnight shifts.',
+          explanation: 'The supplied candidate evidence explicitly conflicts with overnight availability.',
+        }],
+        materialGaps: [{
+          requirementText: 'Overnight on-call availability', priority: 'required',
+          jobEvidence: 'Must be available for overnight on-call.', status: 'contradicted',
+          candidateEvidence: 'Cannot work overnight shifts.',
+          impact: 'This explicit availability conflict affects hiring fit.',
+        }],
+      };
+      const documentedFit = calibratedScoreForJob(notDocumented, job, { candidateText, candidateRoles: [] });
+      const contradictedFit = calibratedScoreForJob(contradicted, job, { candidateText, candidateRoles: [] });
+      assert(documentedFit?.fitAssessment?.auditStatus === 'audited'
+        && documentedFit.requirementAssessments?.[0]?.effectiveStatus === 'not_documented'
+        && documentedFit.requirementAssessments?.[0]?.materialGap === true
+        && /not documented in (?:the )?supplied career data/i.test(documentedFit.reasoning || '')
+        && !/candidate lacks/i.test(documentedFit.reasoning || ''),
+      'absence from concise career data is an auditable not-documented evidence gap, never an asserted candidate deficit');
+      assert(contradictedFit?.fitAssessment?.auditStatus === 'audited'
+        && contradictedFit.requirementAssessments?.[0]?.effectiveStatus === 'contradicted'
+        && contradictedFit.requirementAssessments?.[0]?.materialGap === true
+        && contradictedFit.requirementAssessments?.[0]?.candidateEvidence?.[0] === 'Cannot work overnight shifts.',
+      'contradicted requires retained verbatim candidate evidence that explicitly conflicts with the requirement');
+      return {
+        documentedStatus: documentedFit.requirementAssessments[0].effectiveStatus,
+        contradictedStatus: contradictedFit.requirementAssessments[0].effectiveStatus,
+      };
+    },
+  },
+  {
+    name: 'job pipeline recovery snapshot: deferred LinkedIn rows stay recoverable and distinct from scoring inputs',
+    run: () => {
+      const full = Array.from({ length: 6 }, (_, index) => ({
+        source: 'linkedin', title: `Full ${index}`, company: 'Acme',
+        url: `https://linkedin.example/jobs/full-${index}`, snippet: 'F'.repeat(JOB_DESCRIPTION_EVIDENCE_MIN_CHARS),
+      }));
+      const deferred = Array.from({ length: 48 }, (_, index) => ({
+        source: 'linkedin', title: `Deferred ${index}`, company: 'Acme',
+        url: `https://linkedin.example/jobs/deferred-${index}`, snippet: '',
+      }));
+      const { snapshot } = buildJobAnalysisSnapshot({
+        jobs: full,
+        descriptionRecoveryJobs: [...full, ...deferred],
+        profile: { titles: ['Engineer'] },
+        nodeId: 'linkedin-recovery-v2',
+        targetRole: 'Engineer',
+        snapshotContext: { sourceHubId: 'linkedin-recovery-v2', canvasFilePath: null },
+      });
+      assert(snapshot.version === 2
+        && snapshot.jobs.length === 6
+        && snapshot.descriptionRecoveryJobs.length === 54
+        && snapshotDescriptionRecoveryJobs(snapshot).length === 54
+        && snapshotDescriptionRecoveryJobs({ jobs: full }).length === 6,
+      'snapshot v2 keeps the scoring-safe rows separate from the source recovery universe');
+      const recoveredSix = deferred.slice(0, 6).map(job => ({
+        ...job,
+        snippet: 'R'.repeat(JOB_DESCRIPTION_EVIDENCE_MIN_CHARS),
+      }));
+      const mergedRecovery = mergeDescriptionRecoverySourceJobs(
+        snapshot.descriptionRecoveryJobs,
+        'linkedin',
+        recoveredSix,
+      );
+      assert(mergedRecovery.filter(job => job.snippet.length >= JOB_DESCRIPTION_EVIDENCE_MIN_CHARS).length === 12,
+        'a partial Solve updates matching deferred rows without dropping the rest of the recovery pool');
+
+      const dir = path.join(electronPkg.app.getPath('userData'), 'job-search');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'job-search-last-scrape.json'), JSON.stringify(snapshot), 'utf8');
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        linkedinEnrich: telemetry.linkedinEnrich, linkedinCooldown: telemetry.linkedinCooldown,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'linkedin-recovery-v2', windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 54, deduped: 54, ageDropped: 0, historyDropped: 0, kept: 6 },
+        linkedinEnrich: [{
+          ts: Date.now(), startedAt: Date.now() - 1000, kind: 'search', browserGen: 1,
+          walled: true, attempted: 6, remainingBefore: 54, enriched: 6, stillEmpty: 48,
+          noDesc: 0, noDescSoftBlock: 0, noDescGenuine: 0,
+        }],
+        linkedinCooldown: null,
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['linkedin-recovery-v2']), null, null);
+        assert(report.includes('LinkedIn recovery pool: 54 candidate(s) retained separately from scoring; 48 still below')
+          && report.includes('Residual: 48 still empty — NOT complete')
+          && report.includes('attempted 6/54 remaining')
+          && !report.includes('Completion telemetry disagrees'),
+        'the report must preserve the unresolved source backlog without mislabeling the six scoring inputs as contradictory');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { scoring: 6, recovery: 54, deferred: 48 };
+    },
+  },
+{
+    name: 'job pipeline report: repeated LinkedIn Solve merges accumulate session-gathered accounting',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { ...telemetry };
+      Object.assign(telemetry, {
+        nodeId: 'linkedin-multi-solve-accounting',
+        windowId: null,
+        pipeline: null,
+        search: {
+          ts: Date.now(), queries: 1, raw: 58, deduped: 58,
+          ageDropped: 0, historyDropped: 4, kept: 3,
+          descriptionEvidenceDropped: { total: 51, empty: 51, short: 0, bySource: { linkedin: { empty: 51, short: 0 } } },
+        },
+        resolves: {},
+        scoring: {
+          ts: Date.now(), input: 54, selectedForScoring: 54, scored: 54,
+          placeholders: 0, batches: 4, failedBatches: 0, unscored: 0,
+          inputQuality: { empty: 0, short: 0, bySource: {}, samples: [] },
+        },
+        bucketing: null,
+        linkedinEnrich: [],
+        linkedinCooldown: null,
+      });
+      try {
+        for (const [pendingBefore, pendingAfter] of [[3, 7], [7, 7], [7, 15], [15, 52], [52, 54]]) {
+          recordLinkedinResolveAttempt('linkedin', {
+            needEnrich: 54 - pendingBefore,
+            enrichSuccess: Math.max(0, pendingAfter - pendingBefore),
+            stillEmpty: 54 - pendingAfter,
+            walled: pendingAfter < 54,
+          });
+          recordResolveMergeOutcome('linkedin', {
+            replacedExisting: pendingBefore,
+            fresh: pendingAfter,
+            pendingBefore,
+            pendingAfter,
+          });
+        }
+        const report = buildJobsPipelineSnapshot(new Set(['linkedin-multi-solve-accounting']), null, null);
+        assert(report.includes('history-dropped: 4 → evidence-deferred: 51 → **scoring-eligible: 3**'),
+          'search funnel reconciles description-deferred rows inline');
+        assert(report.includes('cumulative net from this source\'s Solve passes: +51')
+          && !report.includes('carried over from a prior run'),
+        'all Solve deltas survive latest-attempt replacement, so 3 + 51 reports 54 gathered this session');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { initial: 3, solveNet: 51, scored: 54 };
     },
   },
 {
@@ -1774,6 +2019,41 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+  },
+},
+{
+    name: 'job pipeline report identifies re-run provenance and completed duration',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        pipeline: telemetry.pipeline,
+        search: telemetry.search,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'rerun-provenance-diagnostics',
+        windowId: null,
+        pipeline: {
+          phase: 'completed', active: false,
+          startedAt: Date.now() - 5000, ts: Date.now() - 4000,
+          durationMs: 812,
+          runOrigin: 'rerun-button',
+          profileInputMode: 'fresh-files',
+          pendingSources: [],
+        },
+        search: null,
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['rerun-provenance-diagnostics']), null, null);
+        assert(report.includes('✅ complete · phase: **completed** · completed in 812ms')
+          && report.includes('Trigger: **Re-run Search button** · career files reparsed')
+          && !report.includes('run age 5s'),
+        'a completed run reports its actual duration and explicit button origin instead of an ever-growing run age');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { origin: 'rerun-button', durationMs: 812 };
     },
   },
 {
@@ -2030,6 +2310,13 @@ export default [
       const finishEnd = searchRenderer.indexOf('const runScoringAndSpawn', finishStart);
       assert(!searchRenderer.slice(finishStart, finishEnd).includes('appendJobsHistory'),
         'scoring completion alone does not write seen-history');
+      const resumeStart = searchRenderer.indexOf('const resumeScoring = useCallback');
+      const resumeEnd = searchRenderer.indexOf('const handleDiscardResume', resumeStart);
+      const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
+      assert(resumePath.includes('const activeJobRunId = jobRunIdRef.current || data.jobRunId || null')
+        && resumePath.includes('completeJobRun?.({ canvasFilePath, runId: activeJobRunId })')
+        && resumePath.includes('jobRunId: activeJobRunId'),
+      'same-tick source resolution scopes both empty completion and resumed scoring to the live run ref');
 
       const boardRenderer = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
       const combineStart = boardRenderer.indexOf('const handleCombine');
@@ -2042,7 +2329,7 @@ export default [
       return { deferred: true };
     },
   },
-{
+  {
     name: 'job pipeline report: taxonomy audit exposes salary placement and repairs',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -2054,10 +2341,10 @@ export default [
         nodeId: 'taxonomy-audit-diagnostics', windowId: null, search: null, resolves: {}, scoring: null,
         bucketing: {
           ts: Date.now(), input: 1, roleCount: 1, placed: 1, missing: 0, duplicated: 0,
-          bandSummary: [{ label: 'Low fit (0–79%)', count: 1 }], salaryRangeLabels: ['$80k–$120k/yr'],
+          bandSummary: [{ label: 'Limited hiring fit (0–79)', count: 1 }], salaryRangeLabels: ['$80k–$120k/yr'],
           roleSummary: [{ name: 'Creative', count: 1, sampleTitles: ['Weekly role'] }],
           taxonomyRepairs: ['canonicalized salary label "$120k process/yr"'],
-          taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, likelihood: 'Low fit (0–79%)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
+          taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, fitBand: 'Limited hiring fit (0–79)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
           taxonomyAuditOmitted: 0, model: 'gemini-2.5-flash',
           fallback: { preferredModel: 'gemini-3.7-flash', attempts: 1, reason: 'server', counts: { server: 1 } },
           error: null,
@@ -2070,23 +2357,24 @@ export default [
           && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)'),
         'job pipeline report makes salary placement, repair evidence, and taxonomy fallback cause visible');
 
+        // A taxonomy provider may fail after scores are available.
+        // Combine must abort transactionally: it may not create a renderer
+        // fallback tree from the partial taxonomy input.
         telemetry.bucketing = {
-          ts: Date.now(), input: 20, roleCount: 4, placed: 20, missing: 0, duplicated: 0,
-          modelRoleCoverage: {
-            placed: 0, structuralPlaced: 8, missing: 20, duplicated: 0, invalid: 0,
-            malformedNames: 1, malformedNameIndices: [0, 1, 2, 3, 4, 5, 6, 7],
-            unassigned: 12, unassignedIndices: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
-          },
-          repairedRoleCoverage: { roleCount: 4, placed: 20, missing: 0, duplicated: 0, invalid: 0 },
-          bandSummary: [], salaryRangeLabels: [], roleSummary: [],
-          taxonomyRepairs: ['recovered 8 job(s) into career-direction role(s)', 'recovered 12 unhinted job(s) into Other'],
-          taxonomyAudit: [], taxonomyAuditOmitted: 0, error: null,
+          ts: Date.now(), input: 92, roleCount: 0, placed: 0, missing: 92, duplicated: 0,
+          bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [],
+          taxonomyAuditOmitted: 0, model: 'gemini-3.7-flash', fallback: null,
+          strategy: 'failed-provider', blocked: false, capability: 'job-board-generation', errorCode: 'PROVIDER_UNAVAILABLE',
+          error: 'Gemini quota exhausted while organizing the Job Board.',
         };
         report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
-        assert(report.includes('AI role-partition defect: 12 unassigned job(s), 8 job(s) under malformed role name(s).')
-          && report.includes('Deterministic recovery placed 20/20 job(s) into renderable roles; career-direction/Other details appear in Taxonomy validation repaired below.')
-          && !report.includes('NOT placed in any role by the AI'),
-        'job pipeline report distinguishes the raw model role defect from complete deterministic recovery');
+        assert(report.includes('**Job Board combine aborted** on 92 scored job(s)')
+          && report.includes('no new job results were added')
+          && report.includes('existing board was left unchanged')
+          && report.includes('Gemini quota exhausted while organizing the Job Board.')
+          && !report.includes('deterministic likelihood'),
+        'FULL/JOBS records an allowed-provider taxonomy failure as a transactional abort, never a renderer fallback');
+
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2617,6 +2905,69 @@ export default [
     },
   },
 {
+    name: 'Job scoring UI uses hiring-fit semantics and preserves grounded evidence',
+    run: () => {
+      const card = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const board = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardDoneState.jsx'), 'utf8');
+      const tree = fs.readFileSync(path.resolve('src/nodes/jobsearch/buildJobTree.js'), 'utf8');
+      const snapshot = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+      const serialization = fs.readFileSync(path.resolve('src/utils/serializationUtils.js'), 'utf8');
+
+      const scoreCalls = search.split('window.electronAPI.scoreJobs({').slice(1);
+      const snapshotWrites = search.split('saveJobAnalysisSnapshot?.({').slice(1);
+      assert(card.includes('Hiring fit')
+        && card.includes('{score}/100')
+        && card.includes('comparative evidence-based score, not a statistical probability or guaranteed outcome')
+        && !card.includes('{score}%'),
+      'job cards show Hiring fit N/100 with an honest outcome caveat, never a percentage probability');
+      assert(card.includes('function compactHiringFitAudit(data)')
+        && card.includes("assessment.auditStatus !== 'audited'")
+        && card.includes('showFullReasoning && hiringFitAudit')
+        && card.includes('Grounded strengths')
+        && card.includes('function materialGapStatus(row)')
+        && card.includes("status === 'not_documented' || status === 'missing'")
+        && card.includes('Evidence to confirm ({hiringFitAudit.materialGaps.not_documented.total})')
+        && card.includes('Do you have experience with ${cleanRequirement} that is not yet included in your career data?')
+        && card.includes('Documented conflicts ({hiringFitAudit.materialGaps.contradicted.total})')
+        && card.includes('Unclear evidence ({hiringFitAudit.materialGaps.unclear.total})')
+        && card.includes('Evidence to review ({hiringFitAudit.materialGaps.review.total})')
+        && card.includes('Add any omitted relevant experience to your career data and rescore; the assessment can change.')
+        && card.includes('Assessment confidence: {hiringFitAudit.confidence}')
+        && card.includes('Score calibrated: {hiringFitAudit.calibrated.rawScore}')
+        && card.includes('assessment.confidence?.effective')
+        && !card.includes('assessment.confidence?.reported')
+        && !card.includes('rawModelReasoning'),
+      'expanded cards distinguish confirmable omitted evidence, documented conflicts, unclear evidence, and legacy review items; they disclose only normalized audited content, effective confidence, and score calibration');
+      assert(board.includes('Hiring fit ≥{scoreThreshold}/100')
+        && board.includes('Min hiring fit')
+        && board.includes('aria-label="Minimum hiring fit"'),
+      'board filters use hiring-fit terminology and expose an accessible minimum-fit label');
+      assert(tree.includes('Excellent hiring fit (85–100)')
+        && tree.includes('Partial hiring fit (40–64)')
+        && tree.includes('Limited hiring fit (0–39)')
+        && !tree.includes('Excellent fit (85–100%)'),
+      'tree bands express hiring-fit ranges without percentage/probability notation');
+      assert(scoreCalls.length === 2 && scoreCalls.every(call => call.includes('careerData:')),
+        'every renderer score handoff includes raw career evidence alongside the compact profile');
+      assert(snapshotWrites.length >= 3 && snapshotWrites.every(call => call.includes('careerData: data.careerData')),
+        'saved-scrape snapshots retain raw career evidence for resumed scoring');
+      assert(search.includes('const careerData = snapshot?.careerData || data.careerData || \'\';')
+        && search.includes('if (!snapshot || !profile || savedJobs.length === 0)')
+        && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
+        && search.includes('careerData,\n          jobs: savedJobs'),
+      'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
+      assert(tree.includes('requirementAssessments: job.requirementAssessments')
+        && tree.includes('fitAssessment: job.fitAssessment')
+        && serialization.includes("'requirementAssessments'")
+        && serialization.includes("'fitAssessment'"),
+      'board cards and legacy migration retain the scorer’s grounded requirement and calibration audit');
+      assert(snapshot.includes('Hiring-fit bands') && snapshot.includes('not a guaranteed hiring outcome'),
+        'job diagnostics use hiring-fit terminology rather than an interview forecast');
+      return { scoreCalls: scoreCalls.length, snapshotWrites: snapshotWrites.length };
+    },
+  },
+{
     name: 'anthropicRequest: buildCachedUserContent splits the cached prefix into an ephemeral block',
     run: () => {
       const arr = [{ type: 'image' }];
@@ -2804,16 +3155,23 @@ export default [
         [{ title: 'Bank Equipment Technician', company: 'Cennox', location: 'Phoenix, AZ', url: 'https://jobs/2', source: 'dice', snippet: jd }],
       ];
       const scored = [
-        { ...batches[1][0], matchScore: 35, careerDirection: 'Field Operations', reasoning: 'Large fit gaps.' },
-        { ...batches[0][0], matchScore: 55, careerDirection: 'Field Services', reasoning: 'Transferable service background.' },
+        { ...batches[1][0], matchScore: 35, rawScore: 35, adjustedScore: 35, careerDirection: 'Field Operations', reasoning: 'Large fit gaps.' },
+        {
+          ...batches[0][0], matchScore: 55, rawScore: 86, adjustedScore: 55, careerDirection: 'Field Services',
+          reasoning: 'Grounded material gap lowers the fit score.',
+          fitAssessment: { adjustments: [{ code: 'critical-gap', from: 86, to: 55 }], rawModelReasoning: 'Unsupported upbeat model prose.' },
+        },
       ];
       const audit = buildScoringAudit(scoringAuditRowsFromBatches(batches, scored));
       assert(audit.rows.length === 2 && audit.rows[0].batch === 1 && audit.rows[0].score === 55,
         'audit restores original batch attribution after scored jobs are sorted');
       assert(audit.anomalies.length === 1 && audit.anomalies[0].delta === 20,
         `identical cross-batch postings with a 20-point delta are flagged, got ${JSON.stringify(audit.anomalies)}`);
-      assert(audit.rows.every(row => row.url && row.reason && row.descriptionFingerprint),
-        'bounded rows retain the evidence needed to diagnose drift from a report');
+      assert(audit.rows.every(row => row.url && row.reason && row.descriptionFingerprint)
+        && audit.rows[0].rawScore === 86 && audit.rows[0].adjustedScore === 55
+        && audit.rows[0].adjustments[0]?.code === 'critical-gap'
+        && !JSON.stringify(audit.rows).includes('Unsupported upbeat model prose.'),
+        'bounded rows retain score calibration evidence without retaining ungrounded model prose');
       return { ok: true, anomalies: audit.anomalies.length };
     },
   },
@@ -2970,7 +3328,7 @@ export default [
     },
   },
 {
-    name: 'Job tree: likelihood → salary → role hierarchy',
+    name: 'Job tree: hiring-fit → salary → role hierarchy',
     run: () => {
       const mk = (title, score, salary, url) => ({
         title, company: 'Acme', location: 'Remote', salary, snippet: 'x',
@@ -3009,13 +3367,13 @@ export default [
       const salary = byKind('salary');
       const roles = byKind('role');
       assert(cards.length === 3, `hierarchy: expected 3 cards, got ${cards.length}`);
-      // Two fixed-rubric bands present (Excellent has 2 jobs, Long shot has 1).
-      assert(bands.length === 2, `hierarchy: expected 2 likelihood bands, got ${bands.length}`);
+      // Two fixed-rubric bands present (Excellent has 2 jobs, Limited has 1).
+      assert(bands.length === 2, `hierarchy: expected 2 hiring-fit bands, got ${bands.length}`);
       const excellent = bands.find(b => b.data.label.startsWith('Excellent'));
-      const longshot = bands.find(b => b.data.label.startsWith('Long shot'));
-      assert(excellent.data.count === 2 && longshot.data.count === 1, `hierarchy: band counts wrong (${excellent.data.count}/${longshot.data.count})`);
+      const limited = bands.find(b => b.data.label.startsWith('Limited hiring fit'));
+      assert(excellent.data.count === 2 && limited.data.count === 1, `hierarchy: band counts wrong (${excellent.data.count}/${limited.data.count})`);
       // Bands are roots (children of hub, not of any group) and ordered best-first.
-      assert(excellent.position.y < longshot.position.y, 'hierarchy: Excellent band should sit above Long shot');
+      assert(excellent.position.y < limited.position.y, 'hierarchy: Excellent band should sit above Limited');
       // Excellent band → two salary ranges ($100k+ for idx0, $50-100k for idx1).
       const excellentRanges = salary.filter(s => (excellent.data.childIds || []).includes(s.id));
       assert(excellentRanges.length === 2, `hierarchy: Excellent band should have 2 salary ranges, got ${excellentRanges.length}`);
@@ -3025,8 +3383,8 @@ export default [
       const hi = excellentRanges.find(s => s.data.label === '$100k+/yr');
       const lo = excellentRanges.find(s => s.data.label === '$50k–$100k/yr');
       assert(excellent.data.childIds[0] === hi.id && excellent.data.childIds[1] === lo.id, 'hierarchy: higher salary range should be ordered first within the band');
-      // idx2 (no salary, weak) lands in the Long shot band's Unspecified range.
-      const lsRange = salary.find(s => (longshot.data.childIds || []).includes(s.id));
+      // idx2 (no salary, weak) lands in the Limited hiring-fit band's Unspecified range.
+      const lsRange = salary.find(s => (limited.data.childIds || []).includes(s.id));
       assert(lsRange.data.label === 'Unspecified', 'hierarchy: no-salary job should land in Unspecified');
       // Role leaves hold the cards.
       assert(roles.every(r => (r.data.childIds || []).every(cid => cards.some(c => c.id === cid))), 'hierarchy: role children should be cards');
@@ -3037,6 +3395,31 @@ export default [
       assert(brandLead.data.originHubId === 'search-A', 'hierarchy: card carries its origin module id');
       assert(cards.every(c => !('resumeProfile' in c.data)), 'hierarchy: no per-card resumeProfile copies');
       return { cards: cards.length, bands: bands.length, salary: salary.length, roles: roles.length };
+  },
+},
+{
+    name: 'Job tree: missing taxonomy is rejected before any cards can be created',
+    run: () => {
+      // A failed or absent taxonomy is not valid input for a combine. The
+      // caller must abort before mutating the existing board rather than
+      // synthesizing an unreviewed tree from score/salary/direction hints.
+      let error = null;
+      try {
+        buildJobTreeNodes({
+        displayedJobs: [
+          { title: 'Senior Engineer', company: 'Acme', location: 'Remote', salary: '$160,000 a year', matchScore: 91, careerDirection: 'Platform Engineering', source: 'lever' },
+          { title: 'Product Analyst', company: 'Acme', location: 'Toronto', salary: '$75,000 a year', matchScore: 72, careerDirection: 'Analytics', source: 'dice' },
+          { title: 'Career Switcher', company: 'Acme', location: 'Remote', salary: '', matchScore: 31, careerDirection: '', source: 'indeed' },
+        ],
+        bucketTree: null,
+        originalPos: { x: 100, y: 200 }, hubId: 'board', baseNodeId: 'fallback',
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      assert(error instanceof Error && /taxonomy/i.test(error.message),
+        'missing taxonomy must throw a clear error before the renderer produces any cards');
+      return { rejected: true };
     },
   },
 {
@@ -3090,6 +3473,7 @@ export default [
           source: 'ziprecruiter', url: 'https://jobs/pulselearning', posted: '17 days ago',
         }],
         bucketTree: {
+          likelihoodBands: [{ label: 'Good fit (65–84%)', minScore: 65, maxScore: 84 }],
           salaryRanges: [
             { label: '$120k+', minSalary: 120000, maxSalary: 0 },
             { label: '$80k–$120k', minSalary: 80000, maxSalary: 120000 },
@@ -3304,12 +3688,19 @@ export default [
       assert(lowCatchAllRepair.repairs.includes('normalized salary upper bound for the low-salary catch-all')
         && !lowCatchAllRepair.repairs.some(repair => /for \$1$/.test(repair)),
       'salary ranges: synthetic low-salary catch-all repair is not misreported as a literal $1 salary');
+      const syntheticCatchAll = normalizeRangesWithRepairs([
+        { label: '$120k+/yr', minSalary: 120000, maxSalary: 0 },
+        { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+      ]);
+      assert(syntheticCatchAll.repairs.includes('added low-salary catch-all below $120k')
+        && !syntheticCatchAll.repairs.includes('canonicalized salary label "(blank)"'),
+      'salary ranges: app-authored catch-all is not misreported as a blank model label');
       const bands = normalizeBandsWithRepairs([{ label: 'Strong fit', minScore: 80, maxScore: 99 }]);
       assert(bands.bands.map(b => `${b.label}:${b.minScore}-${b.maxScore}`).join('|')
-        === 'Excellent fit (85–100%):85-100|Good fit (65–84%):65-84|Possible (40–64%):40-64|Long shot (0–39%):0-39',
-      'likelihood bands: model-authored thresholds/labels are replaced by the fixed scoring rubric');
-      assert(bands.repairs.includes('replaced likelihood bands with fixed scoring rubric'),
-        'likelihood bands: replacing legacy/model thresholds is visible in repair telemetry');
+        === 'Excellent hiring fit (85–100):85-100|Good hiring fit (65–84):65-84|Partial hiring fit (40–64):40-64|Limited hiring fit (0–39):0-39',
+      'hiring-fit bands: model-authored thresholds/labels are replaced by the fixed scoring rubric');
+      assert(bands.repairs.includes('replaced hiring-fit bands with fixed scoring rubric'),
+        'hiring-fit bands: replacing legacy/model thresholds is visible in repair telemetry');
       const taxonomy = sanitizeJobTaxonomy({
         likelihoodBands: [{ label: 'Strong', minScore: 80, maxScore: 100 }],
         salaryRanges: [
@@ -3321,7 +3712,7 @@ export default [
       assert(taxonomy.salaryRanges.some(r => r.label === '$80k–$120k/yr'),
         'taxonomy sanitization: adds a low-end range for parseable weekly salary');
       assert(taxonomy.likelihoodBands.map(b => b.minScore).join(',') === '85,65,40,0',
-        'taxonomy sanitization: likelihood thresholds stay aligned with the scoring rubric');
+        'taxonomy sanitization: hiring-fit thresholds stay aligned with the scoring rubric');
       assert(taxonomy.roles[0].jobIndices.join(',') === '0', 'taxonomy sanitization: drops duplicate/out-of-range role indexes');
       assert(taxonomy.roles.find(role => role.name === 'Other')?.jobIndices.join(',') === '1',
         'taxonomy sanitization: legacy callers without job metadata recover unassigned jobs into Other');
@@ -3361,7 +3752,9 @@ export default [
 
       const result = buildJobTreeNodes({
         displayedJobs: [{ title: 'Weekly', company: 'Acme', location: 'Remote', salary: '$1.6K - $2.0K/wk', snippet: '', matchScore: 50, source: 'dice', url: 'https://jobs/weekly' }],
-        bucketTree: taxonomy,
+        // The salary normalization fixture above was built for two inputs;
+        // give this one-card render a complete matching provider partition.
+        bucketTree: { ...taxonomy, roles: [{ name: 'Creative', jobIndices: [0] }] },
         originalPos: { x: 0, y: 0 }, hubId: 'hub-salary', baseNodeId: 'job-salary',
       });
       assert(result.newNodes.some(n => n.data?.kind === 'salary' && n.data.label === '$80k–$120k/yr' && n.data.count === 1),
@@ -3386,10 +3779,10 @@ export default [
         .filter(n => n.data?.kind === 'likelihood')
         .map(n => [n.data.label, n.data.count]);
       assert(JSON.stringify(boundaryBands) === JSON.stringify([
-        ['Excellent fit (85–100%)', 2],
-        ['Good fit (65–84%)', 2],
-        ['Possible (40–64%)', 2],
-        ['Long shot (0–39%)', 2],
+        ['Excellent hiring fit (85–100)', 2],
+        ['Good hiring fit (65–84)', 2],
+        ['Partial hiring fit (40–64)', 2],
+        ['Limited hiring fit (0–39)', 2],
       ]), `tree placement: rubric boundary scores map to fixed bands, got ${JSON.stringify(boundaryBands)}`);
       return { repairs: taxonomy.repairs.length };
     },
@@ -4035,7 +4428,7 @@ export default [
       const nonBandGroups = result.newNodes.filter(n => n.type === 'jobgroup' && n.data?.kind !== 'likelihood');
       const cards = result.newNodes.filter(n => n.type === 'jobcard');
       const excellent = bands.find(b => b.data.label.startsWith('Excellent'));
-      const possible = bands.find(b => b.data.label.startsWith('Possible'));
+      const partial = bands.find(b => b.data.label.startsWith('Partial hiring fit'));
       // Nothing is expanded — the whole tree is closed when analysis ends.
       assert(result.newNodes.every(n => !n.data?.expanded), 'collapsed: no node should be expanded');
       // Band roots are visible (collapsed pills); everything below is hidden.
@@ -4043,7 +4436,7 @@ export default [
       assert(nonBandGroups.every(g => g.hidden === true), 'collapsed: salary/role groups should be hidden');
       assert(cards.every(c => c.hidden === true), 'collapsed: all cards should be hidden');
       // Bands still ordered best-first and stacked (layout pass runs regardless).
-      assert(excellent.position.y < possible.position.y, 'collapsed: Excellent band should still sit above Possible');
+      assert(excellent.position.y < partial.position.y, 'collapsed: Excellent hiring-fit band should still sit above Partial');
       return { ok: true };
     },
   },
@@ -4278,6 +4671,7 @@ export default [
       const doneStateSource = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardDoneState.jsx'), 'utf8');
       const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const jobsBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       assert(boardSource.includes('const completedModules = useMemo')
         && boardSource.includes('() => combineSignature(completedModules)')
         && boardSource.includes('const allConnectedModulesDone =')
@@ -4296,8 +4690,15 @@ export default [
       const terminalZeroStart = jobSearchSource.indexOf('if (foundJobs.length === 0)');
       const terminalZeroEnd = jobSearchSource.indexOf('return true;', terminalZeroStart);
       assert(terminalZeroStart >= 0 && terminalZeroEnd > terminalZeroStart
-        && /jobCount:\s*0/.test(jobSearchSource.slice(terminalZeroStart, terminalZeroEnd)),
-      'terminal empty job searches clear stale jobCount instead of retaining the prior result total');
+        && /jobCount:\s*0/.test(jobSearchSource.slice(terminalZeroStart, terminalZeroEnd))
+        && jobSearchSource.slice(terminalZeroStart, terminalZeroEnd).includes('gatheredCount: gatheredCount ?? 0')
+        && jobsBackendSource.includes('rawCount: relevanceFunnel.raw'),
+      'terminal empty job searches clear stale jobCount while preserving the provider-level gathered funnel');
+      assert(jobSearchSource.includes("runOrigin: 'rerun-button'")
+        && jobSearchSource.includes('Re-run button clicked; career input=')
+        && jobsBackendSource.includes('runOrigin: normalizedRunOrigin')
+        && jobsBackendSource.includes('profileInputMode: normalizedProfileInputMode'),
+      'Re-run Search carries explicit button and career-input provenance into main-process diagnostics');
       return { reason: staleReason(previous, completedZero), zeroSignature: combineSignature(completedZero) };
     },
   },
@@ -4347,10 +4748,10 @@ export default [
     },
   },
 {
-    name: 'computeJobTreeView: flat-spawn fallback (no jobgroups) — cards survive filter/restore',
+    name: 'computeJobTreeView: legacy flat board (no jobgroups) — cards survive filter/restore',
     run: () => {
-      // Bucketing failed → flat spawn: jobcards wired straight to the hub, NO groups.
-      // Regression: previously computeJobTreeView only seeded `visible` by walking
+      // Old saved boards can contain jobcards wired straight to the hub, with no
+      // groups. Regression: previously computeJobTreeView only seeded `visible` by walking
       // jobgroups, so a flat board had an empty visible set and ALL cards were hidden
       // on any filter/restore (blank board with a non-zero header count).
       const tree = () => ([
@@ -4710,6 +5111,46 @@ export default [
       const bodyParas = [...main.querySelectorAll('.letter-body > p')].filter(paragraph => !paragraph.className).length;
       assert(bodyParas === 2, `cover: expected 2 body paragraphs, got ${bodyParas}`);
       assert(main.querySelector('.contact')?.textContent.includes('jane@x.com') && main.querySelector('.contact .sep'), 'cover: contact line missing separators');
+      // The cover-letter letterhead must reuse the résumé's semantic subtitle
+      // structure, not flatten it into ordinary whitespace around the dot.
+      const structuredHeader = buildCoverLetterDocument({
+        letter: {
+          name: 'Jane Doe',
+          tagline: 'Product Marketer · B.S. Marketing, Example University',
+          subtitleRole: 'Product Marketer',
+          credential: 'B.S. Marketing, Example University',
+        },
+      });
+      const structuredHeaderDom = new JSDOM(structuredHeader);
+      const structuredSubtitle = [...structuredHeaderDom.window.document.querySelectorAll('.tagline > *')]
+        .map(node => `${node.className}:${node.textContent}:${node.getAttribute('aria-hidden') || ''}`);
+      assert(JSON.stringify(structuredSubtitle) === JSON.stringify([
+        'subtitle-role:Product Marketer:',
+        'sep:·:true',
+        'credential:B.S. Marketing, Example University:',
+      ]), 'cover: structured role and credential must preserve the résumé subtitle node sequence');
+      structuredHeaderDom.window.close();
+      const noCredentialHeader = buildCoverLetterDocument({
+        letter: { name: 'Jane Doe', tagline: 'Product Marketer', subtitleRole: 'Product Marketer' },
+      });
+      const noCredentialHeaderDom = new JSDOM(noCredentialHeader);
+      const noCredentialSubtitle = [...noCredentialHeaderDom.window.document.querySelectorAll('.tagline > *')]
+        .map(node => `${node.className}:${node.textContent}:${node.getAttribute('aria-hidden') || ''}`);
+      assert(JSON.stringify(noCredentialSubtitle) === JSON.stringify(['subtitle-role:Product Marketer:']),
+        'cover: a role-only résumé header must not introduce a separator or credential');
+      noCredentialHeaderDom.window.close();
+      const partialHeader = buildCoverLetterDocument({
+        letter: {
+          name: 'Jane Doe', tagline: 'Product Marketer · B.S. Marketing, Example University',
+          subtitleRole: 'Product Marketer',
+        },
+      });
+      const partialHeaderDom = new JSDOM(partialHeader);
+      const partialTagline = partialHeaderDom.window.document.querySelector('.tagline');
+      assert(partialTagline?.textContent === 'Product Marketer · B.S. Marketing, Example University'
+        && partialTagline.children.length === 0,
+      'cover: partial structured header data falls back to the complete flattened tagline instead of dropping unclassed credential text');
+      partialHeaderDom.window.close();
       // Sensible fallbacks when optional fields are omitted: salutation/closing
       // default; the recipient block is always absent; no signatureTitle → no signature-title.
       const bareFull = buildCoverLetterDocument({ letter: { name: 'X' } });

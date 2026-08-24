@@ -134,35 +134,18 @@ export function getSearchLocation(data = {}) {
   return structured;
 }
 
-export function hasRequiredLocations(searchLocation, remoteResidences) {
+// Remote residence entries are optional salary-comparison inputs. They must
+// never prevent a job search from running, even when a saved entry is partial
+// or internally inconsistent.
+export function hasRequiredLocations(searchLocation) {
   const search = normalizeStructuredLocation(searchLocation);
-  const remote = normalizeRemoteResidences(remoteResidences);
-  return Boolean(
-    search.country
-    && !search.countryConflict
-    && remote.usa.country
-    && !remote.usa.countryConflict
-    && remote.canada.country
-    && !remote.canada.countryConflict
-    && remote.other.country
-    && !remote.other.countryConflict
-    && remote.other.country !== 'United States'
-    && remote.other.country !== 'Canada',
-  );
+  return Boolean(search.country && !search.countryConflict);
 }
 
-export function locationValidationMessage(searchLocation, remoteResidences) {
+export function locationValidationMessage(searchLocation) {
   const search = normalizeStructuredLocation(searchLocation);
-  const remote = normalizeRemoteResidences(remoteResidences);
   if (search.countryConflict) return 'The search location combines a U.S. state or Canadian province with the wrong country. Correct the state / province or country.';
-  if (remote.usa.countryConflict) return 'The remote residence under “Job is in USA” has a state / province that is not in the United States.';
-  if (remote.canada.countryConflict) return 'The remote residence under “Job is in Canada” has a state / province that is not in Canada.';
-  if (remote.other.countryConflict) return 'The remote residence outside the US and Canada combines a U.S. state or Canadian province with the wrong country.';
   if (!search.country) return 'Enter a country for the search location before starting the job search.';
-  if (!remote.other.country) return 'Enter where you would live for a remote job outside the US and Canada.';
-  if (remote.other.country === 'United States' || remote.other.country === 'Canada') {
-    return 'For “Job is outside US/Canada,” choose a country other than the United States or Canada.';
-  }
   return '';
 }
 

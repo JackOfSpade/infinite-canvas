@@ -19,7 +19,7 @@
 //   - statusCheckLock (buy-side listing status checks) settles on bounded fetch
 //     timeouts and must NOT wait behind an indefinite captcha-wait — see
 //     statusCheckLock.js for exactly why those two were kept apart.
-//   - withSharedProfileLock guards job scrapers that pkill their own Chrome
+//   - withSharedProfileLock guards job scrapers that own a separate Chrome
 //     PROCESS; sell-side ops share the one persistent stealth browser via tabs.
 //
 // Unlike statusCheckLock, THIS queue CAN be held across an indefinite captcha

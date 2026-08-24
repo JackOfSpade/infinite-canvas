@@ -5,7 +5,7 @@ import { EDGE_STYLE, getNodesBounds } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
-import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardLocalAiJobsRecursively } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 
 const CLIPBOARD_KEY = 'infinite-canvas-clipboard';
@@ -238,6 +238,13 @@ export function useCanvasActions({
     // Cancel any active background tasks for nodes being removed
     if (window.electronAPI?.cancelNodeTask) {
       cancelNodeTasksRecursively(allNodes, lockedIds);
+    }
+    // Root-level Clear bypasses React Flow's onNodesDelete callback, so it
+    // must explicitly withdraw Local AI handoffs for the cards it removes.
+    // Retained locked branches are deliberately excluded, matching task
+    // cancellation and the node list below.
+    if (window.electronAPI?.discardLocalApplication) {
+      discardLocalAiJobsRecursively(allNodes, lockedIds);
     }
 
     setNodes(lockedNodes);

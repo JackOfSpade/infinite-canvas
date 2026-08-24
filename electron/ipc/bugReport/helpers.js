@@ -166,7 +166,7 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
     ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
       : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
         : ambiguousShell ? '⚠️ true (AMBIGUOUS shell — no positive logged-in signal; may be a client-rendered login page)'
-          : '✅ true')
+          : entry?.restoredFromDisk ? '✅ true (restored from prior process)' : '✅ true')
     : entry ? '❌ false' : '— (no entry)';
   const lastConfirmed = entry?.ts
     ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
@@ -188,6 +188,8 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     t.pageTitle ? `  - pageTitle: \`${String(t.pageTitle).replace(/`/g, "'").slice(0, 160)}\`` : null,
     t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
     t.error ? `  - error: \`${t.error}\`` : null,
+    typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
+    Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
     t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
     t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
   ].filter(Boolean);

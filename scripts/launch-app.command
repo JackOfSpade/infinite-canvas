@@ -24,6 +24,13 @@ LOG="$STATE_DIR/last-build.log"
 ticker_pid=""
 lock_held=0
 stale_pid=""
+# A normal Electron quit asks every renderer to finish its beforeunload/save
+# work. Give that handshake enough time, but never turn a double-click launch
+# into an unbounded wait or fall back to killing a canvas editor.
+STALE_QUIT_TIMEOUT_SECONDS=30
+STALE_QUIT_POLL_SECONDS=0.5
+STALE_QUIT_REQUEST_TIMEOUT_SECONDS=5
+APP_BUNDLE_ID="com.antigravity.infinitecanvas"
 # Matches only the app's MAIN process: the helpers live under
 # Contents/Frameworks/... so they can't collide with this path fragment.
 APP_PROC_PATTERN="infinite-canvas.app/Contents/MacOS/infinite-canvas"
@@ -181,6 +188,44 @@ sync_dependencies() {
   fi
 }
 
+# A rebuild replaces the bundle on disk, but `open` activates an already
+# running app instead of starting that replacement. Ask the exact app bundle
+# to quit only after the new bundle has passed codesign verification, then wait
+# for the main PID captured *before* the build. This intentionally gives the
+# renderer's save/beforeunload handshake time to complete; never force-kill it.
+quit_stale_prebuild_instance() {
+  [[ -n "$stale_pid" ]] || return 0
+  kill -0 "$stale_pid" 2>/dev/null || return 0
+
+  echo "> Rebuild verified - asking the previous Infinite Canvas instance (pid $stale_pid) to quit and save..."
+  # Bound the Apple event itself too. The renderer may need time to complete
+  # its save handshake, but an unresponsive app must not leave this launcher
+  # blocked indefinitely before the PID wait below can report a clear failure.
+  if ! osascript \
+    -e "with timeout of $STALE_QUIT_REQUEST_TIMEOUT_SECONDS seconds" \
+    -e "tell application id \"$APP_BUNDLE_ID\" to quit" \
+    -e 'end timeout' >/dev/null 2>&1; then
+    # A timed-out Apple event may still have delivered the quit request while
+    # the renderer is completing its save handshake. Do not mistake the lack
+    # of an acknowledgement for a failed quit: the bounded PID wait below is
+    # the authoritative outcome.
+    echo "  Quit request was not acknowledged within ${STALE_QUIT_REQUEST_TIMEOUT_SECONDS}s; waiting for the save/quit handshake..."
+  fi
+
+  # Do not rely on the optional zsh/datetime module for EPOCHSECONDS: this
+  # launcher is also expected to work in the minimal non-interactive zsh that
+  # Finder uses for .command files.
+  local deadline=$(( $(date +%s) + STALE_QUIT_TIMEOUT_SECONDS ))
+  while kill -0 "$stale_pid" 2>/dev/null; do
+    if (( $(date +%s) >= deadline )); then
+      return 1
+    fi
+    sleep "$STALE_QUIT_POLL_SECONDS"
+  done
+
+  echo "> Previous instance exited; launching the rebuilt app."
+}
+
 # ---- execution starts here ----
 
 cd "$PROJECT_DIR" 2>/dev/null || { echo "ERROR: project directory not found."; notify "Launch failed: project not found." "Basso"; exit 1; }
@@ -207,11 +252,11 @@ if [[ "$need_build" -eq 1 ]]; then
   acquire_lock
   sync_dependencies
 
-  # Remember any instance that predates this build. open(1) ACTIVATES an
-  # already-running app rather than relaunching it (verified: same pid before
-  # and after), so if this process survives the rebuild it would keep showing
-  # the OLD code while the new bundle sits unused on disk. Deliberately not
-  # force-quit: this is a canvas editor and unsaved work would be lost.
+  # Remember any instance that predates this build. After a successful build
+  # and codesign verification we ask this captured instance to quit gracefully
+  # before opening the replacement, so macOS cannot reactivate stale code.
+  # We never force-quit: this is a canvas editor and its renderer must retain
+  # control of the normal save/beforeunload handshake.
   stale_pid="$(pgrep -f "$APP_PROC_PATTERN" 2>/dev/null | head -1)"
 
   # npm install can rewrite package-lock.json, which IS a tracked file and so
@@ -250,6 +295,13 @@ if ! verify_app; then
   fail "Built app failed integrity verification (codesign --verify failed) - not launching."
 fi
 
+# A stale process is only acted on after both the rebuild and this independent
+# final signature gate succeeded. On an unchanged launch stale_pid is empty,
+# so an already-running current app is simply activated as before.
+if ! quit_stale_prebuild_instance; then
+  fail "The previous Infinite Canvas instance (pid $stale_pid) did not quit within ${STALE_QUIT_TIMEOUT_SECONDS}s. It may be waiting for a save confirmation. Finish or cancel that save, quit Infinite Canvas with Cmd-Q, then launch again. The rebuilt app was not opened."
+fi
+
 open "$RELEASE_APP" || fail "open(1) refused to launch the app."
 
 # open(1) only confirms LaunchServices accepted the request, not that the
@@ -267,20 +319,6 @@ done
 
 if [[ "$launched" -ne 1 ]]; then
   fail "App did not start within 10 seconds of open (LaunchServices accepted the request but the process never appeared)."
-fi
-
-# The pre-build instance outlived the rebuild, so what's on screen is the
-# previous build - open(1) just brought it to the front. Say so loudly rather
-# than let the user believe their change shipped.
-if [[ -n "$stale_pid" ]] && kill -0 "$stale_pid" 2>/dev/null; then
-  echo
-  echo "!! WARNING: Infinite Canvas was ALREADY RUNNING (pid $stale_pid) when this"
-  echo "!! rebuild finished, and macOS only brought that existing window forward."
-  echo "!! You are looking at the PREVIOUS build - your changes are NOT live."
-  echo "!! Quit Infinite Canvas (Cmd-Q), then launch it again to pick them up."
-  echo
-  notify "Rebuilt, but the old instance is still running - quit and relaunch." "Basso"
-  exit 0
 fi
 
 echo "> Infinite Canvas is running."

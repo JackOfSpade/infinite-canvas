@@ -21,7 +21,7 @@ export default [
     },
   },
   {
-    name: 'Job Search remote residences require a non-US/Canada outside country and preserve legacy safely',
+    name: 'Job Search remote residences allow U.S. and Canadian homes for outside-region remote jobs and preserve legacy safely',
     run: () => {
       const remote = normalizeRemoteResidences({
         usa: { city: 'Denver', subdivision: 'CO' },
@@ -30,14 +30,32 @@ export default [
       });
       assert(remote.usa.country === 'United States' && remote.canada.country === 'Canada', 'fixed remote countries cannot be overwritten');
       assert(hasRequiredLocations({ country: 'Canada' }, remote), 'all three residence groups make a run valid');
-      assert(!hasRequiredLocations({ country: 'Canada' }, { ...remote, other: { country: 'Canada' } }), 'outside residence rejects Canada');
+      for (const [country, city, subdivision, canonical] of [
+        ['Canada', 'Toronto', 'ON', 'Canada'],
+        ['CA', 'Toronto', 'Ontario', 'Canada'],
+        ['United States', 'Denver', 'CO', 'United States'],
+        ['USA', 'Denver', 'Colorado', 'United States'],
+      ]) {
+        const outsideRemote = normalizeRemoteResidences({ ...remote, other: { country, city, subdivision } });
+        assert(outsideRemote.other.country === canonical && !outsideRemote.other.countryConflict,
+          `${country} remains a compatible residence for an outside-region remote job`);
+        assert(hasRequiredLocations({ country: 'Canada' }, outsideRemote),
+          `${country} residence permits the job search to start`);
+        assert(locationValidationMessage({ country: 'Canada' }, outsideRemote) === '',
+          `${country} residence has no location-validation error`);
+      }
+      const missingOutsideResidence = normalizeRemoteResidences({ ...remote, other: { country: '' } });
+      assert(hasRequiredLocations({ country: 'Canada' }, missingOutsideResidence),
+        'a missing remote residence cannot block job search collection');
+      assert(locationValidationMessage({ country: 'Canada' }, missingOutsideResidence) === '',
+        'a missing remote residence produces no blocking location-validation message');
       const legacy = getSearchLocation({ preferredLocation: 'Toronto, Ontario, Canada' });
       assert(legacy.city === 'Toronto' && legacy.country === 'Canada', 'legacy location text migrates safely');
       return { legacy };
     },
   },
   {
-    name: 'Job Search dedicated country fields resolve US/Canada aliases and cannot bypass the outside-country guard',
+    name: 'Job Search dedicated country fields resolve US/Canada aliases for outside-region remote residences',
     run: () => {
       const usa = normalizeStructuredLocation({ country: 'U.S.' });
       const canada = normalizeStructuredLocation({ country: 'CA' });
@@ -45,13 +63,13 @@ export default [
       assert(usa.country === 'United States', 'U.S. resolves in the dedicated Country field');
       assert(canada.country === 'Canada' && can.country === 'Canada', 'CA and CAN resolve to Canada in the dedicated Country field');
       const remote = normalizeRemoteResidences({ other: { country: 'CA' } });
-      assert(!hasRequiredLocations({ country: 'Canada' }, remote), 'CA cannot bypass the outside-US/Canada requirement');
-      assert(/other than the United States or Canada/i.test(locationValidationMessage({ country: 'Canada' }, remote)), 'outside-country validation explains the alias rejection');
+      assert(hasRequiredLocations({ country: 'Canada' }, remote), 'CA is a valid Canadian residence for an outside-region remote job');
+      assert(locationValidationMessage({ country: 'Canada' }, remote) === '', 'the Canadian alias produces no location-validation error');
       return { usa: usa.country, canada: canada.country };
     },
   },
   {
-    name: 'Job Search rejects contradictory US/Canada subdivisions before a run and preserves legacy locations from empty structured shells',
+    name: 'Job Search blocks only contradictory search locations and preserves legacy locations from empty structured shells',
     run: () => {
       const badSearch = normalizeStructuredLocation({ city: 'Denver', subdivision: 'Ontario', country: 'US' });
       assert(badSearch.countryConflict, 'Ontario + United States remains a deterministic conflict');
@@ -61,8 +79,31 @@ export default [
         other: { country: 'United Kingdom' },
       });
       assert(remote.usa.countryConflict && remote.canada.countryConflict, 'fixed USA/Canada groups validate their subdivisions under the group country');
-      assert(!hasRequiredLocations({ country: 'Canada' }, remote), 'contradictory remote residences block the run before AI work');
-      assert(/Job is in USA/i.test(locationValidationMessage({ country: 'Canada' }, remote)), 'the first conflicting remote group is named in the validation error');
+      assert(hasRequiredLocations({ country: 'Canada' }, remote), 'contradictory remote residences cannot block job search collection');
+      assert(locationValidationMessage({ country: 'Canada' }, remote) === '', 'remote residence contradictions produce no blocking location-validation message');
+      for (const other of [
+        { city: 'Toronto', subdivision: 'Ontario', country: 'United States' },
+        { city: 'Denver', subdivision: 'Colorado', country: 'Canada' },
+      ]) {
+        const conflictingOutsideResidence = normalizeRemoteResidences({
+          usa: { city: 'Denver', subdivision: 'Colorado' },
+          canada: { city: 'Toronto', subdivision: 'Ontario' },
+          other,
+        });
+        assert(conflictingOutsideResidence.other.countryConflict,
+          `${other.subdivision} cannot be paired with ${other.country} in the outside-region residence`);
+        assert(hasRequiredLocations({ country: 'Canada' }, conflictingOutsideResidence),
+          'an outside-region residence contradiction cannot block job search collection');
+        assert(locationValidationMessage({ country: 'Canada' }, conflictingOutsideResidence) === '',
+          'an outside-region residence contradiction produces no blocking location-validation message');
+      }
+      assert(!hasRequiredLocations(badSearch, remote), 'a deterministic search country/subdivision contradiction still blocks the run');
+      assert(/search location combines/i.test(locationValidationMessage(badSearch, remote)),
+        'the blocking message identifies the contradictory search location');
+      const missingSearch = normalizeStructuredLocation({ city: 'Toronto', subdivision: 'Ontario', country: '' });
+      assert(!hasRequiredLocations(missingSearch, remote), 'a missing search country still blocks the run');
+      assert(/Enter a country for the search location/i.test(locationValidationMessage(missingSearch, remote)),
+        'the blocking message identifies the missing search country');
       const legacyShell = getSearchLocation({
         searchLocation: { city: '', subdivision: '', country: '' },
         preferredLocation: 'Toronto, Ontario, Canada',

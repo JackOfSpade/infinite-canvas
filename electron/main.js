@@ -18,7 +18,7 @@ import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
 import { closeAllPages } from './ipc/browserPool.js';
-import { closeStealthBrowser } from './ipc/stealthBrowser.js';
+import { closeAllAuthWindows, closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
@@ -945,6 +945,10 @@ app.on('before-quit', async (event) => {
     // Cleanup with safety timeout
     try {
       const cleanup = async () => {
+        // Visible login/native-auth windows own the same persistent profile.
+        // Close and await them first so the singleton cannot race their final
+        // cookie checkpoint during quit.
+        await closeAllAuthWindows();
         await Promise.allSettled([
           closeAllPages(),
           closeStealthBrowser(true),
@@ -952,12 +956,16 @@ app.on('before-quit', async (event) => {
         ]);
       };
 
-      // Give cleanup 2 seconds to finish, then force quit
+      // A Chrome profile shutdown is a durability boundary for login cookies.
+      // Give owned auth browsers enough time for the 2.5s cookie checkpoint,
+      // graceful 12s exit deadline, and bounded TERM/KILL fallback;
+      // the former 2s app.exit backstop could terminate the main process while
+      // Chrome was still checkpointing the Cookies database.
       let forceQuitTimeoutId;
       try {
         await Promise.race([
           cleanup(),
-          new Promise(resolve => { forceQuitTimeoutId = setTimeout(resolve, 2000); }),
+          new Promise(resolve => { forceQuitTimeoutId = setTimeout(resolve, 25000); }),
         ]);
       } finally {
         if (forceQuitTimeoutId) clearTimeout(forceQuitTimeoutId);

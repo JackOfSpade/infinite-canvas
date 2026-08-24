@@ -274,12 +274,41 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
               : '';
   const value = key ? remoteResidences?.[key] : null;
   const country = String(value?.country || value?.countryCode || '').trim();
-  if (!key || !country) return null;
+  // A malformed saved residence must only make this optional comparison
+  // uncertain; it must never be treated as a credible salary market.
+  if (!key || !country || value?.countryConflict) return null;
   if (key === 'other' && permittedCountry
     && !/^(?:worldwide|global|anywhere|multiple|unspecified|unknown)$/i.test(permittedCountry)
     && permittedCountry.localeCompare(country, undefined, { sensitivity: 'base' }) !== 0) return null;
   const bits = [value.city, value.subdivision, country].map(v => String(v || '').trim()).filter(Boolean);
   return { kind: `remote_${key}_residence`, key, country, display: bits.join(', ') };
+}
+
+/**
+ * Should this job get the competitive-pay check at all?
+ *
+ * Every cohort that reaches research costs TWO model calls (a grounded market
+ * lookup plus an assessment), and cohorts fragment by location — so an ungated
+ * 42-job run can spend dozens of calls and exhaust the shared provider quota
+ * that scoring and bucketing also draw on. A pay comparison only changes a
+ * decision on a job the user could realistically pursue, so it is reserved for
+ * the stronger matches.
+ *
+ * Returns a TRI-STATE, not a boolean, because "we checked and this job scored
+ * below the bar" and "we never got a score for this job" are different facts
+ * and must reach the user as different reasons. Collapsing them would tell
+ * someone their job was judged a weak match when it was never judged at all.
+ *
+ * `unscoredSentinel` is the scorer's fixed placeholder value for a job the AI
+ * could not score. It is a marker, not an assessment, so it counts as unknown.
+ * PURE, so the boundary is directly unit-testable.
+ */
+export function classifyCompensationFitEligibility(rawScore, { minScore, unscoredSentinel = null } = {}) {
+  const known = typeof rawScore === 'number'
+    && Number.isFinite(rawScore)
+    && !(unscoredSentinel !== null && rawScore === unscoredSentinel);
+  if (!known) return 'score-unavailable';
+  return rawScore >= minScore ? 'eligible' : 'below-threshold';
 }
 
 export function compensationCohortKey({ job, context, location, offer }) {

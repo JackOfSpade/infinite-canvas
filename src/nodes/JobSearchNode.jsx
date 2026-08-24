@@ -85,7 +85,7 @@ const PROCESSING_STATES = ['queued', 'parsing', 'querying', 'searching', 'scorin
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
 const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
-// The results cascade (likelihood/salary/role tree) is no longer spawned here —
+// The results cascade (hiring-fit/salary/role tree) is no longer spawned here —
 // the Job Search Module scrapes + scores + STORES its scored jobs, and a Job
 // Board Module (connected by the user) does the bucketing + display. See
 // JobBoardNode.jsx and buildJobTree.js (the shared, hubId-agnostic builder).
@@ -96,13 +96,14 @@ function buildResumeSummary(profile) {
   return `${skills}${profile.experience_years ? `${skills ? ' · ' : ''}${profile.experience_years}y exp` : ''}`.trim();
 }
 
-function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation, remoteResidences }) {
+function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation }) {
   return JSON.stringify({
-    strategyVersion: 3, // v3: structured search/residence locations are snapshotted
+    // v4: remote salary-comparison residences do not influence generated
+    // search queries or whether a cached query bundle can be safely reused.
+    strategyVersion: 4,
     resumeFingerprint: String(resumeFingerprint || ''),
     targetRole: String(targetRole || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
-    remoteResidences: normalizeRemoteResidences(remoteResidences),
   });
 }
 
@@ -491,6 +492,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           const scoreResult = await window.electronAPI.scoreJobs({
             jobs: freshJobs,
             profile,
+            careerData: data.careerData,
             nodeId: currentId,
             targetRole: activeTargetRole,
             searchLocation: locationSnapshot.searchLocation,
@@ -542,7 +544,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
+  }, [id, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, data.careerData, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -904,7 +906,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [id, updateGlobal, canvasFilePath]);
 
   const runScoringAndSpawn = useCallback(async ({
-    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos,
+    profile, careerData = data.careerData, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos,
     hiddenApplied = 0, jobRunId = null, cancelled, locationSnapshot = null,
   }) => {
     const currentId = id;
@@ -924,6 +926,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const scoreResult = await window.electronAPI.scoreJobs({
       jobs,
       profile,
+      careerData,
       nodeId: currentId,
       targetRole: activeTargetRole,
       searchLocation: effectiveLocationSnapshot.searchLocation,
@@ -981,7 +984,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       jobRunId,
       cancelled,
     });
-  }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences]);
+  }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, data.careerData]);
 
   // ── Batch-scoring poll: complete the run when async results land ───────────
   // Active only while parked in 'scoring-batch'. Polls immediately on mount (so
@@ -1073,7 +1076,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    */
   const handlePostSearchResult = useCallback(async ({
     currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
-    hiddenApplied = 0, jobRunId = null, locationSnapshot = null,
+    hiddenApplied = 0, jobRunId = null, locationSnapshot = null, descriptionRecoveryJobs = null,
+    gatheredCount = null,
   }) => {
     // Persisted here (not just at the final 'done' write in finishScoringAndSpawn)
     // because a run that pauses on a blocking warning goes through THIS branch
@@ -1106,21 +1110,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // written by score-jobs, which hasn't run yet) — persist it now so Solve has
       // jobs to work with instead of no-opping.
       if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
-        window.electronAPI?.saveJobAnalysisSnapshot?.({
-          jobs: foundJobs,
-          profile,
-          nodeId: currentId,
-          targetRole: activeTargetRole,
-          snapshotContext: {
-            sourceHubId: currentId,
-            runId: jobRunId,
-            canvasFilePath: cfp,
-            resumeSummary: buildResumeSummary(profile),
-            locationSnapshot,
-            searchLocation: locationSnapshot?.searchLocation || null,
-            remoteResidences: locationSnapshot?.remoteResidences || null,
-          },
-        }).catch(() => {});
+        try {
+          await window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: foundJobs,
+            descriptionRecoveryJobs,
+            profile,
+            careerData: data.careerData,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+            snapshotContext: {
+              sourceHubId: currentId,
+              runId: jobRunId,
+              canvasFilePath: cfp,
+              resumeSummary: buildResumeSummary(profile),
+              locationSnapshot,
+              searchLocation: locationSnapshot?.searchLocation || null,
+              remoteResidences: locationSnapshot?.remoteResidences || null,
+            },
+          });
+        } catch (err) {
+          EventLogger.error(`[JobSearch][${currentId}] Failed to save LinkedIn recovery snapshot:`, err);
+        }
       }
       return false;
     }
@@ -1135,6 +1145,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
           jobs: [],
           profile,
+          careerData: data.careerData,
           nodeId: currentId,
           targetRole: activeTargetRole,
           snapshotContext: {
@@ -1164,7 +1175,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         resultCount: 0,
         totalScoredCount: 0,
         scrapedCount: 0,
-        gatheredCount: 0,
+        // Preserve the backend funnel even when zero rows survive. Otherwise a
+        // clean 88 fetched → 88 relevance-filtered run looks identical to a
+        // source that returned no rows at all.
+        gatheredCount: gatheredCount ?? 0,
         scoreRangeMin: 0,
         scoreRangeMax: 100,
         scoreThreshold: 0,
@@ -1182,7 +1196,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
 
     return true;
-  }, [updateGlobal, ensureBlockedSourceCards, cancelCleanSourceCardDismiss]);
+  }, [updateGlobal, ensureBlockedSourceCards, cancelCleanSourceCardDismiss, data.careerData]);
 
   /**
    * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or
@@ -1194,6 +1208,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     filePaths,
     profile: providedProfile,
     frameSourceCards = true,
+    runOrigin = 'initial',
   } = {}) => {
     if (!window.electronAPI || processingRunsRef.current.active) return;
     // Capture these once per run. A user may edit fields while a long scrape is
@@ -1204,11 +1219,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       searchLocation: getSearchLocation(liveData),
       remoteResidences: normalizeRemoteResidences(liveData.remoteResidences),
     };
-    const locationProblem = locationValidationMessage(
-      runLocationSnapshot.searchLocation,
-      runLocationSnapshot.remoteResidences,
-    );
-    if (!hasRequiredLocations(runLocationSnapshot.searchLocation, runLocationSnapshot.remoteResidences)) {
+    const locationProblem = locationValidationMessage(runLocationSnapshot.searchLocation);
+    if (!hasRequiredLocations(runLocationSnapshot.searchLocation)) {
       updateGlobal(id, { errorMessage: locationProblem, isRateLimit: false });
       addToast({ title: 'Complete job locations', description: locationProblem, type: 'error' });
       return;
@@ -1343,7 +1355,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         resumeFingerprint,
         targetRole: activeTargetRole,
         preferredLocation: activePreferredLocation,
-        remoteResidences: runLocationSnapshot.remoteResidences,
       });
       const canReuseQueries = !!(
         profile &&
@@ -1429,6 +1440,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // job title as role relevance, or a Denver cinematographer pulls in
         // every Denver SWE/sales posting at Datadog et al.
         profileLocations: profile?.locations || [],
+        runOrigin,
+        profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
       });
       if (cancelled()) return;
 
@@ -1488,6 +1501,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile, activeTargetRole, canvasFilePath, hiddenApplied,
         jobRunId: searchResult.runId || null,
         locationSnapshot: runLocationSnapshot,
+        descriptionRecoveryJobs: Array.isArray(searchResult.descriptionRecoveryJobs)
+          ? searchResult.descriptionRecoveryJobs
+          : null,
+        gatheredCount: rawGatheredCount,
       });
       if (!shouldScore) return;
 
@@ -1496,6 +1513,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           await window.electronAPI?.saveJobAnalysisSnapshot?.({
             jobs: foundJobs,
             profile,
+            careerData: data.careerData,
             nodeId: currentId,
             targetRole: activeTargetRole,
             snapshotContext: {
@@ -1586,12 +1604,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
   }, [id, updateGlobal, getNode, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast]);
 
-  const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true } = {}) => {
+  const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true, runOrigin = 'initial' } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
-    return runPipeline({ filePaths, frameSourceCards });
+    return runPipeline({ filePaths, frameSourceCards, runOrigin });
   }, [runPipeline]);
   const startProcessingWithProfile = useCallback(
-    (profile, { frameSourceCards = true } = {}) => runPipeline({ profile, frameSourceCards }),
+    (profile, { frameSourceCards = true, runOrigin = 'initial' } = {}) => runPipeline({ profile, frameSourceCards, runOrigin }),
     [runPipeline],
   );
 
@@ -1614,6 +1632,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // persisted). The refs are updated on every render AND synchronously by the
     // resolve/skip handlers, so they're always at least as fresh as data.
     const pending = pendingJobsRef.current;
+    // A resolve handler can call this synchronously before React commits the
+    // paused run's data.jobRunId. Keep every completion/snapshot write scoped to
+    // the live run token, just like the pending jobs and warnings above.
+    const activeJobRunId = jobRunIdRef.current || data.jobRunId || null;
     const profile = data.resumeProfile;
     if (!pending || !Array.isArray(pending) || pending.length === 0) {
       // Nothing was collected (every blocked source got skipped, or a resolve
@@ -1634,7 +1656,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // explanation (design §6.2: filtering must never be silent).
         hiddenApplied: hiddenAppliedRef.current || 0,
       });
-      window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: data.jobRunId || null }).catch(() => {});
+      window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: activeJobRunId }).catch(() => {});
       return;
     }
     if (!profile) return;
@@ -1677,7 +1699,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // hiddenApplied:0 at the final 'done' write — runScoringAndSpawn
         // defaults it to 0 when omitted, which this call was doing until now.
         hiddenApplied: hiddenAppliedRef.current || 0,
-        jobRunId: data.jobRunId || null,
+        jobRunId: activeJobRunId,
         cancelled,
       });
     } catch (error) {
@@ -1805,6 +1827,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         rawLocation: data.preferredLocation || '',
         profileLocations: profile?.locations || [],
         resume: true,
+        runOrigin: 'crash-resume',
+        profileInputMode: 'stored-profile',
       });
       if (cancelled()) return;
       // Same failure handling as runPipeline — resume targets exactly the
@@ -1834,6 +1858,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         currentId, foundJobs, warnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath: cfp, hiddenApplied,
         jobRunId: searchResult?.runId || null,
+        descriptionRecoveryJobs: Array.isArray(searchResult?.descriptionRecoveryJobs)
+          ? searchResult.descriptionRecoveryJobs
+          : null,
+        gatheredCount: searchResult.rawCount ?? foundJobs.length,
         locationSnapshot: data.locationSnapshot || {
           searchLocation: getSearchLocation({
             searchLocation: data.searchLocation,
@@ -2007,7 +2035,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingBefore: prevPending.length,
         pendingAfter: mergedPending.length,
       });
-      EventLogger.log(`[JobSearch][${id}] Resolved ${resolvedSourceId}: received ${items.length} item(s), +${fresh.length} new → pendingJobs ${prevPending.length}→${mergedPending.length}; ${remainingBlocks.length} block warning(s) remain`);
+      const pendingNet = mergedPending.length - prevPending.length;
+      EventLogger.log(
+        `[JobSearch][${id}] Resolved ${resolvedSourceId}: received ${items.length} item(s); `
+        + `replaced ${replacedExisting}, accepted ${fresh.length} after dedup; `
+        + `net pendingJobs ${pendingNet >= 0 ? '+' : ''}${pendingNet} (${prevPending.length}→${mergedPending.length}); `
+        + `${remainingBlocks.length} block warning(s) remain`,
+      );
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
@@ -2252,13 +2286,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // async re-parse — startProcessingWithProfile re-broadcasts at scrape start,
     // but this clears the stale counts immediately so they don't linger.
     document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
+    const profileInputMode = effectivePaths.length > 0 ? 'fresh-files' : 'stored-profile';
+    EventLogger.log(`[JobSearch][${id}] Re-run button clicked; career input=${profileInputMode}`);
     if (effectivePaths.length > 0) {
       // Files still accessible — re-parse for freshness then run full pipeline
-      startProcessingRef.current?.(effectivePaths, { frameSourceCards });
+      startProcessingRef.current?.(effectivePaths, { frameSourceCards, runOrigin: 'rerun-button' });
     } else {
       // Files gone but profile is persisted — run from query step onward
       addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
-      startProcessingWithProfile(data.resumeProfile, { frameSourceCards });
+      startProcessingWithProfile(data.resumeProfile, { frameSourceCards, runOrigin: 'rerun-button' });
     }
   }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss, activeEnabledSourceIds]);
 
@@ -2339,18 +2375,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // Compute running total from per-source progress
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
-  const clearSessionBtnRef = useRef(null);
-  const handleClearBrowserSession = useCallback(async () => {
-    EventLogger.log(`[JobSearch][${id}] User cleared browser session`);
-    const btn = clearSessionBtnRef.current;
-    if (btn) btn.textContent = 'Clearing…';
-    await window.electronAPI?.clearBrowserSession?.();
-    if (btn) {
-      btn.textContent = 'Session cleared';
-      setTimeout(() => { if (clearSessionBtnRef.current) clearSessionBtnRef.current.textContent = 'Reset browser session'; }, 2000);
-    }
-  }, [id]);
-
   useEffect(() => {
     // The "Resume saved scrape" banner is a skip-AI testing affordance — only
     // that mode ever creates the snapshot (scrape now, AI-score later). In
@@ -2416,6 +2440,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const snapshot = res?.success && res.exists ? res.snapshot : null;
       const savedJobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
       const profile = snapshot?.profile;
+      // New snapshots retain the raw evidence used by the scorer. A current
+      // hub can supply it for a legacy snapshot created before this field.
+      const careerData = snapshot?.careerData || data.careerData || '';
       if (!snapshot || !profile || savedJobs.length === 0) {
         addToast({
           title: 'No Saved Scrape',
@@ -2440,6 +2467,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingJobs: null,
         pendingTargetRole: null,
         resumeProfile: profile,
+        careerData,
         resumeSummary: buildResumeSummary(profile),
         resumeContext: {
           skills: profile.skills,
@@ -2451,6 +2479,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       try {
         await runScoringAndSpawn({
           profile,
+          careerData,
           jobs: savedJobs,
           gatheredCount: snapshot.gatheredJobCount ?? savedJobs.length,
           scrapeWarnings: [],
@@ -2480,7 +2509,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, epoch, getNode, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.locked, epoch, getNode, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
@@ -2707,14 +2736,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     availableSourceIds={ACTIVE_JOB_SOURCES}
                   />
                 )}
-                <button
-                  ref={clearSessionBtnRef}
-                  className="nodrag mt-1 w-full text-[9px] text-white/20 hover:text-white/45 transition-colors bg-transparent border-0 cursor-pointer py-0.5"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={handleClearBrowserSession}
-                >
-                  Reset browser session
-                </button>
                 {savedAnalysisPanel}
               </div>}
             </div>

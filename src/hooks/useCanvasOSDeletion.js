@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardLocalAiJobsRecursively } from '../utils/canvasInteractions';
 
 /**
  * Recursively collects OS file/folder paths from a node tree, for the "also move
@@ -53,6 +53,13 @@ export function useCanvasOSDeletion({ requestConfirm, undo }) {
     // Cancel any active background tasks for these nodes (including nested nodes)
     if (window.electronAPI?.cancelNodeTask) {
       cancelNodeTasksRecursively(deletedNodes);
+    }
+    // A Local AI job contains career context beside the canvas. Removing its
+    // card is an explicit withdrawal, so ask the main process to clean up the
+    // capability-bound handoff too. The handler coordinates with any import or
+    // final save already in flight; this call is intentionally best-effort.
+    if (window.electronAPI?.discardLocalApplication) {
+      discardLocalAiJobsRecursively(deletedNodes);
     }
 
     const pathsToDelete = new Set();

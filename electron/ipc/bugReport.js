@@ -6,7 +6,7 @@ import os from 'os';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
-import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo } from './stealthBrowser.js';
+import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
 import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
@@ -28,7 +28,7 @@ import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollu
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
 import { buildSellHubResolveRollup } from '../../src/utils/sellHubResolveSnapshot.js';
 import { getMissingPreviewRelinkDiagnostics } from './missingPreviewRelink.js';
-import { getAuthWindowDiagnostics, NATIVE_LOGIN_PLATFORMS } from './browser/authWindows.js';
+import { getAuthWindowDiagnostics, NATIVE_LOGIN_PLATFORMS, PLATFORM_AUTH_COOKIES } from './browser/authWindows.js';
 import { NATIVE_READ_PLATFORMS } from './browser/nativeChromeReader.js';
 import {
   getJobSearchTransientKeysForSave,
@@ -46,6 +46,29 @@ function truncateDiagnosticText(value, max) {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * Renders getStealthBrowserInfo().activity — what the shared singleton is
+ * DOING, not just whether it's alive. This is the difference between "our own
+ * idle browser held the profile lock" and "something else did" (see the
+ * profile-lock incident this was added for: a post-login cookie check woke
+ * the singleton, which then sat holding the shared userDataDir with nothing
+ * open on it for the rest of the session). `livePageCount === null` means the
+ * activity cache has no honest observation for the CURRENT browser generation
+ * — report that as "not observed", never guess it as idle.
+ */
+function formatStealthBrowserActivity(activity) {
+  if (!activity || activity.livePageCount == null) return 'not observed';
+  const ageSec = Number.isFinite(activity.observedAt)
+    ? Math.max(0, Math.round((Date.now() - activity.observedAt) / 1000))
+    : null;
+  const ageBit = ageSec == null ? '' : ` (observed ${ageSec}s ago)`;
+  if (activity.livePageCount === 0) return `idle — 0 live pages${ageBit}`;
+  const urls = Array.isArray(activity.livePageUrls)
+    ? activity.livePageUrls.map(u => String(u).replace(/[`|]/g, "'")).join(', ')
+    : '';
+  return `${activity.livePageCount} live page(s)${ageBit}${urls ? `: ${urls}` : ''}`;
 }
 
 // A report is collected precisely when app state may be malformed. Keep one
@@ -317,7 +340,7 @@ function buildAIConfigSnapshot() {
   const geminiKey = ai.geminiApiKey;
   const claudeKey = ai.anthropicApiKey;
   const provider = ai.provider || 'gemini';
-  const activeKey = provider === 'claude' ? claudeKey : provider === 'gemini' ? geminiKey : null;
+  const activeKey = provider === 'claude' ? claudeKey : geminiKey;
   const keyPrefix = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
 
   // resolveServiceAccountPath checks the user-configured path first, then
@@ -329,11 +352,9 @@ function buildAIConfigSnapshot() {
 
   // Gemini works with either a UI key OR a resolvable service-account.json;
   // Claude needs the UI key.
-  const effectivelyConfigured = provider === 'local'
-    ? true
-    : provider === 'claude'
-      ? !!claudeKey
-      : (!!geminiKey || !!resolvedSAPath);
+  const effectivelyConfigured = provider === 'claude'
+    ? !!claudeKey
+    : (!!geminiKey || !!resolvedSAPath);
 
   // For Gemini, the runtime picks AI Studio when a key is set, Vertex when
   // a service-account is resolvable, and has no usable credential otherwise. Surfacing the
@@ -341,9 +362,7 @@ function buildAIConfigSnapshot() {
   // "billing depleted on Vertex" vs "rate-limited on AI Studio" report is
   // immediately disambiguated.
   let activeEndpoint;
-  if (provider === 'local') {
-    activeEndpoint = 'Claude Code manual local handoff (no API credential)';
-  } else if (provider === 'claude') {
+  if (provider === 'claude') {
     activeEndpoint = claudeKey ? 'Anthropic API' : '(no key)';
   } else if (geminiKey) {
     activeEndpoint = 'Gemini API (AI Studio — generativelanguage.googleapis.com)';
@@ -355,38 +374,21 @@ function buildAIConfigSnapshot() {
 
   const telemetry = getGeminiTelemetry();
 
-  // Résumé/cover-letter generation is no longer pinned to Claude — every task
-  // now follows the same `provider` setting above. What's still worth
-  // reporting explicitly is which MODEL each Claude task GROUP resolves to
-  // (llm.js TASK_GROUPS): the per-group family is a Settings pick
-  // (ai.claudeModels), independent of whether Claude is even the active
-  // provider right now, so a "the résumé used the wrong model" report needs
-  // this spelled out rather than inferred from the family name alone.
+  // API-backed features follow the selected provider. Report only live API
+  // task groups: Application Generate is a Local AI handoff, and its retired
+  // remote task ids must not masquerade as selectable API routes here.
   let taskRouting = null;
   try { taskRouting = taskModelRoutingSnapshot(ai); } catch { /* keep the rest of the report */ }
-  // The two step-1 tasks (career-achievement-refute, company-research) run
-  // ONE FAMILY BELOW `generation`'s pick — surfaced separately because a
-  // reader skimming only the 3-row group table would otherwise assume the
-  // refuter shares the miner's model, which is exactly the independence
-  // property the step exists to prevent (see llm.js TASK_GROUPS doc).
-  const steppedTaskRouting = taskRouting
-    ? Object.entries(taskRouting.tasks)
-        .filter(([, t]) => t.step > 0)
-        .map(([task, t]) => `${task} (${t.group}, step ${t.step}) → ${t.provider}/${t.model}`)
-    : [];
 
   return {
     provider,
-    modelSelection: provider === 'local'
-      ? 'manual Claude Code handoff for Application Generate; API-only tasks are intentionally unavailable'
-      : provider === 'gemini'
+    modelSelection: provider === 'gemini'
         ? 'auto per-task preference + Gemini capability-ladder fallbacks (pro→flash→lite)'
         : 'auto within the user-picked per-group Claude family (see llm.js TASK_GROUPS / Settings → AI)',
     // Present regardless of the active provider (a no-op display when
     // provider === 'gemini') — these picks persist independently, so the
     // report should never leave the reader guessing what Claude WOULD serve.
     claudeGroupRouting: taskRouting?.groups || '(unresolved)',
-    claudeSteppedTaskRouting: steppedTaskRouting.length ? steppedTaskRouting : '(none)',
     hasGeminiKey: !!geminiKey,
     hasAnthropicKey: !!claudeKey,
     activeKeyPrefix: keyPrefix,
@@ -473,7 +475,7 @@ function buildScraperAdaptationSnapshot() {
 > when a response is anomalously small relative to it.
 
 ### Rate limiter (this session)
-${rlLines.length ? rlLines.join('\n') : '- (rate limiter idle this session)'}
+${rlLines.length ? rlLines.join('\n') : '- (shared scraper rate limiter idle; LinkedIn guest-enrichment limits are reported separately in Job Search Pipeline)'}
 
 ### Learned scrape budgets (persisted)
 ${budgetLines.length ? budgetLines.join('\n') : '- (no source has a recorded sample yet — all using seed timeouts)'}
@@ -638,13 +640,24 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // filterStats (computed before a filter code could drop the `nodes` section);
   // fall back to scanning nodes when present (no-filter reports).
   const { hasJobNodes, hasSellNodes } = resolveNodePresence(payload);
-  const wantsAuthDiagnostics = /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
   // FULL (or no code) must mean EVERYTHING — otherwise description-keyword-gated
   // sections silently vanish on a FULL report. "window not opening" (a captcha/
   // login window) doesn't match the auth keywords above, so without this the
   // Auth Window Diagnostics section was dropped even under FULL.
   const reportCode = String(payload.filterCode || '').trim().toUpperCase();
   const isFullReport = !reportCode || codeIncludesFull(reportCode);
+  const reportCodes = new Set(reportCode.split(/[+\s,]+/).filter(Boolean));
+  // AUTH implies PERSIST. "I logged in but it still says logged out" is an AUTH-
+  // shaped question whose answer lives entirely in the persistence section: the
+  // close-lifecycle table's Store-checkpointed / Executable / Profile columns and
+  // the per-platform auth-cookie-on-disk line are what separate "the login never
+  // completed" from "the login completed and never reached the profile". Gating
+  // those behind a code the user has no reason to guess made an AUTH report look
+  // complete while omitting the deciding evidence.
+  const wantsPersistenceDiagnostics = isFullReport || reportCodes.has('PERSIST') || reportCodes.has('AUTH');
+  const wantsAuthDiagnostics = wantsPersistenceDiagnostics
+    || reportCodes.has('AUTH')
+    || /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
 
   const systemInfo = {
     platform: process.platform,
@@ -705,8 +718,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     // band/salary/role breakdown are summarized in the Job Search Pipeline /
     // Taxonomy sections; only a genuine anomaly (selected/editing/resizing/
     // edge-cursor/error) forces a row to always show.
-    const ROUTINE_JOBCARD_CAP = 15;
-    const ROUTINE_JOBGROUP_CAP = 25; // keep enough to convey the taxonomy shape
+    // Only clipboard output needs sampling; Save to file is the promised full
+    // artifact and must retain every routine row as well as every anomaly.
+    const ROUTINE_JOBCARD_CAP = options?.maxChars ? 15 : Infinity;
+    const ROUTINE_JOBGROUP_CAP = options?.maxChars ? 25 : Infinity; // keep enough to convey the taxonomy shape
     const hasAnomaly = (n) => {
       const cs = compStateById[n.id] || {};
       return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor || nodeDataById[n.id]?.errorMessage);
@@ -1318,6 +1333,101 @@ ${statusQueueLine}
   try { missingPreviewRelinkMarkdown = buildMissingPreviewRelinkMarkdown(); }
   catch { /* never break the report on diagnostic failure */ }
 
+  // ── Cross-restart session durability ──────────────────────────────────────
+  // Values are intentionally absent: file checkpoints, cache provenance, and
+  // cookie name/persistence metadata are sufficient to distinguish "detected in
+  // RAM but never flushed" from "restored and later rejected by the server."
+  let sessionPersistenceMarkdown = '';
+  if (wantsPersistenceDiagnostics) try {
+    const profile = getBrowserProfileDiagnostics?.() || {};
+    const cache = getStatusCacheSync?.() || {};
+    const authDiag = getAuthWindowDiagnostics?.() || {};
+    const fileLine = (label, entry) => entry?.exists
+      ? `- ${label}: ${entry.bytes} bytes · mtime ${entry.mtime}`
+      : `- ${label}: (missing)`;
+    const cacheEntries = Object.entries(cache);
+    const restoredIds = cacheEntries.filter(([, entry]) => entry?.restoredFromDisk).map(([id]) => id);
+    const currentBrowser = profile.browser || {};
+    // Basename / trailing-slice truncation — keeps the lifecycle table readable
+    // while still distinguishing "which binary" and "which profile dir" a login
+    // window used, the two facts needed to tell whether it could share cookies
+    // with the scrape that read the session back afterward (see PPID / Indeed:
+    // a native login and a Puppeteer-launched scrape use different OSCrypt keys
+    // even on the SAME userDataDir when their executable differs).
+    const execLabel = (value) => value ? path.basename(String(value)) : '—';
+    const profileLabel = (value) => {
+      const s = String(value || '');
+      if (!s) return '—';
+      return s.length > 40 ? `…${s.slice(-40)}` : s;
+    };
+    const lifecycleRows = (Array.isArray(authDiag.history) ? authDiag.history : [])
+      .filter(item => item?.mode === 'puppeteer-visible' || item?.mode === 'native-chrome')
+      .slice(-12)
+      .reverse()
+      .map(item => {
+        const cookies = (Array.isArray(item.authCookiesBeforeClose) ? item.authCookiesBeforeClose : [])
+          .map(cookie => `${cookie.name || '?'}:${cookie.persistent ? 'persistent' : 'session'}${cookie.expiresAt ? ` exp=${new Date(cookie.expiresAt * 1000).toISOString()}` : ''}`)
+          .join(', ') || 'none captured';
+        return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${item.loginDetected ? 'yes' : 'no'} | ${item.cookieFlushMs ?? '—'} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
+      }).join('\n');
+    // Auth-cookie-on-disk presence per platform with a known session cookie
+    // (PLATFORM_AUTH_COOKIES). Written under `lastTrace` by writeStatusCache
+    // (extras spread), not `trace` — read the wrong key here and every row
+    // prints "not recorded" even when accounts.js just observed one. Two
+    // producers populate it: annotateCookieSurvival on a confirmed logged-out
+    // verdict, and completeLoginWindowVerification's trusted-native-login
+    // survival check, which can record TRUE (a native login that positively
+    // confirmed its cookie landed) as well as false/null. A platform whose
+    // check never ran this process has no recorded value; one whose check ran
+    // but could not read the disk stores an explicit null. Say what was
+    // observed rather than guess. Cookie NAMES only.
+    const authCookiePresenceLines = Object.keys(PLATFORM_AUTH_COOKIES).map(platformId => {
+      const trace = cache[platformId]?.lastTrace;
+      const names = (trace?.authCookieNames || PLATFORM_AUTH_COOKIES[platformId] || []).join(',');
+      const presentLabel = trace?.authCookiePresent === true ? 'present'
+        : trace?.authCookiePresent === false ? 'ABSENT'
+          : trace?.authCookiePresent === null ? 'not observed — the on-disk read could not run'
+            : 'not recorded';
+      return `  - \`${platformId}\` (\`${names}\`): ${presentLabel}`;
+    }).join('\n');
+    sessionPersistenceMarkdown = `
+## Session Persistence Diagnostics
+> Redacted durability metadata only — cookie values are never read or exported.
+> Compare the profile mtimes and close disposition with the login-attempt and
+> startup-verification timestamps below. A detected cookie followed by a forced
+> close or no profile checkpoint identifies a local persistence failure. A login
+> window and a scrape that used different binaries or different profile
+> directories cannot share a session — the Executable/Profile columns below are
+> what makes that mismatch visible instead of assumed. **Store checkpointed = NO**
+> on a row whose login WAS detected means Chromium never committed its batched
+> cookie writes before that window closed: the session existed in the window and
+> did not reach the profile. \`n/a\` is a window whose close path does not observe
+> the checkpoint (the Puppeteer path flushes via \`browser.close()\`). The shared
+> browser's \`activity\` is its most recent observed live-page count/URLs (never a
+> live query) — \`idle — 0 live pages\` while \`running\` means it holds the shared
+> profile lock but isn't doing anything, the signature of a wake-and-forget call.
+
+- Browser profile: \`${String(profile.userDataDir || '(unavailable)').replace(/`/g, "'")}\`
+- Current shared browser: ${currentBrowser.connected ? 'running' : 'stopped'} · generation ${currentBrowser.generation ?? '—'} · executable \`${String(currentBrowser.executablePath || '(not launched this process)').replace(/`/g, "'")}\` · activity: ${formatStealthBrowserActivity(currentBrowser.activity)}
+${fileLine('Cookies DB', profile.cookies)}
+${fileLine('Cookies journal', profile.cookiesJournal)}
+${fileLine('Cookies WAL', profile.cookiesWal)}
+${fileLine('Local State', profile.localState)}
+${fileLine('Default/Preferences', profile.preferences)}
+- In-memory session-cache entries: ${cacheEntries.length}
+- Still sourced from prior-process restore: ${restoredIds.length ? restoredIds.map(id => `\`${id}\``).join(', ') : '(none — every current row is fresh or disconnected)'}
+- Auth cookie present on disk, per platform with a known session cookie (recorded when a survival check ran — confirmed logged-out verify or trusted native login):
+${authCookiePresenceLines}
+
+### Completed auth-browser close lifecycle (newest first)
+| Platform | Mode | Login detected | Pre-close wait ms | Store checkpointed | Close disposition | Process exit observed | Executable | Profile | Auth cookie metadata before close |
+|---|---|---:|---:|---|---|---:|---|---|---|
+${lifecycleRows || '| — | — | — | — | — | — | — | — | — | (no completed auth window this process) |'}
+`;
+  } catch (error) {
+    sessionPersistenceMarkdown = diagnosticRenderFailureMarkdown('Session Persistence Diagnostics', error);
+  }
+
   // ── Marketplace session snapshot ──────────────────────────────────────────
   // In-memory session cache (populated by verifyAllPlatforms on startup and
   // by writeStatusCache after each login flow). Truth source for the "Log in"
@@ -1407,7 +1517,13 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
       ...(Array.isArray(diag?.active) ? diag.active.map(d => ({ ...d, state: 'active' })) : []),
       diag?.last ? { ...diag.last, state: 'last' } : null,
     ].filter(Boolean);
-    if (entries.length > 0 || profileReservation) {
+    // Also render when launch collisions were recorded but no auth/login window
+    // was ever involved: the shared-profile liveness + collision lines live in
+    // this block, and gating them on an auth window meant two headless scrapes
+    // colliding with each other produced a FULL report with no trace of it at
+    // all — the exact evidence needed, silently absent.
+    const collisionTelemetry = getLaunchCollisions?.();
+    if (entries.length > 0 || profileReservation || (collisionTelemetry?.total || 0) > 0) {
       const rows = entries.map(d => {
         const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
         return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${String(d.currentUrl || d.loginUrl || '—').replace(/`/g, "'").slice(0, 180)}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
@@ -1459,7 +1575,13 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           const detected = h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
           const title = h.title ? `, title="${String(h.title).replace(/\s+/g, ' ').slice(0, 100)}"` : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
-          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
+          const close = h.closeDisposition
+            ? ` · close=${h.closeDisposition}, flush=${h.cookieFlushMs ?? 0}ms, exit=${h.processExitObserved ? 'observed' : 'NOT observed'}`
+            : '';
+          const cookieMeta = Array.isArray(h.authCookiesBeforeClose) && h.authCookiesBeforeClose.length > 0
+            ? ` · auth cookies before close=${h.authCookiesBeforeClose.map(c => `${c.name}:${c.persistent ? 'persistent' : 'session'}`).join(',')}`
+            : '';
+          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
         ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
@@ -1502,7 +1624,17 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
             let host = '';
             try { host = last.url ? ` ${new URL(last.url).host}` : ''; } catch { /* non-URL */ }
             const ago = last.ts ? `, ${Math.round((Date.now() - last.ts) / 1000)}s ago` : '';
-            lastBit = ` Last: \`${last.context}\`${host} — ${last.recovered ? `auto-recovered after ${last.attempts} attempt(s)` : `NOT recovered (${last.attempts} attempt(s))`}${ago}.`;
+            // Distinguishes "our own idle browser held it (and was asked to yield)"
+            // from "something else held it and never yielded" — a visible window a
+            // person left open, vs. the retained singleton. `null` (older event, or a
+            // caller that never reported it) says neither, honestly, rather than
+            // defaulting to one.
+            const yieldBit = last.askedSingletonToYield === true
+              ? ' The retained singleton was asked to yield during this attempt.'
+              : last.askedSingletonToYield === false
+                ? ' The retained singleton was NOT asked to yield during this attempt (already yielded, not running, or this context can\'t ask itself).'
+                : '';
+            lastBit = ` Last: \`${last.context}\`${host} — ${last.recovered ? `auto-recovered after ${last.attempts} attempt(s)` : `NOT recovered (${last.attempts} attempt(s))`}${ago}.${yieldBit}`;
           }
           launchCollisionLine = `\n- ⚠️ Shared-profile launch collisions: **${lc.total}** total, ${lc.recovered} auto-recovered. A Chrome launch hit the userDataDir lock held by another window/scrape (captcha-resolve window racing a headless rescrape, or overlapping windows).${lastBit} Recovered ones retried silently; un-recovered ones forced a manual re-Solve/re-click.\n`;
         }
@@ -1577,10 +1709,9 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
   // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
   // the 24576 hard cap means a task is truncating and the cap has grown to match.
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
-  // The persisted budget store never prunes task keys, so a renamed/removed task
-  // lingers as a "ghost" that misleadingly reports a stuck truncation forever.
-  // Split live tasks (in the current build's TASK_MODELS/TASK_MAX_TOKENS) from
-  // stale ghosts and footnote the ghosts instead of mixing them into the funnel.
+  // The persisted budget store never prunes renamed/removed task keys. Split
+  // current live API task ids from those ghosts; Local AI application handoff
+  // work has no API token-budget entry.
   const knownTaskIds = (() => { try { return getKnownTaskIds(); } catch { return null; } })();
   const staleBudgetTasks = knownTaskIds
     ? Object.keys(tokenBudgets).filter(t => !knownTaskIds.has(t)).sort()
@@ -1641,18 +1772,14 @@ ${tokenBudgetLines.join('\n')}`
 - service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
 - **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fail until a key is added in Settings'}
 
-### Claude Model Routing (per-group family → resolved model)
+### Claude Model Routing (live API task groups → resolved model)
 > Which model serves each task GROUP on the Claude provider (llm.js
-> TASK_GROUPS) — shown regardless of the active provider above, since the
-> per-group family is a Settings pick (ai.claudeModels) that persists
-> independent of which provider is currently active.
+> TASK_GROUPS) — shown regardless of the active provider above, since these
+> Settings picks persist independently. Application Generate uses Local AI and
+> is intentionally excluded from this API-routing table.
 ${typeof aiConfig.claudeGroupRouting === 'string'
   ? `- ${aiConfig.claudeGroupRouting}`
   : Object.entries(aiConfig.claudeGroupRouting).map(([group, r]) => `- **${group}**: \`${r.family}\` → \`${r.model}\``).join('\n')}
-- Step-offset tasks (resolve BELOW their group's family on purpose — see the load-bearing independence note in llm.js TASK_GROUPS):
-${Array.isArray(aiConfig.claudeSteppedTaskRouting)
-  ? aiConfig.claudeSteppedTaskRouting.map((line) => `  - ${line}`).join('\n')
-  : `  - ${aiConfig.claudeSteppedTaskRouting}`}
 ${aiConfig.provider === 'gemini' ? `
 ### Gemini Telemetry
 - Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
@@ -1780,46 +1907,16 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
-  // Static safety bound (not adaptive): keeps the assembled bug-report payload
-  // from ballooning past what's reasonable to ship/store.
-  const MAX_BUDGET_BYTES = 10 * 1024 * 1024; // 10MB
-  const bufferBytes = Buffer.byteLength(baseMarkdown, 'utf8');
   const events = payload.eventLogs || [];
-  const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;
-
-  let includedEventLines = [];
-  let trimmedEventsMarkdown = '';
-  if (remainingBytes > 0 && events.length > 0) {
-    const eventsBlockOpen = `\`\`\`text\n`;
-    const eventsBlockClose = `\n\`\`\`\n`;
-    let eventsBytes = Buffer.byteLength(eventsBlockOpen) + Buffer.byteLength(eventsBlockClose);
-
-    for (let i = events.length - 1; i >= 0; i--) {
-      const eventLine = String(events[i]);
-      const eventStr = eventLine + '\n';
-      const eventBytes = Buffer.byteLength(eventStr, 'utf8');
-      if (eventsBytes + eventBytes < remainingBytes) {
-        eventsBytes += eventBytes;
-        includedEventLines.push(eventLine);
-      } else {
-        break;
-      }
-    }
-    includedEventLines.reverse(); // restore chronological order
-
-    trimmedEventsMarkdown = buildFencedTextBlock(includedEventLines, '*(No events recorded)*');
-  } else if (remainingBytes <= 0) {
-    trimmedEventsMarkdown = `*(Event history omitted due to size limit)*\n`;
-  } else {
-    trimmedEventsMarkdown = `*(No events recorded)*\n`;
-  }
+  const includedEventLines = events.map(String);
+  const eventsMarkdown = buildFencedTextBlock(includedEventLines, '*(No events recorded)*');
 
   // Logs and the Event History heading live outside baseMarkdown so the
   // clipboard path (enforceClipboardMarkdownCap) can trim them independently.
-  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + trimmedEventsMarkdown;
+  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + eventsMarkdown;
   if (options?.maxChars) {
     return enforceClipboardMarkdownCap(baseMarkdown, includedEventLines, mainProcessLogLines, options.maxChars);
   }

@@ -469,8 +469,18 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 ? 'Hub is locked'
                 : progress?.warning?.actionTitle
                   ? progress.warning.actionTitle
-                  : progress?.warning?.resumeState
-                    ? 'Log in via Settings → Job Sources first, then click Continue to resume the search from where Indeed blocked'
+                  : progress?.warning?.resumeState?.mode === 'native-challenge'
+                    ? 'Continue opens real Chrome to complete Indeed verification, then resumes the search automatically'
+                    : progress?.warning?.resumeState
+                      // Generic fallback ONLY. Every warning that knows why it
+                      // stopped sets its own actionTitle above — this used to
+                      // assert "log in first" for all of them, which read as a
+                      // flat contradiction on failures that have nothing to do
+                      // with the account (a busy browser profile, a Chrome that
+                      // could not start) while the panel right above correctly
+                      // said to close a window. Say only what is true for every
+                      // resumable warning.
+                      ? 'Resumes the search from where this source stopped — see the reason above for what to do first'
                   : 'Open the failed page in a browser sharing your session — solve the captcha or log in, cookies persist for the next Re-run Search'}
             >
               <ExternalLink size={9} />

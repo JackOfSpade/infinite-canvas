@@ -1,4 +1,4 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 
 import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDetailSelection, buildDescriptionCardTargets, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, readActiveGoogleDetailTitle, readDescriptionPanelText } from '../test-dependencies.js';
 
@@ -264,6 +264,72 @@ export default [
       assert(jobs[0].company === 'Acme' && jobs[0].location === 'Remote', 'Indeed DOM extraction: wrong company/location');
       assert(jobs[0].url === 'https://www.indeed.com/viewjob?jk=abc123', `Indeed DOM extraction: normalized URL mismatch ${jobs[0].url}`);
       return { count: jobs.length, sample: jobs[0] };
+    },
+  },
+{
+    // Guards FACT 2 (phantom Indeed template/companion records): the id-shape
+    // family must catch the exact synthetic ids observed in a live scrape plus
+    // their immediate rotation/repeat family, while a false POSITIVE here would
+    // silently discard a REAL job — every genuine key below is a real jobkey
+    // pulled from a live scrape or canvas.jobs-history.csv.
+    name: 'isPlaceholderIndeedJobKey: catches synthetic/rotated-hex filler without flagging real jobkeys',
+    run: () => {
+      const placeholders = [
+        '789abcdef0123456', // observed phantom (McCain Foods row)
+        'cdef0123456789ab', // observed phantom (Msitek LLC row)
+        '0f1e2d3c4b5a6978', // observed phantom (nibble-complement family)
+        'aaaaaaaaaaaaaaaa', // repeat family, any charset
+        '11111111',         // repeat family, shortest accepted length
+        '0123456789abcdef', // the base ascending run itself
+        'fedcba9876543210', // full descending run
+        '3456789abcdef012', // an unobserved rotation — same cyclic family
+      ];
+      for (const key of placeholders) {
+        assert(isPlaceholderIndeedJobKey(key),
+          `isPlaceholderIndeedJobKey must flag synthetic filler "${key}" — missing this lets a template/companion block through as a fake job`);
+      }
+      const genuine = [
+        '2136516a5da5d5e0', 'b36bd069f99d6c51', 'cbf351c41691bab3', '7b94b7c15100eb51',
+        'df5300d5ae5f3472', '0dd80eafa128e4d8', '9d7a8b67591b2443', 'ffb46192a788b229',
+        'fb535a2465cfa509',
+      ];
+      for (const key of genuine) {
+        assert(!isPlaceholderIndeedJobKey(key),
+          `isPlaceholderIndeedJobKey must NOT flag genuine jobkey "${key}" — a false positive here silently discards a REAL job`);
+      }
+      return { placeholders: placeholders.length, genuine: genuine.length };
+    },
+  },
+{
+    // Guards the same phantom problem as the test above via an INDEPENDENT
+    // structural signal (no description at all), end-to-end through the real
+    // extraction pipeline: a __NEXT_DATA__ payload carrying a real described
+    // row, a same-title+company undescribed duplicate (must collapse away),
+    // two genuinely distinct described postings sharing a title+company (must
+    // both survive), and a placeholder-id phantom (must be rejected and
+    // counted).
+    name: 'Indeed extraction: placeholder ids are rejected and description-less duplicates collapse without erasing distinct postings',
+    run: () => {
+      const results = [
+        { title: 'DevOps Manager', company: 'CirrusLabs North Inc.', jobkey: 'b36bd069f99d6c51', location: 'Remote', snippet: 'Full job description text for the real posting goes here.' },
+        { title: 'DevOps Manager', company: 'CirrusLabs North Inc.', jobkey: 'df5300d5ae5f3472', location: 'Remote' },
+        { title: 'Full Stack Developer', company: 'MetricAid', jobkey: '9d7a8b67591b2443', location: 'City A', snippet: 'Description one for req A.' },
+        { title: 'Full Stack Developer', company: 'MetricAid', jobkey: 'ffb46192a788b229', location: 'City B', snippet: 'Description two for req B, different city.' },
+        { title: 'Senior / Principal Software Engineer', company: 'Soma Energy', jobkey: 'cbf351c41691bab3', location: 'Austin, TX', snippet: 'Real description for the genuine posting.' },
+        { title: 'Senior / Principal Software Engineer', jobkey: 'cdef0123456789ab' },
+      ];
+      const html = `<html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { results } } })}</script></body></html>`;
+      const jobs = extractIndeedJobsFromHtml(html);
+      assert(jobs.length === 4, `expected 4 surviving jobs (1 described-wins pair + 2 distinct-postings pair + 1 real), got ${jobs.length}`);
+      const byKey = new Map(jobs.map(j => [j.jobkey, j]));
+      assert(byKey.has('b36bd069f99d6c51') && !byKey.has('df5300d5ae5f3472'),
+        'the described CirrusLabs row must survive and its undescribed same-title+company duplicate must collapse away');
+      assert(byKey.has('9d7a8b67591b2443') && byKey.has('ffb46192a788b229'),
+        'two distinct DESCRIBED postings that merely share a title+company must both be kept, not collapsed');
+      assert(byKey.has('cbf351c41691bab3') && !byKey.has('cdef0123456789ab'),
+        'the real Soma Energy row must survive; its placeholder-id phantom must never reach the output');
+      assert(jobs.rejectedPlaceholderCount === 1, `expected exactly 1 rejected placeholder, got ${jobs.rejectedPlaceholderCount}`);
+      return { count: jobs.length, rejectedPlaceholderCount: jobs.rejectedPlaceholderCount };
     },
   },
 {
@@ -654,7 +720,7 @@ export default [
     // DOM test harness.  Lock the integration seams down here instead: these
     // are the ordering and guard invariants that cannot be established by the
     // generic queue unit test alone.
-    name: 'Job Card application integration acquires before mutable reads, releases after save, and guards duplicate/deleted calls',
+    name: 'Job Card application integration acquires before mutable reads, releases after local handoff, and guards duplicate/deleted calls',
     run: () => {
       const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const indexOf = (needle) => source.indexOf(needle);
@@ -667,11 +733,11 @@ export default [
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
       const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
       const originRead = generationIndexOf('const originHub = getNode(originHubId);');
-      const generateIpc = generationIndexOf('await window.electronAPI.generateApplication({');
-      const saveIpc = generationIndexOf('await window.electronAPI.saveApplication({');
+      const queueIpc = generationIndexOf('await window.electronAPI.queueLocalApplication({');
       const release = generationIndexOf('lease?.release();');
       const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
       const applicationIpcSource = fs.readFileSync(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
+      const localApplicationIpcSource = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
       const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
 
       assert(latchGuard >= 0 && latchSet > latchGuard && acquire > latchSet,
@@ -688,8 +754,10 @@ export default [
         && source.includes('expectedResultSha256')
         && source.includes('openLocalApplicationFolder({ jobId: localApplication.id, canvasFilePath })'),
       'poll, import, and open operations must keep using the canvas path that owns the queued job');
-      assert(generateIpc > originRead && saveIpc > generateIpc && release > saveIpc,
-        'the lease must cover generation and save, then release only in the terminal cleanup path');
+      assert(queueIpc > originRead && release > queueIpc,
+        'the lease must cover creation of the durable local handoff, then release after the queue write settles');
+      assert(!generationScope.includes('generateApplication({') && !generationScope.includes('saveApplication({'),
+        'Application Generate must never enter the retired remote generation/save path');
       assert(source.includes("kind: 'application'") && source.includes('onQueued: ({ position })')
         && source.includes('onQueueUpdate: ({ position })') && source.includes('Queued · #${displayedApplicationRun.position}'),
       'queued applications must have an application identity and an isolated visible queue position');
@@ -702,25 +770,24 @@ export default [
         && canvasSource.includes('currentFile, getCurrentFile'),
       'Canvas navigation must expose a stable latest-file accessor for queued Save As operations');
       assert(!generationScope.includes('if (!isMountedRef.current) return;')
-        && generationScope.includes('if (!getNode(idRef.current)) {'),
-      'a hidden-but-extant card must finish caching and saving; only actual deletion stops post-generation work');
+        && generationScope.includes('if (!getLiveJobCard(idRef.current)) {')
+        && generationScope.includes('const expectedPriorLocalApplication = getLiveJobCard(idRef.current)?.data?.localApplication || null;')
+        && generationScope.includes('const settlement = queuedLocalApplicationSettlement(')
+        && generationScope.includes('expectedPriorLocalApplication,')
+        && generationScope.includes('discardLocalApplication'),
+      'a hidden-but-extant card must persist or deliberately replace its durable handoff globally, while an actually deleted or superseded card discards that exact handoff');
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
-        && source.includes('if (!getNode(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
+        && source.includes('if (!getLiveJobCard(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
         && source.includes('additionalNotes: additionalNotes.trim()')
         && source.includes('updateGlobal(id, { additionalNotes: additionalNotes.trim() })')
-        && applicationIpcSource.includes('normalizeApplicationAdditionalNotes')
-        && applicationIpcSource.includes('careerDataWithAdditionalNotes(careerData, additionalNotes)')
-        && applicationIpcSource.includes('additionalNotesChars:'),
-      'job-specific applicant notes must persist on the card, reach generation, stay bounded at IPC, and be diagnosable without logging their text');
-      assert(source.includes('discardApplication?.({ workDir: result.workDir })')
-        && preloadSource.includes("discardApplication: (args) => ipcRenderer.invoke('discard-application', args)")
-        && applicationIpcSource.includes("handleSafe('discard-application'")
-        && applicationIpcSource.includes('pendingApplicationArtifacts.get(resolvedWorkDir) !== pending')
-        && applicationIpcSource.includes("discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure')"),
-      'a deleted post-generation card must discard only its registered, sender-owned workspace, including terminal save failures');
-      return { lifecycleOrdered: true, remountSafe: true, currentCanvasAtLease: true, hiddenCardContinues: true, deletedCardGuard: true };
+        && localApplicationIpcSource.includes('normalizeApplicationAdditionalNotes(args.additionalNotes)'),
+      'job-specific applicant notes must persist on the card, reach the local handoff, and stay bounded at IPC');
+      assert(!preloadSource.includes("ipcRenderer.invoke('generate-application'")
+        && !applicationIpcSource.includes("handleSafe('generate-application'"),
+      'remote application generation must not be exposed through preload or registered in the main process');
+      return { lifecycleOrdered: true, remountSafe: true, currentCanvasAtLease: true, hiddenCardContinues: true, localOnly: true };
     },
   },
 {
@@ -1544,21 +1611,21 @@ export default [
     },
   },
 {
-    // The other half of the clear: nothing may write the OLD files' derivatives
-    // back onto a hub that has since been cleared. A generation takes minutes,
-    // and the user is free to clear the hub while one is in flight.
-    name: 'A mined achievement ledger is only written back to the hub whose career data it was mined from',
+    name: 'Application Generate preserves an existing achievement ledger without starting API mining',
     run: () => {
       const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      const writeBackAt = source.indexOf('updateGlobal(originHubId, { achievements: result.achievements })');
-      assert(writeBackAt >= 0, 'the mined-ledger write-back is missing, so every application would re-mine the ledger from scratch');
-      const guard = source.slice(source.lastIndexOf('if (', writeBackAt), writeBackAt);
-      assert(guard.includes('getNode(originHubId)?.data?.careerData === careerData'),
-        'the ledger write-back only checks that the hub still exists, so a "Clear career files" (or a file swap) during the minutes-long generation lands the OLD files\' ledger on the cleared hub — and because the mine gate is just `!cachedAchievements`, every later résumé is then written from the previous files\' figures');
-      assert(source.indexOf('const careerData = originHub?.data?.careerData') >= 0
-        && source.indexOf('const careerData = originHub?.data?.careerData') < writeBackAt,
-      'the compared careerData must be the one this generation actually read and mined from, captured before the backend call');
-      return { writeBackGuarded: true };
+      const generationStart = source.indexOf('const generateApplication = useCallback');
+      const generationEnd = source.indexOf('// ── Mark applied', generationStart);
+      const generationScope = source.slice(generationStart, generationEnd);
+      assert(generationScope.includes('const cachedAchievements = originHub.data?.achievements || null;')
+        && generationScope.includes('achievements: cachedAchievements,')
+        && generationScope.includes('mineAllowed,'),
+      'the local handoff must receive the hub ledger and an explicit signal when no cached ledger exists');
+      assert(!generationScope.includes('achievementsMining')
+        && !generationScope.includes('generateApplication({')
+        && !generationScope.includes('updateGlobal(originHubId, { achievements:'),
+      'the renderer must not start or write back remote achievement mining during local-only generation');
+      return { cachedLedgerPassedThrough: true, apiMiningDisabled: true };
     },
   },
 {
@@ -2131,6 +2198,31 @@ export default [
           && jobRelevanceMatch('Senior Technical Architect', 'Technical Lead', new Set()),
         'Job board relevance filtering: broad technical queries retain engineering/architecture roles without leaking into technical sales',
       );
+      const softwareArchitectureTitles = [
+        'Associate Observability Architect | PST | Remote',
+        'Associate Solutions Architect (French or German fluency)',
+        'Customer Support Systems & Analytics Architect',
+        'Principal Cloud Architect',
+      ];
+      assert(
+        softwareArchitectureTitles.every(title => jobRelevanceMatch(title, 'Software Architect', new Set())),
+        'Job board relevance filtering: Software Architect recognizes technical architecture qualifier variants',
+      );
+      assert(jobRelevanceMatch('Principal Cloud Architect', 'Software Architects', new Set()),
+        'Job board relevance filtering: pluralized architecture queries use the same technical qualifier family');
+      assert(
+        ['Landscape Architect', 'Naval Architect', 'Business Architect', 'Senior Software Engineer']
+          .every(title => !jobRelevanceMatch(title, 'Software Architect', new Set())),
+        'Job board relevance filtering: architecture variants still require a technical qualifier and the architect head',
+      );
+      const softwareArchitectureAdmission = filterWholeFeedJobsByTitleRelevance(
+        [...softwareArchitectureTitles, 'Director, GTM Finance'].map((title, index) => ({ title, url: `wwr-architecture-${index}` })),
+        ['Software Architect'],
+      );
+      assert(softwareArchitectureAdmission.providerGathered === 5
+        && softwareArchitectureAdmission.gathered === 4
+        && softwareArchitectureAdmission.relevanceDropped === 1,
+      'whole-feed relevance: software-architecture variants survive WWR admission without relaxing unrelated titles');
       const cappedCandidates = [
         'Junior Project Buyer', 'Draftsperson', 'Data Coordinator',
         'Shipping & Logistics Specialist', 'Project Coordinator, New Graduate',
@@ -2586,6 +2678,17 @@ export default [
         'Bug report code filtering: RESOLVE should retain source-resolve queue diagnostics');
       assert(resolve.sectionExclusions.has('nodes') && resolve.sectionExclusions.has('nodeComponentStates'),
         'Bug report code filtering: RESOLVE should rely on compact resolve state and drop heavy node payloads/diagnostics');
+      const persist = applyBugReportCode([
+        ...logs,
+        '[StealthBrowser] linkedin login confirmed — waiting 2500ms for the auth cookie/profile checkpoint before closing',
+        '[Accounts] Restored 3 prior connected session statuses from disk',
+      ], {}, 'PERSIST');
+      assert(persist.matchedCodes.includes('PERSIST')
+        && persist.filteredLogs.some(line => line.includes('profile checkpoint'))
+        && persist.filteredLogs.some(line => line.includes('Restored 3 prior')),
+      'Bug report code filtering: PERSIST retains cross-restart auth durability evidence');
+      assert(persist.sectionExclusions.has('nodes') && persist.sectionExclusions.has('mediaState'),
+        'Bug report code filtering: PERSIST omits heavy canvas/media payloads');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 

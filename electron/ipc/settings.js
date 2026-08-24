@@ -25,38 +25,38 @@ const ENC_PREFIX = 'safeStorage:v1:';
 const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
 const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
 
-// ── Claude per-group family selection ───────────────────────────────────────
-// Mirrors llm.js's GROUP_DEFAULT_FAMILY / CLAUDE_FAMILY_LADDER tokens —
+// ── Claude live-group family selection ──────────────────────────────────────
+// Mirrors llm.js's GROUP_DEFAULT_FAMILY and modelResolver's family tokens —
 // duplicated here (not imported) rather than reused, to avoid a settings.js
 // <-> llm.js import cycle: llm.js already imports getAISettings FROM this
 // module to resolve which model serves each task, and modelResolver.js (the
 // other place these tokens live) already imports getAISettings too. Family
 // tokens are extremely low-churn (four tiers, added on the order of once a
 // year), so the duplication cost is small next to the cycle it would create.
-const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' });
+// Application generation is a Local AI handoff, so it has no API model family
+// to configure. Keep only groups served by live Gemini/Claude API calls here.
+// A legacy persisted `generation` key is deliberately dropped on read and on
+// the next settings write because no live API route consumes it.
+const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ analysis: 'SONNET', light: 'HAIKU' });
 const VALID_CLAUDE_FAMILY_TOKENS = new Set(['FABLE', 'OPUS', 'SONNET', 'HAIKU']);
-const VALID_AI_PROVIDERS = new Set(['local', 'gemini', 'claude']);
+const VALID_AI_PROVIDERS = new Set(['gemini', 'claude']);
 
 /**
- * Keep the provider setting forward-compatible and safe to consume. Older
- * installs have only `gemini` / `claude`; an edited or otherwise invalid
- * value must retain the historic Gemini fallback instead of reaching an LLM
- * dispatch path which cannot serve it.
+ * Keep the API-provider setting forward-compatible and safe to consume.
+ * Local AI used to be a selectable provider, but application generation now
+ * uses its separate local handoff. An edited, legacy, or otherwise invalid
+ * value falls back to Gemini instead of reaching an LLM dispatch path which
+ * cannot serve it.
  */
 export function normalizeAIProvider(value) {
   return VALID_AI_PROVIDERS.has(value) ? value : 'gemini';
 }
 
 /**
- * Validate + backfill the persisted `ai.claudeModels` (per-group Claude
- * family selection: which of Fable/Opus/Sonnet/Haiku serves generation vs.
- * analysis vs. light tasks — see llm.js's TASK_GROUPS doc). An older config
- * written before this feature existed has no `claudeModels` key at all; a
- * corrupted/hand-edited one could carry an unrecognized token (a retired
- * family name, a typo, `null`). Either case falls back to that GROUP's
- * default rather than throwing or handing llm.js a token it can't resolve —
- * getAISettings() is on the hot path of every LLM call, so a throw here
- * would break every task, not just the misconfigured group.
+ * Validate + backfill the persisted `ai.claudeModels` for the live API task
+ * groups. Legacy `generation` is intentionally omitted: application work is
+ * now local-only, so carrying that picker into snapshots would imply it still
+ * controls something. Invalid live values fall back to their own default.
  */
 export function normalizeClaudeModels(raw) {
   const out = {};
@@ -162,15 +162,9 @@ function getStore() {
         // lookup, so the user can keep the file anywhere on disk and reuse
         // it across canvases without copying.
         serviceAccountPath: '',
-        // Per-GROUP Claude family (llm.js TASK_GROUPS): which of
-        // Fable/Opus/Sonnet/Haiku serves application-generation tasks vs.
-        // analysis tasks vs. light/status tasks. These defaults reproduce
-        // the OLD hard-coded per-task TASK_MODELS table exactly (see llm.js's
-        // GROUP_DEFAULT_FAMILY doc) — electron-store only applies top-level
-        // `defaults`, so an on-disk config from BEFORE this key existed
-        // still needs getAISettings()'s normalizeClaudeModels() to backfill
-        // it; this entry only covers a genuinely fresh install.
-        claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' },
+        // Per-live-group Claude family. Application Generate is handled by
+        // Local AI and therefore deliberately has no API model setting.
+        claudeModels: { analysis: 'SONNET', light: 'HAIKU' },
       },
       // Aggregate seller pages scanned by the Marketplace Status Module, keyed
       // by platformId: dashboards, notification centers, messages, sold-items
@@ -195,17 +189,21 @@ function getStore() {
     },
   });
 
-  // One-shot migration: model selection moved from user-controlled to
-  // per-task auto-selection in llm.js TASK_MODELS. Strip the persisted
-  // `claudeModel` / `geminiModel` so they don't show up in get-settings
-  // payloads (which would confuse renderers that still display them) and
-  // can't be accidentally re-read by any new code path. Safe even when the
-  // fields are already absent.
+  // One-shot migrations: model selection moved from user-controlled to
+  // per-task auto-selection in llm.js TASK_MODELS, and Local AI stopped being
+  // an API-provider choice. Strip stale model fields and replace only the
+  // legacy `provider: 'local'` value with Gemini. Spreading the stored object
+  // preserves encrypted API keys and Claude group choices byte-for-byte.
   try {
     const ai = _store.get('ai') || {};
-    if ('claudeModel' in ai || 'geminiModel' in ai) {
+    const hasLegacyModel = 'claudeModel' in ai || 'geminiModel' in ai;
+    const hasLegacyLocalProvider = ai.provider === 'local';
+    if (hasLegacyModel || hasLegacyLocalProvider) {
       const { claudeModel: _drop1, geminiModel: _drop2, ...rest } = ai;
-      _store.set('ai', rest);
+      _store.set('ai', {
+        ...rest,
+        ...(hasLegacyLocalProvider ? { provider: 'gemini' } : {}),
+      });
     }
   } catch { /* never block startup on settings migration */ }
 
@@ -231,9 +229,8 @@ function decryptedStoreSnapshot(s) {
   return {
     ...data,
     // claudeModels goes through the same normalizeClaudeModels() as
-    // getAISettings() — the renderer must never see a missing/invalid
-    // per-group token either (a blank/unmatched dropdown in Settings), not
-    // just the internal LLM-call path.
+    // getAISettings() — the renderer sees only live, valid API groups, never
+    // a legacy application-generation token with no effect.
     ai: {
       ...decryptSectionSecrets(AI_SECRET_KEYS, data.ai),
       provider: normalizeAIProvider(data.ai?.provider),
@@ -250,10 +247,10 @@ function decryptedStoreSnapshot(s) {
  * wipe sibling keys). Exported (pure, no store/encryption side effects) so
  * the nested-merge behavior below is directly unit-testable.
  *
- * `ai.claudeModels` is itself a {generation,analysis,light} object.
+ * `ai.claudeModels` is itself an {analysis,light} object.
  * SettingsPanel's updateAISetting/updateClaudeModelGroup send ONE changed
  * top-level `ai` key per call, so a single family-dropdown change arrives as
- * `{ claudeModels: { generation: 'FABLE' } }`. A bare top-level shallow merge
+ * `{ claudeModels: { analysis: 'FABLE' } }`. A bare top-level shallow merge
  * (`{ ...current, ...value }`) would REPLACE `claudeModels` wholesale with
  * that partial object, silently dropping `analysis`/`light` back to
  * undefined — getAISettings() papers over it with defaults on the next read,
@@ -263,8 +260,17 @@ function decryptedStoreSnapshot(s) {
  */
 export function mergeSettingsSection(section, current, value) {
   const merged = { ...(current || {}), ...value };
-  if (section === 'ai' && value?.claudeModels && typeof value.claudeModels === 'object') {
-    merged.claudeModels = { ...(current?.claudeModels || {}), ...value.claudeModels };
+  if (section === 'ai') {
+    // Normalize on every AI write, including an unrelated credential update.
+    // That makes a legacy persisted `generation` selection self-cleaning
+    // without treating a read as a surprising disk mutation.
+    const requestedModels = value?.claudeModels && typeof value.claudeModels === 'object'
+      ? value.claudeModels
+      : {};
+    merged.claudeModels = normalizeClaudeModels({
+      ...normalizeClaudeModels(current?.claudeModels),
+      ...requestedModels,
+    });
   }
   return merged;
 }

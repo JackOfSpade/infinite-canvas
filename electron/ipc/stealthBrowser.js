@@ -133,6 +133,7 @@ let isShuttingDown = false;
 // "is a limit browser/session-based (resets on relaunch) or IP-based?".
 let browserGeneration = 0;
 let browserLaunchedAt = 0;
+let browserExecutablePath = null;
 // Set while closeStealthBrowser() is tearing down the shared instance (e.g.
 // handing the profile off to a captcha/login window). getStealthBrowser()
 // awaits this before touching browserInstance so it can't reuse/relaunch on
@@ -141,6 +142,95 @@ let browserLaunchedAt = 0;
 let browserClosePromise = null;
 
 let sharedProfileReservation = null;
+
+// ── Singleton activity snapshot ─────────────────────────────────────────────
+// What made the profile-lock incident hard to diagnose after the fact wasn't
+// that the singleton was alive (getStealthBrowserInfo already reported that) —
+// it's that "alive" doesn't say whether it's doing anything. A cookie check
+// that opens a page, reads cookies, and closes it again leaves the singleton
+// holding the OS lock for as long as it stays cached, with nothing else ever
+// touching it. Surfacing live-page activity makes that self-evident.
+//
+// A page counts as "live" the same way getBrowserSessionResetBlocker already
+// defines it below: open, not closed, and not sitting on about:blank (a
+// browser.newPage() default that never navigated anywhere isn't activity).
+async function collectLivePages(browser) {
+  const pages = await browser.pages();
+  return pages
+    .filter(page => !page.isClosed?.())
+    .map(page => page.url?.() || '')
+    .filter(url => url && url !== 'about:blank');
+}
+
+// host+path only, bounded — enough to identify what's open without the report
+// growing unboundedly on a long query string.
+const ACTIVITY_URL_MAX = 90;
+function truncateActivityUrl(rawUrl) {
+  let hostPath;
+  try {
+    const u = new URL(rawUrl);
+    hostPath = `${u.host}${u.pathname}${u.search || ''}`;
+  } catch {
+    hostPath = String(rawUrl || '');
+  }
+  return hostPath.length > ACTIVITY_URL_MAX ? `${hostPath.slice(0, ACTIVITY_URL_MAX - 1)}…` : hostPath;
+}
+
+// getStealthBrowserInfo() is called from a SYNCHRONOUS bug-report path (see
+// getBrowserProfileDiagnostics's doc comment) while browser.pages() is
+// inherently async — so it cannot query live activity itself. This cache is
+// the bridge: refreshed at the few points below where an extra pages() call
+// is already cheap (right after the singleton launches, and whenever
+// getBrowserSessionResetBlocker already does this exact inspection), and read
+// back synchronously by getStealthBrowserInfo(). `pages: null` means never
+// observed this generation — reported as "not observed", never guessed.
+// `generation` lets a snapshot from an already-replaced browser process be
+// told apart from the current one instead of being shown as current.
+let _lastActivitySnapshot = { observedAt: null, generation: null, pages: null };
+
+async function refreshActivitySnapshot(browser) {
+  try {
+    const pages = await collectLivePages(browser);
+    _lastActivitySnapshot = {
+      observedAt: Date.now(),
+      generation: browserGeneration,
+      pages: pages.map(truncateActivityUrl),
+    };
+    return pages;
+  } catch {
+    // An inspection failure is not evidence of zero pages — leave whatever
+    // was last honestly observed in place rather than overwrite it with a
+    // guess. Returning null (vs. an empty array) is what lets a caller like
+    // getBrowserSessionResetBlocker distinguish "inspected, found nothing" from
+    // "could not inspect".
+    return null;
+  }
+}
+
+// A session reset must never race a launch/teardown or an interactive login/
+// captcha window.  The shared profile is intentionally used by several
+// platforms, so the reset code below is deliberately conservative about when
+// it may take ownership of it.
+export async function getBrowserSessionResetBlocker() {
+  if (isShuttingDown) return 'The browser is shutting down.';
+  if (sharedProfileReservation) {
+    return `Close the ${sharedProfileReservation.reason} browser window before resetting a session.`;
+  }
+  if (browserLaunchPromise) return 'The browser is starting. Wait for it to finish, then try again.';
+  if (browserClosePromise) return 'The browser is closing. Wait for it to finish, then try again.';
+  // The singleton itself may be an idle, blank Chromium left over after an
+  // earlier request. It is safe to close that process for maintenance, but a
+  // navigated live page means another operation is actively using the profile
+  // and must finish rather than being detached by a reset. This inspection is
+  // also the activity snapshot the bug report reads back later (see
+  // refreshActivitySnapshot above) — one shape, not a second copy of it.
+  if (browserInstance?.connected) {
+    const livePages = await refreshActivitySnapshot(browserInstance);
+    if (livePages === null) return 'Browser activity could not be inspected safely. Wait a moment, then try again.';
+    if (livePages.length > 0) return 'A browser operation is still running. Wait for it to finish, then try again.';
+  }
+  return null;
+}
 
 export function reserveSharedProfile(reason = 'visible-window') {
   // Only one visible window can hold the shared userDataDir at a time (OS-level
@@ -191,11 +281,81 @@ function assertSharedProfileAvailable(context) {
 
 // Identity of the current stealth-browser process. generation increments each
 // launch; launchedAt is the epoch ms of that launch (0 if never launched).
+//
+// `activity` answers "what is it doing", not just "is it alive": an idle
+// singleton holding the shared profile (0 live pages) reads very differently
+// from one mid-scrape. Read from the cache _lastActivitySnapshot populates
+// (see above) — synchronous by necessity, since this function is called from
+// the synchronous bug-report path. `livePageCount`/`livePageUrls` are null
+// when there is no honest observation for the CURRENT browser generation yet
+// (never launched, or launched but not yet refreshed, or the browser isn't
+// running) — callers must render that as "not observed", never as zero.
 export function getStealthBrowserInfo() {
+  const connected = !!browserInstance?.connected;
+  const hasCurrentSnapshot = connected
+    && _lastActivitySnapshot.generation === browserGeneration
+    && _lastActivitySnapshot.pages !== null;
   return {
     generation: browserGeneration,
     launchedAt: browserLaunchedAt,
-    connected: !!browserInstance?.connected,
+    connected,
+    executablePath: browserExecutablePath,
+    activity: {
+      observedAt: hasCurrentSnapshot ? _lastActivitySnapshot.observedAt : null,
+      livePageCount: hasCurrentSnapshot ? _lastActivitySnapshot.pages.length : null,
+      livePageUrls: hasCurrentSnapshot ? _lastActivitySnapshot.pages : null,
+    },
+  };
+}
+
+function browserProcessExited(proc) {
+  return !proc || proc.exitCode != null || proc.signalCode != null;
+}
+
+function waitForOwnedBrowserExit(proc, timeoutMs) {
+  if (browserProcessExited(proc)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let timer;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      proc.removeListener?.('exit', done);
+      resolve(true);
+    };
+    proc.once('exit', done);
+    if (browserProcessExited(proc)) return done();
+    timer = setTimeout(() => {
+      proc.removeListener?.('exit', done);
+      resolve(browserProcessExited(proc));
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Read-only, value-free snapshot of the persistent Chrome profile. This is
+ * deliberately synchronous so bug-report generation stays synchronous. Cookie
+ * values are never opened or exported; file identity/mtime is enough to tell
+ * whether a successful login ever checkpointed the profile before restart.
+ */
+export function getBrowserProfileDiagnostics() {
+  const userDataDir = _userDataDir
+    || path.join(app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas'), 'browser-data');
+  const snapshotFile = (filePath) => {
+    try {
+      const stat = fs.statSync(filePath);
+      return { exists: true, bytes: stat.size, mtime: stat.mtime.toISOString() };
+    } catch {
+      return { exists: false, bytes: 0, mtime: null };
+    }
+  };
+  return {
+    userDataDir,
+    profile: snapshotFile(userDataDir),
+    cookies: snapshotFile(path.join(userDataDir, 'Default', 'Cookies')),
+    cookiesJournal: snapshotFile(path.join(userDataDir, 'Default', 'Cookies-journal')),
+    cookiesWal: snapshotFile(path.join(userDataDir, 'Default', 'Cookies-wal')),
+    localState: snapshotFile(path.join(userDataDir, 'Local State')),
+    preferences: snapshotFile(path.join(userDataDir, 'Default', 'Preferences')),
+    browser: getStealthBrowserInfo(),
   };
 }
 
@@ -214,19 +374,61 @@ export function getStealthBrowserInfo() {
 // the complementary serialization of the job-scrape launchers.
 const PROFILE_LOCK_RETRY_DELAYS = [700, 1200, 2000, 3000, 4500]; // ms; ~11.4s total
 
+// The `context` string getStealthBrowser() passes when it launches the
+// retained singleton THROUGH this very helper (see ~line 419 below). That
+// launch must never trigger the singleton-yield logic a few lines down —
+// closing "the singleton" while it is itself mid-launch would mean
+// closeStealthBrowser() tearing down the browser instance this same call is
+// trying to produce, which can only end in a wedge or a use-after-close.
+const HEADLESS_SCRAPE_LAUNCH_CONTEXT = 'headless-scrape';
+
 export async function launchWithProfileLockRetry(launchOpts, context, url = null) {
   let lastErr;
+  // Ask the retained singleton to yield the shared profile at most once per
+  // call — it only needs to step aside once, and asking again on every
+  // subsequent retry would spam the log and fight whatever relaunched it
+  // (getStealthBrowser() relaunches on demand for its own next caller).
+  let askedSingletonToYield = false;
   for (let attempt = 0; attempt <= PROFILE_LOCK_RETRY_DELAYS.length; attempt++) {
     try {
       const browser = await puppeteer.launch(launchOpts);
       if (attempt > 0) {
-        recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: true, error: lastErr, ts: Date.now() });
+        recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: true, error: lastErr, ts: Date.now(), askedSingletonToYield });
         logger.info(`[StealthBrowser] ${context} launch recovered after ${attempt} retry(ies) — shared profile freed`);
       }
       return browser;
     } catch (err) {
       lastErr = err;
       if (!isProfileLockCollision(err)) throw err;
+
+      // The retained singleton is an app-owned, relaunch-on-demand cache — not
+      // a visible window a person is using. openLoginWindow and
+      // resetPlatformSession already make it yield by hand (an explicit
+      // closeStealthBrowser() before their own launch); scrape launchers had
+      // no equivalent, so any path that left the singleton alive (e.g. a
+      // post-login cookie check that happens to touch it) hard-failed the
+      // next browser scrape for the full retry ladder. Do this ONLY on an
+      // actual collision, never preemptively: pure-HTTP sources (LinkedIn
+      // guest enrichment, etc.) run concurrently with browser scrapes and use
+      // the singleton via fetchHtmlClean, so closing it unconditionally here
+      // would abort in-flight fetches that were never blocking anything. Once
+      // we've genuinely collided, the alternative is failing this whole
+      // source, so making the singleton yield is strictly better. Guard
+      // against HEADLESS_SCRAPE_LAUNCH_CONTEXT — see its definition above.
+      if (!askedSingletonToYield && context !== HEADLESS_SCRAPE_LAUNCH_CONTEXT && getStealthBrowserInfo().connected) {
+        askedSingletonToYield = true;
+        logger.info(`[StealthBrowser] ${context} launch collided with the shared profile — closing the retained idle singleton so it yields the profile`);
+        // Never let a failed close replace the profile-lock error we are in the
+        // middle of handling: that error names the real problem and carries the
+        // retry ladder, while a close failure here is only the recovery attempt
+        // not working. Fall through and keep retrying.
+        try {
+          await closeStealthBrowser(false);
+        } catch (closeErr) {
+          logger.warn(`[StealthBrowser] Retained singleton did not close cleanly while yielding to ${context}: ${closeErr?.message || closeErr}`);
+        }
+      }
+
       if (attempt < PROFILE_LOCK_RETRY_DELAYS.length) {
         const delay = PROFILE_LOCK_RETRY_DELAYS[attempt];
         logger.warn(`[StealthBrowser] ${context} launch hit the shared-profile lock (another Chrome window/scrape holds it) — retrying in ${delay}ms (attempt ${attempt + 1}/${PROFILE_LOCK_RETRY_DELAYS.length + 1})`);
@@ -234,9 +436,19 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
         continue;
       }
       // Retries exhausted: record + throw a message that names the real cause
-      // (the bare puppeteer "Code: 0" is undebuggable).
-      recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: false, error: err, ts: Date.now() });
-      throw new Error(`Chrome launch blocked by the shared browser profile lock after ${attempt + 1} attempts — another window or scrape is holding it. Close any open captcha/login window and retry. (${err?.message || String(err)})`);
+      // (the bare puppeteer "Code: 0" is undebuggable). Also state — as an
+      // observation, not a cause — whether this call itself asked the
+      // retained singleton to yield, so a bug report can tell "our own idle
+      // browser held it (and was asked to close)" apart from "something else
+      // (a visible captcha/login window, another process) held it the whole
+      // time and never yielded".
+      recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: false, error: err, ts: Date.now(), askedSingletonToYield });
+      throw new Error(
+        `Chrome launch blocked by the shared browser profile lock after ${attempt + 1} attempts — ` +
+        `another window or scrape is holding it. Close any open captcha/login window and retry. ` +
+        `(retained singleton yield ${askedSingletonToYield ? 'was requested during this call' : 'was not requested this call'}) ` +
+        `(${err?.message || String(err)})`
+      );
     }
   }
   throw lastErr; // unreachable — loop either returns or throws
@@ -260,7 +472,15 @@ export async function getStealthBrowser() {
     assertSharedProfileAvailable('headless stealth browser');
   }
 
-  if (browserInstance?.connected) return browserInstance;
+  if (browserInstance?.connected) {
+    // Best-effort background refresh, deliberately NOT awaited — this is the
+    // hot path every caller goes through, and blocking it on an extra pages()
+    // round-trip would add latency to every scrape for a diagnostic-only
+    // signal. refreshActivitySnapshot swallows its own errors, so there is no
+    // unhandled-rejection risk in firing it and moving on.
+    refreshActivitySnapshot(browserInstance);
+    return browserInstance;
+  }
 
   // Clear a dead/crashed instance. Killing the orphaned Chrome process releases
   // the userDataDir lock — without this, the next puppeteer.launch() fails with
@@ -333,11 +553,18 @@ export async function getStealthBrowser() {
           deviceScaleFactor: 1,
         },
         ignoreHTTPSErrors: true,
-      }, 'headless-scrape');
+      }, HEADLESS_SCRAPE_LAUNCH_CONTEXT);
 
       browserGeneration += 1;
       browserLaunchedAt = Date.now();
+      browserExecutablePath = executablePath;
       logger.info(`[StealthBrowser] Browser launched successfully (generation #${browserGeneration})`);
+      // Awaited (unlike the hot-path refresh above): this runs once per
+      // generation, not once per caller, and establishes the first honest
+      // snapshot for the new generation before anyone can observe it —
+      // without this, getStealthBrowserInfo() would report "not observed"
+      // for however long the singleton sits idle before its next use.
+      await refreshActivitySnapshot(browserInstance);
       return browserInstance;
     } finally {
       // Always release the mutex so the next call can retry on failure.
@@ -566,6 +793,9 @@ export async function closeStealthBrowser(forShutdown = false) {
     browserLaunchPromise = null; // Prevent anyone from waiting on a completed/failed launch
     if (browserInstance) {
       const proc = browserInstance.process();
+      // Subscribe before close() so a normal process exit that occurs while the
+      // CDP close promise is settling cannot be missed.
+      const processExit = waitForOwnedBrowserExit(proc, forShutdown ? 12_000 : 5_000);
       try {
         await browserInstance.close();
       } catch { /* already closed */ }
@@ -575,13 +805,8 @@ export async function closeStealthBrowser(forShutdown = false) {
       // a moment to die. Without this wait, the next puppeteer.launch() on the
       // same profile races the dying process and Chrome falls back to a temp
       // empty profile, causing page.goto() to silently land on about:blank.
-      if (proc && !proc.killed) {
-        await new Promise(resolve => {
-          const done = () => resolve();
-          proc.once('exit', done);
-          setTimeout(() => { proc.removeListener('exit', done); resolve(); }, 2000);
-        });
-      }
+      const exited = await processExit;
+      if (!exited) logger.warn('[StealthBrowser] Shared browser process did not report exit before the profile-release deadline');
     }
   })();
 
@@ -593,10 +818,134 @@ export async function closeStealthBrowser(forShutdown = false) {
 }
 
 export async function clearBrowserSession() {
-  await closeStealthBrowser(false);
-  const dir = await getUserDataDir();
-  await fs.promises.rm(dir, { recursive: true, force: true });
-  _userDataDir = null; // reset cache so next launch recreates the dir
+  const blocker = await getBrowserSessionResetBlocker();
+  if (blocker) {
+    const error = new Error(blocker);
+    error.code = 'browser-busy';
+    throw error;
+  }
+  const releaseProfileReservation = reserveSharedProfile('clear-browser-session');
+  try {
+    await closeStealthBrowser(false);
+    const dir = await getUserDataDir();
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    _userDataDir = null; // reset cache so next launch recreates the dir
+  } finally {
+    releaseProfileReservation();
+  }
+}
+
+// Keep this list intentionally small and explicit. These are the hosts the
+// Indeed login/search flow can use today; accepting origins from renderer data
+// here would turn a platform-scoped reset into an arbitrary-origin clearer.
+const INDEED_SESSION_RESET_HOSTS = [
+  'www.indeed.com',
+  'secure.indeed.com',
+  'ca.indeed.com',
+  'uk.indeed.com',
+  'au.indeed.com',
+  'nz.indeed.com',
+  'ie.indeed.com',
+  'de.indeed.com',
+  'fr.indeed.com',
+  'in.indeed.com',
+  'sg.indeed.com',
+];
+
+/** Pure, strict domain ownership check used by the targeted session reset. */
+export function isIndeedCookieDomain(domain) {
+  const normalized = String(domain || '').trim().toLowerCase().replace(/^\.+/, '');
+  return normalized === 'indeed.com' || normalized.endsWith('.indeed.com');
+}
+
+/** Fixed origins whose non-cookie website storage is safe to clear for Indeed. */
+export function getIndeedSessionResetOrigins() {
+  return INDEED_SESSION_RESET_HOSTS.map(host => `https://${host}`);
+}
+
+async function closeOwnedSessionResetBrowser(browser) {
+  if (!browser) return;
+  const proc = browser.process?.();
+  const processExit = waitForOwnedBrowserExit(proc, 5000);
+  await browser.close().catch(() => {});
+  if (!await processExit) logger.warn('[StealthBrowser] Session-reset browser did not report exit before profile release');
+}
+
+/**
+ * Clear the saved session for Indeed alone, without deleting the shared Chrome
+ * profile. This is intentionally not generic: its caller must not be able to
+ * supply an arbitrary domain or a path to erase.
+ */
+export async function resetPlatformSession(platformId) {
+  if (platformId !== 'indeed') {
+    return { success: false, code: 'unsupported-platform', reason: 'Only the Indeed session can be reset here.' };
+  }
+  const blocker = await getBrowserSessionResetBlocker();
+  if (blocker) return { success: false, code: 'browser-busy', reason: blocker };
+
+  let browser = null;
+  let page = null;
+  let cdp = null;
+  const releaseProfileReservation = reserveSharedProfile('platform-session-reset:indeed');
+  try {
+    // A retained singleton is normally idle between requests. Close it before
+    // this controlled maintenance launch so Chrome flushes the cookie database
+    // and no second process competes for the profile. The reservation prevents
+    // normal shared-profile callers from launching during this handoff.
+    await closeStealthBrowser(false);
+    // Indeed login/scraping deliberately uses system Chrome because Chromium
+    // cookie encryption is keyed to the browser app identity on macOS. Using
+    // Playwright's Chrome-for-Testing here could open the same directory but be
+    // unable to read/delete the session that system Chrome wrote.
+    const executablePath = process.env.CHROME_PATH || await findSystemChromePath() || await findChromePath();
+    browser = await launchWithProfileLockRetry({
+      headless: 'new',
+      executablePath,
+      userDataDir: await getUserDataDir(),
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
+      ignoreHTTPSErrors: true,
+    }, 'platform-session-reset', 'https://www.indeed.com/');
+    page = await browser.newPage();
+    cdp = await page.createCDPSession();
+
+    const cookieResponse = await cdp.send('Network.getAllCookies');
+    const ownedCookies = (Array.isArray(cookieResponse?.cookies) ? cookieResponse.cookies : [])
+      .filter(cookie => isIndeedCookieDomain(cookie?.domain));
+    for (const cookie of ownedCookies) {
+      const params = { name: cookie.name, domain: cookie.domain, path: cookie.path || '/' };
+      // Partitioned cookies are uncommon for Indeed, but preserving the key
+      // makes the deletion exact when Chromium reports one.
+      if (cookie.partitionKey) params.partitionKey = cookie.partitionKey;
+      await cdp.send('Network.deleteCookies', params);
+    }
+
+    // Do not use `all` or include `cookies`: cookie deletion above is exact,
+    // while these origin-scoped stores remove stale workers/cache/local state
+    // that can keep serving an old challenge shell.
+    const storageTypes = 'service_workers,cache_storage,local_storage,indexeddb,websql,file_systems';
+    for (const origin of getIndeedSessionResetOrigins()) {
+      await cdp.send('Storage.clearDataForOrigin', { origin, storageTypes });
+    }
+
+    logger.info(`[StealthBrowser] Reset Indeed session data (${ownedCookies.length} Indeed cookie(s), ${getIndeedSessionResetOrigins().length} origins)`);
+    return {
+      success: true,
+      platformId: 'indeed',
+      removedCookies: ownedCookies.length,
+      clearedOrigins: getIndeedSessionResetOrigins().length,
+      reason: 'Indeed cookies and saved website data were cleared. Other platform sessions were left untouched.',
+    };
+  } catch (error) {
+    const reason = error?.message || String(error);
+    logger.error(`[StealthBrowser] Indeed session reset failed: ${reason}`);
+    return { success: false, code: 'reset-failed', reason };
+  } finally {
+    if (cdp) await cdp.detach().catch(() => {});
+    if (page) await page.close().catch(() => {});
+    await closeOwnedSessionResetBrowser(browser);
+    releaseProfileReservation();
+  }
 }
 
 // Forward exports from extracted modules for backwards compatibility with other files
@@ -608,7 +957,9 @@ export {
   getSupportedPlatforms,
   getLoginAutoCloseWaitReason,
   hasPlatformAuthCookie,
+  readPlatformAuthCookieState,
   isNativeLoginSuccess,
+  closeAllAuthWindows,
 } from './browser/authWindows.js';
 export { getRandomUA };
 
@@ -659,7 +1010,21 @@ const JOB_LOGIN_PLATFORMS = {
   // the intended nav budget + 5s. 17000 ⇒ a 12s navigation — the value the earlier
   // 12000 was reasoning about, which actually cut the nav off at 7s and truncated a
   // real (469KB, redirect-heavy) member-page load into a status-less partial read.
-  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  verifyTimeoutMs: 17000, bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
+  glassdoor:    {
+    name: 'Glassdoor',
+    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',
+    verifyTimeoutMs: 17000,
+    bodySignals: [
+      'sign in to glassdoor',
+      'create a free glassdoor account',
+      'join glassdoor for free',
+      'log in to glassdoor',
+      // Current anonymous /member/home redirect: the public /Job/index.htm page
+      // keeps a generic "Sign In" nav item, so use the adjacent anonymous-only
+      // resume CTA as a high-signal phrase instead of matching bare "sign in".
+      'sign in upload your resume - let employers find you',
+    ],
+  },
   // /jobseeker/home is the post-login landing page — authenticated sessions stay
   // there; anonymous requests redirect to /user/login (connectedFinalUrlMustContain
   // catches the redirect). Avoids /profile which Cloudflare challenges on new

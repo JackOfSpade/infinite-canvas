@@ -1,5 +1,6 @@
-import { assert } from '../test-dependencies.js';
+import { assert, COMPENSATION_MIN_FIT_SCORE } from '../test-dependencies.js';
 import {
+  classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
   mergeCompetitiveRanges,
   compensationAssessment,
@@ -8,8 +9,35 @@ import {
   isAuditableCompensationSource,
   selectComparableEvidence,
 } from '../../electron/ipc/jobCompensation.js';
+import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
 
 export default [{
+  name: 'classifyCompensationFitEligibility: the 70 boundary is inclusive and an unscored job is not a low-scoring job',
+  run: () => {
+    const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
+    // Boundary. The user asked for "70% match or above", so 70 must be
+    // INCLUSIVE — an off-by-one here silently denies the check to exactly the
+    // jobs sitting on the bar they named.
+    assert(classifyCompensationFitEligibility(70, opts) === 'eligible', '70 must be eligible (threshold is inclusive)');
+    assert(classifyCompensationFitEligibility(69, opts) === 'below-threshold', '69 must be below the threshold');
+    assert(classifyCompensationFitEligibility(100, opts) === 'eligible', '100 must be eligible');
+    assert(classifyCompensationFitEligibility(0, opts) === 'below-threshold', '0 must be below the threshold');
+    // An unscored job must NEVER be reported as a weak match. The scorer's
+    // sentinel marks "no assessment happened", so reading it as a real 50
+    // would tell the user their job was judged and found wanting when it was
+    // never judged at all.
+    assert(classifyCompensationFitEligibility(50, opts) === 'score-unavailable',
+      'the unscored sentinel must read as score-unavailable, never as a genuine mid score');
+    for (const missing of [null, undefined, NaN, Infinity, '82', {}]) {
+      assert(classifyCompensationFitEligibility(missing, opts) === 'score-unavailable',
+        `a non-numeric score must read as score-unavailable → ${String(missing)}`);
+    }
+    // With no sentinel configured, 50 is an ordinary score like any other.
+    assert(classifyCompensationFitEligibility(50, { minScore: COMPENSATION_MIN_FIT_SCORE }) === 'below-threshold',
+      'with no sentinel configured, 50 is an ordinary below-threshold score');
+    return { threshold: COMPENSATION_MIN_FIT_SCORE };
+  },
+}, {
   name: 'Cash compensation parsing, source union, and exact market-floor verdict',
   run: () => {
     const canadian = parseGuaranteedCashOffer({ salary: 'C$70,000–C$95,000 per year' });
@@ -105,6 +133,22 @@ export default [{
       { usa: { city: 'Denver', subdivision: 'Colorado', country: 'United States' } },
     );
     assert(inferredRemote?.display === 'Denver, Colorado, United States', 'an explicit permitted country repairs an unknown remote-region classification');
+    const worldwideCanadianRemote = resolveCompensationLocation(
+      { remote: true, location: 'Remote' },
+      { workMode: 'remote', remoteRegion: 'other', remoteCountry: 'worldwide' },
+      { other: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } },
+    );
+    assert(worldwideCanadianRemote?.display === 'Toronto, Ontario, Canada',
+      'a worldwide outside-region remote role may use a Canadian residence for compensation');
+    const conflictingRemoteResidence = normalizeRemoteResidences({
+      other: { city: 'Toronto', subdivision: 'Ontario', country: 'United States' },
+    });
+    assert(conflictingRemoteResidence.other.countryConflict, 'the compensation fixture carries a deterministic residence conflict');
+    assert(resolveCompensationLocation(
+      { remote: true, location: 'Remote' },
+      { workMode: 'remote', remoteRegion: 'other', remoteCountry: 'worldwide' },
+      conflictingRemoteResidence,
+    ) === null, 'a selected conflicting residence remains unavailable for salary comparison');
     assert(resolveCompensationLocation(
       { remote: true, location: 'Remote' },
       { workMode: 'remote', remoteRegion: 'other', remoteCountry: 'Germany' },
@@ -115,5 +159,65 @@ export default [{
       !== compensationCohortKey({ ...cohortCommon, context: { seniority: 'senior', requiredYears: '8 years' } }),
     'different experience asks cannot share a cached compensation cohort');
     return { unionFloor: merged.min };
+  },
+}, {
+  // Contracts A + C: the compensation-research fit gate. The gate's boundary
+  // check itself (rawScore >= COMPENSATION_MIN_FIT_SCORE, and the unscored-vs-
+  // known-low-score branch) lives inline in the non-exported async
+  // researchCompensationAssessments (electron/ipc/jobs.js ~1939-1963) — it is
+  // not exposed as an importable pure function, so it cannot be exercised
+  // directly here (see the accompanying risk note). This test instead pins the
+  // two things that ARE exported and load-bearing: the threshold constant
+  // itself, and — via compensationAssessment(), the same helper jobs.js calls
+  // to build the skip's fallback card — that a below-threshold skip and an
+  // unscored skip are honestly distinguishable in the justification text even
+  // though both currently share the reasonCode 'below_fit_threshold' (contract
+  // C), and that JOB_COMPENSATION_EVIDENCE distinguishes them from a REAL
+  // researched verdict via reasonCode.
+  name: 'Compensation fit gate: threshold constant and below_fit_threshold skip shape',
+  run: () => {
+    assert(COMPENSATION_MIN_FIT_SCORE === 70, `COMPENSATION_MIN_FIT_SCORE must be 70 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
+
+    // Mirrors jobs.js's compensationFallback(job, 'below_fit_threshold', ...)
+    // for a job that DOES have a real, parseable salary but scored below the
+    // gate — offer.usable is true, so `offered` on the card is the real offer,
+    // never null, and no market range was ever requested for it.
+    const knownLowOffer = parseGuaranteedCashOffer({ salary: '$90,000 per year', location: 'Austin, Texas, USA' });
+    assert(knownLowOffer.usable, 'fixture salary must itself be a usable stated cash offer');
+    const knownLowScoreSkip = compensationAssessment({
+      offer: knownLowOffer,
+      reasonCode: 'below_fit_threshold',
+      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored 69.`,
+    });
+    assert(knownLowScoreSkip.reasonCode === 'below_fit_threshold' && knownLowScoreSkip.offered?.max === 90000,
+      'a known below-threshold score must be skipped with reasonCode below_fit_threshold while still carrying the real parsed offer');
+    assert(knownLowScoreSkip.justification.includes('69'),
+      'a known below-threshold score justification must name the actual score so it reads as a real assessment, not a missing one');
+
+    // Mirrors the sibling branch for a job whose score is unknown/null
+    // (unscored, or the UNSCORED_FALLBACK_SCORE sentinel) — same reasonCode,
+    // but the justification must say the score was unavailable rather than
+    // implying a real low score was measured. This is the "distinguishable"
+    // half of contract C: there is no separate reasonCode for this case today,
+    // so the justification text is the only signal a bug report can show.
+    const unknownScoreSkip = compensationAssessment({
+      offer: knownLowOffer,
+      reasonCode: 'below_fit_threshold',
+      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
+    });
+    assert(unknownScoreSkip.reasonCode === 'below_fit_threshold', 'an unscored job must also be gated out under the below_fit_threshold reason code');
+    assert(unknownScoreSkip.justification.includes('unavailable') && !unknownScoreSkip.justification.includes('scored'),
+      'an unscored skip must read as "score unavailable", not be confused with a known below-threshold score');
+    assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,
+      'a known-low-score skip and an unscored skip must never render identical text on the card — that would erase the only signal that distinguishes them');
+
+    // A boundary-inclusive pass (score === 70) never reaches this fallback path
+    // at all in jobs.js; it is asserted here only as the documented contract on
+    // the constant itself, since the real branch is not independently callable
+    // (see the risk note above).
+    assert(70 >= COMPENSATION_MIN_FIT_SCORE && 69 < COMPENSATION_MIN_FIT_SCORE,
+      'the fit gate must be boundary-inclusive: 70 eligible, 69 not — pinned against the real constant');
+
+    return { minFitScore: COMPENSATION_MIN_FIT_SCORE };
   },
 }];

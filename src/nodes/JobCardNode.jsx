@@ -13,15 +13,15 @@ import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement } from '../utils/localAiApplicationLifecycle';
 
-// Accent color encodes the match score (interview-likelihood) band, so the
-// card's color reinforces the single metric: greener = better odds. Bands match
-// the scoring prompt (85+ strong, 65-84 good chance, 40-64 stretch, <40 unlikely).
+// Accent color encodes the hiring-fit band: a compact evidence-based assessment
+// of full-process fit, not a guaranteed hiring outcome.
 function scoreColor(score) {
-  if (score >= 85) return '#22c55e'; // green  — genuinely strong
-  if (score >= 65) return '#3b82f6'; // blue   — good chance of interview
-  if (score >= 40) return '#eab308'; // amber  — stretch / longshot
-  return '#6b7280';                  // gray   — unlikely
+  if (score >= 85) return '#22c55e'; // green  — strong hiring fit
+  if (score >= 65) return '#3b82f6'; // blue   — solid hiring fit
+  if (score >= 40) return '#eab308'; // amber  — partial/stretch hiring fit
+  return '#6b7280';                  // gray   — limited hiring fit
 }
 
 const COMPENSATION_BORDER_COLORS = {
@@ -57,11 +57,74 @@ function researchedDateLabel(value) {
   return parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-// A cached ledger's in-flight marker (data.achievementsMining, a ms timestamp)
-// older than this is treated as stale rather than "still mining" — a crashed
-// generation must not wedge the hub into permanently skipping its own mine.
-// docs/resume-achievement-mining-design.md §3.6.
-const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
+function compactAuditLabels(rows, limit) {
+  const unique = [];
+  const seen = new Set();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const label = String(row?.requirement || row?.requirementText || '').replace(/\s+/g, ' ').trim();
+    if (!label || seen.has(label.toLowerCase())) continue;
+    seen.add(label.toLowerCase());
+    unique.push(label.slice(0, 180));
+  }
+  return { items: unique.slice(0, limit), overflow: Math.max(0, unique.length - limit), total: unique.length };
+}
+
+function materialGapStatus(row) {
+  const status = String(row?.status || row?.effectiveStatus || '').trim().toLowerCase().replace(/-/g, '_');
+  // Prior audited cards used "missing" to mean that the supplied career data
+  // did not establish the requirement. Preserve that evidence-based meaning;
+  // it was never proof that the candidate did not have the experience.
+  if (status === 'not_documented' || status === 'missing') return 'not_documented';
+  if (status === 'contradicted') return 'contradicted';
+  if (status === 'unclear') return 'unclear';
+  return 'review';
+}
+
+function compactMaterialGaps(rows, limit) {
+  const groups = {
+    not_documented: [],
+    contradicted: [],
+    unclear: [],
+    review: [],
+  };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const requirement = String(row?.requirement || row?.requirementText || '').replace(/\s+/g, ' ').trim();
+    if (!requirement) continue;
+    const status = materialGapStatus(row);
+    const duplicate = groups[status].some(item => item.requirement.toLowerCase() === requirement.toLowerCase());
+    if (!duplicate) groups[status].push({ requirement: requirement.slice(0, 180) });
+  }
+  return Object.fromEntries(Object.entries(groups).map(([status, items]) => [status, {
+    items: items.slice(0, limit),
+    overflow: Math.max(0, items.length - limit),
+    total: items.length,
+  }]));
+}
+
+function evidenceConfirmationQuestion(requirement) {
+  const cleanRequirement = String(requirement).replace(/[?.!]+$/, '').trim();
+  return `Do you have experience with ${cleanRequirement} that is not yet included in your career data?`;
+}
+
+// Only the normalized audit is eligible for this disclosure. In particular,
+// raw model reasoning and rejected evidence never reach this presentation.
+function compactHiringFitAudit(data) {
+  const assessment = data?.fitAssessment;
+  if (!assessment || typeof assessment !== 'object' || assessment.auditStatus !== 'audited') return null;
+  const strengths = compactAuditLabels(assessment.strengths, 2);
+  const materialGaps = compactMaterialGaps(assessment.materialGaps, 3);
+  const effectiveConfidence = String(assessment.confidence?.effective || data?.confidence?.effective || '').toLowerCase();
+  const confidence = ['high', 'medium', 'low'].includes(effectiveConfidence) ? effectiveConfidence : '';
+  const rawScore = Number(assessment.rawScore ?? data?.rawScore);
+  const adjustedScore = Number(assessment.adjustedScore ?? data?.adjustedScore ?? data?.matchScore);
+  const calibrated = Number.isFinite(rawScore) && Number.isFinite(adjustedScore) && rawScore !== adjustedScore
+    ? { rawScore, adjustedScore }
+    : null;
+  const materialGapTotal = Object.values(materialGaps).reduce((total, group) => total + group.total, 0);
+  if (!strengths.total && !materialGapTotal && !confidence && !calibrated) return null;
+  return { strengths, materialGaps, confidence, calibrated };
+}
+
 // Claude Code often makes a sequence of atomic edits while composing one
 // revision. Import only after the same complete result has survived a few poll
 // cycles, otherwise a valid intermediate JSON document can be measured as if
@@ -81,6 +144,8 @@ const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
  * data shape:
  *   title, company, location, salary, snippet, url, source, posted,
  *   matchScore, reasoning, careerDirection,
+ *   requirementAssessments, materialGaps, strengths, experienceAssessment,
+ *   confidence, fitAssessment, rawScore, adjustedScore, adjustments, calibration,
  *   hubId,       // the Job Board that spawned this card (owns the cascade)
  *   originHubId, // the Job Search Module whose search found it (owns careerData)
  *   language (optional 2-letter code, set only when non-English → shows a chip)
@@ -124,6 +189,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const idRef = useRef(id);
   useEffect(() => { idRef.current = id; }, [id]);
   const isMountedRef = useIsMountedRef();
+  // React Flow only knows the active canvas level. A card can unmount because
+  // its parent level is no longer active while still existing in the global
+  // navigation stack, so async lifecycle checks must prefer that complete
+  // graph over a current-level getNode lookup.
+  const getLiveJobCard = useCallback((nodeId) => {
+    const globalNode = nav?.enumerateAllNodes?.().find((node) => node.id === nodeId);
+    return globalNode || getNode(nodeId);
+  }, [nav, getNode]);
 
   // While mounted, this card is the sole driver of its Local AI job — the
   // canvas-level fallback manager (useLocalAiFallbackManager) consults this
@@ -225,7 +298,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
-  const localJobPending = !!localApplication && !['saved', 'invalid', 'failed', 'revision-exhausted'].includes(localApplication.status);
+  const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(data.salary, data.location),
     [data.salary, data.location]
@@ -237,6 +310,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
     .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
     .filter((source) => source.safeUrl), [compensationAssessment]);
+  const hiringFitAudit = useMemo(() => compactHiringFitAudit(data), [data]);
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
@@ -380,6 +454,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const resumeOverflow = Number.isFinite(resumeFit?.pageCount)
         && Number.isFinite(resumeFit?.targetPageCount)
         && resumeFit.pageCount > resumeFit.targetPageCount;
+      // Import can take long enough for a user to dismiss this card. Hiding a
+      // card merely unmounts it and its node remains live; an explicit delete
+      // must instead discard the exact sender-owned workspace before it can
+      // be promoted into Applied Jobs.
+      if (!canSaveImportedLocalApplication(getLiveJobCard(idRef.current), jobId)) {
+        await window.electronAPI.discardApplication?.({ workDir: local.workDir });
+        EventLogger.log(`[LocalAI] discarded imported workspace job=${jobId}: card was removed before save`);
+        return;
+      }
       const saved = await window.electronAPI.saveApplication({
         resumeHtmlPath: local.resumeHtmlPath,
         resumePdfPath: local.resumePdfPath,
@@ -432,7 +515,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
-  }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, isMountedRef]);
+  }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveJobCard, isMountedRef]);
 
   // Claude Code writes result.json manually/asynchronously. Polling only reads
   // that app-owned job; after a short stable-result window, the import happens
@@ -511,14 +594,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // module whose search produced this job (cards are spawned by the Job Board,
   // which merges several modules and holds no career data itself; data.hubId
   // is the board). Not stored per-card, to avoid bloating the canvas file.
-  // The backend researches the company, fills the design system, builds the
-  // single-file HTML workspace, then writes it straight into
-  //   <canvas dir>/Applied Jobs/<company>/<location>/<job title>/
-  // and opens that folder in Finder — no save dialog. (Location is part of the
-  // path because same title + same company + different city is a DIFFERENT job
-  // — see src/utils/locationIdentity.js.)
+  // Application Generate always writes a self-contained Local AI handoff next
+  // to the saved canvas. The Claude Code routine produces the documents, then
+  // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
-    if (!window.electronAPI?.generateApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
+    if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
     if (getNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
     const originHubId = data.originHubId || data.hubId;
     // Fast, non-queued validation prevents a known-invalid card from taking a
@@ -547,17 +627,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     applicationSubmissionRef.current = true;
     let lease = null;
-    let myMarker = null;
     let cancelledBeforeStart = false;
 
     setApplicationRun({ state: 'generating', position: null });
     try {
-      // Application generation uses the same app-wide capacity-one queue as
-      // searches and marketplace runs. LLM quota, Chromium/PDF rendering, and
-      // the shared achievement cache make parallel bundles unsafe. Crucially,
-      // every mutable input below is read only *after* the lease starts: a
-      // card which waited behind another application sees that application's
-      // newly cached achievement ledger instead of re-mining it.
+      // Handoff creation uses the same app-wide capacity-one queue as searches
+      // and marketplace runs. Crucially, every mutable input below is read
+      // only after the lease starts, so queued work sees the latest canvas
+      // state before it materializes its durable job folder.
       lease = await acquireModuleRun({
         nodeId: id,
         kind: 'application',
@@ -571,7 +648,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         onStart: () => {
           // Hidden card views can unmount while their node remains valid. Only
           // cancellation/deletion of the actual canvas node skips the work.
-          if (!getNode(idRef.current)) {
+          if (!getLiveJobCard(idRef.current)) {
             cancelledBeforeStart = true;
             throw new Error('Job card was removed before application generation started');
           }
@@ -610,61 +687,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
 
-      // Local AI queues a compact, self-contained job for the user's Claude
-      // Code routine instead of making an API request. The shared FIFO lease
-      // only covers writing that job; it is released below while the user does
-      // the manual Claude Code step.
-      const settings = await window.electronAPI?.getSettings?.();
-      if (settings?.ai?.provider === 'local') {
-        if (!window.electronAPI?.queueLocalApplication) {
-          throw new Error('Local AI is selected, but this app version does not support Local AI jobs. Relaunch Infinite Canvas and try again.');
-        }
-        const queued = await window.electronAPI.queueLocalApplication({
-          nodeId: idRef.current,
-          canvasFilePath,
-          job: {
-            title: data.title, company: data.company, snippet: data.snippet,
-            location: data.location, salary: data.salary, url: data.url,
-            source: data.source, posted: data.posted, language: data.language,
-          },
-          careerData,
-          additionalNotes: additionalNotes.trim(),
-          reasoning: data.reasoning,
-          matchScore: data.matchScore,
-        });
-        if (!queued?.success || !queued.localJob) {
-          throw new Error(queued?.error || 'Could not queue the Local AI job.');
-        }
-        if (isMountedRef.current) {
-          setLocalApplication(queued.localJob);
-          addToast({
-            title: 'Local AI Job Ready',
-            description: 'The job is beside this canvas under .local-ai/jobs. Run your Claude Code routine there; this card will import the completed application automatically.',
-            type: 'success',
-          });
-        }
-        return;
-      }
-
-      // Achievement ledger pass-through (design doc §3.6). The read and the
-      // fencing marker belong inside the lease so the next FIFO card reuses a
-      // ledger produced by the previous one rather than racing it.
+      // Preserve an already-mined achievement ledger in the handoff context.
+      // Local application generation never runs the API achievement-mining
+      // pass; the routine can use this durable context when it is available.
       const cachedAchievements = originHub.data?.achievements || null;
-      const miningMarkerAt = originHub.data?.achievementsMining;
-      const markerFresh = typeof miningMarkerAt === 'number' && (Date.now() - miningMarkerAt) < MINING_MARKER_STALE_MS;
-      const mineAllowed = !cachedAchievements && !markerFresh;
-      if (mineAllowed) {
-        myMarker = Date.now();
-        updateGlobal(originHubId, { achievementsMining: myMarker });
-      }
-
-      addToast({
-        title: 'Generating Application',
-        description: `Researching ${data.company} and writing your résumé + cover letter…`,
-        type: 'info',
-      });
-      const result = await window.electronAPI.generateApplication({
+      const mineAllowed = !cachedAchievements;
+      // A terminal handoff remains on the card as the audit/repair pointer.
+      // Snapshot the exact one this click intends to replace; settlement will
+      // accept it only if the live card still owns the same terminal id/status.
+      // That permits regeneration without allowing a late response to clobber
+      // a genuinely newer in-flight handoff.
+      const expectedPriorLocalApplication = getLiveJobCard(idRef.current)?.data?.localApplication || null;
+      const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
+        canvasFilePath,
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
           location: data.location, salary: data.salary, url: data.url,
@@ -677,108 +713,58 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         achievements: cachedAchievements,
         mineAllowed,
       });
-      if (!result.success) {
-        if (isMountedRef.current) {
-          addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
-        }
+      if (!queued?.success || !queued.localJob) {
+        throw new Error(queued?.error || 'Could not prepare the local application job.');
+      }
+      // Hiding/collapsing unmounts this component but leaves its canvas node
+      // intact. Persist the durable pointer directly into the live node before
+      // consulting mounted state, so the canvas-level fallback manager can
+      // keep driving that handoff. A card genuinely deleted during this IPC
+      // owns neither the pointer nor its private job directory, so delete the
+      // exact app-owned handoff rather than leaving private career context
+      // behind until retention pruning.
+      const settlement = queuedLocalApplicationSettlement(
+        getLiveJobCard(idRef.current),
+        queued.localJob,
+        expectedPriorLocalApplication,
+      );
+      if (settlement.action !== 'persist') {
+        await window.electronAPI.discardLocalApplication?.({
+          jobId: queued.localJob.id,
+          canvasFilePath: queued.localJob.canvasFilePath || canvasFilePath,
+        });
+        EventLogger.log(`[LocalAI] discarded queued handoff job=${queued.localJob.id}: ${settlement.reason || 'card no longer owns it'}`);
         return;
       }
-      // A freshly mined ledger comes back on the result — cache it on the
-      // origin hub so every later application from this hub reuses it instead
-      // of re-mining (§2/§3.6). The identity compare is load-bearing: the ledger
-      // is an UNKEYED hub-level cache (mineAllowed is just `!cachedAchievements`),
-      // so a write-back must prove the source text it was mined from is still the
-      // hub's current career data. A "Clear career files" or a file swap during
-      // this multi-minute generation would otherwise re-poison the cleared hub
-      // with the previous files' figures, and every later résumé would be written
-      // from them.
-      if (result.achievements && getNode(originHubId)?.data?.careerData === careerData) {
-        updateGlobal(originHubId, { achievements: result.achievements });
-      }
-      // A view can unmount simply because its branch was hidden; that must not
-      // abandon a valid queued application. Only actual card deletion stops
-      // post-generation work (the active IPC is independently cancelled by
-      // the canvas task cleanup).
-      if (!getNode(idRef.current)) {
-        // Generation registered this exact workDir with the main process.
-        // Dispose it through the sender-bound IPC instead of leaving a temp
-        // workspace/pending-artifact entry behind; the renderer cannot pass a
-        // raw deletion path to the filesystem.
-        try {
-          await window.electronAPI.discardApplication?.({ workDir: result.workDir });
-        } catch (error) {
-          EventLogger.error('Could not discard application workspace after card deletion:', error);
-        }
-        return;
-      }
-      // Write the generated documents into ./Applied Jobs/<company>/<location>/<job>/
-      // next to the canvas, then reveal that folder in Finder. No picker.
-      // The workspace is written as normal sibling files (not a ZIP), so the
-      // generated HTML can later Sync a selected edit back into this folder.
-      const saved = await window.electronAPI.saveApplication({
-        resumeHtmlPath: result.resumeHtmlPath,
-        resumePdfPath: result.resumePdfPath,
-        coverLetterPdfPath: result.coverLetterPdfPath,
-        jobListingPath: result.jobListingPath,
-        workDir: result.workDir,
-        company: result.company,
-        candidateName: result.candidateName,
-        jobTitle: data.title,
-        location: data.location,
-        canvasFilePath,
+      EventLogger.log(`[LocalAI] accepted queued handoff job=${queued.localJob.id} replacing=${expectedPriorLocalApplication?.id || 'none'} priorStatus=${expectedPriorLocalApplication?.status || 'none'}`);
+      updateGlobal(idRef.current, (node) => {
+        const liveSettlement = queuedLocalApplicationSettlement(node, queued.localJob, expectedPriorLocalApplication);
+        return liveSettlement.action === 'persist' ? { localApplication: queued.localJob } : null;
       });
-      if (saved?.success && saved.saved) {
-        // Remembered so "Mark applied" can record where the artifacts went —
-        // see lastSavedFolderRef's doc-comment.
-        if (isMountedRef.current) lastSavedFolderRef.current = saved.dir || null;
-        const analysisNote = result.skillOpportunityError
-          ? ' The skill-demand analysis was unavailable; the résumé workspace includes the error so this generation is not silently counted.'
-          : '';
-        if (isMountedRef.current && !saved.bundleError) {
-          addToast({
-            title: 'Application Workspace Saved',
-            description: `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.${analysisNote}`,
-            type: 'success',
-          });
-        } else if (isMountedRef.current) {
-          addToast({
-            title: 'Application Workspace Incomplete',
-            description: `${saved.bundleError} The editable HTML was saved to ${saved.dir}.${analysisNote}`,
-            type: 'error',
-          });
-        }
-      } else if (saved?.success === false && isMountedRef.current) {
-        addToast({ title: 'Save Error', description: saved.error || 'Could not save files', type: 'error' });
+      if (isMountedRef.current) {
+        setLocalApplication(queued.localJob);
+        addToast({
+          title: 'Application Job Ready',
+          description: 'The job is beside this canvas under .local-ai/jobs. Run your Claude Code routine there; this card will import the completed application automatically.',
+          type: 'success',
+        });
       }
     } catch (e) {
       // Explicit dismissal/cancellation is normal control flow, not an error
-      // toast. It must also never touch a different card's mining marker.
+      // toast.
       if (cancelledBeforeStart) return;
       EventLogger.error('Application generation failed:', e);
       if (isMountedRef.current) {
         addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
       }
     } finally {
-      // Compare-and-clear, not an unconditional clear: only remove the marker
-      // if the hub's CURRENT marker still equals the one this call wrote. A
-      // boolean "did I set it" flag isn't enough — if this call's mining
-      // outlives MINING_MARKER_STALE_MS while still in flight, a second card
-      // reads the (still-live) marker as stale and overwrites it with its
-      // OWN fresh marker; an unconditional clear here would then null out
-      // that second card's marker out from under it the instant this call
-      // finishes, opening a window for a THIRD card to see no marker at all
-      // and start a third concurrent mine. Only a call that still owns the
-      // marker (fencing-token match) may clear it — see myMarker above.
-      if (myMarker != null && getNode(originHubId)?.data?.achievementsMining === myMarker) {
-        updateGlobal(originHubId, { achievementsMining: null });
-      }
-      // Release only after both LLM generation and artifact save settle, so a
-      // FIFO successor cannot collide with the shared render/save resources.
+      // The lease only covers durable handoff creation. Claude Code execution,
+      // polling, validation, and final save continue independently.
       lease?.release();
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, getLiveJobCard, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as
@@ -857,10 +843,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       {/* Header */}
       <div className="px-3 py-2 flex items-start gap-2 border-b border-white/5">
         <div
-          className="shrink-0 mt-0.5 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold"
+          className="shrink-0 mt-0.5 w-[52px] h-10 rounded-lg flex flex-col items-center justify-center leading-none"
           style={{ backgroundColor: accentColor + '20', color: accentColor }}
+          title={`Hiring fit: ${score}/100. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
+          aria-label={`Hiring fit ${score} out of 100. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
         >
-          {score}%
+          <span className="text-[9px] font-medium uppercase tracking-wide">Hiring fit</span>
+          <span className="mt-0.5 text-xs font-bold">{score}/100</span>
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
@@ -914,7 +903,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         )}
       </div>
 
-      {/* Compensation is deliberately separate from the interview-match score.
+      {/* Compensation is deliberately separate from the hiring-fit score.
           Its border is semantic (green/red only for a confident cash-pay
           verdict); unknown, old, and incomplete research remains neutral. */}
       <div className="border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
@@ -1004,6 +993,65 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         >
           {data.reasoning}
         </button>
+      )}
+
+      {showFullReasoning && hiringFitAudit && (
+        <div className="px-3 pb-2.5 text-[11px] leading-snug text-white/50 border-t border-white/5" aria-label="Hiring fit audit">
+          {hiringFitAudit.strengths.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-emerald-300/70">Grounded strengths</div>
+              <ul className="mt-1 space-y-0.5">
+                {hiringFitAudit.strengths.items.map((strength) => <li key={strength}>• {strength}</li>)}
+              </ul>
+              {hiringFitAudit.strengths.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.strengths.overflow} more</div>}
+            </div>
+          )}
+          {hiringFitAudit.materialGaps.not_documented.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-sky-300/75">Evidence to confirm ({hiringFitAudit.materialGaps.not_documented.total})</div>
+              <ul className="mt-1 space-y-0.5">
+                {hiringFitAudit.materialGaps.not_documented.items.map(({ requirement }) => <li key={requirement}>• {evidenceConfirmationQuestion(requirement)}</li>)}
+              </ul>
+              {hiringFitAudit.materialGaps.not_documented.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.not_documented.overflow} more to confirm</div>}
+            </div>
+          )}
+          {hiringFitAudit.materialGaps.contradicted.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-rose-300/75">Documented conflicts ({hiringFitAudit.materialGaps.contradicted.total})</div>
+              <ul className="mt-1 space-y-0.5">
+                {hiringFitAudit.materialGaps.contradicted.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
+              </ul>
+              {hiringFitAudit.materialGaps.contradicted.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.contradicted.overflow} more documented conflicts</div>}
+            </div>
+          )}
+          {hiringFitAudit.materialGaps.unclear.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-amber-300/75">Unclear evidence ({hiringFitAudit.materialGaps.unclear.total})</div>
+              <ul className="mt-1 space-y-0.5">
+                {hiringFitAudit.materialGaps.unclear.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
+              </ul>
+              {hiringFitAudit.materialGaps.unclear.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.unclear.overflow} more unclear items</div>}
+            </div>
+          )}
+          {hiringFitAudit.materialGaps.review.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-white/50">Evidence to review ({hiringFitAudit.materialGaps.review.total})</div>
+              <ul className="mt-1 space-y-0.5">
+                {hiringFitAudit.materialGaps.review.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
+              </ul>
+              {hiringFitAudit.materialGaps.review.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.review.overflow} more to review</div>}
+            </div>
+          )}
+          {(hiringFitAudit.materialGaps.not_documented.total > 0 || hiringFitAudit.materialGaps.unclear.total > 0) && (
+            <div className="mt-2 text-white/40">Add any omitted relevant experience to your career data and rescore; the assessment can change.</div>
+          )}
+          {(hiringFitAudit.confidence || hiringFitAudit.calibrated) && (
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-white/40">
+              {hiringFitAudit.confidence && <span>Assessment confidence: {hiringFitAudit.confidence}</span>}
+              {hiringFitAudit.calibrated && <span>Score calibrated: {hiringFitAudit.calibrated.rawScore} → {hiringFitAudit.calibrated.adjustedScore}/100</span>}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Job-specific context is persisted on this card, never merged into the

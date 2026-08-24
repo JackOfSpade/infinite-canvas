@@ -15,9 +15,9 @@ import { handleSafe } from './ipcUtils.js';
 import { formatOriginalJobListingMarkdown } from './applicationBundle.js';
 import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
-import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, extractResumeEvidence, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization, targetPageCountForJob } from './jobApplication.js';
+import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
-import { authorCoverLetterEnvelope, checkGenericPhrases, checkLegalStatus, formatCoverLetterDate } from './coverLetterChecks.js';
+import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkLogisticsGrounding, checkMappingNarrativeStructure, checkRoleThesis, evaluateCoverLetterChecks, formatCoverLetterDate } from './coverLetterChecks.js';
 import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
 
@@ -28,18 +28,63 @@ const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[
 const MAX_CAREER_DATA_CHARS = 240_000;
 const MAX_RESUME_HTML_CHARS = 220_000;
 const MAX_RESULT_BYTES = 1_000_000;
+// Allows one-time recovery of pre-ring manifests, after which append trims
+// them back to the compact bounded form. This is not a handoff-round limit.
+const MAX_LOCAL_AI_MANIFEST_BYTES = 8_000_000;
 const LOCAL_AI_STALE_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
-const MAX_LOCAL_AI_UNFINISHED_JOBS = 20;
 const LOCAL_AI_FIT_FEEDBACK_FILE = 'fit-feedback.json';
 const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
-const MAX_LOCAL_AI_HANDOFF_EVENTS = 12;
-const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. A new evidence block is justified only when it deepens, corroborates, extends, or honestly qualifies that same throughline, with its relationship clear before the details. Never follow a thesis with a standalone background fact whose relevance arrives later. Name an ordinary prior employer once, then use the role, system, project, organization, or “there” when unambiguous. Preserve facts while varying repeated source wording across the résumé and letter; avoid “built from scratch” when a natural supported alternative such as “designed and implemented,” “created,” “developed,” or “delivered” says the same thing. Use temporal contrast words such as “now,” “still,” “again,” “before,” or “after” only when the contrasted state or sequence is already explicit. Prefer common contemporary wording: close or address a gap, never answer a gap. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Otherwise state the strongest supported adjacent experience positively and stop at its evidence boundary. Reject unclear antecedents, unexplained employer or time-period shifts, unjustified chronological backtracking, inventory-style paragraphs, evidence dumps unloaded after a colon, semicolon, or dash, sentences that compress several résumé bullets, repeated organizing metaphors, delayed relevance, and a second thesis. Assert explicit career facts and use narrow evidence-derived connective or causal language when it improves flow; never add a candidate fact, outcome, scope, tool, sequence, or motivation. Keep general domain principles distinct from personal experience; omit or verify plausible-but-unverified steps.';
+// Handoff diagnostics must never become an implicit limit on authoring rounds.
+// Keep enough recent observations to investigate a live handoff, while the
+// monotonic counter preserves the fact that older observations existed.
+const MAX_LOCAL_AI_HANDOFF_HISTORY = 32;
+const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Never delay the relevance of a background fact. Frame an unfamiliar prior employer with the candidate’s role or relationship, then use the shortest unambiguous reference. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
+const COVER_LETTER_COPY_PRECISION_RULE = 'Punctuate introductory phrases so the transition into the main subject is immediately clear. Read every sentence once as a recruiter seeing it for the first time; reject idiom, figurative personification, or an implied actor, artifact, or action when the reader must translate it or reconstruct what it literally means. In interface or ownership claims, name the concrete actor, artifact, and action instead. Keep communication verbs attached to an actual document or speaker rather than assigning them to the work or position being described. When describing interface guidance, distinguish metaphorical reference from visible on-screen indication and state only the literal limitation. When a closing invites further conversation, use direct present-tense language and connect the candidate’s relevant contribution to the specific target work; do not end solely on what the candidate wants to learn, hear, or discuss, and reject conditional or deferential boilerplate.';
+
+export const APPLICATION_QUALITY_CHECKLIST_VERSION = 1;
+
+// Stable writer-facing acceptance contract. Each final handoff must explicitly
+// account for every item; the host separately runs every deterministic check
+// it can prove. The evidence strings are concise audit notes, never hidden
+// reasoning or intermediate drafts.
+export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
+  { id: 'resume-source-grounding', document: 'resume', requirement: 'Every candidate fact preserves the supplied source, scope, employer, date, and attribution.' },
+  { id: 'resume-priority-alignment', document: 'resume', requirement: 'The strongest truthful evidence addresses the job’s highest-priority requirements first.' },
+  { id: 'resume-role-completeness', document: 'resume', requirement: 'Every documented role remains present with at least one factual highlight.' },
+  { id: 'resume-evidence-quality', document: 'resume', requirement: 'Highlights prefer concrete actions, judgment, outcomes, scale, and differentiators over generic claims.' },
+  { id: 'resume-bullet-independence', document: 'resume', requirement: 'Every highlight is understandable by itself and names its concrete referents.' },
+  { id: 'resume-concision', document: 'resume', requirement: 'Copy is concise, nonredundant, scannable, and free of raw career-note wording.' },
+  { id: 'resume-copy-editing', document: 'resume', requirement: 'Grammar, parallel structure, modifier attachment, compounds, and reference clarity are correct.' },
+  { id: 'resume-structure', document: 'resume', requirement: 'Markup uses exactly one bare design-system main and valid peer section and role structures.' },
+  { id: 'resume-ats-safety', document: 'resume', requirement: 'The document contains no unsafe, hidden, decorative, or non-parseable content.' },
+  { id: 'cover-source-grounding', document: 'coverLetter', requirement: 'Every candidate claim is supported and does not broaden scope, causality, chronology, or attribution.' },
+  { id: 'cover-single-argument', document: 'coverLetter', requirement: 'One specific controlling argument organizes the entire letter.' },
+  { id: 'cover-minimum-evidence', document: 'coverLetter', requirement: 'Only minimum-sufficient evidence is used; each additional proof has an explicit supporting role.' },
+  { id: 'cover-priority-alignment', document: 'coverLetter', requirement: 'The argument connects distinctive candidate evidence to an emphasized employer need.' },
+  { id: 'cover-opening', document: 'coverLetter', requirement: 'The first sentence adds substantive information and advances the argument immediately.' },
+  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance.' },
+  { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; the selected position is referenced proximally, and listing-only employer context is attributed with its source document—not the target position—as the reporting subject.' },
+  { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditionally deferential closing language; a final invitation connects the candidate’s contribution to target work.' },
+  { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing; they use literal first-read language with concrete actors, artifacts, and actions where needed, and contain no semicolon or dash clause splices.' },
+  { id: 'cover-figure-discipline', document: 'coverLetter', requirement: 'Every figure is necessary and appears in the selected résumé evidence.' },
+  { id: 'cover-legal-status', document: 'coverLetter', requirement: 'The letter contains no citizenship, residency, visa, or work-authorization statement.' },
+  { id: 'cover-envelope', document: 'coverLetter', requirement: 'The host-owned identity, contact, salutation, and closing are not contradicted or inferred.' },
+  { id: 'cross-document-consistency', document: 'bundle', requirement: 'Résumé, cover letter, and argument contract agree on identity, facts, terminology, and scope.' },
+  { id: 'requirement-coverage', document: 'bundle', requirement: 'Every high-priority requirement is deliberately addressed or honestly omitted without invention.' },
+  { id: 'adversarial-final-review', document: 'bundle', requirement: 'A final adversarial pass found no concrete factual, relevance, clarity, structural, or compliance defect.' },
+]);
 
 function cleanText(value, max = 20_000) {
   return Array.from(String(value ?? ''), char => {
     const code = char.charCodeAt(0);
     return code < 32 && char !== '\n' && char !== '\t' ? ' ' : char;
   }).join('').replace(/\r\n?/g, '\n').slice(0, max);
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new Error(typeof signal.reason === 'string' && signal.reason ? signal.reason : 'Local AI job creation was cancelled.');
 }
 
 function safeJob(raw = {}) {
@@ -192,11 +237,22 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
     try { stat = await fs.promises.lstat(dir); } catch { continue; }
     if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
     let createdAt = stat.mtimeMs;
+    let active = false;
     try {
-      const manifest = JSON.parse(await readOwnedFile(realRoot, path.join(dir, 'manifest.json'), { maxBytes: 64_000 }));
+      const manifest = JSON.parse(await readOwnedFile(realRoot, path.join(dir, 'manifest.json'), { maxBytes: MAX_LOCAL_AI_MANIFEST_BYTES }));
       const parsedCreatedAt = Date.parse(manifest?.createdAt || '');
       if (Number.isFinite(parsedCreatedAt)) createdAt = parsedCreatedAt;
-    } catch { /* malformed jobs are retained until their directory ages out */ }
+      // A queued job is also the manifest state of every active Local AI
+      // revision. Its age says nothing about whether a user has an ongoing
+      // high-quality authoring session, so retention must not delete it.
+      active = manifest?.version === LOCAL_AI_APPLICATION_VERSION
+        && manifest?.id === entry.name
+        && ['queued', 'revision-required', 'render-retry-required', 'invalid'].includes(manifest?.status);
+    } catch { /* malformed jobs may be pruned once their directory ages out */ }
+    if (active) {
+      retained += 1;
+      continue;
+    }
     if (createdAt < cutoff) {
       const realDir = await fs.promises.realpath(dir).catch(() => null);
       if (realDir && isWithinDirectory(realRoot, realDir) && realDir !== realRoot) {
@@ -309,33 +365,41 @@ async function ensureProjectRoutine(projectRoot) {
     mode: 0o700,
     label: 'Local AI routine folder',
   });
-  const target = path.join(routineDir, 'CLAUDE_CODE_ROUTINE.md');
-  try {
-    const stat = await fs.promises.lstat(target);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error('Local AI routine must be a regular file, not a link.');
+  const routineTarget = path.join(routineDir, 'CLAUDE_CODE_ROUTINE.md');
+  const waitHelperTarget = path.join(routineDir, 'wait-for-handoff.mjs');
+  const bundledDir = process.resourcesPath ? path.join(process.resourcesPath, 'local_ai') : '';
+
+  const validateExisting = async (target, label) => {
+    try {
+      const stat = await fs.promises.lstat(target);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular file, not a link.`);
+      const realTarget = await fs.promises.realpath(target);
+      if (!isWithinDirectory(realProjectRoot, realTarget)) throw new Error(`${label} escaped its project folder.`);
+      await fs.promises.access(target, fs.constants.R_OK);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw error;
     }
-    const realTarget = await fs.promises.realpath(target);
-    if (!isWithinDirectory(realProjectRoot, realTarget)) {
-      throw new Error('Local AI routine escaped its project folder.');
+  };
+  const copyBundledIfMissing = async (target, sourceName, label) => {
+    if (await validateExisting(target, label)) return;
+    const bundled = bundledDir ? path.join(bundledDir, sourceName) : '';
+    let bundledStat = null;
+    try { bundledStat = bundled ? await fs.promises.lstat(bundled) : null; } catch { /* handled below */ }
+    if (!bundledStat?.isFile() || bundledStat.isSymbolicLink()) {
+      throw new Error(`${label} is missing. Restore local_ai/${sourceName} in the project.`);
     }
-    await fs.promises.access(target, fs.constants.R_OK);
-    return target;
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-    // A standalone packaged app copies its bundled default below.
-  }
-  const bundled = process.resourcesPath
-    ? path.join(process.resourcesPath, 'local_ai', 'CLAUDE_CODE_ROUTINE.md')
-    : '';
-  let bundledStat = null;
-  try { bundledStat = bundled ? await fs.promises.lstat(bundled) : null; } catch { /* handled below */ }
-  if (!bundledStat?.isFile() || bundledStat.isSymbolicLink()) {
-    throw new Error('Local AI routine is missing. Restore local_ai/CLAUDE_CODE_ROUTINE.md in the project.');
-  }
-  await fs.promises.copyFile(bundled, target, fs.constants.COPYFILE_EXCL);
-  await fs.promises.chmod(target, 0o600);
-  return target;
+    await fs.promises.copyFile(bundled, target, fs.constants.COPYFILE_EXCL);
+    await fs.promises.chmod(target, 0o600);
+  };
+
+  // The editable routine and app-owned wait helper travel together. The helper
+  // makes the terminal receipt/folder-cleanup race deterministic for standalone
+  // builds where the project initially has no local_ai directory.
+  await copyBundledIfMissing(routineTarget, 'CLAUDE_CODE_ROUTINE.md', 'Local AI routine');
+  await copyBundledIfMissing(waitHelperTarget, 'wait-for-handoff.mjs', 'Local AI handoff wait helper');
+  return routineTarget;
 }
 
 function promptFor(jobId) {
@@ -387,6 +451,8 @@ function authorLocalCoverLetterEnvelope(coverLetter, resumeMainHtml, job = {}) {
     name: authored.name || coverLetter.name,
     contact: authored.contact.length ? authored.contact : coverLetter.contact,
     tagline: authored.tagline,
+    subtitleRole: authored.subtitleRole,
+    credential: authored.credential,
     date: authored.date,
     recipient: authored.recipient,
     salutation: authored.salutation,
@@ -398,6 +464,8 @@ function authorLocalCoverLetterEnvelope(coverLetter, resumeMainHtml, job = {}) {
 function localAiCoverLetterTelemetry(coverLetter = {}) {
   return {
     tagline: String(coverLetter.tagline || ''),
+    subtitleRole: String(coverLetter.subtitleRole || ''),
+    credential: String(coverLetter.credential || ''),
     salutation: String(coverLetter.salutation || ''),
     recipient: String(coverLetter.recipient || ''),
     closing: String(coverLetter.closing || ''),
@@ -442,10 +510,30 @@ function sanitizeCoverLetterArgument(raw) {
       relationToPrimary: cleanArgumentText(raw.secondaryEvidence.relationToPrimary, 'secondaryEvidence.relationToPrimary'),
     };
   }
+  let logistics = null;
+  if (raw.logistics != null) {
+    if (!raw.logistics || typeof raw.logistics !== 'object' || Array.isArray(raw.logistics)) {
+      throw new Error('Local AI coverLetterArgument.logistics must be an object when present.');
+    }
+    const statement = cleanText(raw.logistics.statement, 700).replace(/\s+/g, ' ').trim();
+    if (statement.length < 4) throw new Error('Local AI coverLetterArgument.logistics.statement must be specific.');
+    if (!Array.isArray(raw.logistics.careerDataQuotes) || !raw.logistics.careerDataQuotes.length || raw.logistics.careerDataQuotes.length > 4) {
+      throw new Error('Local AI coverLetterArgument.logistics.careerDataQuotes must contain one to four source quotes.');
+    }
+    logistics = {
+      statement,
+      careerDataQuotes: raw.logistics.careerDataQuotes.map((value, index) => {
+        const quote = cleanText(value, 1_200).replace(/\s+/g, ' ').trim();
+        if (!quote) throw new Error(`Local AI coverLetterArgument.logistics.careerDataQuotes[${index}] must be text.`);
+        return quote;
+      }),
+    };
+  }
   return {
     roleThesis: cleanArgumentText(raw.roleThesis, 'roleThesis'),
     primaryEvidence,
     ...(secondaryEvidence ? { secondaryEvidence } : {}),
+    ...(logistics ? { logistics } : {}),
   };
 }
 
@@ -457,9 +545,211 @@ function assertCoverLetterReviewAttestsToArgument(rationale) {
   }
 }
 
-function sanitizeQualityReview(raw = {}) {
+function sanitizeApplicationQualityCriteria(raw) {
+  if (!Array.isArray(raw)) {
+    throw new Error('Local AI qualityReview.criteria must be the complete application quality checklist.');
+  }
+  const expected = new Map(APPLICATION_QUALITY_CRITERIA.map(criterion => [criterion.id, criterion]));
+  const seen = new Set();
+  if (raw.length !== APPLICATION_QUALITY_CRITERIA.length) {
+    throw new Error('Local AI qualityReview.criteria must contain the canonical checklist exactly once and in order.');
+  }
+  const normalizedNotes = new Set();
+  const normalizedNoteCores = new Set();
+  const sanitized = raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Local AI qualityReview.criteria[${index}] must be an object.`);
+    }
+    const id = cleanText(entry.id, 120).trim();
+    const expectedId = APPLICATION_QUALITY_CRITERIA[index]?.id;
+    if (id !== expectedId) {
+      throw new Error(`Local AI qualityReview.criteria[${index}] must be canonical criterion “${expectedId}” in checklist order.`);
+    }
+    if (!expected.has(id)) throw new Error(`Local AI qualityReview.criteria contains unknown criterion “${id || '(missing)'}”.`);
+    if (seen.has(id)) throw new Error(`Local AI qualityReview.criteria repeats criterion “${id}”.`);
+    seen.add(id);
+    if (entry.status !== 'pass') {
+      throw new Error(`Local AI quality criterion “${id}” did not pass; regenerate the affected draft, rerun the entire checklist, and submit only after every criterion passes.`);
+    }
+    const evidence = cleanText(entry.evidence, 600).replace(/\s+/g, ' ').trim();
+    const noteWords = evidence.match(/[\p{L}\p{N}]+/gu) || [];
+    if (evidence.length < 24 || noteWords.length < 5) {
+      throw new Error(`Local AI quality criterion “${id}” needs a specific verification note.`);
+    }
+    const normalizedEvidence = evidence.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (normalizedNotes.has(normalizedEvidence)) {
+      throw new Error(`Local AI qualityReview.criteria repeats a verification note at criterion “${id}”.`);
+    }
+    normalizedNotes.add(normalizedEvidence);
+    const criterionWords = id.split('-');
+    const noteCore = normalizedEvidence.split(' ').filter(word => !new Set([
+      ...criterionWords, 'a', 'an', 'and', 'application', 'applications', 'against', 'all', 'bundle', 'bundles',
+      'checked', 'check', 'criterion', 'criteria', 'document', 'documents', 'final', 'for', 'in', 'of', 'on',
+      'pass', 'passed', 'review', 'the', 'this', 'verified', 'was', 'with',
+    ]).has(word)).join(' ');
+    if (noteCore.split(' ').filter(Boolean).length < 3 || normalizedNoteCores.has(noteCore)) {
+      throw new Error(`Local AI quality criterion “${id}” uses a repeated or boilerplate verification note.`);
+    }
+    normalizedNoteCores.add(noteCore);
+    return { id, status: 'pass', evidence };
+  });
+  const missing = [...expected.keys()].filter(id => !seen.has(id));
+  if (missing.length) {
+    throw new Error(`Local AI qualityReview.criteria is incomplete; missing: ${missing.join(', ')}.`);
+  }
+  return sanitized;
+}
+
+function normalizeSourceGroundingText(value) {
+  return cleanText(value, MAX_RESULT_BYTES).normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
+
+function sourceQuoteIsSpecific(quote) {
+  return quote.length >= 12 && (quote.match(/[\p{L}\p{N}]+/gu) || []).length >= 3;
+}
+
+const SOURCE_GROUNDING_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'in', 'into', 'is', 'it', 'of', 'on',
+  'or', 'that', 'the', 'their', 'this', 'to', 'was', 'were', 'with', 'while', 'within', 'worked', 'work',
+  'build', 'built', 'create', 'created', 'design', 'designed', 'develop', 'developed', 'deliver', 'delivered',
+  'implement', 'implemented', 'lead', 'led', 'manage', 'managed', 'support', 'supported', 'improve', 'improved',
+  'use', 'used', 'using', 'provide', 'provided', 'help', 'helped', 'make', 'made',
+]);
+
+function meaningfulSourceTokens(value) {
+  return [...new Set(normalizedTokens(value).filter(token =>
+    !SOURCE_GROUNDING_STOPWORDS.has(token) && (token.length > 1 || /\d/u.test(token)),
+  ))];
+}
+
+function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index) {
+  const finalTokens = meaningfulSourceTokens(finalText);
+  const quoteTokens = new Set(meaningfulSourceTokens(sourceQuotes.join(' ')));
+  const shared = finalTokens.filter(token => quoteTokens.has(token));
+  const minimumShared = finalTokens.length === 1 ? 1 : 2;
+  if (!finalTokens.length || shared.length < minimumShared) {
+    const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
+    const detail = shared.length ? `shared meaningful token(s): ${shared.slice(0, 4).join(', ')}` : 'no shared meaningful tokens';
+    throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] has career-data quotes unrelated to its final ${unit} (${detail}; need ${minimumShared}).`);
+  }
+}
+
+function resumeBulletsWithRoles(resumeEvidence = {}) {
+  return (Array.isArray(resumeEvidence.roles) ? resumeEvidence.roles : []).flatMap(role =>
+    (Array.isArray(role?.bullets) ? role.bullets : []).map(bullet => ({
+      text: normalizeSourceGroundingText(bullet?.text),
+      title: normalizeSourceGroundingText(role?.title),
+      company: normalizeSourceGroundingText(role?.company),
+    })),
+  ).filter(entry => entry.text);
+}
+
+function normalizedTokens(value) {
+  return normalizeSourceGroundingText(value).toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function tokenCoverage(needle, haystack) {
+  const expected = [...new Set(normalizedTokens(needle))];
+  if (!expected.length) return 0;
+  const available = new Set(normalizedTokens(haystack));
+  return expected.filter(token => available.has(token)).length / expected.length;
+}
+
+function argumentEvidenceMatchesBullet(evidence, bullet) {
+  const candidate = normalizeSourceGroundingText(evidence).toLowerCase();
+  const finalText = normalizeSourceGroundingText(bullet).toLowerCase();
+  return candidate === finalText || candidate.includes(finalText) || finalText.includes(candidate)
+    || (normalizedTokens(candidate).length >= 5 && tokenCoverage(candidate, finalText) >= 0.6);
+}
+
+function argumentRoleMatchesResumeRole(evidenceRole, role) {
+  const descriptor = normalizeSourceGroundingText(evidenceRole).toLowerCase();
+  if (!descriptor || !role?.title || !role?.company) return false;
+  return tokenCoverage(role.title, descriptor) >= 0.6
+    && tokenCoverage(role.company, descriptor) >= 1;
+}
+
+function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter, coverLetterArgument }) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Local AI qualityReview.sourceGrounding must cover every final résumé bullet and cover-letter paragraph.');
+  }
+  const trustedSource = normalizeSourceGroundingText(careerData);
+  if (!trustedSource) throw new Error('Local AI cannot validate source grounding because trusted career data is empty.');
+  const validateEntries = (entries, expectedTexts, label, finalField, quotesField) => {
+    if (!Array.isArray(entries) || entries.length !== expectedTexts.length) {
+      const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
+      throw new Error(`Local AI qualityReview.sourceGrounding.${label} must bind every final ${unit} exactly once.`);
+    }
+    return entries.map((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] must be an object.`);
+      }
+      const finalText = normalizeSourceGroundingText(entry[finalField]);
+      if (!finalText || finalText !== expectedTexts[index]) {
+        throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] must bind the exact normalized final text.`);
+      }
+      if (!Array.isArray(entry[quotesField]) || !entry[quotesField].length || entry[quotesField].length > 4) {
+        throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] needs one to four exact trusted source quotes.`);
+      }
+      const sourceQuotes = entry[quotesField].map((value, quoteIndex) => {
+        const quote = normalizeSourceGroundingText(value);
+        if (!sourceQuoteIsSpecific(quote)) {
+          throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}].careerDataQuotes[${quoteIndex}] is not specific enough.`);
+        }
+        if (!trustedSource.includes(quote)) {
+          throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}].careerDataQuotes[${quoteIndex}] is not an exact quote from trusted career data.`);
+        }
+        return quote;
+      });
+      if (new Set(sourceQuotes).size !== sourceQuotes.length) {
+        throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] repeats a trusted career-data quote.`);
+      }
+      assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index);
+      return { [finalField]: finalText, [quotesField]: sourceQuotes };
+    });
+  };
+  const resumeBullets = resumeBulletsWithRoles(resumeEvidence);
+  const resumeBulletsGrounding = validateEntries(raw.resumeBullets, resumeBullets.map(item => item.text), 'resumeBullets', 'bullet', 'careerDataQuotes');
+  const coverLetterParagraphs = validateEntries(raw.coverLetterParagraphs,
+    (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : []).map(normalizeSourceGroundingText),
+    'coverLetterParagraphs', 'paragraph', 'careerDataQuotes');
+  if (coverLetterArgument?.logistics) {
+    const renderedLetter = (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [])
+      .map(normalizeSourceGroundingText).join('\n');
+    if (!renderedLetter.includes(normalizeSourceGroundingText(coverLetterArgument.logistics.statement))) {
+      throw new Error('Local AI coverLetterArgument.logistics.statement must appear exactly in the final cover-letter paragraphs.');
+    }
+    const logisticsQuotes = coverLetterArgument.logistics.careerDataQuotes.map((value, index) => {
+      const quote = normalizeSourceGroundingText(value);
+      if (!sourceQuoteIsSpecific(quote) || !trustedSource.includes(quote)) {
+        throw new Error(`Local AI coverLetterArgument.logistics.careerDataQuotes[${index}] is not an exact specific quote from trusted career data.`);
+      }
+      return quote;
+    });
+    if (new Set(logisticsQuotes).size !== logisticsQuotes.length) {
+      throw new Error('Local AI coverLetterArgument.logistics.careerDataQuotes repeats a trusted source quote.');
+    }
+    coverLetterArgument.logistics.careerDataQuotes = logisticsQuotes;
+  }
+  const argumentEntries = [coverLetterArgument?.primaryEvidence, coverLetterArgument?.secondaryEvidence].filter(Boolean);
+  for (const [index, argument] of argumentEntries.entries()) {
+    const matched = resumeBullets.find(bullet => argumentEvidenceMatchesBullet(argument.evidence, bullet.text));
+    if (!matched) {
+      throw new Error(`Local AI coverLetterArgument evidence ${index + 1} does not match a final résumé bullet.`);
+    }
+    if (!argumentRoleMatchesResumeRole(argument.evidenceRole, matched)) {
+      throw new Error(`Local AI coverLetterArgument evidenceRole ${index + 1} must identify the matched résumé role (${matched.title} at ${matched.company}).`);
+    }
+  }
+  return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };
+}
+
+function sanitizeQualityReview(raw = {}, sourceContext = null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Local AI result must include qualityReview for both documents.');
+  }
+  if (raw.checklistVersion !== APPLICATION_QUALITY_CHECKLIST_VERSION) {
+    throw new Error(`Local AI qualityReview.checklistVersion must be ${APPLICATION_QUALITY_CHECKLIST_VERSION}.`);
   }
   const documentReview = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -483,13 +773,66 @@ function sanitizeQualityReview(raw = {}) {
   };
   const coverLetter = documentReview(raw.coverLetter, 'coverLetter');
   assertCoverLetterReviewAttestsToArgument(coverLetter.rationale);
-  return {
+  const qualityReview = {
+    checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+    criteria: sanitizeApplicationQualityCriteria(raw.criteria),
     resume: documentReview(raw.resume, 'resume'),
     coverLetter,
   };
+  if (sourceContext?.required) {
+    qualityReview.sourceGrounding = sanitizeSourceGrounding(raw.sourceGrounding, sourceContext);
+  }
+  return qualityReview;
 }
 
-export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}) {
+// Feedback, telemetry, and the bounded manifest ring need revision decisions,
+// not a second copy of every provenance quote and checklist note. Keeping this
+// representation compact prevents a valid result.json from producing a
+// fit-feedback.json too large for the handoff reader's 64 KB safety cap.
+function compactLocalAiQualityReview(review = {}) {
+  return {
+    checklistVersion: review?.checklistVersion === APPLICATION_QUALITY_CHECKLIST_VERSION
+      ? APPLICATION_QUALITY_CHECKLIST_VERSION
+      : null,
+    criteria: Array.isArray(review?.criteria) ? review.criteria.slice(0, APPLICATION_QUALITY_CRITERIA.length).map(item => ({
+      id: cleanText(item?.id, 120),
+      status: item?.status === 'pass' ? 'pass' : 'invalid',
+    })) : [],
+    resume: {
+      decision: cleanText(review?.resume?.decision, 80),
+      rationale: cleanText(review?.resume?.rationale, 400),
+    },
+    coverLetter: {
+      decision: cleanText(review?.coverLetter?.decision, 80),
+      rationale: cleanText(review?.coverLetter?.rationale, 400),
+    },
+  };
+}
+
+function localCoverLetterPlan(argument) {
+  const mappings = [{
+    evidence: argument.primaryEvidence.evidence,
+    evidenceRole: argument.primaryEvidence.evidenceRole,
+    narrativeRole: 'primary',
+    relationToPrevious: argument.primaryEvidence.relationToThesis,
+  }];
+  if (argument.secondaryEvidence) {
+    mappings.push({
+      evidence: argument.secondaryEvidence.evidence,
+      evidenceRole: argument.secondaryEvidence.evidenceRole,
+      narrativeRole: argument.secondaryEvidence.narrativeRole,
+      relationToPrevious: argument.secondaryEvidence.relationToPrimary,
+    });
+  }
+  return {
+    roleThesis: argument.roleThesis,
+    mappings,
+    companyHook: { detail: '', source: '', whyItMattersToCandidate: '' },
+    logistics: argument.logistics?.statement || '',
+  };
+}
+
+export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Local AI result must be a JSON object.');
   if (raw.version !== LOCAL_AI_APPLICATION_VERSION || raw.jobId !== jobId || raw.status !== 'completed') {
     throw new Error('Local AI result does not belong to this job or uses an unsupported version.');
@@ -497,29 +840,49 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
   if (typeof raw.outputBundleRoot !== 'string') throw new Error('Local AI result must include outputBundleRoot.');
   const output = resolveLocalOutputBundleRoot(raw.outputBundleRoot, projectRoot);
   const resumeMainHtml = assertRetainedResumeRoleBullets(sanitizeResumeMainHtml(raw.resumeMainHtml));
+  const resumeProseFailures = evaluateResumeProseChecks(resumeMainHtml).filter(check => !check.passed);
+  if (resumeProseFailures.length) {
+    throw new Error(`Local AI résumé failed editorial checks: ${resumeProseFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
+  }
+  const resumeEvidence = extractResumeEvidence(resumeMainHtml);
   const coverLetter = authorLocalCoverLetterEnvelope(
     sanitizeCoverLetter(raw.coverLetter),
     resumeMainHtml,
     job,
   );
   const coverLetterArgument = sanitizeCoverLetterArgument(raw.coverLetterArgument);
-  const proseCheck = checkGenericPhrases(coverLetter.paragraphs);
-  if (!proseCheck.passed) {
-    throw new Error(`Local AI cover letter failed the generic-language check: ${proseCheck.detail}`);
-  }
-  // Legal work status is application-form data; a letter stating it is a
-  // policy violation, not a style observation, so it rejects the run the same
-  // way generic phrases do and the local agent removes it and resubmits.
-  const legalStatusCheck = checkLegalStatus(coverLetter.paragraphs);
-  if (!legalStatusCheck.passed) {
-    throw new Error(`Local AI cover letter failed the legal-status check: ${legalStatusCheck.detail}`);
+  const coverPlan = localCoverLetterPlan(coverLetterArgument);
+  const hasTrustedCareerData = Object.prototype.hasOwnProperty.call(options || {}, 'careerData');
+  const careerData = hasTrustedCareerData ? cleanText(options.careerData, MAX_CAREER_DATA_CHARS) : '';
+  const coverFailures = [
+    checkRoleThesis(coverPlan),
+    checkMappingNarrativeStructure(coverPlan),
+    checkEvidenceGrounding(coverPlan, resumeEvidence),
+    ...(hasTrustedCareerData ? [checkLogisticsGrounding(coverPlan, careerData)] : []),
+    ...evaluateCoverLetterChecks({
+      plan: coverPlan,
+      paragraphs: coverLetter.paragraphs,
+      evidence: resumeEvidence,
+      jobText: [job?.title, job?.company, job?.location, job?.snippet].filter(Boolean).join('\n'),
+      researchText: '',
+      companyName: job?.company || '',
+    }),
+  ].filter(check => !check.passed);
+  if (coverFailures.length) {
+    throw new Error(`Local AI cover letter failed required checks: ${coverFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
   }
   assertCandidateDashPunctuation({ resumeMainHtml, coverLetter });
   return {
     resumeMainHtml,
     coverLetter,
     coverLetterArgument,
-    qualityReview: sanitizeQualityReview(raw.qualityReview),
+    qualityReview: sanitizeQualityReview(raw.qualityReview, {
+      required: hasTrustedCareerData,
+      careerData,
+      resumeEvidence,
+      coverLetter,
+      coverLetterArgument,
+    }),
     outputBundleRoot: output.relative,
     outputBundleRootPath: output.resolved,
   };
@@ -532,9 +895,58 @@ function localAiDocumentHashes(result) {
   };
 }
 
+function finiteMetric(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function safeMeasuredDocumentHashes(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const resume = typeof value.resume === 'string' && /^[a-f0-9]{64}$/i.test(value.resume) ? value.resume : null;
+  const coverLetter = typeof value.coverLetter === 'string' && /^[a-f0-9]{64}$/i.test(value.coverLetter) ? value.coverLetter : null;
+  return resume || coverLetter ? { resume, coverLetter } : null;
+}
+
+function safeMeasuredLayout(layout) {
+  if (!layout || typeof layout !== 'object' || Array.isArray(layout)) return null;
+  return {
+    contentHeightPx: finiteMetric(layout.contentHeightPx),
+    typeAreaHeightPx: finiteMetric(layout.typeAreaHeightPx),
+    utilization: finiteMetric(layout.utilization),
+  };
+}
+
+// An invalid result has no measurements of its own. Preserve the last app
+// measurement inside an explicit snapshot so a validation rejection cannot
+// erase the hard-layout invariant for the next submitted bytes.
+function measuredFeedbackSnapshot(feedback) {
+  const source = ['revision-required', 'revision-exhausted'].includes(feedback?.status)
+    ? feedback
+    : feedback?.priorMeasured;
+  if (!source || !['revision-required', 'revision-exhausted'].includes(source.status)) return null;
+  const documentSha256 = safeMeasuredDocumentHashes(source.documentSha256);
+  if (!documentSha256) return null;
+  return {
+    status: source.status,
+    documentSha256,
+    revisionRound: Number.isSafeInteger(source.revisionRound) && source.revisionRound >= 0 ? source.revisionRound : 0,
+    targetPageCount: finiteMetric(source.targetPageCount),
+    resume: {
+      pageCount: finiteMetric(source?.resume?.pageCount),
+      targetPageCount: finiteMetric(source?.resume?.targetPageCount),
+      layout: safeMeasuredLayout(source?.resume?.layout),
+    },
+    coverLetter: {
+      pageCount: finiteMetric(source?.coverLetter?.pageCount),
+      targetPageCount: finiteMetric(source?.coverLetter?.targetPageCount),
+      layout: safeMeasuredLayout(source?.coverLetter?.layout),
+    },
+  };
+}
+
 function assertLocalAiQualityReviewConsistency(result, priorFeedback) {
   const hashes = localAiDocumentHashes(result);
-  const priorHashes = priorFeedback?.documentSha256;
+  const measuredPrior = measuredFeedbackSnapshot(priorFeedback);
+  const priorHashes = measuredPrior?.documentSha256;
   for (const [key, label] of [['resume', 'resume'], ['coverLetter', 'coverLetter']]) {
     const expected = expectedApplicationQualityDecision({
       priorHash: priorHashes?.[key] || '',
@@ -545,6 +957,26 @@ function assertLocalAiQualityReviewConsistency(result, priorFeedback) {
         ? 'has no prior measured version'
         : expected === 'changed_materially' ? 'changed' : 'is byte-for-byte unchanged';
       throw new Error(`Local AI qualityReview.${label}.decision must be ${expected} because that document ${reason}.`);
+    }
+  }
+  if (measuredPrior) {
+    const resumePageCount = Number(measuredPrior?.resume?.pageCount);
+    const resumeTarget = Number(measuredPrior?.resume?.targetPageCount ?? measuredPrior?.targetPageCount);
+    const resumeStillFails = Number.isFinite(resumePageCount) && Number.isFinite(resumeTarget)
+      && (resumePageCount > resumeTarget || resumeIsMateriallyUnderfilled({
+        pageCount: resumePageCount,
+        targetPageCount: resumeTarget,
+        layout: measuredPrior?.resume?.layout || null,
+      }));
+    const coverPageCount = Number(measuredPrior?.coverLetter?.pageCount);
+    const coverTarget = Number(measuredPrior?.coverLetter?.targetPageCount) || 1;
+    const coverStillFails = Number.isFinite(coverPageCount) && coverPageCount > coverTarget;
+    const unchangedFailures = [
+      ...(resumeStillFails && priorHashes?.resume === hashes.resume ? ['résumé'] : []),
+      ...(coverStillFails && priorHashes?.coverLetter === hashes.coverLetter ? ['cover letter'] : []),
+    ];
+    if (unchangedFailures.length) {
+      throw new Error(`Local AI must materially regenerate the ${unchangedFailures.join(' and ')} because its prior app-measured layout criterion is still unsatisfied; diminishing returns cannot override a failed hard criterion.`);
     }
   }
   return hashes;
@@ -639,7 +1071,7 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
 }
 
 async function loadManifest(root) {
-  const source = await readOwnedFile(root, path.join(root, 'manifest.json'));
+  const source = await readOwnedFile(root, path.join(root, 'manifest.json'), { maxBytes: MAX_LOCAL_AI_MANIFEST_BYTES });
   const manifest = JSON.parse(source);
   if (manifest?.version !== LOCAL_AI_APPLICATION_VERSION || !JOB_ID_RE.test(manifest?.id || '')) throw new Error('Local AI job manifest is invalid.');
   return manifest;
@@ -682,26 +1114,24 @@ function localAiHandoffEvent({ type, resultRaw, revisionRound = null, resumeFit 
         utilization: Number.isFinite(coverLetterFit.contentUtilization) ? coverLetterFit.contentUtilization : null,
       } : null,
     } : null,
-    qualityReview: qualityReview ? {
-      resume: {
-        decision: cleanText(qualityReview.resume?.decision, 80),
-        rationale: cleanText(qualityReview.resume?.rationale, 800),
-      },
-      coverLetter: {
-        decision: cleanText(qualityReview.coverLetter?.decision, 80),
-        rationale: cleanText(qualityReview.coverLetter?.rationale, 800),
-      },
-    } : null,
+    qualityReview: qualityReview ? compactLocalAiQualityReview(qualityReview) : null,
     detail: detail ? cleanText(detail, 500) : '',
   };
 }
 
 async function appendLocalAiHandoffEvent(dir, manifest, event) {
   const prior = Array.isArray(manifest?.handoffHistory) ? manifest.handoffHistory : [];
-  const history = [...prior, event]
-    .filter(item => item && typeof item === 'object' && !Array.isArray(item))
-    .slice(-MAX_LOCAL_AI_HANDOFF_EVENTS);
-  const nextManifest = { ...manifest, handoffHistory: history };
+  const allEvents = [...prior, event]
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item));
+  const priorEventCount = Number.isSafeInteger(manifest?.handoffEventCount) && manifest.handoffEventCount >= 0
+    ? manifest.handoffEventCount
+    : prior.length;
+  const history = allEvents.slice(-MAX_LOCAL_AI_HANDOFF_HISTORY);
+  const nextManifest = {
+    ...manifest,
+    handoffEventCount: Math.max(priorEventCount + 1, allEvents.length),
+    handoffHistory: history,
+  };
   await atomicJson(path.join(dir, 'manifest.json'), nextManifest);
   return nextManifest;
 }
@@ -725,10 +1155,12 @@ async function readLocalFitFeedback(root, dir) {
 // renderer, but per local_ai/CLAUDE_CODE_ROUTINE.md step 7 the waiting Claude
 // Code session may read only fit-feedback.json, manifest.json, result.json and
 // the handoff receipt — so a rejected result is indistinguishable from an app
-// that never ran, and the session can only burn its 6-minute wait.
+// that never ran. The rejection record below gives the same active session a
+// bounded, exact repair target while it waits without a production deadline.
 //
 // This record is deliberately NOT a measurement. The routine acts on
-// 'revision-required' and 'revision-exhausted'; 'invalid' plus `measured:
+// 'revision-required' (and resumes legacy 'revision-exhausted' records as
+// revision-required); 'invalid' plus `measured:
 // false` sits outside both, and the record carries no page counts, layout,
 // utilization, or revision instruction that could be mistaken for one.
 //
@@ -761,9 +1193,7 @@ async function writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, erro
       logger.warn(`[LocalAI] Keeping the measured ${prior.status} record for job ${jobId}; not recording a transient rejection over it.`);
       return;
     }
-    const priorDocumentSha256 = prior?.documentSha256 && typeof prior.documentSha256 === 'object' && !Array.isArray(prior.documentSha256)
-      ? prior.documentSha256
-      : null;
+    const priorMeasured = measuredFeedbackSnapshot(prior);
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), {
       version: 1,
       jobId,
@@ -773,10 +1203,14 @@ async function writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, erro
       // Untrusted: a validation message can quote model-authored prose (the
       // generic-language check embeds the offending phrase verbatim). Bound and
       // strip it exactly like every other echoed string in this module.
-      error: cleanText(error?.message || error, 500).replace(/\s+/g, ' ').trim(),
+      error: cleanText(error?.message || error, 12_000).replace(/\s+/g, ' ').trim(),
       rejectedAt: new Date().toISOString(),
-      documentSha256: priorDocumentSha256,
-      revisionRound: Number.isFinite(prior?.revisionRound) ? prior.revisionRound : 0,
+      // Retain legacy top-level fields for older writer sessions, and preserve
+      // the complete trusted measurement in priorMeasured for the host's
+      // unchanged-hard-failure check.
+      documentSha256: priorMeasured?.documentSha256 || null,
+      revisionRound: priorMeasured?.revisionRound || 0,
+      priorMeasured,
       message: 'Infinite Canvas rejected this result.json during validation. Nothing was rendered, saved, or measured. Correct the reported problem and overwrite only result.json.',
     });
   } catch (writeError) {
@@ -786,40 +1220,49 @@ async function writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, erro
   }
 }
 
-export async function queueLocalApplicationJob(args = {}) {
+export async function queueLocalApplicationJob(args = {}, signal = null) {
+  throwIfAborted(signal);
   const id = crypto.randomUUID();
   const canvas = await resolveCanvasProject(args.canvasFilePath);
+  throwIfAborted(signal);
   // The shared routine is source-project scoped; the per-canvas job data is
   // deliberately NOT. This separation keeps a portable canvas self-contained
   // without creating a second editable routine beside every canvas.
   const routineProjectRoot = localAiProjectRoot(canvas.canonicalCanvasFilePath);
   await ensureProjectRoutine(routineProjectRoot);
+  throwIfAborted(signal);
   const realRoot = await ensureDirectoryWithinRoot(canvas.canvasRoot, localJobsRoot(canvas.canvasRoot), {
     mode: 0o700,
     label: 'The canvas .local-ai/jobs folder',
   });
-  const unfinishedCount = await pruneAndCountLocalAiJobs(canvas.canvasRoot);
-  if (unfinishedCount >= MAX_LOCAL_AI_UNFINISHED_JOBS) {
-    throw new Error(`This canvas already has ${MAX_LOCAL_AI_UNFINISHED_JOBS} unfinished Local AI jobs. Complete or remove an old .local-ai/jobs folder before generating another.`);
-  }
+  await pruneAndCountLocalAiJobs(canvas.canvasRoot);
+  throwIfAborted(signal);
   const dir = path.join(realRoot, id);
-  await ensureDirectoryWithinRoot(realRoot, dir, { mode: 0o700, label: 'Local AI job folder' });
-  const job = safeJob(args.job);
-  const careerData = cleanText(args.careerData, MAX_CAREER_DATA_CHARS);
-  const input = {
-    version: LOCAL_AI_APPLICATION_VERSION, jobId: id, createdAt: new Date().toISOString(),
-    canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot, job,
-    additionalNotes: normalizeApplicationAdditionalNotes(args.additionalNotes),
-    reasoning: cleanText(args.reasoning, 8_000), matchScore: Number.isFinite(args.matchScore) ? args.matchScore : null,
-    achievements: safeJson(args.achievements), mineAllowed: Boolean(args.mineAllowed),
-    targetPageCount: Number.isFinite(args.targetPageCount) && args.targetPageCount > 0 ? Math.round(args.targetPageCount) : targetPageCountForJob(job.title),
-  };
-  const manifest = {
-    version: LOCAL_AI_APPLICATION_VERSION, id, status: 'queued', createdAt: input.createdAt,
-    canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot,
-    files: ['input.json', 'context/job-listing.md', 'context/career-data.txt', 'CLAUDE_CODE_PROMPT.md', 'result.json'],
-  };
   try {
+    await ensureDirectoryWithinRoot(realRoot, dir, { mode: 0o700, label: 'Local AI job folder' });
+    throwIfAborted(signal);
+    const job = safeJob(args.job);
+    const careerData = cleanText(args.careerData, MAX_CAREER_DATA_CHARS);
+    if (!sourceQuoteIsSpecific(normalizeSourceGroundingText(careerData))) {
+      throw new Error('Local AI needs career data with at least 12 characters and 3 alphanumeric words so every final claim can cite a trusted source quote.');
+    }
+    const input = {
+      version: LOCAL_AI_APPLICATION_VERSION, jobId: id, createdAt: new Date().toISOString(),
+      canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot, job,
+      additionalNotes: normalizeApplicationAdditionalNotes(args.additionalNotes),
+      reasoning: cleanText(args.reasoning, 8_000), matchScore: Number.isFinite(args.matchScore) ? args.matchScore : null,
+      achievements: safeJson(args.achievements), mineAllowed: Boolean(args.mineAllowed),
+      targetPageCount: Number.isFinite(args.targetPageCount) && args.targetPageCount > 0 ? Math.round(args.targetPageCount) : targetPageCountForJob(job.title),
+      qualityChecklist: {
+        version: APPLICATION_QUALITY_CHECKLIST_VERSION,
+        criteria: APPLICATION_QUALITY_CRITERIA,
+      },
+    };
+    const manifest = {
+      version: LOCAL_AI_APPLICATION_VERSION, id, status: 'queued', createdAt: input.createdAt,
+      canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot,
+      files: ['input.json', 'context/job-listing.md', 'context/career-data.txt', 'CLAUDE_CODE_PROMPT.md', 'result.json'],
+    };
     await ensureDirectoryWithinRoot(dir, path.join(dir, 'context'), { mode: 0o700, label: 'Local AI context folder' });
     await Promise.all([
       atomicJson(path.join(dir, 'input.json'), input), atomicJson(path.join(dir, 'manifest.json'), manifest),
@@ -827,11 +1270,12 @@ export async function queueLocalApplicationJob(args = {}) {
       fs.promises.writeFile(path.join(dir, 'context', 'career-data.txt'), careerData, { encoding: 'utf8', mode: 0o600 }),
       fs.promises.writeFile(path.join(dir, 'CLAUDE_CODE_PROMPT.md'), promptFor(id), { encoding: 'utf8', mode: 0o600 }),
     ]);
+    throwIfAborted(signal);
+    return { id, status: 'queued', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: 'Local AI job is ready beside this canvas in .local-ai/jobs. Run CLAUDE_CODE_PROMPT.md with your subscription-authenticated Claude Code session.' };
   } catch (error) {
     await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  return { id, status: 'queued', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: 'Local AI job is ready beside this canvas in .local-ai/jobs. Run CLAUDE_CODE_PROMPT.md with your subscription-authenticated Claude Code session.' };
 }
 
 function assertManifestCanvasOwnership(manifest, input, canvas) {
@@ -841,6 +1285,79 @@ function assertManifestCanvasOwnership(manifest, input, canvas) {
     || path.resolve(String(input?.canvasRoot || '')) !== canvas.canvasRoot) {
     throw new Error('Local AI job belongs to a different saved canvas.');
   }
+}
+
+async function discardLocalAiTerminalReceipt(canvasRoot, jobId) {
+  const root = path.resolve(localAiHandoffReceiptsRoot(canvasRoot));
+  const receiptPath = path.resolve(root, `${jobId}.json`);
+  if (!isWithinDirectory(root, receiptPath) || receiptPath === root) {
+    throw new Error('Local AI receipt path escaped its trusted folder.');
+  }
+  let rootStat;
+  try { rootStat = await fs.promises.lstat(root); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('Local AI handoff receipt folder is not trusted.');
+  }
+  const realRoot = await fs.promises.realpath(root);
+  if (realRoot !== root || !isWithinDirectory(canvasRoot, realRoot)) {
+    throw new Error('Local AI handoff receipt folder resolved outside the canvas folder.');
+  }
+  let receiptStat;
+  try { receiptStat = await fs.promises.lstat(receiptPath); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!receiptStat.isFile() || receiptStat.isSymbolicLink()) {
+    throw new Error('Local AI handoff receipt is not a regular file.');
+  }
+  const realReceipt = await fs.promises.realpath(receiptPath);
+  if (!isWithinDirectory(realRoot, realReceipt)) {
+    throw new Error('Local AI handoff receipt resolved outside its trusted folder.');
+  }
+  await fs.promises.unlink(receiptPath);
+  return true;
+}
+
+// Delete one exact app-authored Local AI job after its owning card was
+// deleted. This is deliberately separate from discard-application: the latter
+// may only remove a main-process-registered post-import workspace, while this
+// capability is restricted to a UUID directory below the canonical canvas.
+export async function discardLocalApplicationJob(jobId, canvasFilePath) {
+  if (!JOB_ID_RE.test(String(jobId || ''))) throw new Error('Invalid Local AI job id.');
+  if (importsInFlight.has(jobId)) {
+    const error = new Error('Local AI result import is still running; wait for it to settle before discarding this job.');
+    error.code = 'LOCAL_AI_IMPORT_IN_FLIGHT';
+    throw error;
+  }
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  let removedJob = false;
+  try {
+    const { root, dir } = await assertRealJobDirectory(jobId, canvas.canonicalCanvasFilePath);
+    const [manifest, inputRaw] = await Promise.all([
+      loadManifest(dir),
+      readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }),
+    ]);
+    const input = JSON.parse(inputRaw);
+    assertManifestCanvasOwnership(manifest, input, canvas);
+    // Revalidate the precise regular directory immediately before mutation.
+    const current = await fs.promises.lstat(dir);
+    const currentRealPath = await fs.promises.realpath(dir);
+    if (!current.isDirectory() || current.isSymbolicLink() || currentRealPath !== dir
+      || !isWithinDirectory(root, currentRealPath) || currentRealPath === root) {
+      throw new Error('Local AI job directory changed before it could be discarded.');
+    }
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    removedJob = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const removedReceipt = await discardLocalAiTerminalReceipt(canvas.canvasRoot, jobId);
+  return { discarded: true, removedJob, removedReceipt };
 }
 
 export async function localApplicationStatus(jobId, canvasFilePath) {
@@ -898,7 +1415,12 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
   }
   const { root, dir, ...canvas } = trustedJob;
   const manifest = await loadManifest(dir);
-  const input = JSON.parse(await readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }));
+  const [inputRaw, careerDataRaw] = await Promise.all([
+    readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }),
+    readOwnedFile(root, path.join(dir, 'context', 'career-data.txt'), { maxBytes: MAX_RESULT_BYTES }),
+  ]);
+  const input = JSON.parse(inputRaw);
+  const careerData = cleanText(careerDataRaw, MAX_CAREER_DATA_CHARS);
   assertManifestCanvasOwnership(manifest, input, canvas);
   if (manifestImportFreshlySettling(manifest)) {
     return {
@@ -916,7 +1438,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
     resultSha256 = contentHash(rawText);
     try {
       const raw = JSON.parse(rawText);
-      const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job);
+      const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job, { careerData });
       const feedback = await readLocalFitFeedback(root, dir);
       // Only the two MEASURED verdicts may hold a valid result back. The
       // rejection record shares this file and matches on hash, so the
@@ -928,7 +1450,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
       if (!measuredFeedback) assertLocalAiQualityReviewConsistency(validated, feedback);
       status = 'completed'; message = 'Validated result.json is ready to import.';
       if (measuredFeedback) {
-        status = feedback.status === 'revision-exhausted' ? 'revision-exhausted' : 'revision-required';
+        status = 'revision-required';
         message = String(feedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
       }
     } catch (error) {
@@ -994,10 +1516,12 @@ export async function importLocalApplicationJob(request) {
 
 async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, senderId, signal, expectedResultSha256 = '' }) {
   const { root, dir, ...canvas } = await assertRealJobDirectory(jobId, canvasFilePath);
-  const [manifest, inputRaw] = await Promise.all([
+  const [manifest, inputRaw, careerDataRaw] = await Promise.all([
     loadManifest(dir), readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: 700_000 }),
+    readOwnedFile(root, path.join(dir, 'context', 'career-data.txt'), { maxBytes: MAX_RESULT_BYTES }),
   ]);
   const input = JSON.parse(inputRaw);
+  const careerData = cleanText(careerDataRaw, MAX_CAREER_DATA_CHARS);
   if (manifest.id !== jobId || input?.jobId !== jobId || input?.version !== LOCAL_AI_APPLICATION_VERSION) throw new Error('Local AI job input is invalid.');
   assertManifestCanvasOwnership(manifest, input, canvas);
   // Gate on the manifest BEFORE touching result.json: during the save window
@@ -1015,7 +1539,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   }
   let result;
   try {
-    result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job);
+    result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job, { careerData });
   } catch (error) {
     // The poll path normally rejects first — an import only ever begins from
     // status 'completed' — so this covers the narrow race where result.json is
@@ -1042,7 +1566,6 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   // original observation with an identical one. A changed result has a new
   // hash and intentionally continues below for a fresh measurement.
   if (measuredPriorFeedback) {
-    const revisionExhausted = priorFeedback.status === 'revision-exhausted';
     const targetPageCount = Number.isFinite(priorFeedback.targetPageCount) && priorFeedback.targetPageCount > 0
       ? priorFeedback.targetPageCount
       : (Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
@@ -1060,14 +1583,16 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
       ...(resumeUnderfilled ? [`résumé content spans ${Math.round(resumeTypeAreaUtilization(resumeLayout) * 100)}% of the measured type area (minimum 90%)`] : []),
       ...(!coverLetterTargetMet && coverLetterPageCount != null ? [`cover letter is ${coverLetterPageCount} pages (target: 1)`] : []),
     ];
-    const fitMessage = String(priorFeedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
+    const fitMessage = priorFeedback.status === 'revision-exhausted'
+      ? `${fitIssues.join('; ') || 'A measured layout criterion remains unsatisfied'}. This legacy diminishing-returns result is resumable: make a material correction, rerun the complete checklist, and continue without a fixed revision limit.`
+      : String(priorFeedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
     return {
-      id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required',
+      id: jobId, status: 'revision-required',
       company: input.job?.company || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
-      localJob: { id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
+      localJob: { id: jobId, status: 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
   }
   // measuredPriorFeedback always returns above, so this always runs the assert.
@@ -1093,7 +1618,34 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
       ? [`cover-letter layout could not be verified${coverLetterFit.renderError ? `: ${coverLetterFit.renderError}` : coverLetterFit.fontsLoaded === false ? ': web fonts were unavailable' : ''}`] : []),
   ];
   if (verificationIssues.length) {
-    const renderMessage = `${verificationIssues.join('; ')}. No final bundle was saved. Retry the measured import when rendering is available; the AI draft does not need another rewrite.`;
+    // Renderer errors can include unbounded engine output. This feedback is
+    // read through a 64 KB trusted-file cap by both the app and the waiting
+    // handoff helper, so bound it before persistence rather than parking the
+    // job behind an unreadable advisory.
+    const boundedVerificationIssues = verificationIssues
+      .map(issue => cleanText(issue, 2_000).replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .slice(0, 4);
+    const renderMessage = cleanText(`${boundedVerificationIssues.join('; ')}. No final bundle was saved. Retry the measured import when rendering is available; the AI draft does not need another rewrite.`, 10_000)
+      .replace(/\s+/g, ' ').trim();
+    const priorMeasured = measuredFeedbackSnapshot(priorFeedback);
+    // The handoff helper follows hash-bound feedback, not telemetry. Persist a
+    // non-measured render-retry record before returning so an indefinite
+    // authoring session never waits forever when PDF verification is down.
+    await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), {
+      version: 1,
+      jobId,
+      status: 'render-retry-required',
+      measured: false,
+      resultSha256: contentHash(resultRaw),
+      requestedAt: new Date().toISOString(),
+      revisionRound: priorMeasured?.revisionRound || 0,
+      documentSha256: priorMeasured?.documentSha256 || null,
+      priorMeasured,
+      verificationIssues: boundedVerificationIssues,
+      message: renderMessage,
+      instruction: 'Retry the measured import when rendering is available. Keep result.json unchanged unless a separate quality correction is needed; this record contains no layout measurement.',
+    });
     const handoffManifest = await appendLocalAiHandoffEvent(dir, manifest, localAiHandoffEvent({
       type: 'layout-verification-unavailable', resultRaw, resumeFit: resumeHandoffFit,
       coverLetterFit: coverLetterHandoffFit, qualityReview: result.qualityReview, detail: renderMessage,
@@ -1109,11 +1661,11 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
         coverLetterPageCount: coverLetterFit.pageCount, coverLetterFontsLoaded: coverLetterFit.fontsLoaded,
         coverLetterPdfError: coverLetterFit.renderError,
       },
-      localAi: { jobId, verificationIssues, qualityReview: result.qualityReview, handoffHistory: handoffManifest.handoffHistory },
+      localAi: { jobId, verificationIssues: boundedVerificationIssues, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
       id: jobId, status: 'render-retry-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
-      renderMessage, verificationIssues,
+      renderMessage, verificationIssues: boundedVerificationIssues,
       localJob: { id: jobId, status: 'render-retry-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: renderMessage },
     };
   }
@@ -1131,39 +1683,34 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   ];
   if (fitIssues.length) {
     const revisionRound = Math.max(0, Number(priorFeedback?.revisionRound) || 0) + 1;
-    const diminishingReturnsDocuments = [
+    const unchangedUnsatisfiedDocuments = [
       ...(!targetMet && result.qualityReview.resume.decision === 'kept_diminishing_returns' ? ['résumé'] : []),
       ...(!coverLetterTargetMet && result.qualityReview.coverLetter.decision === 'kept_diminishing_returns' ? ['cover letter'] : []),
     ];
-    const revisionExhausted = diminishingReturnsDocuments.length > 0;
-    const fitMessage = revisionExhausted
-      ? `${fitIssues.join('; ')}. ${diminishingReturnsDocuments.join(' and ')} remained unchanged after an explicit diminishing-returns quality review. No bundle was saved.`
-      : `${fitIssues.join('; ')}. Continue the Local AI routine with measured revision ${revisionRound} using fit-feedback.json; there is no fixed revision limit.`;
+    const fitMessage = `${fitIssues.join('; ')}. Continue the Local AI routine with measured revision ${revisionRound} using fit-feedback.json; there is no fixed revision limit.${unchangedUnsatisfiedDocuments.length ? ` The ${unchangedUnsatisfiedDocuments.join(' and ')} cannot remain unchanged while its measured layout criterion is unsatisfied; make a material correction and run the complete quality checklist again.` : ''}`;
     const feedback = {
       version: 1,
       jobId,
-      status: revisionExhausted ? 'revision-exhausted' : 'revision-required',
+      status: 'revision-required',
       revisionRound,
       resultSha256: contentHash(resultRaw),
       documentSha256,
-      qualityReview: result.qualityReview,
+      qualityReview: compactLocalAiQualityReview(result.qualityReview),
       requestedAt: new Date().toISOString(),
       targetPageCount,
       resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null },
       coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null },
-      instruction: revisionExhausted
-        ? `Stop this measured revision loop. The app verified that the unsatisfied ${diminishingReturnsDocuments.join(' and ')} is byte-for-byte unchanged and its quality review explicitly recorded diminishing returns.`
-        : `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique. Page fit is a constraint, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep that document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. The cover letter's reported type-area utilization is informational only: a short letter is a supported outcome with no minimum utilization, so never lengthen it to fill its page. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
+      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${APPLICATION_QUALITY_CHECKLIST_VERSION} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. The cover letter's reported type-area utilization is informational only: a short letter is a supported outcome with no minimum utilization, so never lengthen it to fill its page. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
       message: fitMessage,
     };
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), feedback);
     const handoffManifest = await appendLocalAiHandoffEvent(dir, manifest, localAiHandoffEvent({
-      type: revisionExhausted ? 'fit-revisions-exhausted' : 'fit-revision-requested',
+      type: 'fit-revision-requested',
       resultRaw, revisionRound, resumeFit: resumeHandoffFit, coverLetterFit: coverLetterHandoffFit,
       qualityReview: result.qualityReview, detail: fitMessage,
     }));
     recordApplicationTelemetry({
-      source: 'local-ai', status: revisionExhausted ? 'revision-exhausted' : 'revision-required', phase: revisionExhausted ? 'fit revisions exhausted' : 'fit revision requested', attemptId: `local-${jobId}`,
+      source: 'local-ai', status: 'revision-required', phase: 'fit revision requested', attemptId: `local-${jobId}`,
       jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
       coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
       render: {
@@ -1175,15 +1722,15 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
         coverLetterPageCount: coverLetterFit.pageCount, coverLetterPdfProduced: false,
         coverLetterFontsLoaded: coverLetterFit.fontsLoaded, coverLetterPdfError: coverLetterFit.renderError,
       },
-      localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: !revisionExhausted, revisionRound, fitIssues, qualityReview: result.qualityReview, handoffHistory: handoffManifest.handoffHistory },
+      localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: true, revisionRound, fitIssues, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
-      id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
+      id: jobId, status: 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
       resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, contentUtilization: coverLetterFit.contentUtilization },
       fitIssues, fitMessage,
       revisionRound,
-      localJob: { id: jobId, status: revisionExhausted ? 'revision-exhausted' : 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
+      localJob: { id: jobId, status: 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
   }
   const outputRoot = await materializeTrustedOutputRoot(result.outputBundleRoot, canvas.canvasRoot);
@@ -1243,7 +1790,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
       coverLetterPageCount: coverLetterFit.pageCount, coverLetterPdfProduced: Boolean(coverPdf),
       coverLetterFontsLoaded: coverLetterFit.fontsLoaded, coverLetterPdfError: coverLetterFit.renderError,
     },
-    localAi: { jobId, targetMet, coverLetterTargetMet, qualityReview: result.qualityReview, handoffHistory: importedManifest.handoffHistory },
+    localAi: { jobId, targetMet, coverLetterTargetMet, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: importedManifest.handoffHistory },
   });
   const workDir = registerPendingApplicationWorkspace({
     workDir: dir, senderId, company: input.job?.company, candidateName: result.coverLetter.name,
@@ -1277,8 +1824,41 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
 }
 
 export function registerLocalAiApplicationHandlers() {
-  handleSafe('queue-local-application', async (_event, args) => ({ localJob: await queueLocalApplicationJob(args) }));
+  handleSafe('queue-local-application', async (_event, args, signal) => {
+    // queueLocalApplicationJob cooperates at every durable-write boundary.
+    // Keep an abort listener through this handler's return as a final guard:
+    // handleSafe may observe a node-deletion abort after the job was created
+    // but before it is reported to the renderer, in which case no card can
+    // own the returned id and the exact private job must be removed here.
+    let localJob = null;
+    let discardPromise = null;
+    const discardQueuedJob = () => {
+      if (!localJob) return Promise.resolve();
+      if (!discardPromise) {
+        discardPromise = discardLocalApplicationJob(localJob.id, localJob.canvasFilePath)
+          .catch((error) => logger.warn(`[LocalAI] Could not discard aborted queued job ${localJob.id}: ${error?.message || error}`));
+      }
+      return discardPromise;
+    };
+    const onAbort = () => { void discardQueuedJob(); };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    try {
+      localJob = await queueLocalApplicationJob(args, signal);
+      if (signal?.aborted) {
+        await discardQueuedJob();
+        throwIfAborted(signal);
+      }
+      return { localJob };
+    } catch (error) {
+      if (signal?.aborted) await discardQueuedJob();
+      throw error;
+    } finally {
+      signal?.removeEventListener?.('abort', onAbort);
+    }
+  });
   handleSafe('get-local-application-status', async (_event, { jobId, canvasFilePath } = {}) => ({ localJob: await localApplicationStatus(jobId, canvasFilePath) }));
+  handleSafe('discard-local-application', async (_event, { jobId, canvasFilePath } = {}) =>
+    discardLocalApplicationJob(jobId, canvasFilePath));
   handleSafe('open-local-application-folder', async (_event, { jobId, canvasFilePath } = {}) => {
     const { dir } = await assertRealJobDirectory(jobId, canvasFilePath);
     const error = await shell.openPath(dir);

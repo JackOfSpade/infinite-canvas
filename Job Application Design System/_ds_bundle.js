@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"9c0abdf3c4ee","build/synthesis-scope-gate-doc-test.js":"e8725ba140f6","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"2a8eb9c5e1c1","build/synthesis-scope-gate-doc-test.js":"e10b5335ff9c","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -1681,15 +1681,14 @@ assert(/from X through\/to Y/.test(style) || /`from X through\/to Y`/.test(style
   assert(style.indexOf(shape) !== -1, 'STYLE.md names the "' + shape + '" coordination shape', 'shape "' + shape + '" not found in §11.2.3');
 });
 assert(/noun phrase.{0,40}gerund phrase|gerund phrase.{0,40}noun phrase/i.test(style), 'STYLE.md names the noun-phrase / gerund-phrase mismatch as the common failure', 'no noun-phrase/gerund-phrase language found');
-assert(/from requesting quotes\s+through\s+presenting findings/i.test(style), 'STYLE.md gives the gerund-repair example from the defect brief', 'gerund-repair example missing');
-assert(/from the initial request for\s+quotes through the presentation of findings/i.test(style), 'STYLE.md gives the noun-phrase-repair example from the defect brief', 'noun-phrase-repair example missing');
-assert(/from the time of/i.test(style), 'STYLE.md explicitly rejects bureaucratic padding ("from the time of…") as a non-repair', '"from the time of" padding example missing — the rule must call this out as a non-fix');
+assert(/noun\s+phrase\s+with\s+noun\s+phrase[^\p{L}\p{N}]+action\s+with\s+action/iu.test(style), 'STYLE.md gives the general repair: coordinate like grammatical forms', 'general parallel-construction repair missing');
+assert(/Padding the seam[^.]*not a repair/i.test(style), 'STYLE.md rejects bureaucratic padding as a non-repair', 'padding non-repair principle missing');
 console.log('\nScope — applies beyond the cover letter');
 assert(/r\u00e9sum\u00e9 bullets, role summaries, and\s*project descriptions/i.test(style) || /bullets, role summaries, and\s*project descriptions/i.test(style), 'STYLE.md §11.2.3 Rule 5 states it applies to résumé bullets, role summaries, and project descriptions', 'no explicit résumé-scope statement found near Rule 5');
 assert(/broken parallel(ism)?/i.test(style) && /\u00a75\.3/.test(style), 'STYLE.md §5.3 résumé bullet rules mention broken parallelism', 'résumé bullet-rules section (§5.3) does not mention parallelism');
 console.log('\nSKILL.md pipeline coverage');
 assert(/no coordinated (phrase|construction)/i.test(skill), 'SKILL.md mentions the coordinated-phrase / parallelism check', 'no "no coordinated phrase/construction" language found in SKILL.md');
-assert(/from the quote\s+request through presenting findings/i.test(skill), 'SKILL.md cites the observed defect sentence as the diagnostic example', 'defect example not referenced in SKILL.md');
+assert(/noun phrase spliced to a gerund phrase/i.test(skill), 'SKILL.md names the grammatical mismatch without embedding a domain-specific specimen', 'general mismatch description missing in SKILL.md');
 console.log('\nreadme.md coverage');
 assert(/broken parallelism|coordinated (phrase|construction)/i.test(readme), 'readme.md documents the parallelism rule alongside the other prose-shape rules', 'no parallelism language found in readme.md');
 assert(!/^### Colon dumps, overloaded sentences, metaphors\s*$/im.test(readme) || /broken parallelism/i.test(readme), 'readme.md\'s colon/overload/metaphor section covers parallelism too', 'readme.md section header not updated to include parallelism');
@@ -1754,10 +1753,10 @@ assert(/only when it explicitly names/i.test(rule6), 'Rule 6 requires the genera
   assert(new RegExp('\\b' + noun + '\\b', 'i').test(rule6), 'Rule 6 names "' + noun + '" as an allowed concrete connector', 'connector "' + noun + '" missing from the rule');
 });
 console.log('\nRule 6 — evidence scope ceiling');
-assert(/most of my work/i.test(rule6), 'Rule 6 rejects "most of my work" breadth from one example', '"most of my work" scope-inflation example missing');
-assert(/throughout\s+my career/i.test(rule6), 'Rule 6 rejects "throughout my career" breadth', '"throughout my career" scope-inflation example missing');
+assert(/one example\s+supports a claim about that example/i.test(rule6), 'Rule 6 limits a single example to a claim about that example', 'single-example scope ceiling missing');
+assert(/one\s+role\s+supports\s+a\s+claim\s+about\s+that\s+role/i.test(rule6), 'Rule 6 limits one role to a claim about that role', 'single-role scope ceiling missing');
 assert(/general working style|general(ise|ize)? about .{0,30}career|working style/i.test(rule6), 'Rule 6 rejects a general-working-style claim drawn from one role', 'no working-style breadth language found');
-assert(/one role supports a claim about that role/i.test(rule6), 'Rule 6 states the in-scope ceiling (one role → a claim about that role)', 'no explicit in-scope statement found');
+assert(/career-wide breadth[^.]*requires\s+source evidence[^.]*career-wide/i.test(rule6), 'Rule 6 requires career-wide evidence for career-wide breadth', 'career-wide evidence requirement missing');
 console.log('\nRule 6 — bridge nouns must define themselves');
 ['shape', 'pattern', 'approach'].forEach(function (noun) {
   assert(new RegExp('"' + noun + '"').test(rule6), 'Rule 6 names "' + noun + '" as a bridge noun under the rule', 'bridge noun "' + noun + '" not listed');
@@ -1772,9 +1771,8 @@ assert(/[Rr]ewrite it as a concrete, evidence-scoped conclusion/.test(rule6), 'R
 assert(/\*\*Delete it\.\*\*/.test(rule6), 'Rule 6 offers deletion as repair 2 for synthesis that adds no supported reasoning', 'delete repair missing');
 assert(/Filler is not a repair/i.test(rule6), 'Rule 6 forbids solving the problem with filler transitions', 'no "filler is not a repair" prohibition found');
 assert(/That said|Additionally|In this\s+way/.test(rule6), 'Rule 6 names the filler-transition shapes it rejects', 'no filler examples given');
-assert(/explanatory examples, never mandatory/i.test(rule6), 'Rule 6 marks its repair sentences as explanatory, not mandatory copy', 'example sentences not marked as illustrative');
-assert(/That was the broader pattern in the\s+role/i.test(rule6), 'Rule 6 shows the evidence-scoped repair pattern', 'repair example missing');
-assert(/That end-to-end responsibility/i.test(rule6), 'Rule 6 shows the explicit-transition repair pattern', 'transition example missing');
+assert(/name the\s+responsibility or mechanism/i.test(rule6) && /keep the breadth inside what the\s+evidence supports/i.test(rule6), 'Rule 6 defines the evidence-scoped repair without prescribing copy', 'semantic rewrite instructions missing');
+assert(/transition earns its place by naming the thing it carries\s+forward/i.test(rule6), 'Rule 6 defines an explicit-transition repair without prescribing copy', 'semantic transition repair missing');
 console.log('\nRule 6 — stated scope across surfaces');
 assert(/Rule 6 \(earned generalization\) binds/i.test(style), 'STYLE.md §11.2.3 states Rule 6\'s scope in the section\'s Scope paragraph', 'no Rule 6 scope statement found');
 assert(/every generated prose surface/i.test(style), 'STYLE.md says the scope/bridge-noun clauses bind every generated prose surface', 'no "every generated prose surface" statement found');
@@ -1792,7 +1790,7 @@ console.log('\nreadme.md coverage');
 assert(/unearned generalization/i.test(readme), 'readme.md documents the generalization rule alongside the other prose-shape rules', 'no "unearned generalization" language in readme.md');
 assert(/Five prose failures/i.test(readme), 'readme.md prose-shape section counts five banned shapes', 'readme.md still counts four prose failures');
 assert(/exactly one plausible antecedent/i.test(readme), 'readme.md states the one-antecedent rule for paragraph transitions', 'no antecedent rule in readme.md');
-assert(/that end-to-end responsibility/i.test(readme), 'readme.md shows the explicit-transition repair', 'no transition repair example in readme.md');
+assert(/repeat the\s+precise noun phrase instead/i.test(readme) && /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme), 'readme.md defines the explicit-transition repair without prescribing copy', 'semantic transition repair missing in readme.md');
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering), 'ENGINEERING.md automated-suites index lists this test', 'test not listed in the ENGINEERING.md automated-suites index');
 H.report();

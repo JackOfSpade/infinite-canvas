@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, shouldUseNativeRead, unwrapInlineExtractorItems, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 
 export default [
 {
@@ -498,6 +498,311 @@ export default [
       assert(!longUrl.url.includes('`') && longUrl.url.length <= 180, 'url is backtick-stripped and length-capped');
       const titled = buildAuthAttemptRecord({ title: 'My Listings | Mercari `x`' });
       assert(titled.title === "My Listings \\| Mercari 'x'", `title is preserved and markdown-safe → ${titled.title}`);
+      const durable = buildAuthAttemptRecord({
+        platformId: 'linkedin', result: 'auto-detected', loginDetected: true,
+        closeDisposition: 'graceful-exit', cookieFlushMs: 2500, processExitObserved: true,
+        authCookiesBeforeClose: [{ name: 'li_at', persistent: true, expiresAt: 1_900_000_000, value: 'must-not-leak' }],
+      });
+      assert(durable.closeDisposition === 'graceful-exit' && durable.cookieFlushMs === 2500 && durable.processExitObserved === true,
+        'completed auth history preserves the close/checkpoint lifecycle');
+      assert(durable.authCookiesBeforeClose[0]?.name === 'li_at'
+        && durable.authCookiesBeforeClose[0]?.persistent === true
+        && !('value' in durable.authCookiesBeforeClose[0]),
+      'auth diagnostics preserve name/persistence metadata but never cookie values');
+      return { ok: true };
+    },
+  },
+{
+    name: 'auth browser process-exit wait observes healthy closes and already-exited children',
+    run: async () => {
+      const listeners = new Set();
+      const proc = {
+        exitCode: null,
+        signalCode: null,
+        once(event, fn) { if (event === 'exit') listeners.add(fn); },
+        removeListener(event, fn) { if (event === 'exit') listeners.delete(fn); },
+      };
+      const waiting = waitForBrowserProcessExit(proc, 250);
+      setTimeout(() => {
+        proc.exitCode = 0;
+        for (const fn of [...listeners]) fn(0, null);
+      }, 5);
+      assert(await waiting === true, 'a normal exit emitted after subscription is observed');
+      assert(isBrowserProcessExited(proc) === true, 'exitCode marks the process exited even though proc.killed is false');
+      assert(await waitForBrowserProcessExit(proc, 250) === true,
+        'an already-exited process resolves immediately instead of producing a false 3s hang/SIGKILL');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Indeed status-cache migration drops only the retired public-jobs false positive',
+    run: () => {
+      const now = 1_000_000_000_000;
+      const day = 24 * 60 * 60 * 1000;
+      const legacyReason = 'Native Chrome reached logged-in indeed job-search page at https://www.indeed.com/jobs?q=architect.';
+      const stored = {
+        indeed: { connected: true, ts: now - day, lastReason: legacyReason },
+        ebay: { connected: true, ts: now - day, lastReason: 'Native Chrome reached logged-in ebay marketplace account page at https://www.ebay.com/mye/myebay/summary.' },
+        otherPlatformSameWords: { connected: true, ts: now - day, lastReason: legacyReason },
+      };
+      const restored = selectRestorableStatuses(stored, now, 14 * day);
+      assert(!restored.indeed,
+        'the retired Indeed public /jobs native-success verdict must not survive a restart');
+      assert(restored.ebay && restored.otherPlatformSameWords,
+        `all other recent connected entries must remain restorable (got ${JSON.stringify(restored)})`);
+      const validIndeed = selectRestorableStatuses({
+        indeed: { connected: true, ts: now - day, lastReason: 'Native Chrome reached logged-in indeed job-platform account page at https://secure.indeed.com/settings/account.' },
+      }, now, 14 * day);
+      assert(validIndeed.indeed?.connected === true,
+        'a recent Indeed account-page confirmation must remain restorable');
+      const currentVerdict = buildTrustedNativeLoginVerdict('indeed', {
+        currentUrl: 'https://secure.indeed.com/settings/account',
+        title: 'Account settings | Indeed',
+      });
+      assert(/indeed job-platform account page/.test(currentVerdict.reason)
+        && !/job-search page/.test(currentVerdict.reason),
+      `new native Indeed diagnostics must name the authenticated account page truthfully (got ${currentVerdict.reason})`);
+      return { restored: Object.keys(restored).sort() };
+    },
+  },
+{
+    name: 'Native Indeed challenge handoff waits for a stable clean first-party page',
+    run: () => {
+      const challengeUrl = 'https://secure.indeed.com/auth?__cf_chl_rt_tk=token';
+      assert(isNativeIndeedChallengePending(challengeUrl, 'Just a moment...') === true,
+        'a native Cloudflare interstitial stays pending');
+      assert(isNativeIndeedChallengePending('https://ca.indeed.com/jobs?q=architect', 'Additional verification required') === true,
+        'Cloudflare verification text remains pending even on the public jobs path');
+      assert(isNativeIndeedChallengeCleared('https://ca.indeed.com/jobs?q=architect', 'Software Architect Jobs, Employment | Indeed') === true,
+        'a settled first-party results page is a valid post-challenge handoff destination');
+      assert(isNativeIndeedChallengeCleared(challengeUrl, 'Just a moment...') === false,
+        'a challenge URL/title must never report cleared');
+      assert(isNativeIndeedChallengeCleared('https://accounts.google.com/signin', 'Sign in - Google Accounts') === false,
+        'an OAuth page is not a cleared Indeed page');
+      assert(isNativeIndeedChallengeCleared('https://ca.indeed.com/jobs?q=architect', '') === false,
+        'an empty/loading title is not sufficient proof that the native page settled');
+      assert(isStrictIndeedHttpsUrl('https://ca.indeed.com/jobs') === true
+        && isStrictIndeedHttpsUrl('https://indeed.com.evil.test/jobs') === false,
+      'native handoff accepts only strict Indeed HTTPS hosts');
+      assert(isNativeIndeedChallengeHardBlock('https://ca.indeed.com/jobs', 'Attention Required!') === true
+        && isNativeIndeedChallengeCleared('https://ca.indeed.com/jobs', 'Access Denied') === false,
+      'hard blocks cannot be mistaken for a clean handoff page');
+      const selected = selectNativeIndeedChallengeTab([
+        { url: 'https://www.indeed.com/jobs?q=old', title: 'Old search | Indeed' },
+        { url: 'https://ca.indeed.com/jobs?__cf_chl_rt_tk=token', title: 'Just a moment...' },
+        { url: 'https://indeed.com.evil.test/jobs', title: 'Just a moment...' },
+      ], 'https://ca.indeed.com/jobs?__cf_chl_rt_tk=token');
+      assert(selected?.url === 'https://ca.indeed.com/jobs?__cf_chl_rt_tk=token',
+        'native handoff polls the pending tab for the requested strict hostname, not an unrelated/restored tab');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Indeed session reset is origin-scoped and cannot clear another platform’s cookies',
+    run: () => {
+      const origins = getIndeedSessionResetOrigins();
+      const hosts = origins.map(origin => new URL(origin).hostname).sort();
+      assert(new Set(origins).size === origins.length, `reset origins must be deduped (got ${origins.join(', ')})`);
+      assert(hosts.includes('www.indeed.com') && hosts.includes('ca.indeed.com') && hosts.includes('secure.indeed.com'),
+        `reset must cover public, Canadian, and auth Indeed origins (got ${hosts.join(', ')})`);
+      assert(hosts.every(host => host === 'indeed.com' || host.endsWith('.indeed.com')),
+        `reset origins must stay within Indeed's registrable domain (got ${hosts.join(', ')})`);
+
+      for (const domain of ['indeed.com', '.indeed.com', 'ca.indeed.com', '.ca.indeed.com', 'secure.indeed.com']) {
+        assert(isIndeedCookieDomain(domain) === true, `Indeed cookie domain accepted → ${domain}`);
+      }
+      for (const domain of ['', '.google.com', 'google.com', 'evilindeed.com', 'indeed.com.evil', '.indeed.com.evil']) {
+        assert(isIndeedCookieDomain(domain) === false, `non-Indeed/lookalike cookie domain rejected → ${domain || '(empty)'}`);
+      }
+      return { origins: origins.length };
+    },
+  },
+{
+    name: 'Indeed session preflight separates authenticated state, a Cloudflare wall, and an anonymous public landing',
+    run: () => {
+      const authenticated = classifyIndeedSessionPreflight({
+        hasPPID: true,
+        landedUrl: 'https://ca.indeed.com/',
+        challengeReason: null,
+      });
+      assert(authenticated.status === 'authenticated',
+        `PPID is affirmative session proof (got ${JSON.stringify(authenticated)})`);
+
+      // Native Chrome can persist a real account session in state that a later
+      // CDP cookie read does not expose. A clean authenticated account URL is
+      // therefore an alternate proof, but a public /jobs/home page is not.
+      const authenticatedSettings = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        authenticatedUrl: true,
+        landedUrl: 'https://secure.indeed.com/settings/account',
+        challengeReason: null,
+      });
+      assert(authenticatedSettings.status === 'authenticated' && authenticatedSettings.proof === 'authenticated-url',
+        `clean account-settings access proves the native session when PPID is not CDP-visible (got ${JSON.stringify(authenticatedSettings)})`);
+
+      const challenge = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        landedUrl: 'https://ca.indeed.com/?__cf_chl_rt_tk=token',
+        challengeReason: 'cf-verify-text',
+      });
+      assert(challenge.status === 'challenge',
+        `a no-PPID Cloudflare landing must be challenge, not authenticated (got ${JSON.stringify(challenge)})`);
+
+      const challengedSettings = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        authenticatedUrl: true,
+        landedUrl: 'https://secure.indeed.com/settings/account?__cf_chl_rt_tk=token',
+        challengeReason: 'cf-verify-text',
+      });
+      assert(challengedSettings.status === 'challenge',
+        `a challenge must override an otherwise-authenticated-looking URL (got ${JSON.stringify(challengedSettings)})`);
+
+      const publicLanding = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        landedUrl: 'https://ca.indeed.com/',
+        challengeReason: null,
+      });
+      assert(publicLanding.status === 'needs-login',
+        `a public no-PPID landing must not be accepted as logged in (got ${JSON.stringify(publicLanding)})`);
+
+      assert(shouldHandoffIndeedChallengeToNative('cf-verify-text') === true,
+        'the report’s text-only Cloudflare wall chooses native Chrome handoff, never a controlled-browser wait/restart');
+      assert(shouldHandoffIndeedChallengeToNative('cloudflare-challenge-frame', { interactive: true }) === true,
+        'an embedded Cloudflare widget likewise chooses native Chrome instead of CDP interaction');
+      assert(shouldHandoffIndeedChallengeToNative('indeed-login-wall') === false
+        && shouldHandoffIndeedChallengeToNative('') === false,
+      'login walls and unknown states do not create a native-challenge handoff');
+      return { ok: true };
+    },
+  },
+{
+    // BUG 1 regression: the preflight navigates to the auth-gated
+    // secure.indeed.com/settings/account on purpose, so a logged-out user's
+    // redirect to Indeed's OWN sign-in page (getChallengeSignals'
+    // "indeed-login-wall") is the ORDINARY logged-out signal, not a bot wall.
+    // Before the fix, classifyIndeedSessionPreflight checked challengeReason
+    // first with no carve-out, so this case returned "challenge" and the
+    // needs-login branch (indeedBrowser.js ~631-643) was unreachable — the user
+    // got told to "wait before retrying" with no way to actually log in.
+    name: 'classifyIndeedSessionPreflight: a login-wall redirect is needs-login, never a bot challenge',
+    run: () => {
+      const loginWall = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        landedUrl: 'https://secure.indeed.com/auth?continue=https%3A%2F%2Fsecure.indeed.com%2Fsettings%2Faccount',
+        challengeReason: 'indeed-login-wall',
+      });
+      assert(loginWall.status === 'needs-login' && loginWall.reason === 'redirected-to-sign-in',
+        `a login-wall redirect must classify as needs-login/redirected-to-sign-in, not challenge (got ${JSON.stringify(loginWall)})`);
+
+      // A REAL Cloudflare wall must still win — every reason the wider codebase
+      // treats as an actual bot challenge (see shouldHandoffIndeedChallengeToNative
+      // and getChallengeSignals) must classify as "challenge", never be swallowed
+      // by the login-wall carve-out.
+      for (const reason of ['cf-verify-text', 'challenge-shell', 'cloudflare-challenge-frame', 'cloudflare-challenge-url']) {
+        const challenged = classifyIndeedSessionPreflight({
+          hasPPID: false,
+          landedUrl: 'https://secure.indeed.com/settings/account',
+          challengeReason: reason,
+        });
+        assert(challenged.status === 'challenge' && challenged.reason === reason,
+          `a real Cloudflare reason (${reason}) must still classify as challenge (got ${JSON.stringify(challenged)})`);
+      }
+
+      // hasPPID / authenticatedUrl win over a login-wall reason (the login-wall
+      // check runs only after the affirmative-proof check) …
+      const ppidOverLoginWall = classifyIndeedSessionPreflight({
+        hasPPID: true,
+        landedUrl: 'https://secure.indeed.com/auth?continue=...',
+        challengeReason: 'indeed-login-wall',
+      });
+      assert(ppidOverLoginWall.status === 'authenticated' && ppidOverLoginWall.proof === 'PPID',
+        `a PPID cookie must win over a login-wall reason (got ${JSON.stringify(ppidOverLoginWall)})`);
+      const authUrlOverLoginWall = classifyIndeedSessionPreflight({
+        hasPPID: false,
+        authenticatedUrl: true,
+        landedUrl: 'https://secure.indeed.com/auth?continue=...',
+        challengeReason: 'indeed-login-wall',
+      });
+      assert(authUrlOverLoginWall.status === 'authenticated' && authUrlOverLoginWall.proof === 'authenticated-url',
+        `an authenticated-looking URL must win over a login-wall reason (got ${JSON.stringify(authUrlOverLoginWall)})`);
+
+      // … but NOT over a real challenge: the challenge check runs FIRST, so a
+      // real Cloudflare wall must override even a present PPID/authenticatedUrl
+      // (a stale cookie proves nothing about the page actually served).
+      const challengeOverPPID = classifyIndeedSessionPreflight({
+        hasPPID: true,
+        authenticatedUrl: true,
+        landedUrl: 'https://secure.indeed.com/settings/account',
+        challengeReason: 'cf-verify-text',
+      });
+      assert(challengeOverPPID.status === 'challenge' && challengeOverPPID.reason === 'cf-verify-text',
+        `a real challenge must override hasPPID/authenticatedUrl (got ${JSON.stringify(challengeOverPPID)})`);
+
+      // A navigation that never landed anywhere (about:blank) says nothing about
+      // the session either way — must stay "unreachable", not be asserted as
+      // needs-login/challenge.
+      assert(classifyIndeedSessionPreflight({ landedUrl: 'about:blank' }).status === 'unreachable',
+        'about:blank (navigation never completed) must classify as unreachable');
+      assert(classifyIndeedSessionPreflight({ landedUrl: '' }).status === 'unreachable',
+        'an empty landedUrl must classify as unreachable');
+      return { ok: true };
+    },
+  },
+{
+    // BUG 3: Puppeteer's default launch args force the Chromium MOCK keychain
+    // (a fixed, static OSCrypt key) on every Puppeteer-launched Chrome. The raw
+    // child_process.spawn native login/challenge windows must carry the exact
+    // same flags or they use the REAL macOS Keychain key instead — two
+    // encryption domains on one shared cookie DB, so cookies written by one
+    // Chrome are silently unreadable by the other (this is what actually lost
+    // the Indeed session: the native login wrote real-Keychain-encrypted rows
+    // the Puppeteer scrape browser's mock-keychain profile could never decrypt).
+    name: 'PUPPETEER_OSCRYPT_PARITY_ARGS matches puppeteer-core\'s own OSCrypt-relevant default args',
+    run: () => {
+      assert(Array.isArray(PUPPETEER_OSCRYPT_PARITY_ARGS)
+        && PUPPETEER_OSCRYPT_PARITY_ARGS.includes('--password-store=basic')
+        && PUPPETEER_OSCRYPT_PARITY_ARGS.includes('--use-mock-keychain'),
+      `PUPPETEER_OSCRYPT_PARITY_ARGS must carry both OSCrypt flags → ${JSON.stringify(PUPPETEER_OSCRYPT_PARITY_ARGS)}`);
+
+      // Derive the truth from puppeteer-core itself rather than hardcoding it
+      // twice: every Puppeteer launch here only filters "--enable-automation"
+      // out of defaultArgs() (ignoreDefaultArgs: ["--enable-automation"]), so
+      // "--password-store=basic" and "--use-mock-keychain" always survive into
+      // the real scrape/login Chrome. If puppeteer-core ever drops or renames
+      // either flag, the raw-spawned native windows (authWindows.js
+      // openNativeLoginWindow / openNativeIndeedChallengeWindow) would silently
+      // fall out of parity with the Puppeteer-launched browser sharing the same
+      // profile — this must fail loud instead of that going unnoticed.
+      const launcherPath = path.join('node_modules', 'puppeteer-core', 'lib', 'puppeteer', 'node', 'ChromeLauncher.js');
+      const launcherSrc = fs.readFileSync(launcherPath, 'utf8');
+      assert(launcherSrc.includes('--password-store=basic'),
+        'puppeteer-core ChromeLauncher.js must still inject --password-store=basic into its default launch args');
+      assert(launcherSrc.includes('--use-mock-keychain'),
+        'puppeteer-core ChromeLauncher.js must still inject --use-mock-keychain into its default launch args');
+      return { ok: true };
+    },
+  },
+{
+    // BUG 3 wiring: the on-disk survival check (accounts.js
+    // annotateCookieSurvival) and the scrape preflight both key off this exact
+    // cookie name for Indeed — pin the shape so a future edit can't silently
+    // widen or narrow it (e.g. adding a second candidate cookie would change
+    // cookieListHasAuth's match semantics for every caller).
+    name: 'PLATFORM_AUTH_COOKIES.indeed is exactly ["PPID"]',
+    run: () => {
+      assert(JSON.stringify(PLATFORM_AUTH_COOKIES.indeed) === JSON.stringify(['PPID']),
+        `PLATFORM_AUTH_COOKIES.indeed must be exactly ["PPID"] → ${JSON.stringify(PLATFORM_AUTH_COOKIES.indeed)}`);
+      // The cookie lookup reads back through page.cookies(url), which returns
+      // only cookies that APPLY to each url — a host-only cookie on
+      // secure.indeed.com is invisible to an apex-only query. Since an
+      // "absent" answer now REVOKES a confirmed native login, an incomplete
+      // host list would tell a user who just signed in that their login did
+      // not persist. Pin the same host set the Indeed scrape preflight queries.
+      const indeedDomains = PLATFORM_COOKIE_DOMAINS.indeed || [];
+      for (const host of ['.indeed.com', 'www.indeed.com', 'secure.indeed.com']) {
+        assert(indeedDomains.includes(host),
+          `PLATFORM_COOKIE_DOMAINS.indeed must cover ${host} → ${JSON.stringify(indeedDomains)}`);
+      }
       return { ok: true };
     },
   },
@@ -520,8 +825,16 @@ export default [
       assert(isNativeLoginSuccess('swappa', 'https://swappa.com/login?next=/my/swappa', 'Sign In') === false, 'still on the login page → not yet');
       assert(isNativeLoginSuccess('swappa', 'https://swappa.com/login', 'Just a moment...') === false, 'Cloudflare interstitial title → not a success');
       assert(isNativeLoginSuccess('swappa', 'https://swappa.com/', 'Swappa') === false, 'homepage is not the success marker');
-      // Indeed detection unchanged.
-      assert(isNativeLoginSuccess('indeed', 'https://www.indeed.com/jobs?q=x', 'Jobs') === true, 'indeed success URL unchanged');
+      // Indeed's public /jobs search is deliberately NOT an authenticated
+      // success marker. An anonymous page can reach it, and accepting it made a
+      // Cloudflare/interstitial login flow look connected before any account
+      // signal existed. The settings account page is the only native URL proof.
+      assert(isNativeLoginSuccess('indeed', 'https://www.indeed.com/jobs?q=x', 'Jobs') === false,
+        'public Indeed /jobs is not proof of a completed login');
+      assert(isNativeLoginSuccess('indeed', 'https://secure.indeed.com/settings/account', 'Account settings | Indeed') === true,
+        'Indeed authenticated settings page is a native-login success marker');
+      assert(isNativeLoginSuccess('indeed', 'https://secure.indeed.com/settings/account?__cf_chl_rt_tk=token', 'Just a moment...') === false,
+        'Cloudflare URL/title at an otherwise authenticated-looking path is never a login success');
       return { ok: true };
     },
   },
@@ -601,6 +914,19 @@ export default [
         `unrelated host remains rejected with an explicit reportable reason (${JSON.stringify(mismatch)})`);
       assert(mismatch.currentHost === 'www.linkedin.com' && mismatch.finalTitle === 'LinkedIn Feed',
         'host mismatch diagnostics retain the landing URL/host/title without evaluating the page body');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Glassdoor startup verifier rejects the anonymous public jobs landing page',
+    run: () => {
+      const cfg = getJobLoginConfig('glassdoor');
+      const anonymous = 'Recommended Jobs For You | Glassdoor Job Search Skip to main content Search Notifications Loading... Sign In Upload your resume - let employers find you Your job';
+      const loggedIn = 'Recommended Jobs For You | Glassdoor Job Search Search Notifications Saved Jobs Profile Recommended for you';
+      assert(getSoftLoginWallMatch(anonymous, cfg) === 'sign in upload your resume - let employers find you',
+        'Glassdoor anonymous /Job/index.htm body must not fall through to connected:true');
+      assert(getSoftLoginWallMatch(loggedIn, cfg) === null,
+        'Glassdoor logged-in jobs body must not false-positive as a login wall');
       return { ok: true };
     },
   },

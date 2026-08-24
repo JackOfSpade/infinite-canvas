@@ -175,6 +175,11 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         // minute, and the user may have dismissed the card meanwhile — never
         // auto-save a bundle into Applied Jobs for a job the user discarded.
         if (!findLiveJobNode(nodeId, jobId)) {
+          // importLocalApplication registered this exact workspace under this
+          // renderer's sender id. Dispose of that capability-bound workspace
+          // now; otherwise a deleted card leaves its private Local AI job
+          // folder and imported artifacts behind until retention pruning.
+          await window.electronAPI.discardApplication?.({ workDir: result.workDir });
           EventLogger.log(`[LocalAI] fallback abandoning save job=${jobId} card=${nodeId}: card no longer exists`);
           return;
         }

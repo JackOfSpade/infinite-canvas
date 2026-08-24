@@ -14,9 +14,9 @@
 //
 // This is DELIBERATELY a separate queue from withSharedProfileLock():
 //   - sharedProfileLock guards separate browser PROCESSES contending for the
-//     OS-locked userDataDir (job scrapers that launch+pkill their own Chrome).
+//     OS-locked userDataDir (job scrapers that launch their own Chrome).
 //   - Status checks share the ONE persistent stealth browser via tabs and never
-//     pkill, so they can't hit that process/profile hazard. Their problem is
+//     process cleanup, so they can't hit that former broad-kill hazard. Their problem is
 //     purely the rate-limit burst above. Reusing the profile lock would also
 //     over-serialize: it would throttle a SINGLE check's internal parallel URL
 //     fetches against unrelated job scrapes for no benefit.

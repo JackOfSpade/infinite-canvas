@@ -18,7 +18,7 @@ export function JobBoardDoneState({
   staleReason = '',
   canReplaceWithEmpty = false,
   locked = false,
-  // Score filter
+  // Hiring-fit filter
   scoreThreshold = 0,
   setScoreThreshold,
   scoreRangeMin = 0,
@@ -94,7 +94,7 @@ export function JobBoardDoneState({
         )}
         {!stale && sliderActive && (
           <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 text-white/50 text-[9px]">
-            ≥{scoreThreshold}%
+            Hiring fit ≥{scoreThreshold}/100
             {!locked && (
               <button onClick={() => setScoreThreshold?.(scoreRangeMin)} onPointerDown={(e) => e.stopPropagation()}>
                 <X size={8} />
@@ -157,9 +157,9 @@ export function JobBoardDoneState({
           {sliderUsable && (
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[10px]">
-                <span className="text-white/40">Min score</span>
+                <span className="text-white/40">Min hiring fit</span>
                 <span className="text-white/60 font-medium">
-                  {sliderActive ? `≥${scoreThreshold}%` : 'All'}
+                  {sliderActive ? `≥${scoreThreshold}/100` : 'All'}
                 </span>
               </div>
               <input
@@ -168,12 +168,13 @@ export function JobBoardDoneState({
                 max={scoreRangeMax}
                 step={1}
                 value={scoreThreshold}
+                aria-label="Minimum hiring fit"
                 onChange={(e) => setScoreThreshold?.(Number(e.target.value))}
                 className="w-full h-1 accent-blue-400 cursor-pointer"
               />
               <div className="flex justify-between text-[8px] text-white/20">
-                <span>{scoreRangeMin}%</span>
-                <span>{scoreRangeMax}%</span>
+                <span>{scoreRangeMin}/100</span>
+                <span>{scoreRangeMax}/100</span>
               </div>
             </div>
           )}

@@ -144,6 +144,15 @@ team of 8`.
 
 ### Bullet ordering: relevance to the job, not chronology
 
+Before ordering, each bullet must survive being read alone. Recruiters and ATS
+previews often surface one `<li>` without its neighbors, so a bullet cannot
+borrow its subject from a preceding bullet or role summary. Repeat the shortest
+clear noun phrase for the platform, database, system, dataset, or actor; reject
+backward references such as "those platforms" and "that database." Apply the
+same document-wide copy edit to compounds such as "in-house." Data-flow copy
+names its actors instead of using "their APIs" or "data they returned," and
+temporal modifiers such as "after testing" sit beside the action they modify.
+
 The same role's bullets get **re-sequenced for every application.**
 Within a role, the first bullet is the one whose evidence most
 directly answers *this* job description — its responsibilities,
@@ -172,6 +181,17 @@ when they're doing real work inside the thesis — the rule bans the
 announcement, not the words. Full rule, the reject/rewrite table, and
 the audit grep are in `STYLE.md §11.2.2`.
 
+If the opening first names an unfamiliar prior employer, it also states the
+candidate's role or relationship there. Do not begin with an unexplained
+organization-first construction as though the recruiter already knows it. Across
+the rest of the letter, name cross-domain evidence by its concrete software,
+system, or responsibility; a possessive industry label can imply unsupported
+domain breadth or a different job function.
+
+The closing names the experience, skills, or work the candidate would bring.
+Those capabilities support the argument; they are not themselves "the
+evidence" brought to the role.
+
 ### Colon dumps, overloaded sentences, metaphors, broken parallelism, unearned generalization
 
 Five prose failures are banned in **every** string the system
@@ -187,13 +207,9 @@ should be replaced with the literal description of ownership,
 integration boundary, or data flow. And a coordinated construction —
 `from X through Y`, `both X and Y`, `either X or Y`, `not only X but
 also Y`, or a list — must keep its paired elements in the same
-grammatical form: "from the quote request through presenting
-findings" pairs a noun phrase against a gerund phrase and should
-become "from requesting quotes through presenting findings" (or the
-equally valid noun-phrase repair, "from the initial request for
-quotes through the presentation of findings"). Padding the seam
-("from the time of the quote request through…") doesn't repair the
-mismatch, it just hides it. And a concluding or transitional sentence
+grammatical form. A noun phrase paired against a gerund phrase should
+become two noun phrases or two actions. Padding the seam does not repair the
+mismatch; it only hides it. And a concluding or transitional sentence
 must stay inside the evidence that earned it and name what it
 generalizes: one example or one role supports a claim about that
 example or that role, never "most of my work" or "throughout my
@@ -202,6 +218,9 @@ define the concrete responsibility, system, decision, or process it
 stands for in the same sentence. These are defects of *shape*, so
 test a draft structurally rather than against a list of words.
 Rules and repairs: `STYLE.md §11.2.3`.
+
+A parallel pair can still be opaque: do not compress a multi-step workflow
+into an endpoint range. State the supported actions directly.
 
 ### Cover letter honesty and synthesis (hard gate)
 
@@ -233,12 +252,10 @@ The letter is also the one surface with paragraph boundaries, and the
 gate covers them. A conclusion may generalize from the evidence above
 it only when it names the concrete responsibility, system, decision,
 process, or mechanism connecting that evidence, and only as wide as
-that evidence goes — one product evaluation is not "the shape most of
-my work has taken". A paragraph that opens by pointing back with
+that evidence goes. A paragraph that opens by pointing back with
 "this", "that", or "it" must have exactly one plausible antecedent;
-when the previous paragraph offered several (an evaluation, an
-integration, a decision, an abstract summary noun), repeat the precise
-noun phrase — "that end-to-end responsibility" — instead. Repair a
+when the previous paragraph offered several possible referents, repeat the
+precise noun phrase instead. Repair a
 detached synthesis by rewriting it as a concrete, evidence-scoped
 conclusion or by cutting it; a filler transition that names nothing
 leaves the ambiguity in place and costs a line.

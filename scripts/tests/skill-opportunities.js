@@ -313,55 +313,6 @@ export default [
     },
   },
   {
-    name: 'application workspace: model provenance shows only distinct successful actual models and escapes display data',
-    run: () => {
-      const html = buildResumeDocument({
-        resumeMainHtml: '<main class="page"><h1 class="name">Jane</h1></main>',
-        modelProvenance: [
-          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed', fallback: { attempts: 2 } },
-          // The resume writer can appear twice in task telemetry after a retry;
-          // the immutable workspace should name that same actual model once.
-          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed', fallback: { attempts: 2 } },
-          { task: 'application-cover-letter', provider: 'claude', model: 'claude-sonnet-5', status: 'completed' },
-          { task: 'application-resume-revision', provider: 'gemini', model: '<img id="provenance-xss">', status: 'completed' },
-          { task: 'application-letter-plan', provider: 'gemini', model: 'failed-model-must-not-show', status: 'failed' },
-          { task: 'company-research', provider: 'gemini', model: 'degraded-model-must-not-show', status: 'degraded' },
-        ],
-      });
-      const dom = new JSDOM(html);
-      const provenance = dom.window.document.querySelector('[data-ic-model-provenance]');
-      assert(provenance, 'a successful model outcome did not render provenance in Application.html');
-      const rows = [...provenance.querySelectorAll('li')].map(row => row.textContent);
-      assert(rows.length === 3, `expected two models plus one escaped revision entry after dedupe, got ${rows.length}`);
-      assert(rows.filter(row => row.includes('Résumé writing and fit')).length === 1,
-        'duplicate task/model outcomes were repeated in the saved bundle');
-      assert(rows.some(row => row.includes('gemini-3.7-flash') && row.includes('(fallback)')),
-        'the actual fallback-serving model was not identified as a fallback');
-      assert(rows.some(row => row.includes('Cover-letter writing') && row.includes('claude-sonnet-5')),
-        'a second successful provider/model was not listed');
-      assert(rows.some(row => row.includes('Résumé length revision') && row.includes('<img id="provenance-xss">')),
-        'a successful length-revision model was not displayed as text');
-      assert(!provenance.querySelector('#provenance-xss') && !html.includes('<img id="provenance-xss">'),
-        'model provenance was inserted as HTML instead of escaped text');
-      assert(!provenance.textContent.includes('failed-model-must-not-show')
-        && !provenance.textContent.includes('degraded-model-must-not-show'),
-      'failed or degraded calls were presented as bundle-generating models');
-      dom.window.close();
-
-      const singleModelDom = new JSDOM(buildResumeDocument({
-        resumeMainHtml: '<main class="page"><h1 class="name">Jane</h1></main>',
-        modelProvenance: [
-          { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash', status: 'completed' },
-        ],
-      }));
-      assert(singleModelDom.window.document.querySelector('[data-ic-model-provenance] summary')?.textContent
-        === 'AI model: Google · gemini-3.7-flash',
-      'a single serving model was not shown with the singular, visible bundle label');
-      singleModelDom.window.close();
-      return { entries: rows.length };
-    },
-  },
-  {
     name: 'résumé workspace: verify skill merges into an existing skills category with no new row and no Role-fit label',
     run: () => {
       const resumeMainHtml = resumeWithSkills(

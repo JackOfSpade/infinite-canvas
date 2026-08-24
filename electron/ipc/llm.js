@@ -10,7 +10,7 @@ import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
 import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars } from './tokenWindow.js';
 import { claudeReasoningMaxTokens } from './claudeModels.js';
-import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, isClaudeFamilyToken, claudeModelFor, resolvedClaudeModels, primeClaudeModels } from './modelResolver.js';
+import { CLAUDE_FAMILY, isClaudeFamilyToken, claudeModelFor, resolvedClaudeModels, primeClaudeModels } from './modelResolver.js';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 
@@ -21,9 +21,8 @@ import { logger } from '../logger.js';
  * for the active provider. Quality+cost decisions belong with whoever wrote
  * the prompt, not with the user, who has no signal about which task needs
  * which QUALITY TIER — but the user DOES get a say in what each tier actually
- * costs (see "Task groups" below): résumé generation is no longer hard-pinned
- * to Claude, and within Claude the tier-to-family mapping (Opus vs Sonnet vs
- * Haiku vs Fable) is a Settings choice, not a hard-code.
+ * costs (see "Task groups" below). Within Claude, the tier-to-family mapping
+ * (Opus vs Sonnet vs Haiku vs Fable) is a Settings choice, not a hard-code.
  *
  * The Gemini column below (TASK_MODELS) stays literal, per-task, and is NOT
  * user-selectable — the Gemini path is a capability-ladder CASCADE (pro →
@@ -67,52 +66,6 @@ const TASK_MODELS = {
   // market evidence; a separate structured pass extracts comparable ranges.
   'job-compensation-research':  { gemini: 'gemini-3.7-flash' },
   'job-compensation-assessment': { gemini: 'gemini-3.7-flash' },
-  // Research: grounded summarization that FEEDS application generation, not
-  // the employer-facing artifact itself (see the `generation` group doc below
-  // for why it steps down a tier on the Claude path).
-  'company-research':          { gemini: 'gemini-3.7-flash' },
-  // Application generation (résumé + cover letter from the design system).
-  // Quality compounds here — the output is a polished document a human sends
-  // to a recruiter, where writing nuance + judgment convert to interviews.
-  // This USED to be hard-pinned to Claude regardless of the user's Settings
-  // provider; Jack reversed that call — it now follows the same
-  // provider+model routing as every other task (providerForTask below), and
-  // Gemini is a fully valid choice here, served by its own capability-ladder
-  // cascade exactly like any other Gemini task.
-  'application-resume':        { gemini: 'gemini-3.7-flash' },
-  'application-letter-needs':  { gemini: 'gemini-3.7-flash' },
-  'application-letter-plan':   { gemini: 'gemini-3.7-flash' },
-  'application-cover-letter':  { gemini: 'gemini-3.7-flash' },
-  // Independent factual audit: deliberately one generation below the writer
-  // so it does not simply grade its own prose with the same primary model.
-  'application-letter-grounding': { gemini: 'gemini-3.5-flash' },
-  'application-letter-revise': { gemini: 'gemini-3.7-flash' },
-  // Evidence-bound analysis of job-significant, adjacent skills. This runs
-  // before the employer-facing artefact and feeds the candidate-only review /
-  // learning surfaces, so it belongs on the same capable Flash tier.
-  'application-skill-opportunity': { gemini: 'gemini-3.7-flash' },
-  // Achievement mining (résumé design doc §3.1) derives accomplishments by
-  // JOINING facts scattered across the corpus — e.g. two balance sheets + a
-  // tenure date → "cut debt 74%" — which no other task attempts. It's the
-  // highest-leverage reasoning pass in the whole pipeline, and it runs ONCE
-  // PER HUB (cached on the jobhub node, reused by every application generated
-  // from it), not per application — so a premium tier's cost is amortized
-  // rather than paid on every Generate click the way application-resume pays it.
-  'career-achievement-mining': { gemini: 'gemini-3.7-flash' },
-  // The refute pass MUST resolve to a DIFFERENT model from the miner — see
-  // the `generation` group's `step` doc below, which is where that
-  // independence guarantee now lives (it used to be "pin both to Claude";
-  // the group/step mechanism generalizes it to work under any Settings pick).
-  // Deliberately a DIFFERENT Gemini id from career-achievement-mining above,
-  // not a cheaper one — same Flash tier, one generation back. The Claude path
-  // gets miner/refuter independence from the `step: 1` offset (see TASK_GROUPS
-  // below), but `step` is a Claude-family ladder walk and does nothing on the
-  // Gemini side: both tasks would otherwise resolve to the identical
-  // gemini-3.7-flash and the "independent" refutation would be the same model
-  // grading its own homework, which is the one thing the refute pass exists to
-  // avoid. Keeping it in the Flash tier (rather than stepping down to Lite)
-  // means the check stays strong enough to actually overturn a bad claim.
-  'career-achievement-refute': { gemini: 'gemini-3.5-flash' },
   'text-polish':               { gemini: 'gemini-3.5-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
@@ -122,71 +75,20 @@ const TASK_MODELS = {
 /**
  * ── Task groups: the user-selected Claude tier ─────────────────────────────
  *
- * On the Claude path, every task belongs to exactly one GROUP, and each
- * group's Claude FAMILY (Fable/Opus/Sonnet/Haiku) is a Settings choice
- * (`ai.claudeModels`, settings.js) instead of the hard-coded per-task column
- * this table used to carry. GROUP_DEFAULT_FAMILY below is what an install
- * with no `claudeModels` configured (or an unrecognized token in it) falls
- * back to — chosen to reproduce the OLD per-task TASK_MODELS Claude column
- * exactly, so this refactor changes WHO gets to pick the tier, not what a
- * default install actually does. (Verified by a same-output-as-before test
- * in scripts/test-runner.js — the safety net for this whole change.)
- *
- * `step` is a per-task offset DOWN CLAUDE_FAMILY_LADDER from the group's
- * chosen family (0 = the group's own family; 1 = one family less capable).
- * Two tasks use it, both in `generation`:
- *   - `career-achievement-refute` (step 1) — LOAD-BEARING. The refuter must
- *     resolve to a DIFFERENT model from the miner (`career-achievement-mining`,
- *     same group, step 0) or the adversarial fact-check degenerates into
- *     self-confirmation: a model re-checking its own reasoning tends to just
- *     re-confirm it. This is not a cost optimization that happens to also buy
- *     independence — independence IS the reason for the step. Don't remove it
- *     and don't let it default to step 0.
- *     NOTE `step` is a CLAUDE-family ladder walk and does nothing on the
- *     Gemini path — the same independence is bought there by giving the two
- *     tasks different literal ids in TASK_MODELS above (3.7-flash miner /
- *     3.5-flash refuter). Change one and change the other, or one provider
- *     silently loses the property.
- *   - `company-research` (step 1) — grounded summarization that FEEDS
- *     generation (the résumé/cover-letter, not the artifact itself), so it
- *     runs one tier below whatever family the user picked for Generation —
- *     same relationship as the old table's "Sonnet research feeds Opus
- *     résumé" split, just relative to the user's choice instead of a literal
- *     pin.
- * Every other task in every group runs at step 0 (the group's own family).
- *
- * Stepping CLAMPS at the bottom of CLAUDE_FAMILY_LADDER — a user who sets
- * Generation to Haiku leaves career-achievement-refute on Haiku too (nowhere
- * lower to step to), which silently loses the independence property above.
- * claudeFamilyForTask() below logs a warning whenever a step lands on the
- * same family as its group for exactly this reason — a landed-flat step is
- * otherwise invisible (no error, no crash, just quietly worse verification).
+ * On the Claude path, every task belongs to exactly one live API group.
+ * `analysis` and `light` take their family from Settings (`ai.claudeModels`),
+ * with GROUP_DEFAULT_FAMILY as the safe fallback for absent or invalid values.
  */
 const GROUP_DEFAULT_FAMILY = {
-  generation: CLAUDE_FAMILY.OPUS,
   analysis:   CLAUDE_FAMILY.SONNET,
   light:      CLAUDE_FAMILY.HAIKU,
 };
 
 const TASK_GROUPS = {
-  // generation — employer-facing output, and what feeds it. Quality compounds
-  // here: the output is a document a human sends to a recruiter, where
-  // writing nuance + judgment convert to interviews.
-  'application-resume':        { group: 'generation' },
-  'application-letter-needs':  { group: 'generation', step: 1 }, // feeds generation, isn't the artifact
-  'application-letter-plan':   { group: 'generation' },
-  'application-cover-letter':  { group: 'generation' },
-  'application-letter-grounding': { group: 'generation', step: 1 },
-  'application-letter-revise': { group: 'generation' },
-  'application-skill-opportunity': { group: 'generation' },
-  'career-achievement-mining': { group: 'generation' },
-  'career-achievement-refute': { group: 'generation', step: 1 }, // independence — see doc above, load-bearing
-  'company-research':          { group: 'generation', step: 1 }, // feeds generation, isn't the artifact
-
   // analysis — vision identification, pricing judgment, resume parsing, job
   // scoring/query-gen/bucketing, and the fallback default: anywhere quality
-  // compounds or the output is user-facing but isn't the generation
-  // pipeline. Query gen and bucketing are here deliberately: query quality
+  // compounds or the output is user-facing rather than a light classifier.
+  // Query gen and bucketing are here deliberately: query quality
   // gates which jobs are ever DISCOVERED, and the bucketing role-
   // consolidation IS the user-facing results hierarchy. Both run once per
   // search (not per-job), so the quality tier is cheap regardless of pick.
@@ -292,17 +194,15 @@ const TASK_MAX_TOKENS = {
   // the JSON mid-output. 4096 matches resume-parse and gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
-  // Job scoring on the active Flash-tier Gemini with thinking: real-world telemetry shows
-  // ~175 thinking tokens per job plus ~150 visible tokens per job (score +
-  // 1-sentence rationale). 15-job batch with old formula (512 + 15*150 =
-  // 2762) had thoughts=2647 alone — barely 100 visible tokens before
-  // truncation. Formula: 2500 base + 420/item gives 15→8800, 50→23500, capped
-  // at 24576 so a pathological batch can't request runaway billing. The 420
-  // (was 300) reflects the richer multi-sentence `reasoning` we now ask for
-  // (truncated on the card, expandable) — output is billed on actual tokens so
-  // the headroom is free, and effectiveCap self-heals if a batch still clips.
+  // Job scoring now emits a requirement-by-requirement evidence inventory,
+  // material gaps, and separate tenure assessments in addition to the concise
+  // fit explanation. On thinking-capable models, the former 420/item reserve
+  // could truncate that structured evidence before the final rows. Formula:
+  // 2800 base + 1000/item gives 15→17800, still capped at 24576 so a
+  // pathological batch cannot request runaway billing. Output is billed on
+  // actual tokens; the reserve is headroom for complete, auditable JSON.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
-    Math.min(24576, 2500 + itemCount * 420),
+    Math.min(24576, 2800 + itemCount * 1000),
   // Bucketing reasons over salaries per category — thinking-heavy (the model
   // weighs each job's salary against its category's distribution). The old
   // static 6144 was calibrated against an older lighter-thinking Flash model
@@ -320,37 +220,6 @@ const TASK_MAX_TOKENS = {
   'job-compensation-research': 4096,
   'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
     Math.min(8192, 2048 + itemCount * 600),
-  // Research: synthesized web findings covering BOTH the company (culture,
-  // products, recent news, stage) AND the specific role (responsibilities,
-  // requirements, emphasized skills) — the primary job-context source. Grounded
-  // calls also spend tokens assembling search results, so give room for a
-  // thorough two-part synthesis.
-  'company-research':          6144,
-  // Résumé generation emits a full <main class="page"> block of HTML (several
-  // roles × bullets, skills, education) — the largest free-text output here. A
-  // truncation produces malformed HTML → a broken PDF, so size well past a
-  // 2-page senior résumé. Unused cap is free (billed on actual output).
-  'application-resume':        12288,
-  'application-letter-needs':  2048,
-  'application-letter-plan':   3072,
-  'application-cover-letter':  3072,  // body paragraphs generated from a vetted plan
-  'application-letter-grounding': 2048,
-  'application-letter-revise': 3072,
-  // Short structured analysis: one role plus only job-significant verify/learn
-  // candidates, with evidence and safe follow-up text. Sized for several
-  // detailed items without the resume-sized budget.
-  'application-skill-opportunity': 6144,
-  // A ledger of ~40 items, each carrying a verbatim evidence quote AND a
-  // human-readable derivation string, is a larger output than a single file's
-  // transcription — deliberately set above career-file-extract's 16384 for
-  // the same reason that cap is generous: a truncated ledger silently DROPS
-  // achievements rather than erroring, which is worse than an oversized cap.
-  // Caps bill on actual output, so the headroom is free.
-  'career-achievement-mining': 24576,
-  // The refuter returns one verdict per ledger item (id + verdict enum + a
-  // short reason + suggested attribution/caveat) — far smaller than the
-  // ledger it's attacking.
-  'career-achievement-refute': 8192,
   'text-polish':               1024,  // light edit
   'default':                   2048,
 };
@@ -363,11 +232,8 @@ function resolveTask(task) {
   return task;
 }
 
-// The set of task ids the current build actually issues (union of the model +
-// max-tokens maps, minus the 'default' fallback). The persisted token-budget
-// store accumulates a rolling sample per task and never prunes renamed/removed
-// keys, so a stale task can haunt bug reports forever — callers use this to tell
-// live tasks from persisted ghosts (e.g. an old 'parse-pasted-jobs').
+// The set of task ids registered in the live routing + token-cap tables (union
+// of both maps, minus the 'default' fallback).
 export function getKnownTaskIds() {
   return new Set(
     [...Object.keys(TASK_MODELS), ...Object.keys(TASK_MAX_TOKENS)].filter(k => k !== 'default')
@@ -376,9 +242,7 @@ export function getKnownTaskIds() {
 
 /**
  * The Claude FAMILY that serves `task` on the Claude provider: the task's
- * group's user-selected family (settings.claudeModels[group]), stepped down
- * CLAUDE_FAMILY_LADDER by the task's `step` and clamped at the ladder's end —
- * see the TASK_GROUPS doc above for the full contract.
+ * group's user-selected family (settings.claudeModels[group]).
  *
  * Falls back to GROUP_DEFAULT_FAMILY when `settings.claudeModels` is absent
  * (an older persisted config) or carries an unrecognized token. settings.js's
@@ -389,54 +253,28 @@ export function getKnownTaskIds() {
  */
 function claudeFamilyForTask(task, settings) {
   const t = resolveTask(task);
-  const { group, step = 0 } = TASK_GROUPS[t];
+  const { group } = TASK_GROUPS[t];
   const configured = settings?.claudeModels?.[group];
-  const groupFamily = isClaudeFamilyToken(configured) ? configured : GROUP_DEFAULT_FAMILY[group];
-  if (step === 0) return groupFamily;
-
-  const idx = CLAUDE_FAMILY_LADDER.indexOf(groupFamily);
-  // idx is always found (groupFamily is always a valid token by this point) —
-  // the `-1` branch below is unreachable defensive code, not a real case.
-  const stepped = idx === -1 ? groupFamily : CLAUDE_FAMILY_LADDER[Math.min(idx + step, CLAUDE_FAMILY_LADDER.length - 1)];
-
-  if (stepped === groupFamily) {
-    logger.warn(`[LLM] Task '${t}' steps ${step} below its group '${group}' (${groupFamily}), but CLAUDE_FAMILY_LADDER clamped at the same family — the independence this step exists for is lost until '${group}' is set above the ladder floor.`);
-  }
-  return stepped;
+  return isClaudeFamilyToken(configured) ? configured : GROUP_DEFAULT_FAMILY[group];
 }
 
 function pickModel(provider, task, settings) {
   const t = resolveTask(task);
-  // Local AI is a human-in-the-loop Claude Code handoff, not a network model
-  // endpoint. Keep a readable pseudo-model for diagnostics rather than
-  // pretending a Gemini fallback will serve the request.
-  if (provider === 'local') return 'claude-code-local';
   if (provider === 'claude') return claudeModelFor(claudeFamilyForTask(t, settings), settings?.anthropicApiKey);
   return TASK_MODELS[t].gemini || TASK_MODELS['default'].gemini;
 }
 
 /**
- * Which provider serves `task` — purely the user's Settings choice.
+ * Which API provider serves `task` — purely the user's Settings choice.
  *
- * Every task follows the same provider now (no more per-task pin): Jack
- * reversed the earlier "always run application-generation on Claude"
- * decision, so a user who selects Gemini gets résumé + cover-letter
- * generation on Gemini too, served by its own capability-ladder cascade like
- * every other Gemini task. `task` is kept in the signature for API stability
- * (every call site already threads it through) even though the routing no
- * longer depends on it.
+ * Generic LLM calls support Gemini API and Claude API only. `task` is kept in
+ * the signature for API stability (every call site already threads it through)
+ * even though the provider selection does not depend on it.
  *
  * PURE — no throw, no network.
  */
 export function providerForTask(task, settings = getAISettings()) {
-  if (settings?.provider === 'local') return 'local';
   return settings?.provider === 'claude' ? 'claude' : 'gemini';
-}
-
-function assertApiProvider(provider) {
-  if (provider === 'local') {
-    throw new Error('Local AI is a manual Claude Code handoff. It currently supports Application Generate only; choose Gemini API or Claude API for this task.');
-  }
 }
 
 /**
@@ -451,20 +289,14 @@ export function modelForTask(task, settings = getAISettings()) {
 }
 
 /**
- * Diagnostic snapshot for bug reports: which model actually serves every
- * GROUP (generation/analysis/light) and every individual TASK, given the
- * active provider + the user's `claudeModels` picks. Replaces the old
- * `providerPinnedTasks` / `applicationGenerationBlocked` bug-report fields,
- * which described a pin that no longer exists.
- *
- * Per-task detail matters alongside the per-group summary: a step-offset task
- * (career-achievement-refute, company-research) resolves to a DIFFERENT model
- * than its group's headline family, and that divergence is exactly the kind
- * of thing a "why did this task use a weaker/stronger model than I picked"
- * report needs spelled out rather than inferred.
+ * Diagnostic snapshot for bug reports: how every registered live API task
+ * resolves by GROUP and individual TASK, given the active provider and the
+ * user's `claudeModels` picks. Application Generate is diagnosed by the
+ * separate Local AI handoff trace.
  */
 export function taskModelRoutingSnapshot(settings = getAISettings()) {
   const provider = providerForTask(undefined, settings); // task-independent — see providerForTask doc
+  const tasksForReport = getKnownTaskIds();
   const groups = {};
   for (const group of Object.keys(GROUP_DEFAULT_FAMILY)) {
     const configured = settings?.claudeModels?.[group];
@@ -472,9 +304,9 @@ export function taskModelRoutingSnapshot(settings = getAISettings()) {
     groups[group] = { family, model: claudeModelFor(family, settings?.anthropicApiKey) };
   }
   const tasks = {};
-  for (const task of getKnownTaskIds()) {
-    const { group, step = 0 } = TASK_GROUPS[task];
-    tasks[task] = { group, step, provider, model: pickModel(provider, task, settings) };
+  for (const task of tasksForReport) {
+    const { group } = TASK_GROUPS[task];
+    tasks[task] = { group, provider, model: pickModel(provider, task, settings) };
   }
   return { provider, groups, tasks };
 }
@@ -508,8 +340,7 @@ function pickMaxTokens(task, hints = {}, provider = null, model = null) {
  * floor immediately; the call that paid for the truncation is the only one that
  * never gets to use it. Re-resolving here recovers the corrected cap for a
  * single retry — the difference between a completed atomic call and a hard
- * failure for tasks with no chunking path to fall back on
- * (career-file-extract, career-achievement-refute, application-resume).
+ * failure for non-chunkable tasks such as career-file extraction.
  *
  * Returns null unless the floor ACTUALLY moved, so a task already pinned at
  * TOKEN_HARD_CAP (or one that failed for any other reason) never retries.
@@ -546,7 +377,6 @@ export async function checkPromptFits(prompt, opts = {}) {
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
-  assertApiProvider(provider);
   const model = pickModel(provider, task, settings);
   const { cap: requestedOutput } = pickMaxTokens(task, hints, provider, model);
 
@@ -663,7 +493,6 @@ export async function callLLMText(prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
-  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const capHints = { promptLength: fullLen, ...hints };
@@ -753,7 +582,6 @@ export async function callLLMRaw(prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
-  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const capHints = { promptLength: fullLen, ...hints };
@@ -796,7 +624,6 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
-  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
@@ -855,7 +682,6 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
-  assertApiProvider(provider);
   const model    = pickModel(provider, task, settings);
   const capHints = { promptLength: prompt?.length || 0, ...hints };
   let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
@@ -902,7 +728,7 @@ function normalizeOpts(opts) {
 
 /**
  * Settings-panel support: the live Claude family → model-id map, so the
- * three group dropdowns can show "Opus — claude-opus-5" instead of a bare
+ * live group dropdowns can show "Sonnet — claude-sonnet-5" instead of a bare
  * family name (proof the always-latest resolver is actually working, not
  * just a label). A cheap `primeClaudeModels()` call first means the panel
  * reflects a just-added API key immediately rather than whatever the
@@ -930,7 +756,7 @@ export function registerLlmHandlers() {
     } finally {
       if (abortListener) signal?.removeEventListener('abort', abortListener);
     }
-    return { resolved: resolvedClaudeModels(), ladder: [...CLAUDE_FAMILY_LADDER], groupDefaults: { ...GROUP_DEFAULT_FAMILY } };
+    return { resolved: resolvedClaudeModels(), groupDefaults: { ...GROUP_DEFAULT_FAMILY } };
   }, 12_000);
 
   // Text polish lives HERE, not in registerGeminiHandlers, because it is not a
