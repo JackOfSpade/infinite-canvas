@@ -40,6 +40,19 @@ const ROW_H = { group: 70, job: 280 }; // module-local: only used within this fi
 // unchanged — this only governs how far the next card sits below a grown one.
 const JOB_V_GAP = 40;
 
+/**
+ * Whether a newly reported JobCard measurement requires the whole visible tree
+ * to be laid out again. A card initially reserves ROW_H.job; its first real
+ * measurement only needs a reflow when it grows beyond that reservation. Later
+ * measurement changes always need one so disclosure expansion/collapse keeps
+ * every lower sibling clear.
+ */
+export function shouldReflowMeasuredJobCard({ visible, previousMeasuredHeight, measuredHeight }) {
+  if (!visible || !Number.isFinite(measuredHeight)) return false;
+  if (!Number.isFinite(previousMeasuredHeight)) return measuredHeight > ROW_H.job;
+  return previousMeasuredHeight !== measuredHeight;
+}
+
 // Leaf (role) groups paginate their cards; reveal the first N on expand.
 export const ROLE_VISIBLE_DEFAULT = 10;
 
@@ -330,8 +343,8 @@ export function parseSalaryToNumeric(salaryStr) {
 // currency SYMBOL preceded by letters used to break the match outright. The
 // engine would anchor group 1 on the bare `$50K` (skipping `US`), then require
 // group 2 to start at `US$250K` — where `\$?\s*\d` cannot consume the `U`. The
-// whole regex failed, so salaryRangeAnomaly returned null and every US$-prefixed
-// range silently escaped anomaly detection at ANY ratio, for the two sources
+// whole regex failed, so range metadata returned null and every US$-prefixed
+// range silently escaped diagnostic disclosure at ANY ratio, for the two sources
 // that use that format. The lookahead keeps the prefix unambiguous: letters are
 // consumed only when a currency symbol immediately follows, so a "20 to 30"
 // separator can never be mistaken for a prefix. Dice's symbol-less "USD 90,000.00
@@ -340,12 +353,11 @@ const SALARY_ENDPOINT = '(?:[A-Za-z]{1,3}(?=[$€£]))?[$€£]?\\s*\\d[\\d,]*(?
 const SALARY_RANGE_RE = new RegExp(`(${SALARY_ENDPOINT})(?:\\s*(?:[-–—]|to)\\s*)(${SALARY_ENDPOINT})`, 'i');
 
 /**
- * Surface obviously malformed source pay ranges without changing placement.
- * Salary buckets intentionally use the lower endpoint (the conservative floor
- * a candidate can actually expect), but a chip such as "$23.50–$250/hr" is
- * useful scraper-quality evidence and must not disappear behind that floor.
+ * Return annualized endpoints for any valid source pay range without changing
+ * placement. This is diagnostic provenance: salary buckets still use the lower
+ * endpoint (the conservative floor a candidate can actually expect).
  */
-export function salaryRangeAnomaly(salaryStr) {
+export function salaryRangeMetadata(salaryStr) {
   const raw = String(salaryStr || '').trim();
   if (!raw) return null;
   const match = raw.match(SALARY_RANGE_RE);
@@ -356,14 +368,29 @@ export function salaryRangeAnomaly(salaryStr) {
   const upperAnnual = parseSalaryToNumeric(`${match[2]}${raw.slice((match.index || 0) + match[0].length)}`);
   if (!(lowerAnnual > 0) || !(upperAnnual > 0) || upperAnnual < lowerAnnual) return null;
   const ratio = upperAnnual / lowerAnnual;
+  return {
+    lowerAnnual,
+    upperAnnual,
+    ratio: Math.round(ratio * 10) / 10,
+  };
+}
+
+/**
+ * Surface obviously malformed source pay ranges without changing placement.
+ * Salary buckets intentionally use the lower endpoint (the conservative floor
+ * a candidate can actually expect), but a chip such as "$23.50–$250/hr" is
+ * useful scraper-quality evidence and must not disappear behind that floor.
+ */
+export function salaryRangeAnomaly(salaryStr) {
+  const metadata = salaryRangeMetadata(salaryStr);
+  if (!metadata) return null;
+  const { ratio } = metadata;
   // A fivefold compensation spread is rare enough to be diagnostic while still
   // avoiding noise from normal hourly/annual bands. We report it; never rewrite
   // source data or change the lower-bound bucket.
   if (ratio < 5) return null;
   return {
-    lowerAnnual,
-    upperAnnual,
-    ratio: Math.round(ratio * 10) / 10,
+    ...metadata,
     reason: `upper endpoint is ${Math.round(ratio * 10) / 10}× the lower endpoint`,
   };
 }

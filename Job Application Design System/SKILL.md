@@ -139,15 +139,25 @@ End-to-end, given candidate data + job description:
    from the job listing as the listing's description, not as independently
    verified fact. Frame its source plainly; use an unqualified assertion about
    the employer only when reliable research verifies it, without turning the
-   attribution into repetitive hedging. Make the source document, not the
-   target position or work being described, the grammatical subject of any
-   reporting verb. Refer to the position attached to the application with a
-   proximal determiner unless explicitly contrasting it with another role.
+   attribution into repetitive hedging. Discuss target scope as `this role` or
+   the work itself; do not use impersonal `the listing describes` framing for
+   ordinary role responsibilities. Use listing attribution only when it
+   establishes the provenance of an unverified employer or company assertion.
+   Make the source document, not the target position or work being described,
+   the grammatical subject of any required reporting verb. Refer to the
+   position attached to the application with a proximal determiner unless
+   explicitly contrasting it with another role.
    Read every sentence once as a recruiter seeing it for the first time. Reject
    idiom, figurative personification, or an implied actor, artifact, or action
    when the reader must translate it or reconstruct what it literally means.
-   In interface or ownership claims, name the concrete actor, artifact, and
-   action instead.
+   Also inspect each clause boundary: if adjacent words form a familiar compound
+   or alternate parse that a reader may take first, recast the sentence instead
+   of using punctuation to force its intended grammar. In interface or ownership
+   claims, name the concrete actor, artifact, and action instead. Each named
+   technology needs a governing verb that reflects its actual role; never group
+   tools with distinct roles under one operation. Reject a bridge sentence that
+   merely restates a category without adding a decision, mechanism, constraint,
+   or result.
    When the letter's opening first names an unfamiliar prior employer, identify
    the candidate's role or relationship in the same sentence rather than opening
    with a bare "At [employer]." Describe cross-domain evidence through the
@@ -216,7 +226,8 @@ End-to-end, given candidate data + job description:
    a conversation, it must connect the candidate's relevant contribution to the
    target work. Do not end solely on what the candidate wants to learn, hear, or
    discuss. Keep the invitation direct and present-tense, without conditional or
-   deferential boilerplate.
+   deferential boilerplate: `I welcome a conversation` is direct; `I would
+   welcome a conversation` or `I would welcome a discussion` is not.
 
    **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
    the first sentence must lead with a job-specific thesis, a concrete
@@ -553,6 +564,11 @@ Hard rules for every bullet:
   "shape"/"pattern"/"approach", are all rejected
   on the résumé for the same reasons they are in the letter
   (`STYLE.md §11.2.3`).
+- **Technology verbs describe technology roles.** Do not make a web server or
+  application server a means of containerization merely because it runs in a
+  container. State the container/orchestration operation separately from the
+  serving or application-runtime operation, and give each named technology an
+  accurate governing verb.
 
 Verbs to prefer: *designed, shipped, owned, drove, killed, replaced,
 rewrote, migrated, decommissioned, halved, tripled, tenfold-d*.

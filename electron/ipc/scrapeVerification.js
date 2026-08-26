@@ -20,8 +20,9 @@ function allStats() { return store.get('verification') || {}; }
 // ── Per-run manual-solve tracking (in-memory) ───────────────────────────────
 // A scrape driver MARKS a source when it pauses for the user to solve a challenge
 // (manualScraper's waitForReady). The orchestrator RESETS once at the start of the
-// browser phase and RECORDS each source's outcome after it finishes. Indeed never
-// waits for the user (it auto-escalates/skips CF), so it simply records `false`.
+// browser phase and RECORDS each source's outcome after it finishes. Indeed does
+// not wait inside its initial driver, but a returned native-challenge handoff is
+// marked by the orchestrator before that run's single outcome is recorded.
 let manualSolveThisRun = new Set();
 export function resetManualSolveTracking() { manualSolveThisRun = new Set(); }
 export function markManualSolveRequired(sourceId) { if (sourceId) manualSolveThisRun.add(sourceId); }

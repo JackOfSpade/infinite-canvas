@@ -23,12 +23,13 @@ import {
 import { logger } from '../../logger.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
-import { humanDelay } from '../../utils/humanDelay.js';
+import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
 import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
+import { stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
@@ -41,6 +42,11 @@ const CONTENT_TIMEOUT_MS     = 20_000;        // max wait for content before pro
 // This is just the cadence for a "still waiting" heartbeat log during that wait.
 const CHALLENGE_HEARTBEAT_MS = 30_000;
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
+// Cloudflare can remove a solved Turnstile iframe before it either redirects or
+// re-renders the challenge. Do not mistake that short DOM transition for a final
+// terminal block: keep the visible browser open long enough for a human to see
+// what happened and for the widget to return.
+const CHALLENGE_TERMINAL_TRANSITION_GRACE_MS = 10_000;
 const DESC_CHANGE_POLL_MS    = 200;           // poll interval waiting for description panel update
 const DESC_CHANGE_TIMEOUT_MS = 3_000;         // max wait for description to change after a card click
 const DESC_RETRY_PAUSE_MS    = 900;           // pause before re-clicking when the first attempt's panel never updated (catches transient anti-bot 403s)
@@ -48,6 +54,14 @@ const DESC_CLICK_DELAY_MS    = 600;           // pause between card clicks (natu
 const SITE_CHANGED_ABORT_THRESHOLD = 3;
 const DESC_STALE_THRESHOLD   = 3;             // consecutive click/panel failures before flagging stale selectors
 const DETAIL_DESCRIPTION_WAIT_MS = 6000;      // bounded client-hydration recovery for navigation detail pages
+// Cloudflare can append its challenge iframe/Turnstile container just after
+// DOMContentLoaded. Do not decide a fresh detail page is terminal before that
+// injection window has passed.
+const DETAIL_CHALLENGE_SETTLE_MS = 2_500;
+// A text-only terminal detail page is normally a genuine stop, but it must be
+// shown briefly before we close it: that makes the outcome legible to the user
+// and catches a late Turnstile/iframe injection that the first settle missed.
+const DETAIL_TERMINAL_PRESENT_MS = 5_000;
 // ZipRecruiter will serve a plain HTTP 429 page after sustained detail-page
 // navigation. These bounds deliberately slow only detail enrichment (not list
 // collection), retry once, then stop the detail pass rather than hammering a
@@ -56,6 +70,15 @@ const ZIPRECRUITER_DETAIL_GAP_MS = 2500;
 const ZIPRECRUITER_429_FALLBACK_WAIT_MS = 45_000;
 const ZIPRECRUITER_429_MAX_WAIT_MS = 60_000;
 const ZIPRECRUITER_429_RETRIES = 1;
+// Appcast can intermittently block a ZipRecruiter outbound detail redirect
+// while the original ZipRecruiter result page remains usable. Recover once by
+// discarding that detail tab, backing off, refreshing the known-good list page,
+// then retrying the same detail navigation. This is intentionally small: a
+// persistent restriction must be left for the user to retry after a network/IP
+// change, never turned into a navigation loop.
+const ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES = 1;
+const ZIPRECRUITER_APPCAST_RESTRICTED_BACKOFF_MS = 6_000;
+const ZIPRECRUITER_APPCAST_RESTRICTED_MAX_BACKOFF_MS = 15_000;
 
 // Cooldown BETWEEN queries (not before the first). Firing N back-to-back
 // full-page navigations to different search URLs is a velocity signal that
@@ -121,6 +144,13 @@ function isKnownTelemetryNoiseUrl(rawUrl) {
     if (hostIs('googleadservices.com') || hostIs('googlesyndication.com')) return true;
     if (host === 'www.google.com' && (pathname.startsWith('/rmkt/') || pathname.startsWith('/ccm/collect'))) return true;
     if (host === 'csp.withgoogle.com' && pathname === '/csp/identityrotatecookieshttp') return true;
+    // Glassdoor embeds Indeed company-spotlight pixels. Chromium rejects these
+    // cross-origin images/fetches on every card transition, producing duplicate
+    // requestfailed + console entries even though the job-details request and
+    // panel both succeed. Keep the allowlist path-exact so real Indeed job/API
+    // failures remain visible.
+    if (hostIs('indeed.com') && pathname === '/rc/gd/png') return true;
+    if (host === 'itad.indeed.com' && pathname === '/ita/v1/publisher') return true;
 
     // Preserve the pre-existing low-value telemetry exclusions in one shared
     // predicate so request failures and HTTP failures cannot drift apart.
@@ -165,7 +195,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   };
   manualScraperTelemetry.events.push(entry);
   if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
-  if (['desc-miss', 'date-miss', 'detail-unavailable'].includes(entry.phase)) {
+  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -396,29 +426,106 @@ const DESC_CONFIGS = {
     cardIdPrefix:  null,
     cardHrefKey:   null,
     clickSelector: null,
-    // Navigate to each job page in a background tab — individual job pages carry a
-    // JSON-LD JobPosting with description (primary) and [class*="JobDetails_jobDescription"]
-    // as DOM fallback. [data-brandviews*="joblisting-description"] only exists on search
-    // results pages, not on individual job-listing pages.
-    expandViaNavigation: true,
-    navUrlField:         'url',
-    jsonLdType:          'JobPosting',
-    jsonLdField:         'description',
-    panelSelector: '[class*="JobDetails_jobDescription"]',
+    // Keep enrichment on the successful search document. Direct navigation to
+    // an otherwise-valid www.glassdoor.ca detail URL can itself trigger
+    // Glassdoor's Turnstile → terminal "Humans only" sequence. Clicking the
+    // list card asks the site's own SPA to populate its right-side panel without
+    // opening a fresh detail document. This was the app's original Glassdoor
+    // strategy and avoids turning one empty list snippet into a session block.
+    panelSelector: '[data-brandviews*="joblisting-description"], [class*="JobDetails_jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
-    // Glassdoor embeds REGIONAL-domain hrefs in its search cards (e.g.
-    // fr.glassdoor.ca for an Ontario search). We log in + earn cf_clearance on
-    // www.glassdoor.com only, so navigating to the regional host serves an
-    // anti-bot "Security" wall (French "Aidez-nous à protéger Glassdoor…", no
-    // JSON-LD, no __NEXT_DATA__) and the JD comes back empty — confirmed via the
-    // desc-miss diag (url=fr.glassdoor.ca → title "Security | Glassdoor"). The
-    // job-listing path is global, so pin enrichment navigation to the session
-    // domain. Only the nav URL is rewritten; job.url (the user-facing apply link)
-    // keeps its regional host so the human still lands on their locale.
-    pinHost: 'www.glassdoor.com',
+    // The panel request is network-backed. The 2026-08-25 diagnostic showed
+    // 10 successful requests in roughly 20 seconds followed by an HTTP 429;
+    // 1.5s was still a burst, not human reading cadence. Space requests well
+    // apart and let the endpoint's rolling window recover before request nine.
+    clickDelayMs: 4500,
+    panelCooldownEvery: 8,
+    panelCooldownMs: 12000,
   },
 };
+
+/**
+ * Decide whether a source is permitted to open an individual posting while
+ * enriching descriptions. This is deliberately separate from ordinary search,
+ * location-lookup, and user-facing Solve navigation: those actions keep their
+ * existing Glassdoor URLs and are not detail enrichment.
+ *
+ * Glassdoor has one safe enrichment shape: stay on the already-loaded result
+ * document and let its own card click populate the side panel. A direct detail
+ * document request, even to the same first-party host, has repeatedly caused a
+ * Turnstile → text-only "Humans only" escalation. Keep this source-level so a
+ * future config edit cannot silently turn an empty panel into a `goto()` loop.
+ */
+export function descriptionNavigationDecision(sourceId, rawUrl) {
+  if (sourceId === 'glassdoor') {
+    return {
+      allowed: false,
+      reason: 'glassdoor-list-card-panel-only',
+      url: String(rawUrl || '').trim(),
+    };
+  }
+  if (sourceId !== 'ziprecruiter') {
+    return { allowed: true, reason: 'source-has-no-detail-navigation-restriction', url: String(rawUrl || '').trim() };
+  }
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    const allowed = parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    return {
+      allowed,
+      reason: allowed ? 'http-detail-url' : 'unsupported-detail-scheme',
+      url: parsed.toString(),
+    };
+  } catch {
+    return { allowed: false, reason: 'malformed-detail-url', url: String(rawUrl || '').trim() };
+  }
+}
+
+/** The network shape used to recover a source's full job descriptions. */
+export function descriptionExpansionStrategy(sourceId) {
+  const cfg = DESC_CONFIGS[sourceId];
+  if (!cfg) return 'none';
+  // This is an intentional hard guard, not merely the current config shape.
+  // If someone later restores `expandViaNavigation`/`navUrlField` while trying
+  // to repair a selector, Glassdoor still remains on the successful list page.
+  if (sourceId === 'glassdoor') return cfg.panelSelector ? 'list-card-panel' : 'none';
+  if (cfg.expandViaNavigation && (cfg.navUrlTemplate || cfg.navUrlField)) return 'detail-navigation';
+  return cfg.panelSelector ? 'list-card-panel' : 'none';
+}
+
+/**
+ * Deterministic per-source pacing for list-card panel requests.
+ *
+ * `requestsIssued` counts actual mouse clicks which may cause the board's
+ * detail API to run (including a bounded retry), rather than list rows. This
+ * lets Glassdoor cool down before the next request after every small burst,
+ * while other sources preserve their existing walk cadence.
+ */
+export function descriptionPanelPacing(sourceId, requestsIssued = 0) {
+  const cfg = DESC_CONFIGS[sourceId] || {};
+  const requestDelayMs = Math.max(0, Number(cfg.clickDelayMs) || DESC_CLICK_DELAY_MS);
+  const every = Math.max(0, Number(cfg.panelCooldownEvery) || 0);
+  const checkpointDue = sourceId === 'glassdoor'
+    && every > 0
+    && Number(requestsIssued) > 0
+    && Number(requestsIssued) % every === 0;
+  const checkpointCooldownMs = Math.max(0, Number(cfg.panelCooldownMs) || 0);
+  return {
+    requestDelayMs,
+    checkpointDue,
+    // Keep configured pacing visible in card-walk telemetry even before the
+    // first checkpoint is due. The executor gates the actual wait on
+    // `checkpointDue`; diagnostic output must not incorrectly imply that the
+    // 12s policy was absent just because this batch stopped before request 9.
+    checkpointCooldownMs,
+    checkpointEvery: every || null,
+  };
+}
+
+/** Glassdoor panel enrichment is intentionally single-request per listing. */
+export function descriptionPanelRetryAllowed(sourceId) {
+  return sourceId !== 'glassdoor';
+}
 
 /**
  * Produce the stable DOM target for each card-click description attempt.
@@ -484,6 +591,58 @@ export function assessDetailSelection(expectedTitle, selectedTitle) {
   };
 }
 
+/**
+ * Decide whether a list-panel read belongs to the card that was just clicked.
+ *
+ * Most boards replace the description text on every card transition. Glassdoor
+ * can legitimately serve the exact same employer-authored description for two
+ * separate listings (for example the same role in different cities). Text-only
+ * change detection would call the second one a timeout even after its right
+ * panel loaded. We accept an unchanged Glassdoor body only when the active
+ * detail heading independently confirms the requested title; an unverified
+ * unchanged body remains a miss so stale content is never copied forward.
+ */
+export function assessDescriptionPanelUpdate({
+  sourceId = '',
+  previousText = '',
+  currentText = '',
+  expectedTitle = '',
+  selectedTitle = '',
+} = {}) {
+  const previous = String(previousText || '').trim();
+  const current = String(currentText || '').trim();
+  if (!current) return { accepted: false, reason: 'empty-panel' };
+  if (current !== previous) return { accepted: true, reason: 'text-changed' };
+  if (sourceId !== 'glassdoor') return { accepted: false, reason: 'text-unchanged' };
+  const selection = assessDetailSelection(expectedTitle, selectedTitle);
+  return selection.selectionVerified
+    ? { accepted: true, reason: 'text-unchanged-title-verified', selection }
+    : { accepted: false, reason: 'text-unchanged-unverified', selection };
+}
+
+/**
+ * A panel fetch is a first-party Glassdoor SPA request, not a DOM-selector
+ * failure. Keep this predicate pure so the response listener and fixture tests
+ * share the exact boundary: we only stop for the job-details endpoint's 429,
+ * never for a third-party image or an unrelated Glassdoor API response.
+ */
+export function glassdoorPanelResponseIdentity({ sourceId = '', status = null, url = '' } = {}) {
+  if (sourceId !== 'glassdoor' || !Number.isFinite(Number(status))) return null;
+  try {
+    const parsed = new URL(String(url || ''));
+    if (!GLASSDOOR_FIRST_PARTY_HOST.test(parsed.hostname)
+      || !/^\/job-listing\/api\/job-details\/?$/i.test(parsed.pathname)) return null;
+    const key = String(parsed.searchParams.get('jobListingId') || '').trim();
+    return key ? { key, status: Number(status), url: parsed.toString() } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isGlassdoorPanelRateLimitResponse(input = {}) {
+  return glassdoorPanelResponseIdentity(input)?.status === 429;
+}
+
 /** Read a heading from Google's active detail region, never a left-list card. */
 export function readActiveGoogleDetailTitle(root) {
   if (!root?.querySelectorAll) return '';
@@ -514,9 +673,117 @@ export function readDescriptionPanelText(root, panelSelector, panelMulti = false
       .filter(el => el.matches?.('span') && !el.closest?.('[aria-hidden="true"]'))
       .map(el => el.textContent?.trim()).filter(Boolean).join('\n\n').trim();
   }
-  return root.querySelector(panelSelector)?.innerText?.trim()
-    || root.querySelector(panelSelector)?.textContent?.trim()
-    || '';
+  const active = Array.from(root.querySelectorAll(panelSelector))
+    .find(el => !el.closest?.('[aria-hidden="true"]'));
+  return active?.innerText?.trim() || active?.textContent?.trim() || '';
+}
+
+/**
+ * Resolve the stable identity carried by a rendered description-card element.
+ * `elementFromPoint()` normally returns a descendant, so generic attribute
+ * sources such as Glassdoor must walk to the owning `[data-jobid]` card before
+ * comparing it with the planned `jl` key.
+ */
+export function readDescriptionCardDomKey(element, {
+  cardAttr = null,
+  cardDataUrlParam = null,
+  expectedKey = '',
+} = {}) {
+  if (!element) return '';
+  if (cardAttr) {
+    const owner = element.matches?.(`[${cardAttr}]`)
+      ? element
+      : element.closest?.(`[${cardAttr}]`);
+    const value = owner?.getAttribute?.(cardAttr);
+    if (value) return String(value);
+  }
+  const resultCard = element.matches?.('[data-share-url]')
+    ? element
+    : element.closest?.('[data-share-url]');
+  if (resultCard && cardDataUrlParam) {
+    try {
+      return new URL(resultCard.getAttribute('data-share-url') || '', 'https://example.invalid')
+        .searchParams.get(cardDataUrlParam) || '';
+    } catch { /* fall through to the legacy id */ }
+  }
+  return element.id === expectedKey ? expectedKey : '';
+}
+
+// This is deliberately narrower than a generic "close every dialog" helper.
+// Glassdoor can legitimately show saved-job and application dialogs; closing one
+// of those behind a user's back would change the visible result state. The job
+// alert interstitial in the 2026-08-25 report is instead a non-essential prompt
+// that blocks the result cards after a normal list-card click, so its distinctive
+// copy gives us a safe, source-specific fingerprint.
+const GLASSDOOR_OPPORTUNITY_MODAL_MARKERS = [
+  'never miss an opportunity',
+  'create a job alert',
+  'continue with google',
+];
+const GLASSDOOR_OPPORTUNITY_MODAL_SELECTOR = [
+  '[role="dialog"]',
+  '[aria-modal="true"]',
+  'dialog',
+  '[data-test*="modal" i]',
+  '[data-testid*="modal" i]',
+  '[class*="modal" i]',
+].join(', ');
+const GLASSDOOR_OPPORTUNITY_CLOSE_SELECTOR = [
+  'button[aria-label*="close" i]',
+  '[role="button"][aria-label*="close" i]',
+  'button[title*="close" i]',
+  '[role="button"][title*="close" i]',
+  'button[data-test*="close" i]',
+  '[role="button"][data-test*="close" i]',
+  'button[data-testid*="close" i]',
+  '[role="button"][data-testid*="close" i]',
+].join(', ');
+
+function normalizedModalText(element) {
+  return String(element?.textContent || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+function isGlassdoorOpportunityModal(element) {
+  const text = normalizedModalText(element);
+  return GLASSDOOR_OPPORTUNITY_MODAL_MARKERS.every(marker => text.includes(marker));
+}
+
+function isCloseControl(element) {
+  if (!element) return false;
+  const label = [
+    element.getAttribute?.('aria-label'),
+    element.getAttribute?.('title'),
+    element.getAttribute?.('data-test'),
+    element.getAttribute?.('data-testid'),
+  ].filter(Boolean).join(' ').toLocaleLowerCase();
+  const text = normalizedModalText(element);
+  // The actual prompt's close control can be an icon-only X, depending on the
+  // currently served Glassdoor experiment. An empty SVG button is accepted only
+  // inside this exact, positively fingerprinted prompt.
+  return label.includes('close') || text === 'x' || text === '×'
+    || (!text && !!element.querySelector?.('svg'));
+}
+
+/**
+ * Inspect the specific Glassdoor job-alert interstitial without clicking it.
+ * Keeping its signature DOM-root based makes the live safety rule testable: an
+ * ordinary dialog or an unrelated close icon must never qualify.
+ */
+export function inspectGlassdoorOpportunityModal(root) {
+  if (!root?.querySelectorAll) return { detected: false, reason: 'no-dom-root' };
+  const modal = Array.from(root.querySelectorAll(GLASSDOOR_OPPORTUNITY_MODAL_SELECTOR))
+    .find(element => !element.closest?.('[aria-hidden="true"]') && isGlassdoorOpportunityModal(element));
+  if (!modal) return { detected: false, reason: 'not-present' };
+  const close = Array.from(modal.querySelectorAll(GLASSDOOR_OPPORTUNITY_CLOSE_SELECTOR))
+    .find(isCloseControl)
+    || Array.from(modal.querySelectorAll('button, [role="button"]')).find(isCloseControl)
+    || null;
+  return {
+    detected: true,
+    reason: close ? 'close-control-found' : 'close-control-missing',
+    modal,
+    close,
+  };
 }
 
 /**
@@ -562,6 +829,42 @@ export function normalizeDetailNavigationUrl(rawUrl) {
   return input;
 }
 
+const GLASSDOOR_FIRST_PARTY_HOST = /^(?:[a-z0-9-]+\.)*glassdoor\.(?:com|ca|co\.uk|ie|de|fr|es|it|nl|pt|com\.au|co\.nz|co\.in|co\.jp|com\.mx|com\.br|co\.za|com\.sg|com\.hk)$/i;
+
+/**
+ * Keep a Glassdoor detail request on the exact first-party host whose list page
+ * loaded successfully. Cloudflare clearance and behavioural state are host-bound:
+ * a working www.glassdoor.ca search is not evidence that www.glassdoor.com will
+ * accept a burst of detail navigations from the same controlled session.
+ *
+ * Only sibling Glassdoor hosts are rewritten. An employer/ATS URL, malformed URL,
+ * non-HTTP scheme, or non-Glassdoor list page is returned unchanged.
+ */
+export function pinGlassdoorDetailUrlToListHost(rawDetailUrl, rawListUrl) {
+  const input = String(rawDetailUrl || '').trim();
+  if (!input) return input;
+  try {
+    const detail = new URL(input);
+    const list = new URL(String(rawListUrl || '').trim());
+    if (!['http:', 'https:'].includes(detail.protocol)
+      || !['http:', 'https:'].includes(list.protocol)
+      || !GLASSDOOR_FIRST_PARTY_HOST.test(detail.hostname)
+      || !GLASSDOOR_FIRST_PARTY_HOST.test(list.hostname)) {
+      return input;
+    }
+    detail.hostname = list.hostname;
+    return detail.toString();
+  } catch {
+    return input;
+  }
+}
+
+/** A detached Puppeteer main frame cannot recover by navigating the next row. */
+export function isDetachedDetailFrameError(error) {
+  return /detached\s+frame|frame\s+was\s+detached|navigating\s+frame\s+was\s+detached/i
+    .test(String(error?.message || error || ''));
+}
+
 /**
  * ZipRecruiter's ItemList occasionally supplies an employer's outbound
  * application endpoint (for example a Workday `/apply` URL) instead of its
@@ -572,10 +875,22 @@ export function normalizeDetailNavigationUrl(rawUrl) {
  * submits anything on an external page.
  */
 export function shouldNavigateForDescription(sourceId, rawUrl) {
-  if (sourceId !== 'ziprecruiter') return true;
+  return descriptionNavigationDecision(sourceId, rawUrl).allowed;
+}
+
+/**
+ * ZipRecruiter redirects a closed posting to its authenticated jobseeker home
+ * page instead of returning a 404. Keep this URL-only so the live page probe
+ * and deterministic regression tests share the same narrow classification.
+ */
+export function isZipRecruiterClosedDetailRedirect(rawUrl) {
   try {
     const parsed = new URL(String(rawUrl || '').trim());
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    const host = parsed.hostname.toLowerCase();
+    const closed = String(parsed.searchParams.get('closed_job_redirect') || '').trim().toLowerCase();
+    return (host === 'ziprecruiter.com' || host.endsWith('.ziprecruiter.com'))
+      && parsed.pathname.replace(/\/+$/, '') === '/jobseeker/home'
+      && ['1', 'true', 'yes'].includes(closed);
   } catch {
     return false;
   }
@@ -586,8 +901,12 @@ export function shouldNavigateForDescription(sourceId, rawUrl) {
  * slow or selector-incompatible. Workday returns HTTP 200 for a closed posting
  * and exposes that state in its bootstrap object, so status alone is not enough.
  */
-export function isUnavailableDetailPage({ isNotFound = false, workdayPostingAvailable } = {}) {
-  return Boolean(isNotFound) || workdayPostingAvailable === false;
+export function isUnavailableDetailPage({
+  isNotFound = false,
+  workdayPostingAvailable,
+  zipRecruiterClosedJobRedirect = false,
+} = {}) {
+  return Boolean(isNotFound) || workdayPostingAvailable === false || zipRecruiterClosedJobRedirect;
 }
 
 /** Convert a Retry-After header to a safe, bounded wait for a single retry. */
@@ -599,6 +918,35 @@ export function zipRecruiterRetryAfterMs(value, now = Date.now()) {
     delay = Number.isFinite(at) ? at - now : ZIPRECRUITER_429_FALLBACK_WAIT_MS;
   }
   return Math.max(1000, Math.min(ZIPRECRUITER_429_MAX_WAIT_MS, Math.round(delay)));
+}
+
+/**
+ * Appcast's terminal page is distinct from a generic job-board hard block: it
+ * is an outbound click.appcast.io redirect reached from a still-working
+ * ZipRecruiter results page. Require both the host and its visible copy so an
+ * ordinary Appcast job page or another site's generic wording cannot trigger
+ * the recovery.
+ */
+export function isAppcastTemporaryRestriction({ url = '', visibleText = '' } = {}) {
+  let isAppcastClick = false;
+  try {
+    const parsed = new URL(String(url || '').trim());
+    isAppcastClick = parsed.hostname.toLowerCase() === 'click.appcast.io';
+  } catch {
+    return false;
+  }
+  if (!isAppcastClick) return false;
+  const text = String(visibleText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return text.includes('access is temporarily restricted')
+    && text.includes('unusual activity from your device or network');
+}
+
+export function zipRecruiterAppcastRestrictionBackoffMs(attempt) {
+  const safeAttempt = Math.max(1, Math.floor(Number(attempt) || 1));
+  return Math.min(
+    ZIPRECRUITER_APPCAST_RESTRICTED_MAX_BACKOFF_MS,
+    ZIPRECRUITER_APPCAST_RESTRICTED_BACKOFF_MS * (2 ** (safeAttempt - 1)),
+  );
 }
 
 async function waitForAbortableDelay(ms, signal) {
@@ -638,6 +986,156 @@ export function formatJsonLdSalary(bs) {
   if (min != null && max != null) return `${sym}${min} - ${sym}${max}${unit}`;
   if (val != null) return `${sym}${val}${unit}`;
   return '';
+}
+
+const GLASSDOOR_RESPONSE_DESCRIPTION_MIN_CHARS = 400;
+
+function compactGlassdoorResponseText(value) {
+  const raw = typeof value === 'string' ? value : '';
+  if (!raw) return '';
+  return stripHtmlToText(raw).replace(/\s+/g, ' ').trim();
+}
+
+function glassdoorResponsePathToken(value) {
+  return String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function glassdoorStructuredSalary(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const firstFrom = (source, ...keys) => keys.map(key => source?.[key]).find(item => item != null && item !== '');
+  const nested = firstFrom(value, 'salaryRange', 'range', 'baseSalary', 'value');
+  const amountSource = nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : value;
+  const first = (...keys) => firstFrom(amountSource, ...keys) ?? firstFrom(value, ...keys);
+  const rawUnit = String(firstFrom(value, 'unitText', 'payPeriod', 'salaryType', 'period', 'cadence')
+    ?? firstFrom(amountSource, 'unitText', 'payPeriod', 'salaryType', 'period', 'cadence')
+    ?? '').toUpperCase();
+  const unitAliases = {
+    ANNUAL: 'YEAR', ANNUALLY: 'YEAR', YEARLY: 'YEAR', HOURLY: 'HOUR',
+    MONTHLY: 'MONTH', WEEKLY: 'WEEK', DAILY: 'DAY',
+  };
+  const unitText = unitAliases[rawUnit] || rawUnit;
+  return formatJsonLdSalary({
+    currency: firstFrom(value, 'currency', 'currencyCode', 'salaryCurrency')
+      ?? firstFrom(amountSource, 'currency', 'currencyCode', 'salaryCurrency'),
+    value: {
+      minValue: first('minValue', 'min', 'minimum', 'lowerBound'),
+      maxValue: first('maxValue', 'max', 'maximum', 'upperBound'),
+      value: first('value', 'amount'),
+      unitText,
+    },
+  });
+}
+
+/**
+ * Extract conservative enrichment fields from the JSON body already returned
+ * by Glassdoor's card-panel request. This function never performs I/O. The
+ * caller separately binds the response URL's jobListingId to the clicked card,
+ * while this bounded walk tolerates minor response-schema changes.
+ */
+export function extractGlassdoorPanelResponseDetail(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const descriptionCandidates = [];
+  const salaryCandidates = [];
+  const postedCandidates = [];
+  const companyCandidates = [];
+  const queue = [{ value: payload, path: [] }];
+  const seen = new Set();
+  let visited = 0;
+
+  while (queue.length && visited < 800) {
+    const current = queue.shift();
+    const node = current?.value;
+    if (!node || typeof node !== 'object' || seen.has(node) || current.path.length > 10) continue;
+    seen.add(node);
+    visited++;
+    const entries = Array.isArray(node) ? node.entries() : Object.entries(node);
+    for (const [rawKey, value] of entries) {
+      const key = glassdoorResponsePathToken(rawKey);
+      const path = [...current.path, key];
+      const pathText = path.join('.');
+      const jobScoped = /job|listing|posting|position|detail/.test(pathText);
+      const employerScoped = /employer|company|organization/.test(pathText);
+
+      if (typeof value === 'string') {
+        const text = compactGlassdoorResponseText(value);
+        const strongDescription = /^(?:job)?description(?:text|html)?$/.test(key) && key !== 'description';
+        const genericJobDescription = key === 'description' && jobScoped && !employerScoped;
+        if (((strongDescription && !employerScoped) || genericJobDescription)
+          && text.length >= GLASSDOOR_RESPONSE_DESCRIPTION_MIN_CHARS) {
+          descriptionCandidates.push({
+            value: text,
+            score: (strongDescription ? 120 : 80) + Math.min(20, Math.floor(text.length / 1000)),
+          });
+        }
+
+        if (/salary|pay|compensation/.test(key) && text.length <= 160 && parseSalaryToNumeric(text) > 0) {
+          salaryCandidates.push({ value: text, score: /display|text|range/.test(key) ? 100 : 80 });
+        }
+        if (/^(?:dateposted|posteddate|postingdate|listingage|age)$/.test(key) && text.length <= 120) {
+          postedCandidates.push({ value: text, score: /dateposted|posteddate/.test(key) ? 100 : 70 });
+        }
+        if (/^(?:employername|companyname|hiringorganizationname)$/.test(key) && text.length <= 240) {
+          companyCandidates.push({ value: text, score: 100 });
+        } else if (key === 'name' && employerScoped && text.length <= 240) {
+          companyCandidates.push({ value: text, score: 80 });
+        }
+      } else if (typeof value === 'number' && /^(?:ageindays|listingageindays|daysago)$/.test(key)
+        && value >= 0 && value <= 3650) {
+        postedCandidates.push({ value: `${value}d`, score: 70 });
+      }
+
+      if (value && typeof value === 'object') {
+        if (/salary|pay|compensation/.test(key)) {
+          const salary = glassdoorStructuredSalary(value);
+          if (salary && parseSalaryToNumeric(salary) > 0) salaryCandidates.push({ value: salary, score: 110 });
+        }
+        queue.push({ value, path });
+      }
+    }
+  }
+
+  const best = candidates => candidates.sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value || '';
+  const detail = {
+    description: best(descriptionCandidates),
+    salary: best(salaryCandidates),
+    posted: best(postedCandidates),
+    company: best(companyCandidates),
+  };
+  return Object.values(detail).some(Boolean) ? detail : null;
+}
+
+/** Merge one exact card response with its visible panel read, without clobbering list fields. */
+export function mergeGlassdoorPanelDetail(job, { domText = '', responseDetail = null } = {}) {
+  const panelText = String(domText || '').trim();
+  const responseText = String(responseDetail?.description || '').trim();
+  const responseDescriptionUsable = responseText.length >= GLASSDOOR_RESPONSE_DESCRIPTION_MIN_CHARS;
+  const description = panelText || (responseDescriptionUsable ? responseText : '');
+  const existingSalaryUsable = parseSalaryToNumeric(job?.salary) > 0;
+  const responseSalary = String(responseDetail?.salary || '').trim();
+  const salaryRecovered = !existingSalaryUsable && parseSalaryToNumeric(responseSalary) > 0;
+  const postedRecovered = !String(job?.posted || '').trim() && !!String(responseDetail?.posted || '').trim();
+  const companyRecovered = !String(job?.company || '').trim() && !!String(responseDetail?.company || '').trim();
+  const recoveredFields = [
+    salaryRecovered ? 'salary' : '',
+    postedRecovered ? 'posted' : '',
+    companyRecovered ? 'company' : '',
+  ].filter(Boolean);
+  const mergedJob = {
+    ...job,
+    ...(description ? { snippet: description, descriptionCapture: panelText ? 'glassdoor-panel-dom' : 'glassdoor-panel-response-json' } : {}),
+    ...(salaryRecovered ? { salary: responseSalary } : {}),
+    ...(postedRecovered ? { posted: String(responseDetail.posted).trim() } : {}),
+    ...(companyRecovered ? { company: String(responseDetail.company).trim() } : {}),
+  };
+  // Recovery may receive a row staged after an earlier 429. A verified panel or
+  // exact response description makes it score-safe again; remove the explicit
+  // deferral marker from the copied object without mutating recovery storage.
+  if (description) delete mergedJob.descriptionDeferredReason;
+  return {
+    job: mergedJob,
+    descriptionSource: panelText ? 'dom' : responseDescriptionUsable ? 'json' : '',
+    recoveredFields,
+  };
 }
 
 // A ZipRecruiter pay chip may prefix either endpoint with a compact currency
@@ -772,8 +1270,147 @@ export function mergeExpandedJobDetail(job, {
 }
 
 // ── Challenge detection ───────────────────────────────────────────────────────
+const MANUAL_VERIFICATION_TEXT_MARKERS = Object.freeze([
+  'verify you are human',
+  'let us know you',
+  'security check',
+  'your ray id for this request',
+  'additional verification required',
+  'i am not a robot',
+  // Glassdoor's current terminal Cloudflare block has no challenge widget and
+  // does not use the older "your ray id for this request" wording.
+  'humans only',
+  'glassdoor has been built on the contributions of real employees and job seekers',
+  'if you have been mistakenly blocked from accessing our site',
+]);
+const MANUAL_HARD_BLOCK_TEXT_MARKERS = Object.freeze([
+  'humans only',
+  'if you have been mistakenly blocked from accessing our site',
+]);
+
+/** Text-only seam shared by the browser probe and deterministic regressions. */
+export function hasManualVerificationText(value) {
+  const bodyText = String(value || '').toLowerCase();
+  return MANUAL_VERIFICATION_TEXT_MARKERS.some(marker => bodyText.includes(marker));
+}
+
+export function hasManualHardBlockText(value) {
+  const bodyText = String(value || '').toLowerCase();
+  return MANUAL_HARD_BLOCK_TEXT_MARKERS.some(marker => bodyText.includes(marker));
+}
+
+/**
+ * Finalize the DOM probe's challenge verdict outside page.evaluate so the
+ * exact policy is unit-testable. Provider copy is not enough to call a page
+ * terminal: Glassdoor can render its "Humans only" text alongside a live
+ * Turnstile widget. In that state the user must be allowed to solve, and a
+ * challenge that is served again must remain in the wait loop.
+ */
+export function classifyManualChallengeSignals(signals = {}) {
+  const interactive = !!(
+    signals.hasChallengeShell
+    || signals.hasPerimeterXBlock
+    || signals.hasCloudflareChallengeFrame
+    || signals.hasCloudflareTurnstileWidget
+    || Number(signals.visibleRecaptchaFrames) > 0
+    || Number(signals.visibleHCaptchaFrames) > 0
+    || signals.hasDataDomeFrame
+    || signals.hasDataDomeScript
+  );
+  const hardBlockCandidate = !!signals.hasTerminalHardBlockText
+    || signals.reason === 'verification-text'
+    || signals.reason === 'google-sorry-recaptcha';
+  const isHardBlock = hardBlockCandidate && !interactive && !signals.hasNormalContent;
+  return {
+    ...signals,
+    interactive,
+    isHardBlock,
+    isChallenge: isHardBlock || !!signals.isChallenge,
+    reason: isHardBlock ? 'hard-block' : (signals.reason || 'none'),
+  };
+}
+
+/**
+ * Decide whether a terminal-looking challenge page is stable enough to close.
+ *
+ * A Turnstile/Cloudflare page can briefly lose its iframe while it moves from a
+ * user solve to either a redirect or a re-served widget. Once this wait has
+ * observed an interactive challenge, a no-widget hard-block must remain stable
+ * for a human-visible grace period before it is terminal. Kept pure so the
+ * transition policy can be regression-tested without Puppeteer timing.
+ */
+export function resolveManualChallengeTransition({
+  signals = {},
+  sawInteractiveChallenge = false,
+  terminalSince = null,
+  now = Date.now(),
+  graceMs = CHALLENGE_TERMINAL_TRANSITION_GRACE_MS,
+} = {}) {
+  if (signals.interactive) {
+    return {
+      disposition: terminalSince === null ? 'interactive' : 'interactive-returned',
+      sawInteractiveChallenge: true,
+      terminalSince: null,
+      terminalElapsedMs: 0,
+    };
+  }
+  if (!signals.isHardBlock) {
+    return {
+      disposition: 'none',
+      sawInteractiveChallenge,
+      terminalSince: null,
+      terminalElapsedMs: 0,
+    };
+  }
+  if (!sawInteractiveChallenge) {
+    return {
+      disposition: 'hard-block',
+      sawInteractiveChallenge: false,
+      terminalSince: null,
+      terminalElapsedMs: 0,
+    };
+  }
+
+  const stableSince = Number.isFinite(terminalSince) ? terminalSince : now;
+  const terminalElapsedMs = Math.max(0, now - stableSince);
+  return {
+    disposition: terminalElapsedMs < Math.max(0, graceMs) ? 'terminal-settling' : 'hard-block',
+    sawInteractiveChallenge: true,
+    terminalSince: stableSince,
+    terminalElapsedMs,
+  };
+}
+
+/**
+ * Detail tabs share the main-page transition policy. A background tab with a
+ * live widget—or one settling immediately after that widget vanished—must be
+ * brought forward for the user. A terminal page that was never interactive, or
+ * stayed terminal through the grace window, stops enrichment without opening a
+ * futile solve flow.
+ */
+export function resolveManualDetailChallengeDisposition({
+  signals = {},
+  sawInteractiveChallenge = false,
+  terminalSince = null,
+  now = Date.now(),
+  graceMs = CHALLENGE_TERMINAL_TRANSITION_GRACE_MS,
+} = {}) {
+  const transition = resolveManualChallengeTransition({
+    signals,
+    sawInteractiveChallenge,
+    terminalSince,
+    now,
+    graceMs,
+  });
+  if (!signals.isChallenge) return { ...transition, disposition: 'none' };
+  return {
+    ...transition,
+    disposition: transition.disposition === 'hard-block' ? 'terminal-stop' : 'foreground-wait',
+  };
+}
+
 async function getChallengeSignals(page) {
-  return page.evaluate(() => {
+  const evaluated = await page.evaluate((verificationTextMarkers, hardBlockTextMarkers) => {
     const bodyTextRaw = document.body?.innerText || '';
     const bodyText = bodyTextRaw.toLowerCase();
     const titleRaw = document.title || '';
@@ -788,12 +1425,8 @@ async function getChallengeSignals(page) {
       (bodyText.includes('waiting for') && bodyText.includes('indeed.com to respond'));
     const hasVerificationText =
       hasVerificationSuccessful ||
-      bodyText.includes('verify you are human') ||
-      bodyText.includes('let us know you') ||
-      bodyText.includes('security check') ||
-      bodyText.includes('your ray id for this request') ||
-      bodyText.includes('additional verification required') ||
-      bodyText.includes('i am not a robot');
+      verificationTextMarkers.some(marker => bodyText.includes(marker));
+    const hasTerminalHardBlockText = hardBlockTextMarkers.some(marker => bodyText.includes(marker));
     const hasNormalContent = !!document.querySelector(
       'main [data-jk], main a[href*="/viewjob"], main [data-testid="jobDescriptionSection"], main #jobDescriptionSection, main h1'
     );
@@ -844,23 +1477,9 @@ async function getChallengeSignals(page) {
     else if (hasCloudflareChallengeFrame || hasCloudflareTurnstileWidget) reason = 'cloudflare-challenge-frame';
     else if (hasIndeedCloudflareMarker && !hasNormalContent) reason = 'indeed-cloudflare-static-without-content';
 
-    // Hard block: a verification wall is present but there is NO interactive widget
-    // to solve (no Cloudflare turnstile, no reCAPTCHA, no hCaptcha). Covers both the
-    // CF "Additional Verification Required" Ray-ID page AND a Google /sorry page that
-    // serves no reCAPTCHA (a pure rate-limit block). Since a solvable challenge is
-    // now waited on INDEFINITELY, distinguishing this is essential: callers must skip
-    // a hard block immediately so it can't hang the run on an interaction that can't happen.
-    const isHardBlock = (reason === 'verification-text' || reason === 'google-sorry-recaptcha') &&
-                        !hasCloudflareChallengeFrame &&
-                        !hasCloudflareTurnstileWidget &&
-                        visibleRecaptchaFrames === 0 &&
-                        visibleHCaptchaFrames === 0 &&
-                        !hasNormalContent;
-    if (isHardBlock) reason = 'hard-block';
-
     return {
       isChallenge: reason !== 'none',
-      isHardBlock,
+      isHardBlock: false,
       verificationCompleted: hasVerificationSuccessful,
       reason,
       url: window.location.href,
@@ -869,6 +1488,7 @@ async function getChallengeSignals(page) {
       hasChallengeShell,
       hasPerimeterXBlock,
       hasVerificationText,
+      hasTerminalHardBlockText,
       hasNormalContent,
       visibleRecaptchaFrames,
       visibleHCaptchaFrames,
@@ -878,17 +1498,19 @@ async function getChallengeSignals(page) {
       hasDataDomeFrame,
       hasDataDomeScript,
     };
-  }).catch(() => ({
+  }, MANUAL_VERIFICATION_TEXT_MARKERS, MANUAL_HARD_BLOCK_TEXT_MARKERS).catch((error) => ({
     isChallenge: false,
     isHardBlock: false,
     verificationCompleted: false,
     reason: 'evaluate-failed',
+    evaluationError: String(error?.message || error || '').replace(/\s+/g, ' ').slice(0, 180),
     url: page.url(),
     title: '',
     bodyHead: '',
     hasChallengeShell: false,
     hasPerimeterXBlock: false,
     hasVerificationText: false,
+    hasTerminalHardBlockText: false,
     hasNormalContent: false,
     visibleRecaptchaFrames: 0,
     visibleHCaptchaFrames: 0,
@@ -898,6 +1520,7 @@ async function getChallengeSignals(page) {
     hasDataDomeFrame: false,
     hasDataDomeScript: false,
   }));
+  return classifyManualChallengeSignals(evaluated);
 }
 
 function formatChallengeEvidence(signals, key = null) {
@@ -911,6 +1534,7 @@ function formatChallengeEvidence(signals, key = null) {
     signals.hasChallengeShell ? 'challengeShell=yes' : null,
     signals.hasPerimeterXBlock ? 'perimeterX=yes' : null,
     signals.hasVerificationText ? 'verificationText=yes' : null,
+    signals.hasTerminalHardBlockText ? 'terminalHardBlockText=yes' : null,
     signals.visibleRecaptchaFrames ? `recaptchaFrames=${signals.visibleRecaptchaFrames}` : null,
     signals.visibleHCaptchaFrames ? `hcaptchaFrames=${signals.visibleHCaptchaFrames}` : null,
     signals.hasCloudflareChallengeFrame ? 'cfFrame=yes' : null,
@@ -918,6 +1542,7 @@ function formatChallengeEvidence(signals, key = null) {
     signals.hasIndeedCloudflareMarker ? 'indeedCfMarker=yes' : null,
     signals.hasDataDomeFrame ? 'dataDomeFrame=yes' : null,
     signals.hasDataDomeScript ? 'dataDomeScript=yes' : null,
+    signals.evaluationError ? `evaluateError=${JSON.stringify(signals.evaluationError)}` : null,
     signals.bodyHead ? `bodyHead=${JSON.stringify(signals.bodyHead)}` : null,
   ].filter(Boolean);
   return bits.join(' | ').slice(0, 700);
@@ -1032,7 +1657,10 @@ async function waitIfPaused(page, signal) {
 // ── waitForReady ──────────────────────────────────────────────────────────────
 // Waits for real page content to appear, handling challenge pages.
 // Returns 'ok' | 'skip' (challenge timed out) | 'abort' (signal aborted).
-async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, { challengeOnly = false } = {}) {
+async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = null, {
+  challengeOnly = false,
+  initialChallengeState = null,
+} = {}) {
   // Location autocomplete runs from Glassdoor's origin landing page, before a
   // results page exists. In that phase there cannot be a job-card selector to
   // wait for; we only need this function's challenge gate. The origin navigation
@@ -1046,6 +1674,12 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
   let shownVerifiedOverlay     = false;
   let didHomeLandingRecover    = false; // true if recoverFromChallengeHomeLanding fired
   let justRecovered            = false; // true on the iteration immediately after a home-landing recovery
+  let repeatedChallengeCount   = 0;
+  let sawInteractiveChallenge  = !!initialChallengeState?.sawInteractiveChallenge;
+  let terminalSince            = Number.isFinite(initialChallengeState?.terminalSince)
+    ? initialChallengeState.terminalSince
+    : null;
+  let terminalTransitionCount  = 0;
 
   while (true) {
     if (signal?.aborted) return 'abort';
@@ -1058,7 +1692,76 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
 
     if (isChallenge) {
       cleanSince = null; // challenge present or re-served — reset stable timer
-      if (justRecovered) {
+      const priorTerminalSince = terminalSince;
+      const transition = resolveManualChallengeTransition({
+        signals,
+        sawInteractiveChallenge,
+        terminalSince,
+      });
+      sawInteractiveChallenge = transition.sawInteractiveChallenge;
+      terminalSince = transition.terminalSince;
+
+      if (transition.disposition === 'interactive-returned') {
+        repeatedChallengeCount++;
+        shownVerifiedOverlay = false;
+        await updateOverlay(page, {
+          ...overlayBase,
+          status: '⚠️ Verification returned — complete the challenge to continue',
+          challenge: true,
+        }).catch(() => {});
+        recordManualScraperTelemetry({
+          phase: 'challenge-transition-reverted',
+          srcName: overlayBase.srcName,
+          reason: signals.reason,
+          title: signals.title,
+          bodyHead: signals.bodyHead,
+          url: signals.url,
+          repeatCount: repeatedChallengeCount,
+          terminalTransitionCount,
+          pageState: {
+            interactive: true,
+            cfFrame: !!signals.hasCloudflareChallengeFrame,
+            turnstileWidget: !!signals.hasCloudflareTurnstileWidget,
+            recaptchaFrames: Number(signals.visibleRecaptchaFrames) || 0,
+            hcaptchaFrames: Number(signals.visibleHCaptchaFrames) || 0,
+          },
+        });
+        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: interactive challenge returned during terminal transition (repeat ${repeatedChallengeCount}) — continuing to wait`);
+      }
+      if (transition.disposition === 'terminal-settling') {
+        if (priorTerminalSince === null) {
+          terminalTransitionCount++;
+          await updateOverlay(page, {
+            ...overlayBase,
+            status: '⏳ Verification is changing — keeping this page open while it settles…',
+            challenge: true,
+          }).catch(() => {});
+          recordManualScraperTelemetry({
+            phase: 'challenge-terminal-settling',
+            srcName: overlayBase.srcName,
+            reason: signals.reason,
+            title: signals.title,
+            bodyHead: signals.bodyHead,
+            url: signals.url,
+            terminalTransitionCount,
+            terminalGraceMs: CHALLENGE_TERMINAL_TRANSITION_GRACE_MS,
+            pageState: {
+              interactive: false,
+              normalContent: !!signals.hasNormalContent,
+              cfFrame: !!signals.hasCloudflareChallengeFrame,
+              turnstileWidget: !!signals.hasCloudflareTurnstileWidget,
+              terminalHardBlockText: !!signals.hasTerminalHardBlockText,
+            },
+          });
+          logger.warn(`[BrowserScraper] ${overlayBase.srcName}: challenge widget disappeared into a terminal-looking page — waiting ${CHALLENGE_TERMINAL_TRANSITION_GRACE_MS}ms before closing`);
+        }
+        await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
+        continue;
+      }
+
+      if (justRecovered
+        && transition.disposition !== 'interactive-returned'
+        && !(sawInteractiveChallenge && signals.isHardBlock)) {
         // Challenge appeared immediately after navigating back to the resume URL —
         // that URL is itself blocked. Skip now; no checkbox-solve will unblock it.
         logger.warn(`[BrowserScraper] ${overlayBase.srcName}: resume URL immediately challenged after recovery — session fully blocked, skipping source`);
@@ -1068,7 +1771,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       // "Additional Verification Required" shows only a Ray ID + "Return home" —
       // since a solvable challenge now waits indefinitely, a hard block MUST skip
       // here or it would hang the run forever. Surface a clear, actionable error.
-      if (signals?.isHardBlock) {
+      if (transition.disposition === 'hard-block') {
         const evidence = formatChallengeEvidence(signals);
         logger.warn(`[BrowserScraper] ${overlayBase.srcName}: hard block — no solvable challenge widget (${evidence})`);
         recordManualScraperTelemetry({
@@ -1078,6 +1781,24 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           title:     signals.title,
           bodyHead:  signals.bodyHead,
           url:       signals.url,
+          ...(sawInteractiveChallenge ? {
+            terminalTransitionCount,
+            terminalStableMs: transition.terminalElapsedMs,
+            terminalGraceMs: CHALLENGE_TERMINAL_TRANSITION_GRACE_MS,
+            closeCause: 'stable-terminal-after-interactive-challenge',
+          } : { closeCause: 'initial-terminal-hard-block' }),
+          pageState: {
+            interactive: !!signals.interactive,
+            normalContent: !!signals.hasNormalContent,
+            challengeShell: !!signals.hasChallengeShell,
+            perimeterX: !!signals.hasPerimeterXBlock,
+            cfFrame: !!signals.hasCloudflareChallengeFrame,
+            turnstileWidget: !!signals.hasCloudflareTurnstileWidget,
+            recaptchaFrames: Number(signals.visibleRecaptchaFrames) || 0,
+            hcaptchaFrames: Number(signals.visibleHCaptchaFrames) || 0,
+            dataDomeFrame: !!signals.hasDataDomeFrame,
+            dataDomeScript: !!signals.hasDataDomeScript,
+          },
         });
         await updateOverlay(page, {
           ...overlayBase,
@@ -1114,6 +1835,18 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           url:      signals?.url,
           cfFrame:  signals?.hasCloudflareChallengeFrame,
           recaptcha: signals?.visibleRecaptchaFrames,
+          pageState: {
+            interactive: !!signals?.interactive,
+            normalContent: !!signals?.hasNormalContent,
+            challengeShell: !!signals?.hasChallengeShell,
+            perimeterX: !!signals?.hasPerimeterXBlock,
+            cfFrame: !!signals?.hasCloudflareChallengeFrame,
+            turnstileWidget: !!signals?.hasCloudflareTurnstileWidget,
+            recaptchaFrames: Number(signals?.visibleRecaptchaFrames) || 0,
+            hcaptchaFrames: Number(signals?.visibleHCaptchaFrames) || 0,
+            dataDomeFrame: !!signals?.hasDataDomeFrame,
+            dataDomeScript: !!signals?.hasDataDomeScript,
+          },
           browserProfile: BROWSER_LAUNCH_PROFILE,
           egressIp:       egress.ip,
           egressIsp:      egress.isp,
@@ -1144,6 +1877,11 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       continue;
     }
 
+    // A clean poll proves the earlier terminal DOM did not remain stable. Keep
+    // the fact that this challenge was interactive, but never carry its old
+    // terminal timestamp through a redirect/clean settle into a later block.
+    terminalSince = null;
+
     if (inChallenge) {
       if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, resumeUrl)) {
         justRecovered = true;
@@ -1166,6 +1904,36 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       // degraded and the next navigation can immediately re-trigger a challenge.
       // A 3-5s human-like pause reduces the chance of an instant re-challenge.
       await new Promise(r => setTimeout(r, humanDelay(4000)));
+      const postSettleSignals = await getChallengeSignals(page);
+      if (postSettleSignals?.isChallenge) {
+        repeatedChallengeCount++;
+        cleanSince = null;
+        shownVerifiedOverlay = false;
+        await updateOverlay(page, {
+          ...overlayBase,
+          status: '⚠️ Verification returned — complete the challenge to continue',
+          challenge: true,
+        }).catch(() => {});
+        recordManualScraperTelemetry({
+          phase: 'challenge-reappeared',
+          srcName: overlayBase.srcName,
+          reason: postSettleSignals.reason,
+          title: postSettleSignals.title,
+          bodyHead: postSettleSignals.bodyHead,
+          url: postSettleSignals.url,
+          repeatCount: repeatedChallengeCount,
+          pageState: {
+            interactive: !!postSettleSignals.interactive,
+            normalContent: !!postSettleSignals.hasNormalContent,
+            cfFrame: !!postSettleSignals.hasCloudflareChallengeFrame,
+            turnstileWidget: !!postSettleSignals.hasCloudflareTurnstileWidget,
+            recaptchaFrames: Number(postSettleSignals.visibleRecaptchaFrames) || 0,
+            hcaptchaFrames: Number(postSettleSignals.visibleHCaptchaFrames) || 0,
+          },
+        });
+        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: challenge reappeared during post-solve settle (repeat ${repeatedChallengeCount}) — continuing to wait`);
+        continue;
+      }
       await updateOverlay(page, { ...overlayBase, status: 'Extracting jobs…' });
       logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved — resuming`);
       // 'recovered' signals that a home-landing recovery fired — caller is on the
@@ -1199,6 +1967,81 @@ async function runExtractor(page, extractorJS) {
   }
 }
 
+/**
+ * Close only Glassdoor's identified job-alert prompt with a physical click.
+ * A list-card click is intentionally a real mouse action; retain that property
+ * for the close control too, while refusing a click when some other overlay has
+ * already covered it. The returned bounded fingerprint is retained on the
+ * card-walk event so FULL can distinguish a popup from selector drift.
+ */
+async function dismissGlassdoorOpportunityModal(page) {
+  const target = await page.evaluate((modalSelector, closeSelector, markers) => {
+    const normalizedText = (element) => String(element?.textContent || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+    const visible = (element) => {
+      if (!element || element.hidden || element.closest?.('[aria-hidden="true"]')) return false;
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const describe = (element) => element ? {
+      tag: String(element.tagName || '').toLowerCase(),
+      id: String(element.id || '').slice(0, 80),
+      role: String(element.getAttribute?.('role') || '').slice(0, 80),
+      ariaLabel: String(element.getAttribute?.('aria-label') || '').slice(0, 120),
+      testId: String(element.getAttribute?.('data-testid') || element.getAttribute?.('data-test') || '').slice(0, 120),
+      classes: String(element.className || '').replace(/\s+/g, ' ').slice(0, 160),
+      text: String(element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+    } : null;
+    const isClose = (element) => {
+      const label = [
+        element?.getAttribute?.('aria-label'), element?.getAttribute?.('title'),
+        element?.getAttribute?.('data-test'), element?.getAttribute?.('data-testid'),
+      ].filter(Boolean).join(' ').toLocaleLowerCase();
+      const text = normalizedText(element);
+      return label.includes('close') || text === 'x' || text === '×'
+        || (!text && !!element?.querySelector?.('svg'));
+    };
+    const modal = Array.from(document.querySelectorAll(modalSelector))
+      .find(element => visible(element) && markers.every(marker => normalizedText(element).includes(marker)));
+    if (!modal) return { detected: false, action: 'none', reason: 'not-present' };
+    const close = Array.from(modal.querySelectorAll(closeSelector)).find(isClose)
+      || Array.from(modal.querySelectorAll('button, [role="button"]')).find(isClose)
+      || null;
+    if (!close || !visible(close)) {
+      return { detected: true, action: 'failed', reason: 'close-control-missing', modal: describe(modal), dismiss: describe(close) };
+    }
+    const rect = close.getBoundingClientRect();
+    const x = rect.left + (rect.width / 2);
+    const y = rect.top + (rect.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || (!close.contains(hit) && !hit.contains(close))) {
+      return { detected: true, action: 'failed', reason: 'close-control-covered', modal: describe(modal), dismiss: describe(close) };
+    }
+    return { detected: true, action: 'ready', reason: 'close-control-found', x, y, modal: describe(modal), dismiss: describe(close) };
+  }, GLASSDOOR_OPPORTUNITY_MODAL_SELECTOR, GLASSDOOR_OPPORTUNITY_CLOSE_SELECTOR, GLASSDOOR_OPPORTUNITY_MODAL_MARKERS)
+    .catch(() => ({ detected: false, action: 'none', reason: 'page-evaluate-failed' }));
+  if (!target?.detected || target.action !== 'ready') return target;
+
+  await page.mouse.move(target.x, target.y).catch(() => {});
+  await page.mouse.click(target.x, target.y, { delay: humanDelay(70) }).catch(() => {});
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, humanDelay(140)));
+    const remains = await page.evaluate((modalSelector, markers) => {
+      const text = (element) => String(element?.textContent || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+      return Array.from(document.querySelectorAll(modalSelector)).some(element => {
+        if (element.hidden || element.closest?.('[aria-hidden="true"]')) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0
+          && rect.width > 0 && rect.height > 0 && markers.every(marker => text(element).includes(marker));
+      });
+    }, GLASSDOOR_OPPORTUNITY_MODAL_SELECTOR, GLASSDOOR_OPPORTUNITY_MODAL_MARKERS).catch(() => false);
+    if (!remains) return { ...target, action: 'dismissed', reason: 'close-control-clicked' };
+  }
+  return { ...target, action: 'failed', reason: 'close-control-still-visible' };
+}
+
 // ── Description expansion ─────────────────────────────────────────────────────
 // Clicks each job card and captures the full description from the side panel.
 // Only runs when DESC_CONFIGS[sourceId] is defined.
@@ -1220,21 +2063,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   // Jobs collected before this batch starts — used to increment the overlay counter
   // one-by-one (baseCount + i + 1) rather than jumping to totalSoFar immediately.
   const baseCount = totalSoFar - jobs.length;
+  let descWarning = null;
 
   // Navigation-based expansion: navigate to each job's individual page and extract
   // the description there. Used for ZipRecruiter where the extractor
   // reads jobs from JSON (all upfront) but React's virtual list may never render
   // the corresponding card DOM elements — making card-click expansion unreliable.
-  if (cfg.expandViaNavigation && (cfg.navUrlTemplate || cfg.navUrlField)) {
+  if (descriptionExpansionStrategy(sourceId) === 'detail-navigation') {
     const listUrl = page.url();
 
     // Open a dedicated background page for detail fetches so the main list page
     // stays put — eliminates the visual ping-pong between search results and
     // individual job pages. Falls back to the main page if newPage() fails.
     let detailPage = null;
-    try {
-      detailPage = await page.browser().newPage();
-      await detailPage.evaluateOnNewDocument(() => {
+    const createDetailPage = async () => {
+      const nextPage = await page.browser().newPage();
+      await nextPage.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, 'webdriver',           { get: () => false });
         Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
@@ -1242,13 +2086,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
       }).catch(() => {});
       const ua = await page.evaluate(() => navigator.userAgent).catch(() => null);
-      if (ua) await detailPage.setUserAgent(ua).catch(() => {});
+      if (ua) await nextPage.setUserAgent(ua).catch(() => {});
       const vp = page.viewport();
-      if (vp) await detailPage.setViewport(vp).catch(() => {});
+      if (vp) await nextPage.setViewport(vp).catch(() => {});
+      return nextPage;
+    };
+    try {
+      detailPage = await createDetailPage();
     } catch {
       detailPage = null;
     }
-    const fetchPage = detailPage ?? page;
+    let fetchPage = detailPage ?? page;
 
     // Fire the desc/date "miss" diagnostics on the FIRST failure ANYWHERE in the
     // batch — not just i===0. A source can enrich job 0 fine but fail later ones
@@ -1258,10 +2106,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     // had no evidence for WHY. Latches so we log one rich sample per batch.
     let descMissDiagDone = false;
     let dateMissDiagDone = false;
-    let descWarning = null;
     let expandedCount = 0;
-    let lastZipRecruiterDetailAt = 0;
+    let lastDetailNavigationAt = 0;
     let zipRecruiter429Retries = 0;
+    let zipRecruiterAppcastRestrictionRetries = 0;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
@@ -1280,19 +2128,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }
         if (!viewUrl) continue;
 
-        // Pin enrichment to the session domain when configured (Glassdoor serves
-        // regional-domain job hrefs that wall us — see DESC_CONFIGS.glassdoor.pinHost).
-        // Rewrites any sibling host sharing pinHost's second-level label
-        // (fr.glassdoor.ca / www.glassdoor.com → pinHost). Host-only: path + query
-        // preserved; an unrelated host (no shared SLD) is left untouched.
-        if (cfg.pinHost) {
-          const sld = cfg.pinHost.split('.').at(-2); // 'www.glassdoor.com' → 'glassdoor'
-          if (sld) {
-            viewUrl = viewUrl.replace(
-              new RegExp(`^(https?://)[^/]*\\b${sld}\\.[^/]+`, 'i'),
-              `$1${cfg.pinHost}`,
-            );
-          }
+        // Keep Glassdoor detail navigation on the exact country host whose list
+        // page loaded successfully. Only the navigation target is rewritten.
+        if (cfg.pinToListHost) {
+          viewUrl = pinGlassdoorDetailUrlToListHost(viewUrl, listUrl);
         }
         viewUrl = normalizeDetailNavigationUrl(viewUrl);
 
@@ -1315,8 +2154,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         const navPause = await waitIfPaused(page, signal);
         if (navPause === 'abort') break;
 
-        if (sourceId === 'ziprecruiter' && lastZipRecruiterDetailAt) {
-          const waitMs = ZIPRECRUITER_DETAIL_GAP_MS - (Date.now() - lastZipRecruiterDetailAt);
+        const detailGapMs = sourceId === 'ziprecruiter'
+          ? ZIPRECRUITER_DETAIL_GAP_MS
+          : 0;
+        if (detailGapMs > 0 && lastDetailNavigationAt) {
+          const waitMs = detailGapMs - (Date.now() - lastDetailNavigationAt);
           if (waitMs > 0 && !(await waitForAbortableDelay(waitMs, signal))) break;
         }
 
@@ -1344,7 +2186,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let navigationResponse = null;
           let navigationError = null;
           try {
-            if (sourceId === 'ziprecruiter') lastZipRecruiterDetailAt = Date.now();
+            if (detailGapMs > 0) lastDetailNavigationAt = Date.now();
             navigationResponse = await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
           } catch (error) {
             navigationError = error;
@@ -1353,6 +2195,25 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const navigationMoved = finalUrl && finalUrl !== previousUrl && finalUrl !== 'about:blank';
           if (navigationError && !navigationMoved) {
             const reason = String(navigationError?.message || navigationError).replace(/\s+/g, ' ').slice(0, 180);
+            if (isDetachedDetailFrameError(navigationError)) {
+              const unexpandedCount = enhanced.length - i;
+              const samples = enhanced.slice(i, i + 3)
+                .map(row => (row?.title || row?.url || '?').slice(0, 65))
+                .join(', ');
+              logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail frame detached while opening "${job.title || job.url || '?'}" — stopping ${unexpandedCount} remaining detail request(s)`);
+              recordManualScraperTelemetry({
+                phase: 'detail-navigation-abort', srcName: overlayBase.srcName,
+                key: `${unexpandedCount} unexpanded after detached frame | ${samples || 'none'}`,
+                reason: 'detached-frame', error: reason,
+                expectedUrl: viewUrl.slice(0, 240), finalUrl: finalUrl.slice(0, 240),
+              }, { updateActive: false });
+              descWarning = {
+                code: 'description-detail-session-reset', severity: 'warn',
+                evidence: `${overlayBase.srcName}'s detail tab was replaced or detached while opening "${job.title || 'an untitled listing'}". The scraper stopped ${unexpandedCount} remaining detail request(s) instead of repeatedly navigating a dead frame.`,
+                suggestion: `Wait before retrying ${overlayBase.srcName}; if the site shows a verification or hard-block page in normal Chrome, let that restriction cool down before another run.`,
+              };
+              break;
+            }
             logger.warn(`[BrowserScraper] ${overlayBase.srcName} detail navigation failed for "${job.title || job.url || '?'}": ${reason}`);
             recordManualScraperTelemetry({
               phase: 'desc-miss', srcName: overlayBase.srcName,
@@ -1371,10 +2232,27 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           }
           const navigationStatus = navigationResponse?.status?.() ?? null;
 
-          const challengeSignals = await getChallengeSignals(fetchPage);
-          const isChallenge = !!challengeSignals?.isChallenge;
+          // Probe normal detail pages immediately. Only a terminal/challenge
+          // candidate gets an additional injection window: Cloudflare commonly
+          // appends its iframe/Turnstile just after DOMContentLoaded, but adding a
+          // fixed delay to every healthy row would needlessly slow the detail pass.
+          let challengeSignals = await getChallengeSignals(fetchPage);
+          let detailSawInteractiveChallenge = !!challengeSignals?.interactive;
+          let detailTerminalSince = null;
+          if (challengeSignals?.isChallenge) {
+            if (!await waitForAbortableDelay(DETAIL_CHALLENGE_SETTLE_MS, signal)) break;
+            challengeSignals = await getChallengeSignals(fetchPage);
+          }
+          let detailChallengeDecision = resolveManualDetailChallengeDisposition({
+            signals: challengeSignals,
+            sawInteractiveChallenge: detailSawInteractiveChallenge,
+            terminalSince: detailTerminalSince,
+          });
+          detailSawInteractiveChallenge = detailChallengeDecision.sawInteractiveChallenge;
+          detailTerminalSince = detailChallengeDecision.terminalSince;
+          let detailChallengeAction = detailChallengeDecision.disposition;
           // Detect expired listings separately from challenge redirects.
-          const pageInfo = await fetchPage.evaluate(() => {
+          const rawPageInfo = await fetchPage.evaluate(() => {
             const bodyText = (document.body?.innerText || '').toLowerCase();
             const title    = (document.title || '').toLowerCase();
             // Workday's external `/apply` endpoint responds with HTTP 200 even
@@ -1394,8 +2272,95 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               bodyText.includes('no longer available') ||
               bodyText.includes('this job has expired') ||
               title.includes('404');
-            return { isNotFound, isRateLimited, workdayPostingAvailable };
-          }).catch(() => ({ isNotFound: false, isRateLimited: false, workdayPostingAvailable: null }));
+            return {
+              isNotFound,
+              isRateLimited,
+              workdayPostingAvailable,
+              finalUrl: location.href,
+              visibleText: document.body?.innerText || '',
+            };
+          }).catch(() => ({
+            isNotFound: false,
+            isRateLimited: false,
+            workdayPostingAvailable: null,
+            finalUrl: '',
+            visibleText: '',
+          }));
+          // A removed ZipRecruiter posting redirects an authenticated visitor to
+          // its otherwise-valid jobseeker home page. It contains no 404 or
+          // "expired" text, so treating it as a description-hydration miss would
+          // retain a closed listing and show a misleading retry warning.
+          const pageInfo = {
+            ...rawPageInfo,
+            zipRecruiterClosedJobRedirect: isZipRecruiterClosedDetailRedirect(rawPageInfo.finalUrl),
+          };
+
+          const appcastTemporarilyRestricted = sourceId === 'ziprecruiter'
+            && isAppcastTemporaryRestriction({
+              url: rawPageInfo.finalUrl || fetchPage.url(),
+              visibleText: rawPageInfo.visibleText,
+            });
+          if (appcastTemporarilyRestricted) {
+            const title = (job.title || job.url || '?').slice(0, 65);
+            const retryNumber = zipRecruiterAppcastRestrictionRetries + 1;
+            const recoveryAllowed = retryNumber <= ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES
+              && !signal?.aborted;
+            recordManualScraperTelemetry({
+              phase: 'detail-appcast-restriction',
+              sourceId,
+              srcName: overlayBase.srcName,
+              key: `${title} | Appcast temporarily restricted`,
+              reason: recoveryAllowed ? 'recovery-attempt' : 'recovery-exhausted',
+              attempt: retryNumber,
+              maxAttempts: ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES,
+              status: navigationStatus,
+              expectedUrl: viewUrl.slice(0, 240),
+              finalUrl: fetchPage.url().slice(0, 240),
+            }, { updateActive: false });
+
+            if (recoveryAllowed) {
+              zipRecruiterAppcastRestrictionRetries = retryNumber;
+              const waitMs = zipRecruiterAppcastRestrictionBackoffMs(retryNumber);
+              logger.warn(`[BrowserScraper] ZipRecruiter detail redirect reached Appcast's temporary restriction for "${title}"; closing the detail tab, waiting ${Math.ceil(waitMs / 1000)}s, reloading results, then retrying once`);
+              await updateOverlay(page, {
+                ...overlayBase,
+                count: baseCount + i + 1,
+                status: `Appcast temporarily restricted — retrying in ${Math.ceil(waitMs / 1000)}s…`,
+                challenge: true,
+              }).catch(() => {});
+              if (detailPage) {
+                await detailPage.close().catch(() => {});
+                detailPage = null;
+                fetchPage = page;
+              }
+              if (!await waitForAbortableDelay(waitMs, signal)) break;
+              await page.reload({ waitUntil: 'domcontentloaded', timeout: 12_000 }).catch(() => {});
+              await injectOverlay(page).catch(() => {});
+              const resultsReady = await waitForReady(page, sourceId, overlayBase, signal, listUrl);
+              if (!['ok', 'recovered'].includes(resultsReady)) break;
+              try {
+                detailPage = await createDetailPage();
+                fetchPage = detailPage;
+              } catch {
+                detailPage = null;
+                fetchPage = page;
+              }
+              i--; // retry the exact outbound detail navigation after list-page refresh
+              continue;
+            }
+
+            logger.warn(`[BrowserScraper] ZipRecruiter Appcast restriction persisted after the bounded recovery; stopping detail enrichment for this source`);
+            descWarning = {
+              code: 'description-appcast-temporary-restriction',
+              severity: 'block',
+              shortLabel: 'Switch IP, then retry',
+              actionLabel: 'Retry after IP change',
+              actionTitle: 'After changing to a working VPN/network IP, retry this ZipRecruiter source from its saved results page',
+              evidence: `Appcast temporarily restricted the ZipRecruiter outbound detail redirect for "${job.title || 'an untitled listing'}" after one safe recovery (close detail tab, wait, reload results, retry). Detail requests stopped to avoid escalating the restriction.`,
+              suggestion: 'Wait before retrying, or switch ProtonVPN to a new working location. Then click Retry after IP change to reopen the saved ZipRecruiter results page and retry the detail pass. The app will not control your VPN or attempt to bypass the restriction.',
+            };
+            break;
+          }
 
           if (sourceId === 'ziprecruiter' && (navigationStatus === 429 || pageInfo.isRateLimited)) {
             const retryAfter = navigationResponse?.headers?.()?.['retry-after'];
@@ -1433,48 +2398,207 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             break;
           }
 
-          if (isChallenge) {
+          if (detailChallengeAction !== 'none') {
+            let detailChallengeResolved = false;
+            let detailWaitResult = null;
             if (detailPage) {
-              // A background tab cannot be solved by the user. Keep the relevant
-              // list row (rather than silently dropping it), stop the remaining
-              // detail requests so we do not intensify a session-level block, and
-              // attach a source warning that makes the partial scoring input clear.
-              const evidence = formatChallengeEvidence(challengeSignals, job.title || job.url);
-              logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment challenged; retaining list rows and stopping detail pass (${evidence})`);
+              let evidence = formatChallengeEvidence(challengeSignals, job.title || job.url);
+              const detailPageState = {
+                interactive: !!challengeSignals?.interactive,
+                normalContent: !!challengeSignals?.hasNormalContent,
+                challengeShell: !!challengeSignals?.hasChallengeShell,
+                perimeterX: !!challengeSignals?.hasPerimeterXBlock,
+                verificationText: !!challengeSignals?.hasVerificationText,
+                terminalHardBlockText: !!challengeSignals?.hasTerminalHardBlockText,
+                cfFrame: !!challengeSignals?.hasCloudflareChallengeFrame,
+                turnstileWidget: !!challengeSignals?.hasCloudflareTurnstileWidget,
+                recaptchaFrames: Number(challengeSignals?.visibleRecaptchaFrames) || 0,
+                hcaptchaFrames: Number(challengeSignals?.visibleHCaptchaFrames) || 0,
+                dataDomeFrame: !!challengeSignals?.hasDataDomeFrame,
+                dataDomeScript: !!challengeSignals?.hasDataDomeScript,
+              };
               recordManualScraperTelemetry({
                 phase: 'detail-challenge', srcName: overlayBase.srcName,
                 key: (job.title || job.url || '?').slice(0, 80),
                 reason: challengeSignals?.reason, title: challengeSignals?.title,
+                hardBlock: !!challengeSignals?.isHardBlock,
+                disposition: detailChallengeAction === 'terminal-stop' ? 'terminal-hard-block' : 'interactive-presented',
+                navigationStatus,
+                finalUrl: String(challengeSignals?.url || fetchPage.url()).slice(0, 240),
+                bodyHead: String(challengeSignals?.bodyHead || '').slice(0, 240),
+                pageState: detailPageState,
               }, { updateActive: false });
-              recordManualScraperTelemetry({
-                phase: 'desc-miss', srcName: overlayBase.srcName,
-                key: `${(job.title || job.url || '?').slice(0, 65)} | detail challenge`,
-              }, { updateActive: false });
-              descWarning ||= {
-                code: 'description-detail-challenge', severity: 'warn',
-                evidence: `${overlayBase.srcName} challenged the background detail fetch at "${job.title || 'an untitled listing'}". Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
-                suggestion: `Open ${overlayBase.srcName} in a normal Chrome tab, complete any verification, then run the search again for full descriptions.`,
-              };
-              // The break below is deliberate (see comment above) — it must stay so
-              // we don't intensify a session-level block. But it is otherwise SILENT
-              // about its blast radius: every job after this one keeps its list-time
-              // empty snippet with no telemetry of its own, so a later empty-
-              // description row at scoring time is unattributable to this abort. Log
-              // the remaining count (from this loop's own position — not re-derived)
-              // plus a few sample titles so that row can be traced back here.
-              const unexpandedCount = enhanced.length - (i + 1);
-              const unexpandedSample = enhanced
-                .slice(i + 1, i + 1 + 3)
-                .map(j => (j?.title || j?.url || '?').slice(0, 65))
-                .join(', ');
-              recordManualScraperTelemetry({
-                phase: 'desc-miss', srcName: overlayBase.srcName,
-                key: `${unexpandedCount} unexpanded after abort | ${unexpandedSample || 'none'}`,
-              }, { updateActive: false });
-              break;
+
+              // Never hide a terminal-looking detail challenge in a background
+              // tab. Keep it foregrounded for a bounded confirmation window: a
+              // delayed widget becomes the ordinary foreground solve path; a
+              // stable terminal page is then stopped with visible evidence.
+              if (detailChallengeAction === 'terminal-stop') {
+                await detailPage.bringToFront().catch(() => {});
+                const terminalPresentedAt = Date.now();
+                const terminalDeadline = terminalPresentedAt + DETAIL_TERMINAL_PRESENT_MS;
+                let terminalPresentationAborted = false;
+                while (Date.now() < terminalDeadline) {
+                  const remainingMs = terminalDeadline - Date.now();
+                  if (!await waitForAbortableDelay(Math.min(CONTENT_POLL_MS, remainingMs), signal)) {
+                    terminalPresentationAborted = true;
+                    break;
+                  }
+                  challengeSignals = await getChallengeSignals(fetchPage);
+                  detailChallengeDecision = resolveManualDetailChallengeDisposition({
+                    signals: challengeSignals,
+                    sawInteractiveChallenge: detailSawInteractiveChallenge,
+                    terminalSince: detailTerminalSince,
+                  });
+                  detailSawInteractiveChallenge = detailChallengeDecision.sawInteractiveChallenge;
+                  detailTerminalSince = detailChallengeDecision.terminalSince;
+                  detailChallengeAction = detailChallengeDecision.disposition;
+                  if (detailChallengeAction !== 'terminal-stop') break;
+                }
+                const terminalVisibleMs = Date.now() - terminalPresentedAt;
+                recordManualScraperTelemetry({
+                  phase: 'detail-challenge', srcName: overlayBase.srcName,
+                  key: (job.title || job.url || '?').slice(0, 80),
+                  reason: challengeSignals?.reason,
+                  title: challengeSignals?.title,
+                  disposition: 'terminal-presented',
+                  terminalVisibleMs,
+                  terminalPresentationOutcome: terminalPresentationAborted
+                    ? 'aborted'
+                    : detailChallengeAction === 'foreground-wait'
+                      ? 'interactive-returned'
+                      : detailChallengeAction === 'none'
+                        ? 'cleared'
+                        : 'remained-terminal',
+                  finalUrl: fetchPage.url().slice(0, 240),
+                  pageState: {
+                    interactive: !!challengeSignals?.interactive,
+                    normalContent: !!challengeSignals?.hasNormalContent,
+                    terminalHardBlockText: !!challengeSignals?.hasTerminalHardBlockText,
+                    cfFrame: !!challengeSignals?.hasCloudflareChallengeFrame,
+                    turnstileWidget: !!challengeSignals?.hasCloudflareTurnstileWidget,
+                  },
+                }, { updateActive: false });
+                if (terminalPresentationAborted) {
+                  await page.bringToFront().catch(() => {});
+                  await injectOverlay(page).catch(() => {});
+                  break;
+                }
+                if (detailChallengeAction === 'none') {
+                  detailChallengeResolved = true;
+                  await page.bringToFront().catch(() => {});
+                  await injectOverlay(page).catch(() => {});
+                  await updateOverlay(page, {
+                    ...overlayBase,
+                    count: baseCount + i + 1,
+                    status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+                  }).catch(() => {});
+                } else if (detailChallengeAction === 'terminal-stop') {
+                  evidence = formatChallengeEvidence(challengeSignals, job.title || job.url);
+                  await page.bringToFront().catch(() => {});
+                  await injectOverlay(page).catch(() => {});
+                }
+              }
+
+              // An interactive challenge in a background detail tab is still
+              // solvable. Present that exact tab to the user, use the same stable
+              // challenge gate as list navigation, then return to the list. Keep
+              // extracting from the now-unlocked detail document rather than
+              // navigating it again and needlessly provoking Cloudflare.
+              if (detailChallengeAction === 'foreground-wait') {
+                await detailPage.bringToFront().catch(() => {});
+                detailWaitResult = await waitForReady(
+                  detailPage,
+                  sourceId,
+                  overlayBase,
+                  signal,
+                  viewUrl,
+                  {
+                    challengeOnly: true,
+                    initialChallengeState: {
+                      sawInteractiveChallenge: detailSawInteractiveChallenge,
+                      terminalSince: detailTerminalSince,
+                    },
+                  },
+                );
+                const postWaitSignals = await getChallengeSignals(fetchPage);
+                await page.bringToFront().catch(() => {});
+                await injectOverlay(page).catch(() => {});
+
+                recordManualScraperTelemetry({
+                  phase: 'detail-challenge', srcName: overlayBase.srcName,
+                  key: (job.title || job.url || '?').slice(0, 80),
+                  reason: postWaitSignals?.reason || challengeSignals?.reason,
+                  title: postWaitSignals?.title || challengeSignals?.title,
+                  disposition: detailWaitResult === 'ok' || detailWaitResult === 'recovered'
+                    ? 'interactive-resolved'
+                    : detailWaitResult === 'hard-block'
+                      ? 'terminal-hard-block-after-wait'
+                      : detailWaitResult === 'skip'
+                        ? 'session-blocked-after-wait'
+                        : 'aborted-during-wait',
+                  waitResult: detailWaitResult,
+                  navigationStatus,
+                  finalUrl: fetchPage.url().slice(0, 240),
+                  pageState: {
+                    ...detailPageState,
+                    postWaitInteractive: !!postWaitSignals?.interactive,
+                    postWaitHardBlock: !!postWaitSignals?.isHardBlock,
+                    postWaitCfFrame: !!postWaitSignals?.hasCloudflareChallengeFrame,
+                    postWaitTurnstileWidget: !!postWaitSignals?.hasCloudflareTurnstileWidget,
+                  },
+                }, { updateActive: false });
+
+                if (detailWaitResult === 'ok' || detailWaitResult === 'recovered') {
+                  detailChallengeResolved = true;
+                  logger.info(`[BrowserScraper] ${overlayBase.srcName}: detail verification resolved; returning to the list and continuing "${job.title || job.url || '?'}"`);
+                  await updateOverlay(page, {
+                    ...overlayBase,
+                    count: baseCount + i + 1,
+                    status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+                  }).catch(() => {});
+                }
+                if (detailWaitResult === 'abort') break;
+                if (detailWaitResult !== 'ok' && detailWaitResult !== 'recovered') {
+                  evidence = formatChallengeEvidence(postWaitSignals, job.title || job.url);
+                }
+              }
+
+              if (!detailChallengeResolved) {
+                const hardBlock = detailChallengeAction === 'terminal-stop' || detailWaitResult === 'hard-block';
+                logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment ${hardBlock ? 'hard-blocked' : 'remained session-blocked'}; retaining list rows and stopping detail pass (${evidence})`);
+                recordManualScraperTelemetry({
+                  phase: 'desc-miss', srcName: overlayBase.srcName,
+                  key: `${(job.title || job.url || '?').slice(0, 65)} | detail challenge`,
+                }, { updateActive: false });
+                descWarning ||= {
+                  code: hardBlock ? 'description-detail-hard-block' : 'description-detail-challenge',
+                  severity: hardBlock ? 'block' : 'warn',
+                  ...(hardBlock ? { action: 'none', shortLabel: 'Wait, then rerun' } : {}),
+                  evidence: hardBlock
+                    ? `${overlayBase.srcName} returned a non-interactive human-verification hard block while fetching "${job.title || 'an untitled listing'}" (${challengeSignals?.title || 'untitled page'} at ${challengeSignals?.url || fetchPage.url()}). Detail requests stopped immediately.`
+                    : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
+                  suggestion: hardBlock
+                    ? `Do not keep retrying ${overlayBase.srcName}: wait for the IP/session restriction to cool down, confirm the site opens normally in Chrome, then rerun the search.`
+                    : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
+                };
+                // A terminal/session-level stop must remain visible for every
+                // later row whose list-time description stays empty.
+                const unexpandedCount = enhanced.length - i;
+                const unexpandedSample = enhanced
+                  .slice(i, i + 3)
+                  .map(j => (j?.title || j?.url || '?').slice(0, 65))
+                  .join(', ');
+                recordManualScraperTelemetry({
+                  phase: 'desc-miss', srcName: overlayBase.srcName,
+                  key: `${unexpandedCount} unexpanded after abort | ${unexpandedSample || 'none'}`,
+                }, { updateActive: false });
+                break;
+              }
             }
-            // Fallback path: main page is being used, challenge is visible.
-            await updateOverlay(page, {
+            if (!detailPage) {
+              // Fallback path: main page is being used, challenge is visible.
+              await updateOverlay(page, {
               ...overlayBase,
               count:     baseCount + i + 1,
               status:    '⚠️ Complete the verification to continue',
@@ -1506,14 +2630,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               count:  baseCount + i + 1,
               status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
             });
-            i--; // retry this job now that the challenge is solved
-            continue;
+              i--; // retry this job now that the challenge is solved
+              continue;
+            }
           }
 
           if (isUnavailableDetailPage(pageInfo)) {
-            const reason = pageInfo.workdayPostingAvailable === false
-              ? 'workday-posting-unavailable'
-              : 'detail-page-not-found';
+            const reason = pageInfo.zipRecruiterClosedJobRedirect
+              ? 'ziprecruiter-closed-job-redirect'
+              : pageInfo.workdayPostingAvailable === false
+                ? 'workday-posting-unavailable'
+                : 'detail-page-not-found';
             logger.info(`[BrowserScraper] ${overlayBase.srcName} dropped unavailable detail listing "${job.title || job.url || '?'}" (${reason})`);
             recordManualScraperTelemetry({
               phase: 'detail-unavailable', srcName: overlayBase.srcName,
@@ -1965,13 +3092,102 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let attemptedCount = 0;
   let missingCount = 0;
   let panelTimeoutCount = 0;
+  let panelRateLimitCount = 0;
+  let panelHttpFailureCount = 0;
+  let panelRequestsIssued = 0;
+  let proactivePanelCooldowns = 0;
+  let panelJsonResponses = 0;
+  let panelJsonPayloads = 0;
+  let panelJsonDescriptionFallbacks = 0;
+  const panelJsonFieldRecoveries = { salary: 0, posted: 0, company: 0 };
   let selectionMismatchCount = 0;
+  let blockingModalsDismissed = 0;
+  let blockingModalFailures = 0;
   const failureSamples = [];
+  const modalSamples = [];
   const firstTransitionSamples = [];
   const lastTransitionSamples = [];
   const mismatchTransitionSamples = [];
   const selectionMismatchSamples = [];
   let interruptedAt = null;
+  // Glassdoor emits the job-details API response on the same page whose panel
+  // we are polling. A 429 here is conclusive: waiting for a DOM change and then
+  // clicking the same card again only creates another rate-limited request. Do
+  // not let that external throttle masquerade as stale selectors.
+  let glassdoorPanelRateLimit = null;
+  let glassdoorPanelHttpFailure = null;
+  const pendingGlassdoorPanelKeys = new Set();
+  const glassdoorPanelResponseDetails = new Map();
+  const glassdoorPanelResponseListener = (response) => {
+    if (sourceId !== 'glassdoor') return;
+    try {
+      const status = response.status();
+      const url = response.url();
+      const identity = glassdoorPanelResponseIdentity({ sourceId, status, url });
+      if (!identity || !pendingGlassdoorPanelKeys.has(identity.key)) return;
+      if (identity.status === 429) {
+        if (!glassdoorPanelRateLimit) {
+          glassdoorPanelRateLimit = {
+            status,
+            url: url.slice(0, 240),
+            key: identity.key,
+            observedAt: Date.now(),
+          };
+        }
+        return;
+      }
+      if (identity.status >= 400) {
+        glassdoorPanelHttpFailure = {
+          status: identity.status,
+          url: url.slice(0, 240),
+          key: identity.key,
+          observedAt: Date.now(),
+        };
+        return;
+      }
+      if (identity.status < 200 || identity.status >= 300) return;
+      panelJsonResponses++;
+      glassdoorPanelResponseDetails.set(identity.key, Promise.resolve()
+        .then(() => response.json())
+        .then(extractGlassdoorPanelResponseDetail)
+        .catch(() => null));
+    } catch { /* response/frame can disappear during a teardown */ }
+  };
+  if (sourceId === 'glassdoor') page.on('response', glassdoorPanelResponseListener);
+  const takeGlassdoorPanelResponseDetail = async (key, waitMs = 900) => {
+    if (sourceId !== 'glassdoor') return null;
+    const deadline = Date.now() + waitMs;
+    while (!glassdoorPanelResponseDetails.has(key)
+      && !glassdoorPanelRateLimit
+      && !glassdoorPanelHttpFailure
+      && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const detailPromise = glassdoorPanelResponseDetails.get(key);
+    let detail = null;
+    if (detailPromise) {
+      detail = await Promise.race([
+        detailPromise,
+        new Promise(resolve => setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()))),
+      ]);
+    }
+    pendingGlassdoorPanelKeys.delete(key);
+    glassdoorPanelResponseDetails.delete(key);
+    if (detail) panelJsonPayloads++;
+    return detail;
+  };
+  const waitForPanelPacing = async () => {
+    const pacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
+    if (!pacing.checkpointDue || pacing.checkpointCooldownMs <= 0) return pacing;
+    proactivePanelCooldowns++;
+    await updateOverlay(page, {
+      ...overlayBase,
+      count: totalSoFar,
+      status: `Pausing ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s to keep Glassdoor panel requests below its throttle…`,
+    }).catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, humanCooldown(pacing.checkpointCooldownMs)));
+    return pacing;
+  };
   const rememberCardWalkFailure = (itemIndex, key, reason) => {
     if (failureSamples.length < 6) {
       failureSamples.push({ itemIndex, key: String(key || '?').slice(0, 80), reason });
@@ -1999,17 +3215,46 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     if (selectionMismatchSamples.length < 6) selectionMismatchSamples.push(sample);
   };
 
-  const abortWithError = async (evidence, suggestion) => {
+  const dismissBlockingGlassdoorModal = async (itemIndex, physicalIndex, stage) => {
+    if (sourceId !== 'glassdoor') return { detected: false, action: 'none', reason: 'not-glassdoor' };
+    const result = await dismissGlassdoorOpportunityModal(page);
+    if (!result?.detected) return result;
+    if (result.action === 'dismissed') blockingModalsDismissed++;
+    else if (result.action === 'failed') blockingModalFailures++;
+    if (modalSamples.length < 6) {
+      const control = result.dismiss
+        ? [result.dismiss.ariaLabel, result.dismiss.testId, result.dismiss.tag]
+          .filter(Boolean).join(' · ').slice(0, 160)
+        : 'none';
+      modalSamples.push({
+        itemIndex,
+        physicalIndex,
+        stage,
+        signature: 'glassdoor-job-alert',
+        control,
+        outcome: result.action === 'dismissed' ? 'dismissed' : String(result.reason || 'failed').slice(0, 120),
+        action: result.action === 'dismissed' ? 'dismissed' : 'failed',
+        reason: String(result.reason || 'unknown').slice(0, 120),
+        modal: result.modal || null,
+        dismiss: result.dismiss || null,
+      });
+    }
+    return result;
+  };
+
+  const abortWithError = async (evidence, suggestion, code = 'stale-desc-selectors') => {
     logger.warn(`[BrowserScraper] ${sourceId}: ${evidence}`);
     await updateOverlay(page, {
       ...overlayBase,
       count:  totalSoFar,
-      status: 'Desc selector broken — fix selector code and restart.',
+      status: code === 'glassdoor-job-alert-modal'
+        ? 'Glassdoor job-alert prompt blocked the card walk — retry after it is closed.'
+        : 'Desc selector broken — fix selector code and restart.',
       error:  true,
     }).catch(() => {});
     await new Promise(r => setTimeout(r, humanDelay(3000)));
     descError = {
-      code:       'stale-desc-selectors',
+      code,
       severity:   'block',
       evidence,
       suggestion,
@@ -2046,6 +3291,18 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       status: `Opening result card ${i + 1}/${enhanced.length} · result ${physicalIndex}/${physicalTotal}`,
     });
 
+    const preClickModal = await dismissBlockingGlassdoorModal(i + 1, physicalIndex, 'before-card');
+    if (preClickModal?.detected && preClickModal.action === 'failed') {
+      missingCount++;
+      rememberCardWalkFailure(i + 1, key, `blocking-modal-${preClickModal.reason || 'unresolved'}`);
+      await abortWithError(
+        `Glassdoor's “Never Miss an Opportunity” job-alert prompt blocked result card ${i + 1}/${enhanced.length} and could not be closed (${preClickModal.reason || 'unknown'}).`,
+        'The Glassdoor job-alert prompt prevented the list-card panel from opening. Retry the source after closing the prompt, and include the CARDWALK modal sample if it repeats.',
+        'glassdoor-job-alert-modal',
+      );
+      break;
+    }
+
     try {
       // Scroll card into view and get coordinates for a real mouse click.
       // Real mouse events are reliably intercepted by the SPA's React event handlers;
@@ -2053,6 +3310,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       const clickTarget = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, cardDataUrlParam, clickSel, k, expectedTitle) => {
         const cardKey = (el) => {
           if (!el) return '';
+          if (cardAttr) {
+            const attrNode = el.matches?.(`[${cardAttr}]`)
+              ? el
+              : el.closest?.(`[${cardAttr}]`);
+            const attrValue = attrNode?.getAttribute?.(cardAttr);
+            if (attrValue) return String(attrValue);
+          }
           const resultCard = el.matches?.('[data-share-url]') ? el : el.closest?.('[data-share-url]');
           if (resultCard && cardDataUrlParam) {
             try {
@@ -2184,38 +3448,192 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }, { updateActive: false });
       }
 
+      await waitForPanelPacing();
+      if (sourceId === 'glassdoor') {
+        glassdoorPanelHttpFailure = null;
+        glassdoorPanelResponseDetails.delete(key);
+        pendingGlassdoorPanelKeys.add(key);
+      }
       await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
       await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
+      panelRequestsIssued++;
+      // Glassdoor can show this signup prompt only after the click that would
+      // normally hydrate the side panel. Give its animation a moment, then
+      // dismiss it before treating an unchanged panel as selector drift.
+      await new Promise(r => setTimeout(r, humanDelay(240)));
+      const postClickModal = await dismissBlockingGlassdoorModal(i + 1, physicalIndex, 'after-card-click');
+      if (postClickModal?.detected && postClickModal.action === 'failed') {
+        missingCount++;
+        rememberCardWalkFailure(i + 1, key, `blocking-modal-${postClickModal.reason || 'unresolved'}`);
+        await abortWithError(
+          `Glassdoor's “Never Miss an Opportunity” job-alert prompt blocked result card ${i + 1}/${enhanced.length} after its click and could not be closed (${postClickModal.reason || 'unknown'}).`,
+          'The Glassdoor job-alert prompt prevented the list-card panel from opening. Retry the source after closing the prompt, and include the CARDWALK modal sample if it repeats.',
+          'glassdoor-job-alert-modal',
+        );
+        break;
+      }
 
+      let panelModalFailure = null;
       const pollPanel = async () => {
         const dl = Date.now() + DESC_CHANGE_TIMEOUT_MS;
         while (Date.now() < dl) {
           await new Promise(r => setTimeout(r, DESC_CHANGE_POLL_MS));
-          const text = await page.evaluate((panelSel, panelMulti) => {
+          if (glassdoorPanelRateLimit) return null;
+          // A delayed prompt should not turn into a misleading panel timeout.
+          const pendingModal = await dismissBlockingGlassdoorModal(i + 1, physicalIndex, 'await-panel');
+          if (pendingModal?.detected && pendingModal.action === 'failed') {
+            panelModalFailure = pendingModal;
+            return null;
+          }
+          const panel = await page.evaluate((panelSel, panelMulti, panelSourceId, expectedTitle) => {
             if (panelMulti) {
-              return Array.from(document.querySelectorAll(panelSel))
+              const text = Array.from(document.querySelectorAll(panelSel))
                 // Google leaves old/preloaded panels mounted. CSS-hidden .ejCXj
                 // continuations in the active aria-hidden=false panel remain
                 // valid, but nothing below an aria-hidden=true panel may count.
                 .filter(e => e.matches('span') && !e.closest('[aria-hidden="true"]'))
                 .map(e => e.textContent?.trim()).filter(Boolean).join('\n\n').trim();
+              return { text, selectedTitle: '' };
             }
-            return document.querySelector(panelSel)?.innerText?.trim() || '';
-          }, cfg.panelSelector, cfg.panelMulti || false).catch(() => '');
-          if (text && text !== prevPanelText) return text;
+            const active = Array.from(document.querySelectorAll(panelSel))
+              .find(el => !el.closest('[aria-hidden="true"]'));
+            const text = active?.innerText?.trim() || active?.textContent?.trim() || '';
+            // The list cards carry data-jobid. Limit the title probe to the
+            // active description's own ancestor chain so a matching title on
+            // the left list cannot validate a stale right panel.
+            let selectedTitle = '';
+            if (panelSourceId === 'glassdoor' && active && expectedTitle) {
+              const expected = String(expectedTitle).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+              const equivalent = (value) => {
+                const title = String(value || '').replace(/\s+/g, ' ').trim();
+                const normalized = title.toLocaleLowerCase();
+                return title && (normalized === expected || normalized.includes(expected) || expected.includes(normalized));
+              };
+              let scope = active.parentElement;
+              for (let depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
+                const matching = Array.from(scope.querySelectorAll('[data-test*="job-title" i], [data-testid*="job-title" i], h1, h2, h3, [role="heading"]'))
+                  .filter(el => !el.closest?.('[aria-hidden="true"]') && !el.closest?.('[data-jobid]'))
+                  .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+                  .find(equivalent);
+                if (matching) {
+                  selectedTitle = matching;
+                  break;
+                }
+              }
+            }
+            return { text, selectedTitle };
+          }, cfg.panelSelector, cfg.panelMulti || false, sourceId, String(job.title || '')).catch(() => ({ text: '', selectedTitle: '' }));
+          const decision = assessDescriptionPanelUpdate({
+            sourceId,
+            previousText: prevPanelText,
+            currentText: panel.text,
+            expectedTitle: job.title,
+            selectedTitle: panel.selectedTitle,
+          });
+          if (decision.accepted) return panel.text;
         }
         return null;
       };
 
       let panelText = await pollPanel();
-      if (!panelText) {
-        // Transient panel-data fetch failures (e.g. Glassdoor /graph 403s)
+      if (panelModalFailure) {
+        missingCount++;
+        rememberCardWalkFailure(i + 1, key, `blocking-modal-${panelModalFailure.reason || 'unresolved'}`);
+        await abortWithError(
+          `Glassdoor's “Never Miss an Opportunity” job-alert prompt blocked result card ${i + 1}/${enhanced.length} while its panel was loading and could not be closed (${panelModalFailure.reason || 'unknown'}).`,
+          'The Glassdoor job-alert prompt prevented the list-card panel from opening. Retry the source after closing the prompt, and include the CARDWALK modal sample if it repeats.',
+          'glassdoor-job-alert-modal',
+        );
+        break;
+      }
+      const glassdoorResponseDetail = sourceId === 'glassdoor'
+        ? await takeGlassdoorPanelResponseDetail(key)
+        : null;
+      if (glassdoorPanelRateLimit) {
+        pendingGlassdoorPanelKeys.delete(key);
+        glassdoorPanelResponseDetails.delete(key);
+        panelRateLimitCount++;
+        const rateLimit = glassdoorPanelRateLimit;
+        const rateLimitKey = rateLimit.key || key;
+        rememberCardWalkFailure(i + 1, rateLimitKey, 'panel-http-429');
+        recordManualScraperTelemetry({
+          phase: 'detail-panel-rate-limit', sourceId, srcName: overlayBase.srcName,
+          itemIndex: i + 1, itemTotal: enhanced.length,
+          key: rateLimitKey.slice(0, 80), reason: 'http-429', status: rateLimit.status,
+          url: rateLimit.url,
+        }, { updateActive: false });
+        logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor rate-limited the list-panel request for key=${rateLimitKey}; stopping card enrichment without retrying`);
+        descWarning = {
+          code: 'description-rate-limited', severity: 'warn',
+          evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${job.title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle.`,
+          suggestion: 'Wait a few minutes before rerunning Glassdoor. List results were retained; this and later rows may lack full descriptions.',
+        };
+        for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+          enhanced[unresolvedIndex] = {
+            ...enhanced[unresolvedIndex],
+            descriptionDeferredReason: 'description-rate-limited',
+          };
+        }
+        await updateOverlay(page, {
+          ...overlayBase,
+          count: totalSoFar,
+          status: 'Glassdoor rate-limited panel loading — keeping list results and stopping description clicks.',
+        }).catch(() => {});
+        break;
+      }
+      if (glassdoorPanelHttpFailure) {
+        panelHttpFailureCount++;
+        const failure = glassdoorPanelHttpFailure;
+        rememberCardWalkFailure(i + 1, failure.key || key, `panel-http-${failure.status}`);
+        recordManualScraperTelemetry({
+          phase: 'detail-panel-http-error', sourceId, srcName: overlayBase.srcName,
+          itemIndex: i + 1, itemTotal: enhanced.length,
+          key: String(failure.key || key).slice(0, 80), reason: `http-${failure.status}`,
+          status: failure.status, url: failure.url,
+        }, { updateActive: false });
+        logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor denied the list-panel request with HTTP ${failure.status} for key=${failure.key || key}; stopping without another request`);
+        descWarning = {
+          code: 'description-panel-http-error', severity: 'warn',
+          evidence: `Glassdoor returned HTTP ${failure.status} from its right-side panel endpoint for "${job.title || 'an untitled listing'}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`,
+          suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
+        };
+        for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+          enhanced[unresolvedIndex] = {
+            ...enhanced[unresolvedIndex],
+            descriptionDeferredReason: 'description-panel-http-error',
+          };
+        }
+        await updateOverlay(page, {
+          ...overlayBase,
+          count: totalSoFar,
+          status: `Glassdoor panel request failed (HTTP ${failure.status}) — keeping list results and stopping description clicks.`,
+        }).catch(() => {});
+        break;
+      }
+      if (!panelText && descriptionPanelRetryAllowed(sourceId)) {
+        // Transient panel-data fetch failures (for example a temporary 403)
         // leave the right panel stuck on the previous card so the change-poll
         // times out. A brief cool-off then one fresh click catches most of
-        // these without slowing the happy path.
-        await new Promise(r => setTimeout(r, humanDelay(DESC_RETRY_PAUSE_MS)));
+        // these without slowing the happy path. Glassdoor deliberately does
+        // not retry: its same-request JSON capture is the only fallback, so one
+        // unresolved listing cannot double the panel request rate.
+        await waitForPanelPacing();
+        const retryPacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
+        const retryWait = Math.max(DESC_RETRY_PAUSE_MS, retryPacing.requestDelayMs);
+        await new Promise(r => setTimeout(r, sourceId === 'glassdoor' ? humanCooldown(retryWait) : humanDelay(retryWait)));
         await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
+        panelRequestsIssued++;
         panelText = await pollPanel();
+        if (panelModalFailure) {
+          missingCount++;
+          rememberCardWalkFailure(i + 1, key, `blocking-modal-${panelModalFailure.reason || 'unresolved'}`);
+          await abortWithError(
+            `Glassdoor's “Never Miss an Opportunity” job-alert prompt blocked result card ${i + 1}/${enhanced.length} on its retry and could not be closed (${panelModalFailure.reason || 'unknown'}).`,
+            'The Glassdoor job-alert prompt prevented the list-card panel from opening. Retry the source after closing the prompt, and include the CARDWALK modal sample if it repeats.',
+            'glassdoor-job-alert-modal',
+          );
+          break;
+        }
       }
 
       // The list-card htidocid check above proves where the click landed. Google
@@ -2272,7 +3690,18 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       }
 
       let gotDescription = false;
-      if (panelText) {
+      if (sourceId === 'glassdoor') {
+        const merged = mergeGlassdoorPanelDetail(job, {
+          domText: panelText,
+          responseDetail: glassdoorResponseDetail,
+        });
+        enhanced[i] = merged.job;
+        if (merged.descriptionSource === 'dom') prevPanelText = panelText;
+        if (merged.descriptionSource === 'json') panelJsonDescriptionFallbacks++;
+        for (const field of merged.recoveredFields) panelJsonFieldRecoveries[field]++;
+        gotDescription = !!merged.descriptionSource;
+        if (gotDescription) expandedCount++;
+      } else if (panelText) {
         enhanced[i] = { ...job, snippet: panelText };
         prevPanelText = panelText;
         gotDescription = true;
@@ -2310,7 +3739,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     } catch { /* page context destroyed or other transient error — not a stale-selector signal */ }
 
     if (page.isClosed()) break;
-    await new Promise(r => setTimeout(r, humanDelay(DESC_CLICK_DELAY_MS)));
+    const nextPanelPacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
+    await new Promise(r => setTimeout(r, sourceId === 'glassdoor'
+      ? humanCooldown(nextPanelPacing.requestDelayMs)
+      : humanDelay(nextPanelPacing.requestDelayMs)));
   }
 
   // A single bounded batch summary is much more useful than the old
@@ -2346,23 +3778,41 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     expanded:       expandedCount,
     missing:        missingCount,
     panelTimeouts:  panelTimeoutCount,
+    panelRateLimits: panelRateLimitCount,
+    panelHttpFailures: panelHttpFailureCount,
+    panelRequestsIssued,
+    proactivePanelCooldowns,
+    panelJsonResponses,
+    panelJsonPayloads,
+    panelJsonDescriptionFallbacks,
+    panelJsonFieldRecoveries,
+    panelPacing: descriptionPanelPacing(sourceId, 0),
     selectionMismatches: selectionMismatchCount,
     selectionMismatchSamples,
+    blockingModalsDismissed,
+    blockingModalFailures,
+    modalSamples,
     failureSamples,
     transitionSamples: [...transitionSamplesByIndex.values()].sort((a, b) => a.itemIndex - b.itemIndex),
     aborted,
     interruptedAt,
     abortReason: aborted ? 'user-cancelled' : null,
     physicalTotal,
+    strategy: 'list-card-panel',
+    panelSelector: cfg.panelSelector,
   }, { updateActive: false });
+  if (sourceId === 'glassdoor') page.off('response', glassdoorPanelResponseListener);
 
   return {
     jobs: enhanced,
     descError,
+    descWarning,
     expandedCount,
     attemptedCount,
     missingCount,
     panelTimeoutCount,
+    panelRateLimitCount,
+    panelHttpFailureCount,
     selectionMismatchCount,
   };
 }
@@ -3249,7 +4699,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let hitPageCap               = false;
       let hitEmptyPage             = false;
       let hitUnhandledPagination   = false;
-      let sourceDetailRateLimited  = false;
+      let sourceDetailBlockCode    = null;
       let dataStopReason           = null; // set by task.options.onPageScraped (age-window / no-new-jobs) — see jobPageStop.js
       // Exact requests that reached the navigation step. The task list is only
       // a plan: a source can hit its useful-result cap at q1/12.
@@ -3381,6 +4831,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             sourceSiteChangedWarning = {
               code:       'cloudflare-hard-block',
               severity:   'block',
+              action:     'none',
+              shortLabel: 'Wait, then rerun',
               evidence:   `${srcName} was hard-blocked by Cloudflare ("Additional Verification Required") — no interactive challenge to solve.`,
               suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry. If the block persists your IP/session may be flagged — try again in a few hours.`,
             };
@@ -3646,13 +5098,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             status: `Opening all ${jobsToExpand.length} platform-returned cards`,
           }).catch(() => {});
           let detailResult;
-          if (sourceDetailRateLimited) {
+          if (sourceDetailBlockCode) {
             recordManualScraperTelemetry({
-              phase: 'detail-skipped-rate-limited', sourceId, srcName,
+              phase: 'detail-skipped-source-response', sourceId, srcName,
               queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
               count: allJobs.length, skipped: jobsToExpand.length,
+              reason: sourceDetailBlockCode,
             });
-            detailResult = { jobs: jobsToExpand, descError: null, descWarning: null, expandedCount: 0 };
+            detailResult = {
+              jobs: jobsToExpand.map(job => ({
+                ...job,
+                descriptionDeferredReason: sourceDetailBlockCode,
+              })),
+              descError: null,
+              descWarning: null,
+              expandedCount: 0,
+            };
           } else {
             detailResult = await expandDescriptions(
               page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal, walkPlan,
@@ -3689,7 +5150,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // list row. Preserve the row, continue the source, and surface this as a
           // warning in the result rather than converting it into a clean finish.
           if (descWarning && !sourceSiteChangedWarning) sourceSiteChangedWarning = descWarning;
-          if (descWarning?.code === 'description-rate-limited') sourceDetailRateLimited = true;
+          if (['description-rate-limited', 'description-panel-http-error'].includes(descWarning?.code)) {
+            sourceDetailBlockCode = descWarning.code;
+          }
 
           await updateOverlay(page, {
             ...overlayBase,
@@ -3774,17 +5237,19 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           if (pagedReady === 'hard-block' || pagedReady === 'skip') {
             if (!sourceSiteChangedWarning) {
               sourceSiteChangedWarning = pagedReady === 'hard-block'
-                ? {
+                  ? {
                     code:       'cloudflare-hard-block',
                     severity:   'block',
+                    action:     'none',
+                    shortLabel: 'Wait, then rerun',
                     evidence:   `${srcName} was hard-blocked by Cloudflare on page ${pageNum} — no interactive challenge to solve.`,
                     suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry.`,
                   }
                 : {
-                    code:       'challenge-timeout',
+                    code:       'session-blocked',
                     severity:   'block',
-                    evidence:   `${srcName} stayed behind a bot challenge or login wall after moving to page ${pageNum}, so the source was skipped.`,
-                    suggestion: 'Complete the visible login/challenge window, then run the search again.',
+                    evidence:   `${srcName} re-served a bot challenge immediately after verification while moving to page ${pageNum}, so the session is blocked and the source was skipped.`,
+                    suggestion: `Open ${srcName} in a normal Chrome tab, ensure you are logged in and unblocked, then run the search again.`,
                   };
             }
             sourceSkipped = true;

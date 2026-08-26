@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -44,7 +44,7 @@ const passingApplicationQualityCriteria = () => APPLICATION_QUALITY_CRITERIA.map
 }));
 
 const draftedQualityReview = () => ({
-  checklistVersion: 1,
+  checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
   criteria: passingApplicationQualityCriteria(),
   resume: { decision: 'drafted', rationale: 'The fresh résumé passed a relevance, evidence, and factual-support review.' },
   coverLetter: { decision: 'drafted', rationale: 'The fresh cover letter preserves one controlling argument with minimum-sufficient evidence and passed factual-support review.' },
@@ -191,7 +191,7 @@ export default [
           'a stale/mismatched receipt cannot masquerade as terminal success ahead of matching feedback');
 
         const helperSource = await fs.promises.readFile(path.resolve('local_ai/wait-for-handoff.mjs'), 'utf8');
-        const routineSource = await fs.promises.readFile(path.resolve('local_ai/CLAUDE_CODE_ROUTINE.md'), 'utf8');
+        const routineSource = await fs.promises.readFile(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
         const ipcSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
         assert(!helperSource.includes('LOCAL_AI_HANDOFF_WAIT_MS')
           && helperSource.includes('deadlineMs = null')
@@ -222,7 +222,7 @@ export default [
       const apiSource = fs.readFileSync(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
       const convergenceSource = fs.readFileSync(path.resolve('electron/ipc/applicationConvergence.js'), 'utf8');
       const cardSource = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-      const routineSource = fs.readFileSync(path.resolve('local_ai/CLAUDE_CODE_ROUTINE.md'), 'utf8');
+      const routineSource = fs.readFileSync(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
       const styleSource = fs.readFileSync(path.resolve('Job Application Design System/STYLE.md'), 'utf8');
       const skillSource = fs.readFileSync(path.resolve('Job Application Design System/SKILL.md'), 'utf8');
       const normalizedRoutineSource = routineSource.replace(/\s+/g, ' ');
@@ -234,7 +234,7 @@ export default [
         && normalizedRoutineSource.includes('Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result')
         && normalizedRoutineSource.includes('never move a fact between employers or projects'),
       'Local AI résumé generation must apply the same bounded compressed-evidence synthesis rule as API generation');
-      const checklistBlock = /Canonical checklist, version 1:\s*([\s\S]*?)\n\s*Use the full requirements/m.exec(routineSource)?.[1] || '';
+      const checklistBlock = new RegExp(`Canonical checklist, version ${APPLICATION_QUALITY_CHECKLIST_VERSION}:\\s*([\\s\\S]*?)\\n\\s*Use the full requirements`).exec(routineSource)?.[1] || '';
       const routineChecklistIds = [...checklistBlock.matchAll(/`([^`]+)`/g)].map(match => match[1]);
       const compactReviewStart = localSource.indexOf('function compactLocalAiQualityReview');
       const compactReviewEnd = localSource.indexOf('function localCoverLetterPlan', compactReviewStart);
@@ -327,26 +327,51 @@ export default [
         && localSource.includes('missingArtifacts.length === 0'),
       'Local AI measures both final documents, keeps revisions argument-led and fact-bounded, requests evidence-led revision for a materially underfilled one-page résumé, records every handoff event without a queue/history cap, keeps unresolved work revision-required, and never saves when layout verification is unavailable');
       assert(APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('selected position is referenced proximally')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('target scope is stated as this role or the work itself')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
-        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-register')?.requirement.includes('final invitation connects the candidate’s contribution to target work')
-        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('literal first-read language with concrete actors, artifacts, and actions'),
-      'Local AI keeps the stable checklist IDs while making proximal target references, grammatical source framing, literal first-read clarity, and contribution-connected closing requirements explicit');
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-register')?.requirement.includes('direct present tense')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('restating a category')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('word-boundary parse')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('role-accurate governing verb'),
+      'Local AI version 2 keeps stable checklist IDs while making role-facing scope, direct closings, non-filler bridges, first-read parsing, and role-accurate technology verbs explicit');
+      assert(localSource.includes('LEGACY_APPLICATION_QUALITY_CHECKLIST_VERSION = 1')
+        && localSource.includes('expectedApplicationQualityChecklistVersion(input?.qualityChecklist?.version)')
+        && localSource.includes('qualityChecklistVersion: input?.qualityChecklist?.version,')
+        && localSource.includes('qualityChecklistVersion: expectedChecklistVersion,')
+        && localSource.includes('version ${expectedChecklistVersion} quality checklist')
+        && localSource.includes('checklistVersion: expectedChecklistVersion'),
+      'new jobs use checklist v2 while status, import, normalized review, and measured revision guidance preserve only the queued app-owned supported version');
       assert(normalizedRoutineSource.includes("the listing's description, not as independently verified fact")
         && normalizedRoutineSource.includes('source document the grammatical')
         && normalizedRoutineSource.includes('position attached to this application with a proximal determiner')
         && normalizedRoutineSource.includes('Read every sentence once as a recruiter seeing')
+        && normalizedRoutineSource.includes('adjacent words form a familiar compound or alternate parse')
+        && normalizedRoutineSource.includes('governing verb that describes its actual role')
+        && normalizedRoutineSource.includes('merely restates a category')
+        && normalizedRoutineSource.includes('selected scope as `this role` or the work itself')
+        && normalizedRoutineSource.includes('I welcome a conversation')
         && normalizedRoutineSource.includes('connect the candidate\'s relevant contribution to the specific')
         && normalizedSkillSource.includes("the listing's description, not as independently verified fact")
         && normalizedSkillSource.includes('source document, not the target position')
         && normalizedSkillSource.includes('proximal determiner unless explicitly contrasting')
         && normalizedSkillSource.includes('concrete actor, artifact, and')
+        && normalizedSkillSource.includes('adjacent words form a familiar compound')
+        && normalizedSkillSource.includes('governing verb that reflects its actual role')
+        && normalizedSkillSource.includes('merely restates a category')
+        && normalizedSkillSource.includes('Discuss target scope as `this role`')
+        && normalizedSkillSource.includes('I welcome a conversation')
         && normalizedSkillSource.includes('final sentence as a role-facing invitation')
         && normalizedStyleSource.includes('Frame the source of employer context accurately')
         && normalizedStyleSource.includes('reporting verb belongs to the source document')
         && normalizedStyleSource.includes('position attached to the application with a proximal determiner')
         && normalizedStyleSource.includes('Read literally on the first pass')
+        && normalizedStyleSource.includes('Read word boundaries literally too')
+        && normalizedStyleSource.includes('Give each technology its actual operation')
+        && normalizedStyleSource.includes('Delete category restatements')
+        && normalizedStyleSource.includes('Discuss the target scope as *this role*')
+        && normalizedStyleSource.includes('I welcome a conversation')
         && normalizedStyleSource.includes('Close by connecting contribution to work'),
-      'the routine and design-system guidance carry the same proximal-reference, source-framing, first-read literalness, and role-facing closing contract');
+      'the routine and design-system guidance carry the version 2 role-facing scope, source-framing, first-read parsing, technology-role, non-filler-bridge, and direct-closing contract');
       assert(localSource.includes('applicationConvergenceInstruction')
         && !apiSource.includes('createApplicationConvergenceTracker')
         && !apiSource.includes("from './llm.js'")
@@ -359,7 +384,7 @@ export default [
       'Local AI ignores model-supplied compact density and measures default density before the app applies its compact retry');
       assert(cardSource.includes('Repair bundle') && cardSource.includes('missingArtifacts') && cardSource.includes('revision-required') && cardSource.includes('Retry layout check') && cardSource.includes('Retry import')
         && cardSource.includes('LOCAL_AI_RESULT_SETTLE_MS') && cardSource.includes('expectedResultSha256') && cardSource.includes('imported?.errorCode') && cardSource.includes('LOCAL_AI_RESULT_CHANGED') && cardSource.includes('waiting briefly for the final save'),
-      'the card exposes repair for historical partial bundles, waits for a stable Claude Code result before auto-importing, and retains fit, render, and validation recovery paths');
+      'the card exposes repair for historical partial bundles, waits for a stable Local AI result before auto-importing, and retains fit, render, and validation recovery paths');
       assert(routineSource.includes('resultSha256') && routineSource.includes('Preserve a verified one-page cover letter')
         && routineSource.includes('candidate location/contact')
         && routineSource.includes('page fit as a constraint')
@@ -376,7 +401,7 @@ export default [
         && normalizedRoutineSource.includes("Never announce that the candidate is applying")
         && normalizedRoutineSource.includes("Respect the recruiter's intelligence")
         && !normalizedRoutineSource.includes('Name the target company and role naturally in the opening sentence')
-        && routineSource.includes('SAME Claude Code run active') && !routineSource.includes('6 minutes')
+        && routineSource.includes('SAME local AI agent run active') && !routineSource.includes('6 minutes')
         && !routineSource.includes('six-minute')
         && routineSource.includes('There is no fixed round limit')
         && routineSource.includes('Infinite Canvas owns all root document variants')
@@ -415,30 +440,53 @@ export default [
         const [manifest, input, prompt, jobListing, careerData] = await Promise.all([
           fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'),
           fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'),
-          fs.promises.readFile(path.join(queued.folder, 'CLAUDE_CODE_PROMPT.md'), 'utf8'),
+          fs.promises.readFile(path.join(queued.folder, 'LOCAL_AI_PROMPT.md'), 'utf8'),
           fs.promises.readFile(path.join(queued.folder, 'context', 'job-listing.md'), 'utf8'),
           fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8'),
         ]);
         const parsedInput = JSON.parse(input);
         assert(JSON.parse(manifest).status === 'queued' && parsedInput.jobId === queued.id
-          && parsedInput.qualityChecklist?.version === 1
+          && parsedInput.qualityChecklist?.version === APPLICATION_QUALITY_CHECKLIST_VERSION
           && JSON.stringify(parsedInput.qualityChecklist.criteria) === JSON.stringify(APPLICATION_QUALITY_CRITERIA),
           'job manifest and input are tied to the exact queued job id');
         assert(queued.folder.startsWith(`${project.root}${path.sep}.local-ai${path.sep}jobs${path.sep}`)
           && queued.canvasFilePath === project.canvasFilePath
-          && prompt.includes('local_ai/CLAUDE_CODE_ROUTINE.md') && prompt.includes('INPUT_JOBS_ROOT')
-          && prompt.includes('result.json.outputBundleRoot'),
-        'job is beside the saved canvas and binds Claude Code to the reusable routine plus one result file');
+          && prompt.includes('LOCAL_AI_APPLICATION_ROUTINE.md') && prompt.includes(`WORKING_FOLDER: ${process.cwd()}`)
+          && prompt.includes(`ROOT_LOCATION: ${project.root}`) && prompt.includes(`INPUT_JOBS_ROOT: ${jobsRoot}`)
+          && prompt.includes('OUTPUT_BUNDLE_ROOT: Applied Jobs') && prompt.includes(`JOB_ID: ${queued.id}`),
+        'job is beside the saved canvas and binds a provider-neutral local agent to the exact routine, roots, and job id');
         assert(jobListing.includes('Developer') && jobListing.includes('Build reliable systems.')
           && careerData === 'Built reliable systems with measurable outcomes.',
-        'Generate materializes the complete job-listing and career context Claude Code needs');
+        'Generate materializes the complete job-listing and career context the local coding agent needs');
+        const legacyInput = {
+          ...parsedInput,
+          qualityChecklist: { ...parsedInput.qualityChecklist, version: 1 },
+        };
+        const legacyEvidence = 'Built reliable systems with measurable outcomes.';
+        const legacyResult = {
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: `<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>${legacyEvidence}</li></ul></article></section></main>`,
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: [legacyEvidence] },
+          coverLetterArgument: coverLetterArgumentForResumeEvidence(legacyEvidence, 'Developer at Acme'),
+          qualityReview: {
+            ...groundedQualityReview(sourceGroundingFor({
+              resumeBullets: [legacyEvidence], coverLetterParagraphs: [legacyEvidence],
+            })),
+            checklistVersion: 1,
+          },
+        };
+        await fs.promises.writeFile(path.join(queued.folder, 'input.json'), JSON.stringify(legacyInput), 'utf8');
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), JSON.stringify(legacyResult), 'utf8');
+        const legacyStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(legacyStatus.status === 'completed',
+          'status accepts a v1 result only when this already queued app-owned input explicitly expects the supported legacy checklist version');
         const parsedManifest = JSON.parse(manifest);
         assert(parsedManifest.canvasFilePath === project.canvasFilePath && parsedInput.canvasRoot === project.root,
           'manifest and input bind the job to one canonical saved canvas and its folder');
         if (process.platform !== 'win32') {
           const jobMode = (await fs.promises.stat(queued.folder)).mode & 0o777;
           const privateFileModes = await Promise.all([
-            'manifest.json', 'input.json', 'CLAUDE_CODE_PROMPT.md',
+            'manifest.json', 'input.json', 'LOCAL_AI_PROMPT.md',
             path.join('context', 'job-listing.md'), path.join('context', 'career-data.txt'),
           ].map(async file => (await fs.promises.stat(path.join(queued.folder, file))).mode & 0o777));
           assert(jobMode === 0o700 && privateFileModes.every(mode => mode === 0o600),
@@ -606,7 +654,7 @@ export default [
       try {
         await fs.promises.writeFile(path.join(routineProject, 'package.json'), '{"private":true}', 'utf8');
         await fs.promises.mkdir(path.join(routineProject, 'Job Application Design System'));
-        await fs.promises.writeFile(path.join(outsideDir, 'CLAUDE_CODE_ROUTINE.md'), '# untrusted linked routine', 'utf8');
+        await fs.promises.writeFile(path.join(outsideDir, 'LOCAL_AI_APPLICATION_ROUTINE.md'), '# untrusted linked routine', 'utf8');
         await fs.promises.symlink(outsideDir, path.join(routineProject, 'local_ai'), process.platform === 'win32' ? 'junction' : 'dir');
         process.env.INFINITE_CANVAS_PROJECT_ROOT = routineProject;
         let rejected = false;
@@ -679,6 +727,28 @@ export default [
       assert(good.coverLetter.paragraphs.length === 1
         && good.coverLetterArgument.roleThesis === validCoverLetterArgument().roleThesis,
       'valid structured output preserves the non-rendered controlling-argument contract');
+      const legacyV1Result = {
+        version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: validResumeMain,
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: { ...draftedQualityReview(), checklistVersion: 1 },
+      };
+      let defaultV1Rejected = false;
+      try { validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project')); }
+      catch (error) { defaultV1Rejected = /checklistVersion must be 2/u.test(String(error?.message || error)); }
+      const acceptedLegacyV1 = validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+        qualityChecklistVersion: 1,
+      });
+      let unknownExpectedVersionRejected = false;
+      try {
+        validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+          qualityChecklistVersion: 99,
+        });
+      } catch (error) { unknownExpectedVersionRejected = /unsupported quality checklist version/u.test(String(error?.message || error)); }
+      assert(defaultV1Rejected && acceptedLegacyV1.qualityReview.checklistVersion === 1 && unknownExpectedVersionRejected
+        && good.qualityReview.checklistVersion === APPLICATION_QUALITY_CHECKLIST_VERSION,
+      'direct validation requires current v2, accepts v1 only with an explicit supported legacy job expectation, preserves that normalized version, and fails closed for unknown versions');
       assert(Array.isArray(APPLICATION_QUALITY_CRITERIA) && APPLICATION_QUALITY_CRITERIA.length > 0
         && APPLICATION_QUALITY_CRITERIA.every(criterion => criterion
           && typeof criterion.id === 'string' && criterion.id
@@ -766,6 +836,30 @@ export default [
       catch { unrelatedParagraphRejected = true; }
       assert(unrelatedParagraphRejected,
         'an exact but lexically unrelated career quote cannot be used to ground a cover-letter paragraph');
+      const threeBulletTexts = [
+        'Built alpha services with verified controls.',
+        'Delivered beta dashboards through documented reviews.',
+        'Migrated gamma data pipelines for operations.',
+      ];
+      const thirdBulletWrongQuote = {
+        ...trustedResult,
+        resumeMainHtml: `<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights">${threeBulletTexts.map(bullet => `<li>${bullet}</li>`).join('')}</ul></article></section></main>`,
+        coverLetterArgument: coverLetterArgumentForResumeEvidence(threeBulletTexts[0]),
+        qualityReview: groundedQualityReview(sourceGroundingFor({
+          resumeBullets: threeBulletTexts,
+          resumeQuotes: [threeBulletTexts[0], threeBulletTexts[1], 'Unrelated horticulture volunteer event.'],
+        })),
+      };
+      let thirdBulletOrdinalRejected = false;
+      try {
+        validateLocalApplicationResult(thirdBulletWrongQuote, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+          careerData: `${threeBulletTexts.join(' ')} A concise factual letter. Unrelated horticulture volunteer event.`,
+        });
+      } catch (error) {
+        thirdBulletOrdinalRejected = /sourceGrounding\.resumeBullets\[2\] \(résumé bullet 3\)/u.test(String(error?.message || error));
+      }
+      assert(thirdBulletOrdinalRejected,
+        'source-grounding errors retain the zero-based path and add a one-based human résumé-bullet ordinal');
       const genericSharedQuote = 'Built internal dashboard for finance teams.';
       const genericSharedFinalText = 'Built internal security system for enterprise customers.';
       const genericTokenBypass = {
@@ -1100,9 +1194,9 @@ export default [
         await fs.promises.writeFile(path.join(queued.folder, 'result.json'), '{bad json', 'utf8');
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         // A hard rejection must leave a trace in the ONE job-folder file the
-        // waiting Claude Code session is allowed to read. Without this the
+        // waiting local-agent session is allowed to read. Without this the
         // session cannot tell a rejected result from an app that never ran, and
-        // can only burn its 6-minute wait (local_ai/CLAUDE_CODE_ROUTINE.md §7).
+        // can only burn its wait (local_ai/LOCAL_AI_APPLICATION_ROUTINE.md §7).
         const rejection = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
         // REGRESSION GUARD. The rejection record's resultSha256 is, by
         // construction, the hash of the CURRENT result.json — so a consumer that
@@ -1176,7 +1270,7 @@ export default [
       assert(/LOCAL_AI_CARD_POLL_IDLE_STATUSES\.includes\(localApplication\.status\)\) return undefined;/.test(cardSource),
         "the card's poll gate consumes the shared idle-status constant — one source of truth with the fallback manager, so the two drivers' idle sets cannot silently diverge");
       assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('invalid'),
-        'invalid results remain eligible for status polling after Claude Code corrects result.json');
+        'invalid results remain eligible for status polling after Local AI corrects result.json');
       assert(cardSource.includes("status: 'status-error'")
         && cardSource.includes('LOCAL_AI_STATUS_ERROR_STREAK_LIMIT')
         && fallbackSource.includes("status: 'status-error'")
@@ -1316,7 +1410,7 @@ export default [
   {
     // 2026-08-21 regression: the Local AI poll lived only in JobCardNode, and
     // hidden cards unmount — a board hiding stale results killed the poll, so
-    // Claude Code's finished result.json was never imported. The fallback
+    // A local coding agent's finished result.json was never imported. The fallback
     // manager's discovery is pure and covered here: deep traversal over the
     // whole graph plus the mounted-card ownership handoff.
     name: 'Local AI fallback: deep node discovery and unmounted-card job selection',
@@ -1431,7 +1525,7 @@ export default [
   },
   {
     // The measured import finishes before the renderer promotes its registered
-    // workspace. A receipt is terminal evidence for the waiting Claude Code
+    // workspace. A receipt is terminal evidence for the waiting local coding agent
     // session, so it must be emitted by save-application only after that
     // promotion and the private-workspace cleanup both succeed. Conversely, a
     // failed promotion must retain the Local AI job/result for retry.

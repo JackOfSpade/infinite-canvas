@@ -85,7 +85,14 @@ function normUrl(url) {
     // history write AND every future Google job on that canvas would then match
     // that one poisoned key and be suppressed as "already seen".
     const identity = IDENTITY_PARAMS.find(p => u.searchParams.get(p));
-    if (identity) return `https://${host}${path}?${identity}=${u.searchParams.get(identity).toLowerCase()}`;
+    if (identity) {
+      const rawIdentity = u.searchParams.get(identity);
+      // Indeed jobkeys are hexadecimal and case-insensitive in practice.
+      // Google's htidocid is opaque/base64-like: lowercasing it changes the ID
+      // and can collapse two genuinely different cards onto one history key.
+      const identityValue = identity === 'htidocid' ? rawIdentity : rawIdentity.toLowerCase();
+      return `https://${host}${path}?${identity}=${encodeURIComponent(identityValue)}`;
+    }
     if (/\/(?:rc|pagead)\/clk$/.test(path)) return '';
     return `https://${host}${path}`;
   } catch {
@@ -97,7 +104,13 @@ function normUrl(url) {
 }
 
 function normText(s) {
-  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return String(s || '')
+    .replace(/&(?:amp|#0*38);/gi, '&')
+    .replace(/&(?:quot|#0*34);/gi, '"')
+    .replace(/&(?:apos|#0*39);|&#x0*27;/gi, "'")
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function diagnosticText(value, max = 180) {
@@ -134,9 +147,12 @@ function appearsToBeSameListing(first, duplicate) {
   // The shared history key already matches. Matching source and the visible
   // listing fields too is strong evidence that two query paths surfaced the
   // same card, rather than evidence that the history key is too coarse.
-  return ['source', 'title', 'company', 'location'].every(
+  const visibleFieldsMatch = ['title', 'company', 'location'].every(
     field => normText(first?.[field]) === normText(duplicate?.[field]),
   );
+  const firstSource = normText(first?.source);
+  const duplicateSource = normText(duplicate?.source);
+  return visibleFieldsMatch && (!firstSource || !duplicateSource || firstSource === duplicateSource);
 }
 
 /**
@@ -291,9 +307,19 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     const existing = await loadJobsHistory(canvasFilePath, readStats);
     const fresh = existing.filter(r => isWithinAge(r.seen_date));
 
-    const seen = new Set();
+    // One normalized URL can occasionally be reused by a broken extractor or
+    // provider template. Keep every owner, not just a Set membership bit, so a
+    // URL collision is conclusive only when the visible listing identity also
+    // agrees. False negatives merely re-show a duplicate; false positives hide
+    // a genuine opportunity, so URL conflicts deliberately fail open.
+    const seenOwners = new Map();
+    const addOwner = (key, owner) => {
+      const owners = seenOwners.get(key) || [];
+      owners.push(owner);
+      seenOwners.set(key, owners);
+    };
     for (const r of fresh) {
-      for (const k of dedupKeysFor(r)) seen.add(k);
+      for (const k of dedupKeysFor(r)) addOwner(k, r);
     }
 
     const today = new Date().toISOString().slice(0, 10);
@@ -326,13 +352,20 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     for (const job of jobs) {
       const keys = dedupKeysFor(job);
       if (keys.length === 0) { noteSkip(job, 'noKey', false); continue; }
-      const hit = keys.find(k => seen.has(k));
+      const hit = keys.find((key) => {
+        const owners = seenOwners.get(key);
+        if (!owners?.length) return false;
+        // Fallback text keys already encode the visible fields. URL keys need
+        // the extra guard because a shared/poisoned normalized URL must never
+        // suppress a different title/company/location silently.
+        return !key.startsWith('u:') || owners.some(owner => appearsToBeSameListing(owner, job));
+      });
       if (hit) { noteSkip(job, hit.startsWith('u:') ? 'url' : 'titleCompany', batchKeys.has(hit), hit); continue; }
       keys.forEach(k => {
         batchKeys.add(k);
         batchKeyOwners.set(k, job);
       });
-      keys.forEach(k => seen.add(k));
+      keys.forEach(k => addOwner(k, job));
       newRows.push({
         seen_date: today,
         source: String(job.source || ''),
@@ -409,13 +442,16 @@ export function filterHistoryForResume(historyRows, recoveredJobs, runStartedAt)
 }
 
 export function dedupAgainstHistory(jobs, historyRows) {
-  // Retain the first matching history row as well as its key. The Set-only
-  // form told callers merely that something had matched, which made a bad
-  // suppression impossible to investigate from a FULL/JOBS bug report.
+  // Retain every matching history row as well as its key. A URL collision is
+  // conclusive only when source/title/company/location also agree; otherwise
+  // fail open and keep the candidate so a provider's reused URL cannot silently
+  // hide a genuinely different opportunity.
   const historyByKey = new Map();
   for (const r of historyRows) {
     for (const k of dedupKeysFor(r)) {
-      if (!historyByKey.has(k)) historyByKey.set(k, r);
+      const rows = historyByKey.get(k) || [];
+      rows.push(r);
+      historyByKey.set(k, rows);
     }
   }
   const kept = [];
@@ -423,16 +459,22 @@ export function dedupAgainstHistory(jobs, historyRows) {
   const samples = [];
   for (const job of jobs) {
     const keys = dedupKeysFor(job);
-    const matchedKey = keys.find(k => historyByKey.has(k));
+    const matchedKey = keys.find((key) => {
+      const rows = historyByKey.get(key);
+      if (!rows?.length) return false;
+      return !key.startsWith('u:') || rows.some(row => appearsToBeSameListing(row, job));
+    });
     if (matchedKey) {
       removed++;
       if (samples.length < MAX_DEDUP_SAMPLES) {
         const key = historyKeyDiagnostic(matchedKey);
+        const matchedHistory = historyByKey.get(matchedKey).find(row =>
+          !matchedKey.startsWith('u:') || appearsToBeSameListing(row, job));
         samples.push({
           dropped: collisionJobDiagnostic(job),
           keyKind: key.kind,
           key: key.value,
-          history: historyRowDiagnostic(historyByKey.get(matchedKey)),
+          history: historyRowDiagnostic(matchedHistory),
         });
       }
       continue;

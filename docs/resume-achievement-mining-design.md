@@ -8,8 +8,10 @@ Revised: 2026-08-11, after a review pass that verified every code citation again
 found five design defects (receipt matching, arithmetic edge cases, the missing `computed` field,
 the cover-letter gap, and the mining race) — all folded in below.
 
-UPDATE — this design has since been **built** (achievement ledger, applied-jobs store, model
-resolver, HTML generation, receipts). Two things below drifted from this original plan during
+UPDATE — this design has since been **built** (achievement ledger, model resolver, HTML generation,
+receipts). The applied-jobs store described below was later retired in favor of the simpler
+search → hierarchy → bundle → manual submission → delete hierarchy workflow. Two other things
+below drifted from this original plan during
 implementation and are corrected in place rather than left to mislead a future reader: §3.1's
 Claude pin (reverted — see the note under the task table) and §5's "PDF generation goes away
 entirely" (reversed — a PDF companion came back, see the note under §5.1). Everything else in
@@ -32,8 +34,8 @@ Six changes, in dependency order:
    generations behind (`claude-opus-4-8` / `claude-sonnet-4-6` vs the current `claude-opus-5` /
    `claude-sonnet-5`, at identical or lower price). Replace the literals with family tokens
    resolved against the Models API. Smallest change here, immediate payoff.
-1. **Applied-jobs store** — an explicit "Mark applied" action with app-global, never-expiring
-   memory; applied jobs never resurface in future searches. Independent of everything else.
+1. **Retired: applied-jobs store** — this explicit status action was removed. The canvas-scoped
+   shown-job history remains the only search deduplication mechanism.
 2. **HTML-first output** — stop generating PDFs *the old way*. Ship a single-file HTML workspace the user
    opens in Chrome, edits in place, and can export to PDF via the browser. (As built, a PDF
    companion later came back as an automated, in-app render — see the note under §5.1 — but the
@@ -620,92 +622,41 @@ résumé goes through the fit loop.
 
 ---
 
-## 6. Part D — Applied-jobs store
+## 6. Part D — Search history and disposable application hierarchies
 
-### 6.1 What exists today (nothing)
+The proposed applied-jobs store was retired. Infinite Canvas deliberately does not infer or retain
+an application-submission status: generating a bundle is not applying, and submission happens
+manually on the employer site. Once it is no longer useful, the displayed job hierarchy can simply
+be deleted.
 
-There is **no record anywhere of "I applied to this job."** What exists is easily mistaken for it:
-`electron/ipc/jobsHistory.js` writes `<canvas>.jobs-history.csv` recording jobs **shown** — appended
-at *discovery* time, before scoring, whether or not the card was ever looked at
-(`jobs.js:1721`, `JobSearchNode.jsx:752-758`). Canvas-scoped, 60-day retention, read back to
-silently drop those listings from future searches.
+### 6.1 Current search deduplication
 
-Clicking Generate produces PDFs and nothing else. Re-generating for the same job does not detect the
-prior one — `copyUnique` just writes `… (1).pdf`.
+`electron/ipc/jobsHistory.js` maintains a canvas-scoped `<canvas>.jobs-history.csv` sidecar for
+listings already shown in a job-board flow. It is a bounded, 60-day discovery-history record—not an
+application record—and it exists solely to avoid immediately resurfacing the same listing. The file
+stores the minimum identifying fields (`seen_date`, source, company, title, location, URL); old rows
+are pruned so genuine reposts can return.
 
-### 6.2 Design
+Identity is intentionally conservative:
 
-**Generation ≠ applied.** An explicit action is required.
+- A stable listing URL is the primary key, including source-specific URL parameters when the path is
+  shared by many listings.
+- Without a usable URL, title + company + location is the fallback. Location-less records only
+  match other location-less records.
+- A conflicting visible listing never becomes hidden merely because a coarse URL or tuple collides;
+  history deduplication fails open and preserves it for the user.
 
-- **UI**: a button on `JobCardNode` beside Generate. `Mark applied` → `Applied ✓ · undo`. Generate
-  never auto-marks. Marking does not delete the card — the user deletes when they want.
-- **Store**: `app.getPath('userData')/applied-jobs.json`. **Not `lazyStore`** — that helper fails
-  soft and silently drops writes (`electron/utils/lazyStore.js:1-23`), and its own doc says that is
-  "wrong for critical user data." Use real `fs` writes with real errors.
-- **Record**: `{ appliedAt, title, company, location, locationKey, url, urlKey, source, folder }`.
-  Identity + date + where the artifacts went. No status, no notes — the card stays disposable; only
-  the *fact that you applied* outlives it. This preserves the anti-CRM invariant
-  (`JobCardNode.jsx:22-29`) rather than reopening it.
-- **Never expires.** The seen-CSV prunes at 60 days so reposts resurface; this wants the opposite.
-  Different lifecycle is itself why it is a separate store.
-- **IPCs**: `mark-job-applied`, `unmark-job-applied`, `load-applied-jobs`.
-- **Filtering**: applied jobs are dropped from future searches alongside the existing history
-  dedup — four call sites in `electron/ipc/jobs.js`: `:1697-1711` (`search-jobs`), `:2193`
-  (single-source), `:2880` (`resolve-job-source`), `:2935` (`resume-job-source`).
-- **Never silent.** Surface the count in the hub's funnel line
-  (`src/nodes/jobsearch/JobSearchDoneState.jsx:49-55`): *"N hidden (already applied)."*
-- **Undo matters.** The seen-store's mistakes are contained — canvas-scoped and self-expiring. This
-  one is permanent and global: one misclick and that posting is invisible across every canvas
-  forever, with no way to reach it once the card is gone. Provide the card-level undo *and* keep the
-  store file human-readable and editable.
+The deterministic history tests cover URL identity, location-distinct requisitions, malformed CSV
+recovery, concurrent writes, resumed-run behavior, and collision diagnostics. Keep this mechanism
+separate from cross-source job-card merging: its safety rule is to over-show a questionable listing,
+never to make a real opportunity disappear.
 
-### 6.3 Identity — location is the hard part
+### 6.2 Application lifecycle
 
-**Same title + same company + different city = a different job.** Competition pools differ; a
-candidate can have a strong shot in one location and a weak one in another.
-
-Do **not** reuse `dedupKeysFor` (`jobsHistory.js:91-103`) or `dedupJobsAcrossSources`
-(`src/utils/jobIdentity.js:118-143`) as-is. Both are lenient in ways that are correct for their own
-job and wrong for this one:
-
-- `dedupKeysFor` falls back to `tc:title|company` with **no location** when location is missing.
-- `dedupJobsAcrossSources` merges when *either* side's location is unknown — so an Austin
-  application would mark the Denver opening as already-done.
-
-**There is no location normalization anywhere in the codebase**, and the variance is severe:
-
-| source | how `location` is produced | hazard |
-|---|---|---|
-| ZipRecruiter | reconstructed from a URL slug, every `-` → space (`electron/extractors/jobs.js:57-66`) | "Winston-Salem" → "Winston Salem" |
-| Indeed | first-present of 4 internal fields (`apiExtractors.js:1392`) | `addressLocality` is bare city, no state |
-| USAJobs | `PositionLocationDisplay` (`apiExtractors.js:752`) | "Washington DC, District of Columbia" |
-| RemoteOK / WWR | raw field or literal `'Remote'` (`:815`, `:914`) | WWR's `<region>` is poster free text |
-| Glassdoor | two strategies — Apollo cache and DOM (`electron/extractors/jobs.js:115`, `:151-152`) | same listing, two formats |
-| Google / LinkedIn | scraped card text (`electron/extractors/jobs.js:220-225`, `apiExtractors.js:164`) | whatever the UI renders |
-
-The two existing identity helpers also disagree with each other: `keyPart`
-(`jobIdentity.js`) lowercases and trims but does **not** collapse internal whitespace; `normText`
-(`jobsHistory.js`) does. Same string, two keys, depending on which module ran.
-
-New module **`src/utils/locationIdentity.js`**, symmetric and unit-tested:
-
-- lowercase; NFD-strip diacritics ("Montréal" → "montreal")
-- collapse whitespace, normalize commas
-- strip trailing country tokens (`united states`, `usa`, `us`, `(us)`)
-- fold state/province full name ↔ 2-letter code, lifting the `US_STATES` / `CA_PROVINCES` tables
-  from `src/utils/jobLocation.js:182-204` (currently used only by the one-directional diagnostic
-  `summarizeLocationAdherence`, `:274-331`)
-- fold remote variants (`remote`, `remote - us`, `anywhere`, `wfh`, `distributed`, …) to a single
-  `remote` token
-- output canonical `"city, ST"` / `"remote"` / `""` (unknown)
-
-**Match rule**: `urlKey` match **OR** (`titleKey` + `companyKey` + `locationKey`) match.
-**Unknown location never matches** — a location-less job is a *different* job, not a wildcard. The
-tradeoff is deliberate: a false negative means the job resurfaces and gets dismissed (recoverable);
-a false positive means a real opening disappears permanently (not).
-
-Store both the raw string and the canonical key, so improving the canonicalizer later allows
-re-keying existing records.
+Application artifacts are saved below the selected canvas-relative output root. They are useful
+working files, not a CRM record or a permanent declaration that a submission occurred. The workflow
+is therefore: search → score → hierarchy → bundle → manual submission → delete the hierarchy when
+finished. A later search is governed only by the bounded shown-history described above.
 
 ---
 
@@ -854,13 +805,10 @@ PDF-companion path and remains a live reconnect point: `DEFAULT_CREAM_RGB` must 
       derived from the resolver
 - [ ] `ACHIEVEMENT_LEDGER_SCHEMA`, `ACHIEVEMENT_REFUTE_SCHEMA` (`aiSchemas.js`)
 - [ ] `src/utils/achievementLedger.js` (pure, unit-tested)
-- [ ] `src/utils/locationIdentity.js` (pure, unit-tested)
 - [ ] `data.achievements` **not** added to `JOBSEARCH_TRANSIENT_KEYS`; **no** `MIGRATIONS` entry
 - [ ] `data.achievementsMining` (the in-flight marker, §3.6) **is** added to
       `JOBSEARCH_TRANSIENT_KEYS` — it is run state, and persisting it across a crash would wedge
       the hub into permanently skipping its own mine
-- [ ] preload IPCs: `mark-job-applied`, `unmark-job-applied`, `load-applied-jobs`
-- [ ] applied-jobs filter wired at all four `jobs.js` gather sites; count surfaced in the funnel
 - [ ] `recordApplicationTelemetry` (`jobApplication.js:203-214`) extended with ledger stats; rendered
       in `electron/ipc/bugReport/jobsSnapshot.js:1020-1046` under "Application Generation (last)"
 - [ ] startup assertion for design-system files + `<main>` extraction
@@ -874,12 +822,10 @@ wiring — it works off the `task` string automatically.
 
 `scripts/test-runner.js` (single inlined suite; no `*.test.js` files exist).
 
-- **`locationIdentity`** — the format variance table in §6.3, case by case. ZipRecruiter's
-  hyphen-slug reconstruction and Indeed's four-way field fallback are the two worst offenders. Assert
-  unknown location never matches. This is the piece most likely to be quietly wrong, and being wrong
-  means either an applied job resurfaces or a real opening disappears permanently.
-- **Applied-key matching** — URL-branch vs tuple-branch; same title/company across two cities must
-  **not** collide; tracking-param and Indeed `jk`-stub handling.
+- **Shown-history matching** — stable URL identity (including Indeed `jk` and Google `htidocid`),
+  title/company/location fallback, URL collisions that fail open for visibly different listings,
+  malformed CSV recovery, and resumed-run filtering. A questionable match must re-show a listing,
+  never silently hide an opportunity.
 - **`achievementLedger`** — arithmetic including all three edge cases from §3.4 (`isNumeric: false`
   produces no figure rather than `0`/`NaN`; `baselineValue: 0` produces an absolute delta and
   `pct: null`; a direction/sign disagreement demotes rather than propagates), evidence substring
@@ -904,16 +850,14 @@ Each phase ships something usable on its own.
 
 0. **Model resolver** (§8) — smallest change, immediate payoff, and it lands before the new tasks
    add two more literal IDs to the table. Independent of everything below.
-1. **Applied store** — `locationIdentity`, the store, the button, the filter, funnel count, undo.
-   Fully independent of everything else.
-2. **HTML-first output** — inlined CSS, injected chrome, font detection, print hint, edit mode;
+1. **HTML-first output** — inlined CSS, injected chrome, font detection, print hint, edit mode;
    retire the puppeteer/OCG path. Independent of the ledger.
-3. **Broadened transcription prompt.** One prompt edit, large leverage, must precede the ledger.
-4. **Ledger** — schemas, tasks, mining, deterministic checks, refute, persistence, telemetry.
-5. **Résumé prompt** — rubric injection, ledger consumption, TRUTHFULNESS amendment, receipt
+2. **Broadened transcription prompt.** One prompt edit, large leverage, must precede the ledger.
+3. **Ledger** — schemas, tasks, mining, deterministic checks, refute, persistence, telemetry.
+4. **Résumé prompt** — rubric injection, ledger consumption, TRUTHFULNESS amendment, receipt
    emission, thinned class enumeration.
-6. **Receipt tooltips** — depends on 2 and 5.
-7. **Startup assertion** + reconnect-checklist documentation.
+5. **Receipt tooltips** — depends on 1 and 4.
+6. **Startup assertion** + reconnect-checklist documentation.
 
 ---
 
@@ -935,6 +879,6 @@ Each phase ships something usable on its own.
 - **Vendoring fonts** — see §5.3.
 - **A per-item review/approval UI for ledger entries** — human review is a light glance by design; a
   checklist of 30 derived claims contradicts that.
-- **Any status/notes/monitoring on job cards** — cards stay disposable. The applied store records a
-  fact, not a pipeline stage.
+- **Any status/notes/monitoring on job cards** — cards stay disposable. The bounded shown-history
+  sidecar prevents immediate rediscovery without turning the canvas into a submission pipeline.
 - **Editing `Job Application Design System/`** — read-only, replaceable, manually reconnected.

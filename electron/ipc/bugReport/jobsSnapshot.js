@@ -8,7 +8,6 @@ import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
-import { appliedJobsSnapshot, isJobApplied } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
@@ -77,6 +76,66 @@ export function formatPipelineState(pipeline = {}) {
   if (phase === 'aborted' || phase === 'cancelled') return '⏹️ cancelled';
   if (phase.includes('fail') || phase === 'error') return '❌ failed';
   return '⚠️ stopped';
+}
+
+// A source's initial search row can remain at zero after a Continue/Solve path
+// completes in an already-running process that predates the resume telemetry
+// producer. Do not let that stale row override the newer, terminal resume fact.
+function latestResolvedResumeAttempt(telemetry, sourceId, searchTs = 0) {
+  const attempts = telemetry?.resumeAttempts?.[sourceId];
+  if (!Array.isArray(attempts) || attempts.length === 0) return null;
+  const latest = attempts.at(-1);
+  const attemptTs = Number(latest?.t) || 0;
+  return latest?.outcome === 'resolved' && attemptTs > (Number(searchTs) || 0)
+    ? latest
+    : null;
+}
+
+// Generic inline Solve sources do not write resumeAttempts; their durable
+// resolve snapshot is the equivalent terminal recovery fact. Accept older
+// snapshots with kept>0, while never hiding a newer blocking warning.
+function latestResolvedRecovery(telemetry, sourceId, searchTs = 0) {
+  const attempt = latestResolvedResumeAttempt(telemetry, sourceId, searchTs);
+  if (attempt) return { kind: 'resume-attempt', ts: Number(attempt.t) || 0, count: resolvedResumeCount(attempt), attempt };
+  const resolve = telemetry?.resolves?.[sourceId];
+  const resolveTs = Number(resolve?.ts) || 0;
+  const warning = resolve?.warning;
+  const successful = resolve?.resolved === true || Number(resolve?.kept) > 0;
+  if (resolveTs > (Number(searchTs) || 0) && successful && !warning) {
+    return { kind: 'resolve', ts: resolveTs, count: Math.max(0, Number(resolve?.kept) || 0), resolve };
+  }
+  return null;
+}
+
+function resolvedResumeCount(attempt) {
+  const detail = String(attempt?.detail || '');
+  // Newer telemetry records the complete funnel (`… new=19`); older builds
+  // recorded only `19 item(s)`. Both are diagnostic observations, never a
+  // guessed reconstruction from a source warning.
+  const match = detail.match(/\bnew\s*=\s*(\d+)\b/i)
+    || detail.match(/\b(\d+)\s+item\(s\)/i);
+  return match ? Math.max(0, Number(match[1]) || 0) : null;
+}
+
+function postPipelineResumePassCount(telemetry, pipeline) {
+  if (pipeline?.active || !pipeline?.ts) return 0;
+  const completedAt = Number(pipeline.ts) || 0;
+  let count = 0;
+  const sourcesWithResolvedAttempt = new Set();
+  for (const [sourceId, attempts] of Object.entries(telemetry?.resumeAttempts || {})) {
+    const resolved = (Array.isArray(attempts) ? attempts : [])
+      .filter(attempt => attempt?.outcome === 'resolved' && (Number(attempt?.t) || 0) > completedAt);
+    if (resolved.length > 0) {
+      count += resolved.length;
+      sourcesWithResolvedAttempt.add(sourceId);
+    }
+  }
+  // Some older paths emitted a resolve row but not a resume-attempt row. Count
+  // that newer completion once, while avoiding double-counting the normal pair.
+  for (const [sourceId, resolve] of Object.entries(telemetry?.resolves || {})) {
+    if (!sourcesWithResolvedAttempt.has(sourceId) && (Number(resolve?.ts) || 0) > completedAt) count++;
+  }
+  return count;
 }
 
 export function formatGlassdoorCacheProvenance(entry = {}) {
@@ -182,17 +241,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } else {
     applicationSync = null;
   }
-  // Model resolution (§8) and the applied-jobs store (§6) are both app-global —
-  // neither is scoped to a job run, so they can carry signal even on a report
-  // with no fresh search this session (e.g. "why did this posting never come
-  // back" or "which model actually served the last mining pass"). Pulled here
-  // (not gated behind appGen) so they still surface on that kind of report.
+  // Model resolution is app-global rather than scoped to a job run, so it can
+  // carry signal even when no fresh search ran in this session.
   let modelRes = null;
   try { modelRes = modelResolutionSnapshot(); } catch { /* resolver may not be loaded */ }
-  let appliedSnap = null;
-  try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
-  const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
   const visibleLocalApplications = Array.isArray(localApplications)
     ? localApplications.filter(item => item?.localApplication?.id)
     : [];
@@ -210,7 +263,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // principle reach compensation research with those absent (e.g. replayed from
   // a batch-reconcile path). Omitting it here would risk the same silent
   // whole-section drop the resumeAttempts comment above already documents.
-  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs && !t.indeedSession && !hasResumeAttempts && visibleLocalApplications.length === 0) return '';
+  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !t.indeedSession && !hasResumeAttempts && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
@@ -241,6 +294,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
+  if (t.careerParseCache) {
+    const cache = t.careerParseCache;
+    const cacheScope = !cache.nodeId || !Array.isArray(currentNodeIds) || currentNodeIds.includes(cache.nodeId);
+    if (cacheScope) {
+      const outcomes = {
+        checking: 'checking',
+        hit: 'hit — reused the prior parsed career data',
+        miss: 'miss — parsing was started',
+        saved: 'miss → saved — the completed parse was accepted by the local cache store',
+        'save-failed': 'miss → cache write failed — parse results were still returned',
+      };
+      lines.push('\n### Career Parse Cache');
+      lines.push(`- ${outcomes[cache.outcome] || cache.outcome || 'unknown'} · ${cache.fileCount || 0} file(s) · fingerprint \`${cache.fingerprint || 'unknown'}\`${ago(cache.ts)}`);
+      if (cache.error) lines.push(`- ⚠️ Cache write error: \`${String(cache.error).replace(/`/g, "'").slice(0, 240)}\``);
+    }
+  }
   if (visibleLocalApplications.length) {
     lines.push('\n### Local AI Job State (live card snapshot)');
     for (const item of visibleLocalApplications.slice(0, 20)) {
@@ -259,6 +328,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   let savedSnapshotJobs = [];
   let savedRecoveryJobs = [];
 
+  const postCompletionResumePasses = t.pipeline
+    ? postPipelineResumePassCount(t, t.pipeline)
+    : 0;
+
   if (t.pipeline) {
     const p = t.pipeline;
     const stageAge = p.ts ? Math.max(0, Date.now() - p.ts) : null;
@@ -275,7 +348,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : durationMs < 60_000 ? `${(durationMs / 1000).toFixed(1)}s`
           : `${Math.floor(durationMs / 60_000)}m${Math.round((durationMs % 60_000) / 1000)}s`;
     lines.push(`### Live Search Stage`);
-    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
+    const supersedingResumes = postCompletionResumePasses;
+    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${supersedingResumes > 0 ? ` · superseded by ${supersedingResumes} post-completion resume pass${supersedingResumes === 1 ? '' : 'es'}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
     if (p.runOrigin || p.profileInputMode) {
       const runOriginLabel = {
         initial: 'Initial career-file run',
@@ -308,7 +382,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
 
   if (t.search) {
     const s = t.search;
-    lines.push(`### Search${ago(s.ts)}`);
+    lines.push(`### ${postCompletionResumePasses > 0 ? 'Initial Search Pass' : 'Search'}${ago(s.ts)}`);
     lines.push(`- Queries: ${s.queries}`);
     const relevanceStage = s.relevanceDropped > 0
       ? ` → title-relevance-dropped ${s.relevanceDropped}`
@@ -321,6 +395,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       `- Found (raw): ${s.raw}${relevanceStage} → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped} → ` +
       `history-dropped: ${s.historyDropped}${evidenceStage}`,
     );
+    if (postCompletionResumePasses > 0) {
+      lines.push(`- _Initial-pass counters only — ${postCompletionResumePasses} later recovery pass${postCompletionResumePasses === 1 ? '' : 'es'} superseded this result. Final recovered-source funnels are reported under Resume attempts and Captcha-resolve / Solve below._`);
+    }
     lines.push(s.relevanceDropped > 0
       ? '- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_'
       : '- _(dedup / age / history drops are by-design — not jobs we failed to analyze; provider-returned rows are not locally title-filtered)_');
@@ -568,7 +645,27 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const got = entries
         .filter(([, v]) => providerReturned(v) > 0 || Number(v?.count || 0) > 0)
         .map(([k, v]) => `${k}=${providerReturned(v)} → ${Math.max(0, Number(v?.count) || 0)}`);
-      lines.push(`- Per source (provider returned → retained for pipeline): ${got.length ? got.join(', ') : '(none)'}`);
+      // Preserve a terminal post-search resume outcome when the original row
+      // still says 0/0. This prevents a genuine resolved source from becoming
+      // the misleading `(none)` fallback until the main process is restarted.
+      const resumed = entries
+        .filter(([, value]) => providerReturned(value) === 0 && Number(value?.count || 0) === 0)
+        .map(([sourceId]) => [sourceId, latestResolvedRecovery(t, sourceId, s.ts)])
+        .filter(([, recovery]) => recovery)
+        .map(([sourceId, recovery]) => {
+          const label = recovery.kind === 'resolve' ? 'Solve resolved' : 'resume resolved';
+          return `${sourceId}=${label}${recovery.count == null ? '' : ` → ${recovery.count}`}`;
+        });
+      const renderedSources = [...got, ...resumed];
+      lines.push(`- Per source (provider returned → retained for pipeline): ${renderedSources.length ? renderedSources.join(', ') : '(none)'}`);
+      for (const [sourceId, value] of entries) {
+        const enrichment = value?.enrichment;
+        if (!enrichment || !(Number(enrichment.attempted) > 0)) continue;
+        const stageSummary = Object.entries(enrichment.stages || {})
+          .map(([stage, counts]) => `${stage} ${counts.recovered || 0}/${counts.attempted || 0}`)
+          .join(', ');
+        lines.push(`  - \`${sourceId}\` description enrichment: ${enrichment.enriched || 0}/${enrichment.attempted || 0} full · ${enrichment.empty || 0} blank/short · ${enrichment.challenge || 0} challenged · ${enrichment.unavailable || 0} unavailable · ${enrichment.error || 0} error${stageSummary ? ` (${stageSummary})` : ''}`);
+      }
       // Date-bounded deep pagination: how deep each paginating source walked and
       // why it stopped. `empty-page` = the source ran out of results. `blocked`
       // = an anti-bot wall cut it short. `page-cap` = hit this card's requested
@@ -695,7 +792,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           return `${k} (${v.warning.code})${evidence}`;
         });
       const zeroWarn = entries
-        .filter(([, v]) => v.count === 0 && v.warning && !expectedSkipCodes.has(v.warning.code))
+        .filter(([sourceId, v]) => v.count === 0 && v.warning && !expectedSkipCodes.has(v.warning.code)
+          && !latestResolvedRecovery(t, sourceId, s.ts))
         .map(([k, v]) => {
           const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
           return `${k} (${v.warning.code})${evidence}`;
@@ -728,7 +826,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // looks idle). Shown only for sources that ended non-clean or flip-flopped
     // between clean and failed — a plain searching→done source needs no trail.
     if (t.sourceEvents && Object.keys(t.sourceEvents).length > 0) {
-      const interesting = Object.entries(t.sourceEvents).filter(([, evs]) => {
+      const interesting = Object.entries(t.sourceEvents).filter(([sourceId, evs]) => {
+        if (latestResolvedRecovery(t, sourceId, s.ts)) return false;
         const statuses = new Set((evs || []).map(e => e.status));
         const lastStatus = evs?.[evs.length - 1]?.status;
         return (t.pipeline?.active && lastStatus === 'searching') ||
@@ -746,11 +845,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const descriptionDropped = s.descriptionEvidenceDropped;
     if (descriptionDropped?.total > 0) {
       const bySource = Object.entries(descriptionDropped.bySource || {})
-        .map(([source, q]) => `${source}=${q.empty || 0} empty/${q.short || 0} brief`)
+        .map(([source, q]) => `${source}=${q.deferred || 0} explicitly deferred/${q.empty || 0} empty/${q.short || 0} brief`)
         .join(', ');
-      lines.push(`- ℹ️ **Description-evidence filter:** deferred ${descriptionDropped.total} listing(s) below 400 characters (${descriptionDropped.empty || 0} empty, ${descriptionDropped.short || 0} brief) before scoring and before seen-history; they remain recoverable by Solve or a later run when full posting evidence is available${bySource ? ` · ${bySource}` : ''}.`);
+      lines.push(`- ℹ️ **Description-evidence filter:** deferred ${descriptionDropped.total} unresolved listing(s) (${descriptionDropped.deferred || 0} explicitly deferred after a source response failure, ${descriptionDropped.empty || 0} empty, ${descriptionDropped.short || 0} below 400 characters) before scoring and before seen-history; they remain recoverable by Solve or a later run when full posting evidence is available${bySource ? ` · ${bySource}` : ''}.`);
       for (const sample of Array.isArray(descriptionDropped.samples) ? descriptionDropped.samples : []) {
-        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.url ? ` · ${sample.url}` : ''}`);
+        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.deferredReason ? ` · deferred=${sample.deferredReason}` : ''}${sample.url ? ` · ${sample.url}` : ''}`);
       }
     }
 
@@ -881,7 +980,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             total: 0,
             salaryPresent: 0,
             salaryUnparseable: 0,
-            salaryLostCadence: 0, salaryLostCadenceEx: [],
+            salaryLostCadence: 0, salaryLostCadenceEx: [], salaryCadenceContextEx: [],
             salaryImplausibleAnnual: 0, salaryImplausibleAnnualEx: [],
             salaryProse: 0, salaryProseEx: [],
             postedEmpty: 0,
@@ -916,6 +1015,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               } else if (salaryClass === 'lost-cadence') {
                 q.salaryLostCadence++;
                 if (q.salaryLostCadenceEx.length < 3) q.salaryLostCadenceEx.push(`"${sal.slice(0, 50)}"`);
+                // The list/card salary can lose its unit even when the recovered
+                // full description states the same pay with an explicit cadence.
+                // Keep one bounded same-job excerpt so FULL/QUALITY can tell
+                // "the provider omitted it everywhere" from "our list-field
+                // extraction failed to reconcile evidence we already captured."
+                if (q.salaryCadenceContextEx.length < 3) {
+                  const payLine = String(j.snippet || '')
+                    .split(/\r?\n/)
+                    .map(line => line.replace(/\s+/g, ' ').trim())
+                    .find(line => line.length > 0 && line.length <= 180
+                      && /[$€£]\s*\d/.test(line)
+                      && /\b(?:pay|salary|compensation|wage|rate)\b/i.test(line)
+                      && /\b(?:year|yr|yearly|annual|annually|annum|hour|hr|hourly|week|wk|weekly|month|mo|monthly|day|daily)s?\b|\/\s*(?:yr|hr|wk|mo|day)\b/i.test(line));
+                  if (payLine) {
+                    q.salaryCadenceContextEx.push({
+                      raw: sal.slice(0, 80),
+                      context: payLine.slice(0, 180),
+                    });
+                  }
+                }
               } else {
                 q.salaryProse++;
                 if (q.salaryProseEx.length < 3) q.salaryProseEx.push(`"${sal.slice(0, 50)}"`);
@@ -968,6 +1087,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               // pages and omits it on others, so never promise an extractor fix
               // or imply a cadence that the source did not actually provide.
               breakdown.push(`${q.salaryLostCadence} money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing — e.g. ${q.salaryLostCadenceEx.join(', ')}`);
+              if (q.salaryCadenceContextEx.length > 0) {
+                const contexts = q.salaryCadenceContextEx
+                  .map(sample => `raw ${JSON.stringify(sample.raw)} ↔ JD ${JSON.stringify(sample.context)}`)
+                  .join('; ');
+                breakdown.push(`recovered-description pay context exists for ${q.salaryCadenceContextEx.length} bounded sample(s), so cadence reconciliation is possible without guessing — ${contexts}`);
+              }
             }
             if (q.salaryImplausibleAnnual > 0) {
               breakdown.push(`${q.salaryImplausibleAnnual} implausibly tiny explicit annual amount — rejected rather than interpreting a likely mislabeled hourly rate — e.g. ${q.salaryImplausibleAnnualEx.join(', ')}`);
@@ -1201,9 +1326,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // phase ring for reports generated by an already-running older process.
     const fieldAnomalies = Array.isArray(browserScrape.fieldAnomalies)
       ? browserScrape.fieldAnomalies
-      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss', 'detail-unavailable'].includes(e?.phase));
-    const anomalySet = new Set(fieldAnomalies);
-    const recent = allScrapeEvents.filter(e => !anomalySet.has(e)).slice(-8);
+      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort'].includes(e?.phase));
+    // getManualScraperTelemetry deliberately returns defensive entry copies, so
+    // object identity cannot distinguish the dedicated anomaly ring from the
+    // ordinary event ring here. Classify by the retained phase contract instead
+    // of rendering every detail anomaly twice (once bare in Recent phases and
+    // once with its full diagnostic evidence below).
+    const isDetailAnomaly = e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort'].includes(e?.phase);
+    const recent = allScrapeEvents.filter(e => !isDetailAnomaly(e)).slice(-8);
     if (recent.length > 0) {
       lines.push('- Recent browser-scrape phases:');
       for (const e of recent) {
@@ -1212,6 +1342,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // report so the reader immediately knows pid/alive/poll-count without
         // having to cross-reference the raw log.
         const isChromephase = typeof e.phase === 'string' && e.phase.startsWith('chrome-');
+        const isChallengePhase = typeof e.phase === 'string' && e.phase.startsWith('challenge-');
         const label = [
           e.phase || 'event',
           e.srcName || e.sourceId || null,
@@ -1227,6 +1358,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           isChromephase && e.elapsedMs != null ? `elapsed=${(e.elapsedMs / 1000).toFixed(1)}s`  : null,
           isChromephase && e.error          ? `err=${e.error}`                                   : null,
           isChromephase && e.stderr         ? `stderr=${String(e.stderr).slice(0, 200)}`          : null,
+          isChallengePhase && e.reason      ? `reason=${String(e.reason).slice(0, 80)}`           : null,
+          isChallengePhase && e.repeatCount ? `repeat=${e.repeatCount}`                           : null,
+          isChallengePhase && e.title       ? `title=${JSON.stringify(String(e.title).slice(0, 100))}` : null,
+          isChallengePhase && e.pageState   ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
+          isChallengePhase && e.bodyHead    ? `body=${JSON.stringify(String(e.bodyHead).slice(0, 160))}` : null,
           // A skipped source has to say WHY on its own line. Without this the
           // phase read "location-resolution-failed Glassdoor q1/12" and the
           // actual per-endpoint result lived only in the raw log tail.
@@ -1248,8 +1384,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.srcName || e.sourceId || null,
           e.key ? `key=${e.key}` : null,
           e.reason ? `reason=${e.reason}` : null,
+          e.repeatCount ? `repeat=${e.repeatCount}` : null,
+          e.hardBlock ? 'hardBlock=yes' : null,
+          e.title ? `title=${JSON.stringify(String(e.title).slice(0, 100))}` : null,
+          e.pageState ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
           e.status != null ? `HTTP=${e.status}` : null,
           e.finalUrl ? `url=${String(e.finalUrl).slice(0, 140)}` : null,
+          e.bodyHead ? `body=${JSON.stringify(String(e.bodyHead).slice(0, 180))}` : null,
           e.error ? `err=${String(e.error).slice(0, 160)}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
@@ -1277,7 +1418,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const expanded = Number(e.expanded ?? 0);
         const missing = Number(e.missing ?? 0);
         const panelTimeouts = Number(e.panelTimeouts ?? 0);
+        const panelRateLimits = Number(e.panelRateLimits ?? 0);
+        const panelHttpFailures = Number(e.panelHttpFailures ?? 0);
+        const panelRequestsIssued = Number(e.panelRequestsIssued ?? 0);
+        const proactivePanelCooldowns = Number(e.proactivePanelCooldowns ?? 0);
+        const panelJsonResponses = Number(e.panelJsonResponses ?? 0);
+        const panelJsonPayloads = Number(e.panelJsonPayloads ?? 0);
+        const panelJsonDescriptionFallbacks = Number(e.panelJsonDescriptionFallbacks ?? 0);
+        const panelJsonFieldRecoveries = e.panelJsonFieldRecoveries && typeof e.panelJsonFieldRecoveries === 'object'
+          ? e.panelJsonFieldRecoveries
+          : {};
+        const panelJsonFieldRecoveryTotal = ['salary', 'posted', 'company']
+          .reduce((sum, field) => sum + Number(panelJsonFieldRecoveries[field] ?? 0), 0);
+        const panelPacing = e.panelPacing && typeof e.panelPacing === 'object' ? e.panelPacing : null;
         const titleBypassed = Number(e.titleBypassed ?? 0);
+        // A modal can cover an otherwise-correct card without changing the
+        // card selector or panel selector. Keep that distinct from stale
+        // markup: the browser walker records both successful dismissals and
+        // cases where it found a blocker but could not clear it.
+        const blockingModalsDismissed = Number(e.blockingModalsDismissed ?? 0);
+        const blockingModalFailures = Number(e.blockingModalFailures ?? 0);
         // The post-click selected-card probe is separate from the pre-click
         // hit-test. A correct physical hit does not, by itself, prove that the
         // board activated that same row after its event handler ran.
@@ -1302,13 +1462,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           : null;
         const label = [
           e.srcName || e.sourceId || 'source',
+          e.strategy ? `strategy=${String(e.strategy).slice(0, 80)}` : null,
+          e.panelSelector ? `panel=${JSON.stringify(String(e.panelSelector).slice(0, 180))}` : null,
           e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
           e.pageNum ? `p${e.pageNum}` : null,
           `attempted ${attempted}/${total}`,
           `expanded ${expanded}/${total}`,
           missing > 0 ? `missing-target ${missing}` : null,
           panelTimeouts > 0 ? `panel-timeout ${panelTimeouts}` : null,
+          panelRateLimits > 0 ? `panel-http-429 ${panelRateLimits} (source throttle; walk stopped)` : null,
+          panelHttpFailures > 0 ? `panel-http-other ${panelHttpFailures} (source response; walk stopped)` : null,
+          panelPacing?.requestDelayMs
+            ? `panel-pace ${Math.round(Number(panelPacing.requestDelayMs) / 100) / 10}s${panelPacing.checkpointEvery && panelPacing.checkpointCooldownMs ? ` + ${Math.round(Number(panelPacing.checkpointCooldownMs) / 100) / 10}s/${panelPacing.checkpointEvery}` : ''}`
+            : null,
+          proactivePanelCooldowns > 0 ? `proactive-panel-cooldowns ${proactivePanelCooldowns}` : null,
+          panelRequestsIssued > 0 ? `panel-requests ${panelRequestsIssued}` : null,
+          panelJsonResponses > 0 ? `same-request-json ${panelJsonPayloads}/${panelJsonResponses} usable` : null,
+          panelJsonDescriptionFallbacks > 0 ? `json-description-fallback ${panelJsonDescriptionFallbacks}` : null,
+          panelJsonFieldRecoveryTotal > 0
+            ? `json-field-recovery ${['salary', 'posted', 'company'].filter(field => Number(panelJsonFieldRecoveries[field] ?? 0) > 0).map(field => `${field}=${Number(panelJsonFieldRecoveries[field])}`).join(',')}`
+            : null,
           Number.isFinite(selectionMismatches) ? `selection-mismatches ${selectionMismatches}` : null,
+          blockingModalsDismissed > 0 ? `blocking-popup-dismissed ${blockingModalsDismissed}` : null,
+          blockingModalFailures > 0 ? `blocking-popup-dismiss-failed ${blockingModalFailures}` : null,
           titleBypassed > 0 ? `title-bypassed ${titleBypassed} (intentional, page-local)` : null,
           abortLabel,
         ].filter(Boolean).join(' · ');
@@ -1320,6 +1496,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const key = sample?.key ? ` key=${String(sample.key).slice(0, 100)}` : '';
           const reason = sample?.reason ? ` reason=${String(sample.reason).slice(0, 160)}` : '';
           lines.push(`    - ⚠️ ${position}${key}${reason}`);
+        }
+        const modalSamples = Array.isArray(e.modalSamples) ? e.modalSamples.slice(0, 6) : [];
+        if (modalSamples.length > 0) {
+          lines.push('    - Blocking popup handling:');
+          for (const sample of modalSamples) {
+            const index = Number(sample?.itemIndex);
+            const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+            const stage = sample?.stage ? ` · stage=${String(sample.stage).slice(0, 80)}` : '';
+            const signature = sample?.signature ? ` · signature=${String(sample.signature).slice(0, 120)}` : '';
+            const control = sample?.control ? ` · control=${String(sample.control).slice(0, 100)}` : '';
+            const outcome = sample?.outcome ? ` · outcome=${String(sample.outcome).slice(0, 100)}` : '';
+            const failed = sample?.outcome && sample.outcome !== 'dismissed';
+            lines.push(`      - ${failed ? '⚠️ ' : ''}${position}${stage}${signature}${control}${outcome}`);
+          }
+          if (Array.isArray(e.modalSamples) && e.modalSamples.length > modalSamples.length) {
+            lines.push(`      - _${e.modalSamples.length - modalSamples.length} additional popup-handling sample(s) omitted from the bounded trace._`);
+          }
         }
         // Failures alone cannot diagnose a visible "every other card" jump:
         // all clicks can succeed while the browser resolves a neighbouring
@@ -1556,11 +1749,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
-  // LinkedIn anonymous-enrichment egress-IP trail. It records the egress and
-  // browser process for each pass, but those observations alone do NOT identify
-  // the quota key: every completed pass shrinks the remaining job pool, and a
-  // changed IP can independently be warmer/cooler. The report must preserve that
-  // uncertainty rather than infer IP- or browser-session scope from raw yield.
+  // LinkedIn enrichment egress-IP trail. It records whether a verified profile
+  // session was attempted before the guest fallback, plus egress/browser process
+  // for each pass. IP/browser observations alone do NOT identify the quota key:
+  // every completed pass shrinks the remaining job pool, and a changed IP can
+  // independently be warmer/cooler. The report must preserve that uncertainty.
   const enrichTrail = Array.isArray(t.linkedinEnrich) ? t.linkedinEnrich : [];
   if (enrichTrail.length > 0) {
     lines.push('\n### LinkedIn enrichment — egress IP / browser trail');
@@ -1613,7 +1806,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const ageS = e.browserAgeMs != null ? `${Math.round(e.browserAgeMs / 1000)}s old` : 'age ?';
         browserStr = ` · browser#${e.browserGen} (${ageS}, lifetime ${e.browserLifetimeBefore ?? 0}→${e.browserLifetimeAfter ?? 0})`;
       }
-      lines.push(`- ${kind}${ago(e.ts)}${idleStr}: ${ipStr} → ${outcome}${browserStr}`);
+      const modeStr = e.usedAuthenticated
+        ? (e.authenticatedFallback ? ' · profile session → guest fallback' : ' · profile session')
+        : ' · guest context';
+      lines.push(`- ${kind}${ago(e.ts)}${idleStr}: ${ipStr} → ${outcome}${modeStr}${browserStr}`);
       if (e.ip) prevIp = e.ip;
       prevTs = e.ts;
     }
@@ -1775,6 +1971,30 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   }
 
+  if (t.scoringHeartbeat?.active) {
+    const h = t.scoringHeartbeat;
+    const age = h.ts ? Math.max(0, Date.now() - h.ts) : null;
+    const phase = h.phase === 'splitting' ? 'splitting into smaller batches'
+      : h.phase === 'running' ? 'awaiting model response'
+        : h.phase === 'recovering-missing-rows' ? 'recovering unresolved score rows'
+          : h.phase || 'starting';
+    const batch = h.batch != null && h.batchTotal != null ? ` · batch ${h.batch}/${h.batchTotal}` : '';
+    const size = h.attemptSize != null ? ` · current attempt ${h.attemptSize} job(s)` : '';
+    lines.push(`\n### Live Scoring`);
+    lines.push(`- ${h.scored || 0}/${h.total || 0} complete${batch}${size} · **${phase}**${age == null ? '' : ` · heartbeat ${Math.round(age / 1000)}s ago`}`);
+  } else if (t.scoringHeartbeat?.phase === 'aborted') {
+    const h = t.scoringHeartbeat;
+    const batch = h.batch != null && h.batchTotal != null ? ` · batch ${h.batch}/${h.batchTotal}` : '';
+    const size = h.attemptSize != null ? ` · interrupted attempt ${h.attemptSize} job(s)` : '';
+    const handoff = h.transport === 'manual-ai-handoff';
+    const interruptedPhase = h.interruptedPhase === 'running'
+      ? (handoff ? 'while awaiting the manually pasted AI response' : 'while awaiting the model response')
+      : h.interruptedPhase ? `during ${h.interruptedPhase}` : '';
+    lines.push('\n### Scoring Cancellation');
+    lines.push(`- ⏹️ Cancelled at ${h.scored || 0}/${h.total || 0} complete${batch}${size}${interruptedPhase ? ` · ${interruptedPhase}` : ''}${ago(h.ts)}`);
+    if (h.cancellationReason) lines.push(`- Cancellation reason: \`${String(h.cancellationReason).replace(/`/g, "'").slice(0, 240)}\``);
+  }
+
   if (t.scoring) {
     const s = t.scoring;
     const clean = s.placeholders === 0 && s.unscored === 0;
@@ -1819,6 +2039,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // for same-source replacement and every retry: a sequence such as
     // 3→7→7→15→52→54 contributes +51, while latest-attempt-only
     // telemetry would contribute +2 and falsely label 49 jobs as carry-over.
+    const resumeOnlyGathered = Object.entries(t.resumeAttempts || {}).reduce((sum, [sourceId]) => {
+      if (t.resolves?.[sourceId]) return sum;
+      const attempt = latestResolvedResumeAttempt(t, sourceId, t.search?.ts);
+      return sum + (resolvedResumeCount(attempt) || 0);
+    }, 0);
     const sessionGathered = (t.search?.kept || 0) +
       Object.values(t.resolves || {}).reduce((sum, r) => {
         const m = r?.merge;
@@ -1826,12 +2051,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         return sum + (r?.hasMergeTelemetry === true && Number.isFinite(cumulative)
           ? cumulative
           : (m != null ? (m.pendingAfter - m.pendingBefore) : (r?.kept || 0)));
-      }, 0);
+      }, 0) + resumeOnlyGathered;
     const carried = s.input - sessionGathered;
     if (carried > 0) {
       lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
     }
-    lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
+    const providerCalls = Number(s.providerCalls || 0);
+    const recoveryCalls = Number(s.partialRecoveryCalls || 0);
+    const recoveryRows = Number(s.partialRecoveryRowAttempts || 0);
+    const callDetail = providerCalls > 0 && providerCalls !== Number(s.batches || 0)
+      ? ` · ${providerCalls} provider call(s)${recoveryCalls > 0 ? `, including ${recoveryCalls} targeted partial-row recovery call(s) covering ${recoveryRows} row-attempt(s)` : ''}`
+      : '';
+    lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${callDetail}${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
     if (inputQuality && incompleteDescriptions > 0) {
       const bySource = Object.entries(inputQuality.bySource || {})
         .map(([source, q]) => `${source}=${q.empty || 0} empty/${q.short || 0} short`)
@@ -1868,8 +2099,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push('  - ✅ No cross-batch score delta ≥15 among same-title/company jobs with effectively identical descriptions.');
       } else {
         for (const anomaly of anomalies) {
-          const a = audit.rows[anomaly.first?.index];
-          const b = audit.rows[anomaly.second?.index];
+          // Priority rows (placeholders) are deliberately moved to the front
+          // of the bounded audit, so original source indices no longer equal
+          // their display-array positions.
+          const findAuditRow = reference => audit.rows.find(row => row.index === reference?.index)
+            // Pre-priority telemetry did not persist row indices; retain its
+            // original positional contract for saved/legacy reports.
+            || audit.rows[reference?.index];
+          const a = findAuditRow(anomaly.first);
+          const b = findAuditRow(anomaly.second);
           if (!a || !b) continue;
           lines.push(`  - ⚠️ **${anomaly.delta}-point cross-batch drift** for "${anomaly.title}" — ${anomaly.company}: batch ${a.batch} scored ${a.score} (${a.location || 'location ?'}; ${a.direction || 'direction ?'}) vs batch ${b.batch} scored ${b.score} (${b.location || 'location ?'}; ${b.direction || 'direction ?'}); identical JD fingerprint \`${anomaly.descriptionFingerprint}\`.`);
           lines.push(`    - first: ${a.url || '(no URL)'} · reason: "${a.reason || '(none)'}"`);
@@ -1881,11 +2119,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // SCORE promises ordinary per-job evidence too, not only rows involved in
       // a rare cross-batch anomaly. Keep the normal sample compact so FULL still
       // reaches the later history/taxonomy sections.
-      const evidence = audit.rows.slice(0, 10);
+      const evidence = [
+        ...audit.rows.filter(row => row.placeholder),
+        ...audit.rows.filter(row => !row.placeholder),
+      ].slice(0, 10);
       const totalEvidence = audit.rows.length + (audit.omitted || 0);
       lines.push(`- Scoring evidence (${evidence.length}/${totalEvidence} bounded row(s)):`);
       for (const row of evidence) {
-        lines.push(`  - batch ${row.batch || '?'} · score ${row.score ?? '?'} · [${historyReportValue(row.source, '?', 40)}] "${historyReportValue(row.title, '(untitled)', 120)}" — ${historyReportValue(row.direction, '(no direction)', 100)} · input ${row.descriptionChars ?? '?'} chars · reason: "${historyReportValue(row.reason, '(none)', 240)}"`);
+        const placeholder = row.placeholder ? ' · ⚠️ placeholder (not analyzed)' : '';
+        const url = row.placeholder && row.url ? ` · URL: ${historyReportValue(row.url, '(no URL)', 240)}` : '';
+        lines.push(`  - batch ${row.batch || '?'} · score ${row.score ?? '?'}${placeholder} · [${historyReportValue(row.source, '?', 40)}] "${historyReportValue(row.title, '(untitled)', 120)}" — ${historyReportValue(row.direction, '(no direction)', 100)} · input ${row.descriptionChars ?? '?'} chars · reason: "${historyReportValue(row.reason, '(none)', 240)}"${url}`);
       }
       if (totalEvidence > evidence.length) {
         lines.push(`  - _${totalEvidence - evidence.length} additional scoring-evidence row(s) omitted._`);
@@ -1984,12 +2227,45 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // salary range → role). A successful taxonomy is required before the
     // renderer mutates the board; failed combines leave its prior results intact.
     lines.push(`\n### Taxonomy (hiring fit → salary → role)${ago(b.ts)}`);
+    if (b.strategy === 'bounded-plan-chunks') {
+      const chunkProgress = Number(b.taxonomyChunkCount || 0) > 0
+        ? `${Number(b.taxonomyChunksCompleted || 0)}/${Number(b.taxonomyChunkCount)} chunk(s)`
+        : 'classification not started';
+      const provider = b.provider ? ` · provider \`${String(b.provider).replace(/`/g, '')}\`` : '';
+      lines.push(`- Bounded taxonomy: stage ${b.taxonomyStage || 'unknown'} · ${chunkProgress} · max ${Number(b.taxonomyChunkSize || 0) || '?'} jobs/request · ${Number(b.taxonomyRepresentativeCount || 0)} planning sample(s) · ${Number(b.taxonomyVocabularySize || 0)} role label(s)${provider}.`);
+    }
     if (b.error) {
       // Taxonomy is a transactional prerequisite. A provider failure must not
       // imply that a renderer-side fallback created results from an incomplete
       // response.
       lines.push(`- ❌ **Job Board combine aborted** on ${b.input} scored job(s)${modelTag(b.model, b.fallback)} — taxonomy did not complete; no new job results were added and the existing board was left unchanged.`);
       lines.push(`  - Captured taxonomy-provider error: ${b.error}`);
+      const shape = b.roleShape && typeof b.roleShape === 'object' ? b.roleShape : null;
+      if (shape) {
+        const defects = [];
+        if (Number(shape.missingCount || 0) > 0) defects.push(`${shape.missingCount} missing`);
+        if (Number(shape.blankCount || 0) > 0) defects.push(`${shape.blankCount} blank`);
+        if (Number(shape.nonStringCount || 0) > 0) defects.push(`${shape.nonStringCount} non-string`);
+        if (Number(shape.extraCount || 0) > 0) defects.push(`${shape.extraCount} extra`);
+        lines.push(`  - Provider role payload: ${shape.type || 'unknown'} · ${shape.receivedCount ?? 0}/${shape.expectedCount ?? b.input} required entries received${defects.length ? ` · ${defects.join(', ')}` : ''}.`);
+        const indexParts = [];
+        if (Array.isArray(shape.missingIndices) && shape.missingIndices.length) indexParts.push(`missing [${shape.missingIndices.join(', ')}]`);
+        if (Array.isArray(shape.blankIndices) && shape.blankIndices.length) indexParts.push(`blank [${shape.blankIndices.join(', ')}]`);
+        if (Array.isArray(shape.nonStringIndices) && shape.nonStringIndices.length) indexParts.push(`non-string [${shape.nonStringIndices.join(', ')}]`);
+        if (Array.isArray(shape.extraKeys) && shape.extraKeys.length) indexParts.push(`extra keys [${shape.extraKeys.join(', ')}]`);
+        if (indexParts.length) lines.push(`  - Affected role positions (bounded, 0-based): ${indexParts.join(' · ')}${shape.omittedIssueIndices > 0 ? ` · ${shape.omittedIssueIndices} more omitted` : ''}.`);
+      }
+      const coverage = b.modelRoleCoverage && typeof b.modelRoleCoverage === 'object' ? b.modelRoleCoverage : null;
+      if (coverage) {
+        lines.push(`  - Usable role coverage: ${coverage.placed || 0}/${b.input} placed · ${coverage.missing || 0} missing · ${coverage.duplicated || 0} duplicate · ${coverage.invalid || 0} invalid index(es) · ${coverage.malformedNames || 0} malformed role name(s).`);
+      }
+      if (Array.isArray(b.failureSamples) && b.failureSamples.length > 0) {
+        lines.push('  - Affected job samples (bounded; no descriptions/model output retained):');
+        for (const sample of b.failureSamples) {
+          const clean = value => String(value || '').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim();
+          lines.push(`    - #${sample.index} [${clean(sample.source) || '?'}] "${clean(sample.title) || '(untitled)'}" · scorer direction: ${clean(sample.suggestedDirection) || '(none)'}`);
+        }
+      }
     } else {
       const clean = b.missing === 0 && b.duplicated === 0;
       lines.push(`- Input: ${b.input} → ${b.roleCount} role(s), ${Array.isArray(b.bandSummary) ? b.bandSummary.length : 0} hiring-fit band(s), ${Array.isArray(b.salaryRangeLabels) ? b.salaryRangeLabels.length : 0} salary range(s)${clean ? ' · ✅ every job placed in a role' : ''}${modelTag(b.model, b.fallback)}`);
@@ -2056,10 +2332,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const raw = item.rawSalary ? `"${item.rawSalary}"` : '(none)';
           const annual = item.annualSalary > 0 ? `$${Number(item.annualSalary).toLocaleString('en-US')}/yr` : 'unparseable';
           lines.push(`  - #${item.index} ${title}${source} — ${raw} → ${annual} → **${item.salaryRange || 'Unspecified'}**; ${item.fitBand || item.likelihood || 'Hiring fit'}; ${item.role || 'Other'}`);
-          if (item.salaryAnomaly) {
-            const lo = Number(item.salaryAnomaly.lowerAnnual || 0).toLocaleString('en-US');
-            const hi = Number(item.salaryAnomaly.upperAnnual || 0).toLocaleString('en-US');
-            lines.push(`    - ⚠️ salary-range anomaly: $${lo}–$${hi}/yr (${item.salaryAnomaly.reason || 'implausibly wide range'}). Kept the lower endpoint for deterministic placement; verify the source chip.`);
+          // `salaryRange` remains the deterministic bucket label. Endpoint
+          // provenance is deliberately separate so normal ranges are disclosed
+          // without turning every range into a warning; older telemetry only
+          // has the wide-range `salaryAnomaly` payload.
+          const rangeMetadata = item.salaryRangeMetadata || item.salaryAnomaly || item;
+          const lowerAnnual = Number(rangeMetadata?.lowerAnnual);
+          const upperAnnual = Number(rangeMetadata?.upperAnnual);
+          if (Number.isFinite(lowerAnnual) && Number.isFinite(upperAnnual) && upperAnnual > lowerAnnual) {
+            const lo = lowerAnnual.toLocaleString('en-US');
+            const hi = upperAnnual.toLocaleString('en-US');
+            const isWide = upperAnnual / lowerAnnual >= 5;
+            lines.push(`    - ${isWide ? '⚠️ ' : ''}salary range disclosed: $${lo}–$${hi}/yr. Kept the lower endpoint for deterministic placement${isWide ? `; ${item.salaryAnomaly?.reason || 'implausibly wide range'} — verify the source chip` : ''}.`);
           }
           // Only for values mined out of the description body: shows whether the
           // figure was actually the role's pay or a bonus/equity/revenue number
@@ -2413,28 +2697,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`- Local edit Sync: ${sync.registered ? 'workspace registered' : 'NOT registered'} · service ${serviceState}${sync.endpoint ? ` · ${String(sync.endpoint).slice(0, 200)}` : ''}${sync.error ? ` · ${String(sync.error).replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
       }
       if (ex.revealSucceeded != null) lines.push(`- Opened destination folder: ${ex.revealSucceeded ? '✅' : `❌${ex.revealError ? ` — ${String(ex.revealError).slice(0, 300)}` : ''}`}`);
-      // Saving a generated bundle intentionally does NOT claim that the user
-      // submitted an application.  State this alongside the export rather
-      // than forcing a reader to compare an unrelated global timestamp above.
-      // It also prevents a successful save from being mistaken for a broken
-      // applied-jobs write when the user has not clicked the explicit action.
-      let appliedForExport = null;
-      try {
-        appliedForExport = isJobApplied({
-          title: a.jobTitle,
-          company: a.company,
-          location: a.jobLocation,
-          url: a.jobUrl,
-          source: a.jobSource,
-        });
-      } catch { /* an unreadable applied store is reported by its own section */ }
-      if (appliedForExport === true) {
-        lines.push('- Applied-jobs record for this export: ✅ marked applied.');
-      } else if (appliedForExport === false) {
-        lines.push('- Applied-jobs record for this export: not marked — saving an application is intentionally separate from the explicit **Mark applied** action, so this job may still appear in future searches.');
-      } else {
-        lines.push('- Applied-jobs record for this export: not resolved (the applied-jobs store could not be read).');
-      }
+      lines.push('- Submission state: not tracked — use this bundle to apply manually on the employer site.');
     } else if (a.status === 'completed') {
       lines.push('- Application export: not recorded — generation completed, but this process has no verified destination readback for the last attempt.');
     }
@@ -2473,15 +2736,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (Array.isArray(modelRes.skipped) && modelRes.skipped.length > 0) {
       lines.push(`  - ⚠️ Skipped: ${modelRes.skipped.map(s => `\`${s.id}\` (${s.family}: ${s.reason})`).join('; ')}`);
     }
-  }
-
-  // ── Applied jobs store (§6) ─────────────────────────────────────────────────
-  // Global and permanent — the only way to answer "why did this job never come
-  // back in search" (it's silently filtered at every gather site once marked).
-  if (appliedSnap) {
-    const last = appliedSnap.lastAppliedAt ? `${appliedSnap.lastAppliedAt} (${formatAge(Date.parse(appliedSnap.lastAppliedAt))})` : 'never';
-    lines.push(`\n### Applied Jobs Store`);
-    lines.push(`- ${appliedSnap.count} job(s) marked applied · store: \`${appliedSnap.path || '?'}\` · last applied: ${last}`);
   }
 
   return `

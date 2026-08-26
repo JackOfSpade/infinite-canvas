@@ -64,7 +64,7 @@ function assertAttachmentPathSafe(filePath) {
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget).
-const GEMINI_TEMPERATURE = 0.1;
+export const GEMINI_TEMPERATURE = 0.1;
 // NOTE: we deliberately do NOT cap prompt/context size on our end. The model's
 // own input window (~1M tokens on every model we call) is the only ceiling — an
 // over-limit prompt is rejected by the API and that error is surfaced as-is. We

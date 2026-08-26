@@ -46,6 +46,22 @@ const LOGIN_BROWSER_TERM_EXIT_MS = 3_000;
 const LOGIN_BROWSER_KILL_EXIT_MS = 2_000;
 const execFile = promisify(execFileCb);
 
+// Shared by the visible captcha resolver and deterministic regression tests.
+// Keep this at module scope so Cloudflare variants cannot silently diverge from
+// the challenge selectors used by login-window verification.
+export const CAPTCHA_RESOLVE_CHALLENGE_SELECTORS = Object.freeze([
+  { name: 'recaptcha-anchor',  selector: 'iframe[src*="recaptcha/api2/anchor"]' },
+  { name: 'recaptcha-bframe',  selector: 'iframe[src*="recaptcha/api2/bframe"]' },
+  { name: 'recaptcha-widget',  selector: '.g-recaptcha[data-sitekey]' },
+  { name: 'hcaptcha-iframe',   selector: 'iframe[src*="hcaptcha.com"]' },
+  { name: 'cf-challenge-form', selector: '#challenge-form, #challenge-running, #cf-challenge-running, .cf-browser-verification' },
+  { name: 'cf-challenge-frame', selector: 'iframe[src*="challenges.cloudflare.com"]' },
+  { name: 'cf-turnstile', selector: '.cf-turnstile, [id*="cf-chl-widget"]' },
+  { name: 'datadome',          selector: '#datadome-captcha-container, iframe[src*="captcha-delivery.com"]' },
+  { name: 'perimeterx',        selector: '[id*="px-captcha"], iframe[src*="perimeterx"]' },
+  { name: 'press-and-hold',    selector: 'div[id*="px-captcha"][style*="block"]' },
+]);
+
 // ── Cookie-encryption parity between Puppeteer and native Chrome windows ─────
 // BUG: two mutually-unreadable cookie-encryption domains on ONE shared Chrome
 // profile.
@@ -323,6 +339,27 @@ export function unwrapInlineExtractorItems(result) {
   return null;
 }
 
+/**
+ * A page body by itself is never proof that a human challenge was cleared: a
+ * source can open Solve on an already-clean page, or a site can render a
+ * normal-looking interstitial before its widget mounts.  The no-extractor path
+ * may therefore close only after this specific window observed a challenge and
+ * then observed it disappear.  Extractor-backed pages retain their separate
+ * settled-item readiness contract below.
+ */
+export function shouldAutoCloseCaptchaResolveWithoutExtractor({
+  sawChallenge = false,
+  noChallenge = false,
+  consentVisible = false,
+  textLength = 0,
+  bodyTextGate = READINESS.BODY_TEXT_GATE,
+} = {}) {
+  return Boolean(sawChallenge)
+    && Boolean(noChallenge)
+    && !consentVisible
+    && Number(textLength) > Number(bodyTextGate);
+}
+
 // Glassdoor redirects an authenticated session to its country-specific domain
 // (for example www.glassdoor.com → www.glassdoor.ca). A captcha-resolve starts
 // on the scrape URL, so treating that safe first-party redirect as the user
@@ -534,11 +571,46 @@ export function buildAuthAttemptRecord(diag = {}) {
   const startedAt = diag.startedAt || null;
   const finishedAt = diag.finishedAt || new Date().toISOString();
   const openMs = startedAt ? Math.max(0, new Date(finishedAt) - new Date(startedAt)) : null;
+  const isNativeChallenge = diag.mode === 'native-chrome'
+    && String(diag.platformId || '').endsWith('-native-challenge');
+  // Preserve a compact terminal handoff trace after `activeAuthWindows` is
+  // cleared. The bug reporter needs this to distinguish a manual close after a
+  // clean page from a close before the AppleScript observer ever saw clearance.
+  // It deliberately contains no cookie values or page body; URL query strings
+  // are stripped later at render time as a second privacy boundary.
+  const rawNativeChallenge = isNativeChallenge && diag.nativeChallenge && typeof diag.nativeChallenge === 'object'
+    ? diag.nativeChallenge
+    : null;
+  const nativeChallenge = rawNativeChallenge ? {
+    initialChallengeObserved: typeof rawNativeChallenge.initialChallengeObserved === 'boolean'
+      ? rawNativeChallenge.initialChallengeObserved : null,
+    initialSignal: String(rawNativeChallenge.initialSignal || '').slice(0, 90) || null,
+    pollCount: Number.isFinite(rawNativeChallenge.pollCount) ? Math.max(0, Math.round(rawNativeChallenge.pollCount)) : null,
+    pollErrorCount: Number.isFinite(rawNativeChallenge.pollErrorCount) ? Math.max(0, Math.round(rawNativeChallenge.pollErrorCount)) : null,
+    lastPollAt: Number.isFinite(rawNativeChallenge.lastPollAt) ? rawNativeChallenge.lastPollAt : null,
+    lastClassification: String(rawNativeChallenge.lastClassification || '').slice(0, 50) || null,
+    lastTabUrl: String(rawNativeChallenge.lastTabUrl || '').slice(0, 300) || null,
+    lastTabTitle: String(rawNativeChallenge.lastTabTitle || '').slice(0, 120) || null,
+    terminalSource: String(rawNativeChallenge.terminalSource || '').slice(0, 60) || null,
+    exitCode: Number.isFinite(rawNativeChallenge.exitCode) ? rawNativeChallenge.exitCode : null,
+    exitSignal: String(rawNativeChallenge.exitSignal || '').slice(0, 40) || null,
+    postCloseVerify: rawNativeChallenge.postCloseVerify && typeof rawNativeChallenge.postCloseVerify === 'object'
+      ? {
+          outcome: String(rawNativeChallenge.postCloseVerify.outcome || '').slice(0, 60) || null,
+          reason: String(rawNativeChallenge.postCloseVerify.reason || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180) || null,
+          status: Number.isFinite(rawNativeChallenge.postCloseVerify.status) ? rawNativeChallenge.postCloseVerify.status : null,
+          finalUrl: String(rawNativeChallenge.postCloseVerify.finalUrl || rawNativeChallenge.postCloseVerify.url || '').slice(0, 300) || null,
+        }
+      : null,
+  } : null;
   return {
     platformId: diag.platformId || null,
     result: diag.result || null, // auto-detected | closed | timeout | launch-error | …
     loginSignal: diag.loginSignal || diag.autoDetectedLoginSignal || null, // auth-cookie | dom | auth-gated-url | native-url
-    loginDetected: diag.loginDetected ?? (diag.result === 'auto-detected'),
+    // Challenge clearance is not a login assertion: the native handoff only
+    // establishes that the challenge is gone. Keep this null so bug reports do
+    // not say "NOT detected" against a successful `cleared` result.
+    loginDetected: isNativeChallenge ? null : (diag.loginDetected ?? (diag.result === 'auto-detected')),
     mode: diag.mode || null, // puppeteer-visible | native-chrome
     url: (String(diag.currentUrl || diag.loginUrl || '').replace(/`/g, "'").slice(0, 180)) || null,
     title: title || null,
@@ -561,8 +633,9 @@ export function buildAuthAttemptRecord(diag = {}) {
           name: String(cookie?.name || '').slice(0, 80),
           persistent: !!cookie?.persistent,
           expiresAt: Number.isFinite(cookie?.expiresAt) ? cookie.expiresAt : null,
-        }))
+      }))
       : [],
+    nativeChallenge,
   };
 }
 
@@ -625,9 +698,11 @@ async function getNativeChromeTabs() {
   const script = `
 tell application "Google Chrome"
   set output to ""
-  repeat with w in windows
-    repeat with t in tabs of w
-      set output to output & (URL of t as string) & "||" & (title of t as string) & linefeed
+  repeat with wi from 1 to (count of windows)
+    set w to window wi
+    repeat with ti from 1 to (count of tabs of w)
+      set t to tab ti of w
+      set output to output & (wi as string) & "||" & (ti as string) & "||" & (URL of t as string) & "||" & (title of t as string) & linefeed
     end repeat
   end repeat
   return output
@@ -639,8 +714,13 @@ end tell`;
       .map(line => line.trim())
       .filter(Boolean)
       .map(line => {
-        const [url = '', title = ''] = line.split('||');
-        return { url, title };
+        const [windowIndex = '', tabIndex = '', url = '', ...titleParts] = line.split('||');
+        return {
+          windowIndex: Number(windowIndex) || null,
+          tabIndex: Number(tabIndex) || null,
+          url,
+          title: titleParts.join('||'),
+        };
       });
   } catch (error) {
     return [{ url: '', title: '', error: error?.message || String(error) }];
@@ -1546,6 +1626,14 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
 // first response. Without this small floor, a fresh --app window can report its
 // requested /jobs URL before Cloudflare replaces it with the challenge.
 const NATIVE_CHALLENGE_SETTLE_MS = 3_000;
+// A user may close the app-style native window immediately after the checkbox
+// succeeds.  Chromium writes the clearance cookie during that close, so give
+// the profile a short, bounded chance to finish its normal shutdown before we
+// record whether the store changed.  This is diagnostic evidence only: a
+// cookie-store write on its own is never treated as proof that a challenge was
+// solved (the page can update other Cloudflare cookies while still blocked).
+const NATIVE_CHALLENGE_POST_CLOSE_COOKIE_OBSERVE_MS = 3_000;
+const NATIVE_CHALLENGE_POST_CLOSE_COOKIE_POLL_MS = 200;
 
 export function isStrictIndeedHttpsUrl(url) {
   try {
@@ -1577,21 +1665,53 @@ export function isNativeIndeedChallengePending(url, title = '') {
     || /just a moment|additional verification required|verify you are human|checking your browser|cloudflare/i.test(String(title || '').toLowerCase());
 }
 
+/** A compact classification shared by the live poll and its exit fallback. */
+export function classifyNativeIndeedChallengeTab(tab = {}) {
+  if (isNativeIndeedChallengeHardBlock(tab?.url, tab?.title)) return 'hard-block';
+  if (isNativeIndeedChallengePending(tab?.url, tab?.title)) return 'pending';
+  if (isNativeIndeedChallengeCleared(tab?.url, tab?.title)) return 'cleared';
+  return 'unknown';
+}
+
+// Chrome's AppleScript API has no stable tab UUID that works across all
+// supported Chrome versions.  window/tab indexes are stable for the lifetime
+// of this small --app window, which is enough to continue following it when
+// Indeed moves from secure.indeed.com to a regional public host after solving.
+export function nativeIndeedChallengeTabIdentity(tab = {}) {
+  const windowIndex = Number(tab?.windowIndex);
+  const tabIndex = Number(tab?.tabIndex);
+  return Number.isInteger(windowIndex) && windowIndex > 0
+    && Number.isInteger(tabIndex) && tabIndex > 0
+    ? `${windowIndex}:${tabIndex}`
+    : null;
+}
+
 // AppleScript exposes every restored Chrome tab, not just the --app process
 // spawned for this handoff. Restrict polling to the exact first-party hostname
 // and prefer the same path as the requested challenge URL, so an older Indeed
 // search tab cannot accidentally clear this recovery flow.
-export function selectNativeIndeedChallengeTab(tabs, challengeUrl) {
+export function selectNativeIndeedChallengeTab(tabs, challengeUrl, { trackedTabIdentity = null } = {}) {
   let target;
   try { target = new URL(String(challengeUrl || '')); } catch { return null; }
   if (!isStrictIndeedHttpsUrl(target.toString())) return null;
-  const sameHost = (Array.isArray(tabs) ? tabs : []).filter(tab => {
+  const firstPartyTabs = (Array.isArray(tabs) ? tabs : []).filter(tab => {
     try {
       const parsed = new URL(String(tab?.url || ''));
-      return isStrictIndeedHttpsUrl(parsed.toString()) && parsed.hostname === target.hostname;
+      return isStrictIndeedHttpsUrl(parsed.toString());
     } catch {
       return false;
     }
+  });
+  // Once we have seen THIS app window in a pending state, follow that window
+  // even if the post-challenge redirect changes secure/www/ca subdomains.  Do
+  // not broaden the initial selection: a restored unrelated Indeed tab must
+  // not make a new handoff appear successful.
+  const tracked = trackedTabIdentity
+    ? firstPartyTabs.find(tab => nativeIndeedChallengeTabIdentity(tab) === trackedTabIdentity)
+    : null;
+  if (tracked) return tracked;
+  const sameHost = firstPartyTabs.filter(tab => {
+    try { return new URL(String(tab.url)).hostname === target.hostname; } catch { return false; }
   });
   const samePath = sameHost.filter(tab => {
     try { return new URL(String(tab.url)).pathname === target.pathname; } catch { return false; }
@@ -1602,6 +1722,46 @@ export function selectNativeIndeedChallengeTab(tabs, challengeUrl) {
     || candidates.find(tab => isNativeIndeedChallengeCleared(tab.url, tab.title))
     || candidates[0]
     || null;
+}
+
+async function observeProfileCookieCommitAfterClose(userDataDir, baseline) {
+  const startedAt = Date.now();
+  let current = readProfileCookieStoreStamp(userDataDir);
+  if (hasProfileCookieCommitAdvanced(baseline, current)) {
+    return { committed: true, waitedMs: 0 };
+  }
+  while (Date.now() - startedAt < NATIVE_CHALLENGE_POST_CLOSE_COOKIE_OBSERVE_MS) {
+    await new Promise(resolve => setTimeout(resolve, NATIVE_CHALLENGE_POST_CLOSE_COOKIE_POLL_MS));
+    current = readProfileCookieStoreStamp(userDataDir);
+    if (hasProfileCookieCommitAdvanced(baseline, current)) {
+      return { committed: true, waitedMs: Date.now() - startedAt };
+    }
+  }
+  return { committed: false, waitedMs: Date.now() - startedAt };
+}
+
+// The child process can exit while an AppleScript poll is still resolving, so
+// this decision intentionally accepts a SNAPSHOT captured at exit — never live
+// mutable poll state. Pure for the regression test below.
+export function nativeIndeedChallengeExitDisposition({ cleanObservationAtExit = null, startedAt = 0, cookieStoreCommitted = false } = {}) {
+  const cleanWasAffirmative = !!cleanObservationAtExit
+    && Number(cleanObservationAtExit.at) - Number(startedAt) >= NATIVE_CHALLENGE_SETTLE_MS;
+  if (cleanWasAffirmative) {
+    return {
+      result: 'cleared',
+      terminalSource: 'child-exit-after-clean',
+      postCloseOutcome: 'clean-tab-observed',
+      postCloseReason: 'first-party-url-and-title-before-exit',
+    };
+  }
+  return {
+    result: 'closed',
+    terminalSource: 'child-exit',
+    postCloseOutcome: cookieStoreCommitted ? 'profile-checkpoint-only' : 'no-clearance-evidence',
+    postCloseReason: cookieStoreCommitted
+      ? 'no-affirmative-clean-tab'
+      : 'no-affirmative-clean-tab-or-cookie-checkpoint',
+  };
 }
 
 /**
@@ -1620,6 +1780,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
     // active. Release it before the raw Chrome spawn, just as native login does.
     await closeStealthBrowser(false);
     const userDataDir = await getUserDataDir();
+    const cookieStoreBaseline = readProfileCookieStoreStamp(userDataDir);
     const executablePath = await findGoogleSafeChromePath(await findSystemChromePath() ?? await findChromePath());
     const chromeArgs = [
       `--user-data-dir=${userDataDir}`,
@@ -1633,7 +1794,21 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
     ];
     logger.info(`[StealthBrowser] Opening native Chrome challenge handoff for Indeed (no CDP, executable: ${executablePath}, profile: ${userDataDir}): ${url}`);
     const diagnosticPlatformId = 'indeed-native-challenge';
-    updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', loginUrl: url, currentUrl: url, executable: executablePath, userDataDir, chromeArgs });
+    updateAuthWindowDiagnostic(diagnosticPlatformId, {
+      mode: 'native-chrome', loginUrl: url, currentUrl: url, executable: executablePath, userDataDir, chromeArgs,
+      nativeChallenge: {
+        initialChallengeObserved: !!challengeObserved || isNativeIndeedChallengePending(url),
+        initialSignal: challengeObserved ? 'caller-observed' : (isNativeIndeedChallengePending(url) ? 'url-or-title' : null),
+        pollCount: 0,
+        pollErrorCount: 0,
+        lastPollAt: null,
+        lastClassification: 'unknown',
+        lastTabUrl: null,
+        lastTabTitle: null,
+        terminalSource: null,
+        postCloseVerify: null,
+      },
+    });
     const child = spawn(executablePath, chromeArgs, { stdio: 'ignore', detached: false });
     return await new Promise((resolve, reject) => {
       let settled = false;
@@ -1642,8 +1817,27 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       const startedAt = Date.now();
       let observedChallenge = challengeObserved || isNativeIndeedChallengePending(url);
       let cleanSince = 0;
+      let cleanObservation = null;
+      let trackedTabIdentity = null;
+      let nativeChallenge = {
+        initialChallengeObserved: observedChallenge,
+        initialSignal: challengeObserved ? 'caller-observed' : (observedChallenge ? 'url-or-title' : null),
+        pollCount: 0,
+        pollErrorCount: 0,
+        lastPollAt: null,
+        lastClassification: 'unknown',
+        lastTabUrl: null,
+        lastTabTitle: null,
+        terminalSource: null,
+        postCloseVerify: null,
+      };
       let nativeCloseInFlight = false;
+      let childExitObserved = false;
       let unregisterShutdownCloser = () => {};
+      const updateNativeChallenge = (patch = {}) => {
+        nativeChallenge = { ...nativeChallenge, ...patch };
+        updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', nativeChallenge });
+      };
       const settle = async (result) => {
         if (settled) return;
         settled = true;
@@ -1656,7 +1850,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         resolve({ nativeChrome: true, ...result });
       };
       const requestNativeClose = async (result) => {
-        if (settled || nativeCloseInFlight) return;
+        if (settled || nativeCloseInFlight || childExitObserved) return;
         nativeCloseInFlight = true;
         try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already gone */ }
         let exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_TERM_EXIT_MS);
@@ -1668,8 +1862,14 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         }
         await settle({ ...result, closeDisposition: disposition, processExitObserved: exited });
       };
-      const onSenderDestroyed = () => requestNativeClose({ result: 'app-window-destroyed', closedByApp: true });
-      const onAbort = () => requestNativeClose({ result: 'aborted' });
+      const onSenderDestroyed = () => {
+        updateNativeChallenge({ terminalSource: 'app-close' });
+        requestNativeClose({ result: 'app-window-destroyed', closedByApp: true });
+      };
+      const onAbort = () => {
+        updateNativeChallenge({ terminalSource: 'abort' });
+        requestNativeClose({ result: 'aborted' });
+      };
       unregisterShutdownCloser = registerAuthWindowCloser(`native-challenge:${diagnosticPlatformId}`, onSenderDestroyed);
       child.once('error', (error) => {
         if (settled) return;
@@ -1684,27 +1884,93 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       });
       child.once('exit', (code, signal) => {
         if (nativeCloseInFlight) return;
-        settle({ result: 'closed', exitCode: code, signal });
+        childExitObserved = true;
+        // Freeze the evidence at the lifecycle boundary. An in-flight
+        // AppleScript request can finish after this --app process exits and
+        // then see a restored/unrelated tab; it must not retroactively turn a
+        // bare manual close into a successful verification.
+        const cleanObservationAtExit = cleanObservation && { ...cleanObservation };
+        if (poll) { clearInterval(poll); poll = null; }
+        if (timeout) { clearTimeout(timeout); timeout = null; }
+        // A native --app window commonly exits as soon as a user closes it.
+        // Do not throw away a clean first-party page we already observed merely
+        // because it had not survived the additional stability window yet.
+        // Conversely, a bare close remains `closed`: a profile write alone is
+        // not proof that Cloudflare accepted the verification.
+        void observeProfileCookieCommitAfterClose(userDataDir, cookieStoreBaseline).then(({ committed, waitedMs }) => {
+          const exitDisposition = nativeIndeedChallengeExitDisposition({
+            cleanObservationAtExit, startedAt, cookieStoreCommitted: committed,
+          });
+          const cleanWasAffirmative = exitDisposition.result === 'cleared';
+          const postCloseVerify = {
+            outcome: exitDisposition.postCloseOutcome,
+            reason: exitDisposition.postCloseReason,
+            cookieStoreCommitted: committed,
+            waitedMs,
+          };
+          updateNativeChallenge({
+            terminalSource: exitDisposition.terminalSource,
+            exitCode: code ?? null,
+            exitSignal: signal ?? null,
+            postCloseVerify,
+          });
+          if (cleanWasAffirmative) {
+            logger.info(`[StealthBrowser] Native Indeed challenge window closed after an affirmative clean page observation at ${cleanObservationAtExit.url}; accepting the verified handoff.`);
+            void settle({
+              result: 'cleared', currentUrl: cleanObservationAtExit.url, title: cleanObservationAtExit.title,
+              exitCode: code, signal, closeDisposition: 'user-close-after-clean-observation',
+              processExitObserved: true, cookieFlushMs: waitedMs, cookieStoreCommitted: committed,
+            });
+            return;
+          }
+          void settle({ result: 'closed', exitCode: code, signal, processExitObserved: true, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+        }).catch(error => {
+          updateNativeChallenge({ terminalSource: 'child-exit', postCloseVerify: { outcome: 'verify-error', reason: String(error?.message || error).slice(0, 180) } });
+          void settle({ result: 'closed', exitCode: code, signal, processExitObserved: true });
+        });
       });
       const runPoll = createNonOverlappingRunner(async () => {
-        if (settled) return;
-        const tab = selectNativeIndeedChallengeTab(await getNativeChromeTabs(), url);
+        if (settled || childExitObserved) return;
+        const tabs = await getNativeChromeTabs();
+        if (settled || childExitObserved) return;
+        const pollError = tabs.find(tab => tab?.error)?.error || null;
+        const tab = selectNativeIndeedChallengeTab(tabs, url, { trackedTabIdentity });
+        const classification = tab ? classifyNativeIndeedChallengeTab(tab) : 'unknown';
+        updateNativeChallenge({
+          pollCount: nativeChallenge.pollCount + 1,
+          pollErrorCount: nativeChallenge.pollErrorCount + (pollError ? 1 : 0),
+          lastPollAt: Date.now(),
+          lastClassification: classification,
+          lastTabUrl: tab?.url || null,
+          lastTabTitle: tab?.title || null,
+          noMatchingTab: !tab,
+          nativePollError: pollError,
+        });
         if (!tab) return;
-        updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', currentUrl: tab.url || '', title: tab.title || '', nativePollError: tab.error || null });
-        if (isNativeIndeedChallengeHardBlock(tab.url, tab.title)) {
+        const tabIdentity = nativeIndeedChallengeTabIdentity(tab);
+        if (!trackedTabIdentity && classification === 'pending' && tabIdentity) {
+          trackedTabIdentity = tabIdentity;
+          updateNativeChallenge({ trackedTabIdentity });
+        }
+        updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', currentUrl: tab.url || '', title: tab.title || '', nativePollError: pollError });
+        if (classification === 'hard-block') {
           logger.warn(`[StealthBrowser] Native Indeed challenge handoff hard-blocked at ${tab.url}: ${tab.title || 'untitled'}`);
+          updateNativeChallenge({ terminalSource: 'hard-block' });
           void requestNativeClose({ result: 'hard-block', currentUrl: tab.url, title: tab.title });
           return;
         }
-        if (isNativeIndeedChallengePending(tab.url, tab.title)) {
+        if (classification === 'pending') {
           observedChallenge = true;
           cleanSince = 0;
+          cleanObservation = null;
           return;
         }
-        if (observedChallenge && Date.now() - startedAt >= NATIVE_CHALLENGE_SETTLE_MS && isNativeIndeedChallengeCleared(tab.url, tab.title)) {
+        if (observedChallenge && Date.now() - startedAt >= NATIVE_CHALLENGE_SETTLE_MS && classification === 'cleared') {
+          cleanObservation ||= { at: Date.now(), url: tab.url, title: tab.title };
           cleanSince ||= Date.now();
           if (Date.now() - cleanSince < 1_500) return; // require a stable clean page, not a redirect flicker
           logger.info(`[StealthBrowser] Native Indeed challenge handoff cleared at ${tab.url}; holding the window open until the profile cookie store checkpoints so cf_clearance survives the close.`);
+          updateNativeChallenge({ terminalSource: 'poll-clear', clearObservedAt: cleanObservation.at });
           if (poll) { clearInterval(poll); poll = null; }
           // Disarm the open-window ceiling for the same reason the login window
           // does: the checkpoint wait below can outlast whatever is left of it,
@@ -1721,7 +1987,12 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         }
       });
       poll = setInterval(() => void runPoll().catch(error => logger.warn(`[StealthBrowser] Native Indeed challenge poll failed: ${error?.message || error}`)), LOGIN_POLL_INTERVAL_MS * 2);
+      // Start observing immediately.  The user can complete a challenge before
+      // the first interval tick; without this first probe the only lifecycle
+      // event we see is their close, which is intentionally not success alone.
+      void runPoll().catch(error => logger.warn(`[StealthBrowser] Native Indeed challenge initial poll failed: ${error?.message || error}`));
       timeout = setTimeout(() => {
+        updateNativeChallenge({ terminalSource: 'timeout' });
         void requestNativeClose({ result: 'timeout', timedOut: true });
       }, AUTH_WINDOW_AUTO_CLOSE_MS);
       if (sender) {
@@ -1982,16 +2253,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // post-solve search results). Each entry is { name, selector } where
     // selector matches the wrapper / iframe that's only present while the
     // challenge is on screen.
-    const CHALLENGE_SELECTORS = [
-      { name: 'recaptcha-anchor',  selector: 'iframe[src*="recaptcha/api2/anchor"]' },
-      { name: 'recaptcha-bframe',  selector: 'iframe[src*="recaptcha/api2/bframe"]' },
-      { name: 'recaptcha-widget',  selector: '.g-recaptcha[data-sitekey]' },
-      { name: 'hcaptcha-iframe',   selector: 'iframe[src*="hcaptcha.com"]' },
-      { name: 'cf-challenge-form', selector: '#challenge-form, #challenge-running, .cf-browser-verification' },
-      { name: 'datadome',          selector: '#datadome-captcha-container, iframe[src*="captcha-delivery.com"]' },
-      { name: 'perimeterx',        selector: '[id*="px-captcha"], iframe[src*="perimeterx"]' },
-      { name: 'press-and-hold',    selector: 'div[id*="px-captcha"][style*="block"]' },
-    ];
+    const CHALLENGE_SELECTORS = CAPTCHA_RESOLVE_CHALLENGE_SELECTORS;
     // Cookie-consent overlays are NOT captchas, but they cover the page and
     // gate/hide results the same way — and the user is mid-interaction with one.
     // We must not declare the page "empty" and auto-close while one is up (that
@@ -2317,10 +2579,17 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               // keep polling — give the user time to clear a cookie/login wall.
             }
           }
-        } else if (noChallenge && !probe.consentVisible && probe.textLength > READINESS.BODY_TEXT_GATE) {
-          // ── No extractor (login / API source): fall back to the body-text
-          // heuristic — there's no item count to stabilize on. A consent wall
-          // gates this too (don't auto-close a login window mid cookie-accept).
+        } else if (shouldAutoCloseCaptchaResolveWithoutExtractor({
+          sawChallenge: everSawChallenge,
+          noChallenge,
+          consentVisible: probe.consentVisible,
+          textLength: probe.textLength,
+        })) {
+          // ── No extractor (login / API source): a previously visible
+          // challenge has now disappeared, and the settled page has enough
+          // content to be a credible recovery. A clean-looking page that NEVER
+          // showed a challenge stays open for the user to inspect/close; it is
+          // not evidence that this Solve accomplished anything.
           extractOutcome = 'no-extractor';
           await finishCleared(null, 'body-text');
           return;
@@ -2339,7 +2608,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
                   ? (lastExtractCount > 0
                       ? `no widgets; extractor at ${lastExtractCount} item(s), waiting for count to settle`
                       : `no widgets; 0 items so far — holding the window open up to ${RESOLVE_EMPTY_GRACE_MS / 1000}s for the user to clear a cookie/login wall before concluding empty`)
-                  : `no widgets but textLen=${probe.textLength} below 1500 threshold`);
+                  : (everSawChallenge
+                      ? `challenge was seen earlier; no widgets but textLen=${probe.textLength} below ${READINESS.BODY_TEXT_GATE} threshold`
+                      : `no challenge observed in this window — leaving the page open for the user to inspect or close manually`));
           logger.info(`[StealthBrowser] Captcha wait: host=${currentHost} — ${reason}`);
         }
       } catch {

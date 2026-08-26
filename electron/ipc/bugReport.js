@@ -11,6 +11,7 @@ import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
+import { getClaudeCacheTelemetry } from './claudeCacheTelemetry.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
 import { getStatusCheckQueueDepth } from './statusCheckLock.js';
@@ -18,7 +19,7 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
-import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
@@ -34,6 +35,7 @@ import {
   getJobSearchTransientKeysForSave,
   TRANSIENT_PROCESSING_HUB_STATES,
 } from '../../src/utils/persistenceTransientState.js';
+import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -46,6 +48,68 @@ function truncateDiagnosticText(value, max) {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+// Native Chrome challenge telemetry is intentionally metadata-only. In
+// particular, Cloudflare challenge URLs can carry short-lived query tokens, so
+// reports name the origin/path and never copy a query string from the native
+// tab observer. Keep this formatter pure: the auth-window history is a small
+// session ring and a report may be generated long after the main-log ring has
+// discarded the decisive child-exit/poll sequence.
+function redactNativeChallengeUrl(value) {
+  return redactReportUrl(value).replace(/`/g, "'").slice(0, 180);
+}
+
+function nativeChallengeText(value, max = 160) {
+  return truncateDiagnosticText(redactReportUrlsInText(value)
+    .replace(/[\r\n\t`|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim(), max);
+}
+
+/**
+ * Bounded native-Indeed lifecycle evidence for the auth history row.
+ *
+ * `nativeChallenge` is recorded by authWindows when a non-CDP Chrome handoff
+ * ends. It answers the otherwise ambiguous result="closed": did the child
+ * exit before any tab could be observed, was the final tab still challenged,
+ * or did an affirmative post-close check prove clearance? This is deliberately
+ * not a cookie/body dump and all URLs have their query strings removed.
+ */
+export function buildNativeChallengeHistoryEvidence(attempt = {}) {
+  const native = attempt?.nativeChallenge;
+  if (!native || typeof native !== 'object') return '';
+  const bits = [];
+  if (typeof native.initialChallengeObserved === 'boolean') {
+    bits.push(`initial challenge=${native.initialChallengeObserved ? 'yes' : 'no'}`);
+  }
+  const initialSignal = nativeChallengeText(native.initialSignal, 90);
+  if (initialSignal) bits.push(`signal=${initialSignal}`);
+  if (Number.isFinite(native.pollCount)) bits.push(`polls=${Math.max(0, Math.round(native.pollCount))}`);
+  if (Number.isFinite(native.pollErrorCount) && native.pollErrorCount > 0) {
+    bits.push(`poll errors=${Math.max(0, Math.round(native.pollErrorCount))}`);
+  }
+  const classification = nativeChallengeText(native.lastClassification, 50);
+  if (classification) bits.push(`last=${classification}`);
+  const tabUrl = redactNativeChallengeUrl(native.lastTabUrl);
+  const tabTitle = nativeChallengeText(native.lastTabTitle, 100);
+  if (tabUrl || tabTitle) bits.push(`tab=${tabUrl || '—'}${tabTitle ? ` (${tabTitle})` : ''}`);
+  const terminalSource = nativeChallengeText(native.terminalSource, 60);
+  if (terminalSource) bits.push(`terminal=${terminalSource}`);
+  if (native.exitCode != null || native.exitSignal) {
+    bits.push(`child exit=${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeText(native.exitSignal, 40)}` : ''}`);
+  }
+  const verify = native.postCloseVerify && typeof native.postCloseVerify === 'object'
+    ? native.postCloseVerify
+    : null;
+  if (verify) {
+    const outcome = nativeChallengeText(verify.outcome, 60) || 'unknown';
+    const reason = nativeChallengeText(verify.reason, 150);
+    const status = Number.isFinite(verify.status) ? ` HTTP ${Math.round(verify.status)}` : '';
+    const finalUrl = redactNativeChallengeUrl(verify.finalUrl || verify.url);
+    bits.push(`post-close=${outcome}${status}${reason ? ` (${reason})` : ''}${finalUrl ? ` → ${finalUrl}` : ''}`);
+  }
+  return bits.length ? ` · native: ${bits.join('; ')}` : '';
 }
 
 /**
@@ -87,7 +151,7 @@ function diagnosticRenderFailureMarkdown(section, err) {
 /** Render one startup-verification outcome without mistaking cached state for proof. */
 export function formatLoginVerificationTimingResult(duration = {}) {
   const state = duration.connected ? 'connected' : 'not connected';
-  const reason = String(duration.reason || duration.skipReason || '')
+  const reason = redactReportUrlsInText(duration.reason || duration.skipReason || duration.error || '')
     .replace(/[|\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -116,7 +180,7 @@ export function formatLoginVerificationTimingResult(duration = {}) {
       // was introduced. Keep their prior report shape rather than treating them
       // as an unverified failure.
       if (duration.skipped) return withReason('skipped');
-      if (duration.error) return `error: ${String(duration.error).replace(/\|/g, '\\|').slice(0, 80)}`;
+      if (duration.error) return `error: ${redactReportUrlsInText(duration.error).replace(/\|/g, '\\|').slice(0, 80)}`;
       return duration.connected ? 'connected' : 'not connected';
   }
 }
@@ -403,6 +467,73 @@ function buildAIConfigSnapshot() {
     geminiCompatibleModels: telemetry.compatibleModels,
     geminiWarnings: telemetry.warnings,
   };
+}
+
+function cacheTelemetryCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0;
+}
+
+function formatCacheTelemetryCount(value) {
+  return cacheTelemetryCount(value).toLocaleString('en-US');
+}
+
+function cacheTelemetryTaskLabel(value) {
+  return String(value || 'unknown')
+    .replace(/[|`\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || 'unknown';
+}
+
+function hasClaudeCacheTelemetryData(telemetry) {
+  if (!telemetry || typeof telemetry !== 'object') return false;
+  const countFields = [
+    'requested', 'hits', 'writes', 'cacheReadInputTokens',
+    'cacheWriteInputTokens', 'uncachedInputTokens',
+  ];
+  return countFields.some(field => cacheTelemetryCount(telemetry[field]) > 0)
+    || !!telemetry.lastEvent
+    || (telemetry.tasks && typeof telemetry.tasks === 'object'
+      && Object.keys(telemetry.tasks).length > 0);
+}
+
+/**
+ * Render the in-process Anthropic cache counters separately from the general AI
+ * configuration. The counters are deliberately session-only: they are useful
+ * for comparing the requests that this running app actually sent, but should
+ * never be read as Anthropic Console's workspace-wide/billing accounting.
+ */
+export function buildClaudePromptCacheTelemetryMarkdown(telemetry, { provider } = {}) {
+  const hasData = hasClaudeCacheTelemetryData(telemetry);
+  if (provider !== 'claude' && !hasData) return '';
+
+  const requests = cacheTelemetryCount(telemetry?.requested);
+  const hits = cacheTelemetryCount(telemetry?.hits);
+  const writes = cacheTelemetryCount(telemetry?.writes);
+  const readTokens = cacheTelemetryCount(telemetry?.cacheReadInputTokens);
+  const writeTokens = cacheTelemetryCount(telemetry?.cacheWriteInputTokens);
+  const uncachedTokens = cacheTelemetryCount(telemetry?.uncachedInputTokens);
+  const hitRate = requests > 0 ? `${((hits / requests) * 100).toFixed(1)}%` : 'n/a';
+  const tasks = telemetry?.tasks && typeof telemetry.tasks === 'object'
+    ? telemetry.tasks
+    : {};
+  const taskRows = Object.entries(tasks)
+    .map(([task, taskTelemetry]) => {
+      const taskRequested = cacheTelemetryCount(taskTelemetry?.requested);
+      const taskHits = cacheTelemetryCount(taskTelemetry?.hits);
+      const taskWrites = cacheTelemetryCount(taskTelemetry?.writes);
+      const taskReadTokens = cacheTelemetryCount(taskTelemetry?.cacheReadInputTokens);
+      const taskWriteTokens = cacheTelemetryCount(taskTelemetry?.cacheWriteInputTokens);
+      return `| \`${cacheTelemetryTaskLabel(task)}\` | ${taskRequested} | ${taskHits} | ${taskWrites} | ${taskReadTokens} | ${taskWriteTokens} |`;
+    })
+    .sort()
+    .join('\n');
+  const taskTable = taskRows
+    ? `\n### By task\n| Task | Cache-marked | Hits | Writes | Cache-read input tok | Cache-write input tok |\n|---|---:|---:|---:|---:|---:|\n${taskRows}\n`
+    : '';
+
+  return `\n## Claude Prompt Cache Telemetry\n> Session-retained counters for this Electron run only: they survive Recent Logs\n> rollover but reset when the app restarts. They are diagnostic telemetry, not\n> Anthropic Console billing or workspace-wide totals.\n- Cache-marked requests: ${formatCacheTelemetryCount(requests)}\n- Cache hits: ${formatCacheTelemetryCount(hits)} (${hitRate} of cache-marked requests)\n- Cache writes: ${formatCacheTelemetryCount(writes)}\n- Input tokens: ${formatCacheTelemetryCount(readTokens)} cache-read · ${formatCacheTelemetryCount(writeTokens)} cache-write · ${formatCacheTelemetryCount(uncachedTokens)} uncached\n${taskTable}`;
 }
 
 
@@ -775,6 +906,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       // connected hubs at Combine and spawns the cascade), so its results count
       // (shown above) is the signal there — flagging ∅ on a board is noise.
       if (n.type === 'jobhub') {
+        const dropLock = getHubDropLockReason({ type: 'jobhub', data: d });
+        previewParts.push(`careerIdentity: ${hubHasAcceptedInitialDrop({ type: 'jobhub', data: d }) ? 'present' : 'none'}`);
+        previewParts.push(`dropLock: ${dropLock || 'none'}`);
+        if (Array.isArray(d.enabledSourceIds)) {
+          previewParts.push(`enabledSourceIds: ${d.enabledSourceIds.length ? d.enabledSourceIds.map(sourceId => String(sourceId)).join(',') : '∅ none'}`);
+        } else {
+          previewParts.push('enabledSourceIds: default (all known platforms)');
+        }
         const sc = typeof d.scoredJobsCount === 'number'
           ? d.scoredJobsCount
           : (Array.isArray(d.scoredJobs) ? d.scoredJobs.length : null);
@@ -1180,6 +1319,9 @@ ${rows}
         if (jobsTel?.nodeId === nodeId && jobsTel?.pipeline?.ts) {
           signals.push({ ts: jobsTel.pipeline.ts, label: 'search progress heartbeat' });
         }
+        if (jobsTel?.nodeId === nodeId && jobsTel?.scoringHeartbeat?.active && jobsTel.scoringHeartbeat?.ts) {
+          signals.push({ ts: jobsTel.scoringHeartbeat.ts, label: 'scoring stream heartbeat' });
+        }
         // Marketplace telemetry stamps `ts` per STAGE, not on the root — take
         // the newest stage that actually ran.
         if (mktTel?.nodeId === nodeId) {
@@ -1368,7 +1510,12 @@ ${statusQueueLine}
         const cookies = (Array.isArray(item.authCookiesBeforeClose) ? item.authCookiesBeforeClose : [])
           .map(cookie => `${cookie.name || '?'}:${cookie.persistent ? 'persistent' : 'session'}${cookie.expiresAt ? ` exp=${new Date(cookie.expiresAt * 1000).toISOString()}` : ''}`)
           .join(', ') || 'none captured';
-        return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${item.loginDetected ? 'yes' : 'no'} | ${item.cookieFlushMs ?? '—'} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
+        const loginDetected = item.loginDetected == null
+          ? (item.mode === 'native-chrome' && String(item.platformId || '').endsWith('-native-challenge')
+              ? `n/a (challenge ${item.result || 'completed'})`
+              : 'not recorded')
+          : (item.loginDetected ? 'yes' : 'no');
+        return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${loginDetected} | ${item.cookieFlushMs ?? '—'} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
       }).join('\n');
     // Auth-cookie-on-disk presence per platform with a known session cookie
     // (PLATFORM_AUTH_COOKIES). Written under `lastTrace` by writeStatusCache
@@ -1390,6 +1537,13 @@ ${statusQueueLine}
             : 'not recorded';
       return `  - \`${platformId}\` (\`${names}\`): ${presentLabel}`;
     }).join('\n');
+    const indeedPreflight = getJobsTelemetry?.()?.indeedSession;
+    const indeedPpidLabel = indeedPreflight?.hasPPID === true ? 'yes'
+      : indeedPreflight?.hasPPID === false ? 'no'
+        : 'not recorded';
+    const indeedPpidCrossReference = indeedPreflight
+      ? `- Indeed PPID cross-reference: browser session preflight reported **${indeedPpidLabel}**${indeedPreflight.ts ? ` at ${new Date(indeedPreflight.ts).toISOString()}` : ''}; the on-disk survival observation above is a separate check and may be not recorded.`
+      : '- Indeed PPID cross-reference: no browser session preflight was recorded this process.';
     sessionPersistenceMarkdown = `
 ## Session Persistence Diagnostics
 > Redacted durability metadata only — cookie values are never read or exported.
@@ -1418,6 +1572,7 @@ ${fileLine('Default/Preferences', profile.preferences)}
 - Still sourced from prior-process restore: ${restoredIds.length ? restoredIds.map(id => `\`${id}\``).join(', ') : '(none — every current row is fresh or disconnected)'}
 - Auth cookie present on disk, per platform with a known session cookie (recorded when a survival check ran — confirmed logged-out verify or trusted native login):
 ${authCookiePresenceLines}
+${indeedPpidCrossReference}
 
 ### Completed auth-browser close lifecycle (newest first)
 | Platform | Mode | Login detected | Pre-close wait ms | Store checkpointed | Close disposition | Process exit observed | Executable | Profile | Auth cookie metadata before close |
@@ -1526,11 +1681,11 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
     if (entries.length > 0 || profileReservation || (collisionTelemetry?.total || 0) > 0) {
       const rows = entries.map(d => {
         const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
-        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${String(d.currentUrl || d.loginUrl || '—').replace(/`/g, "'").slice(0, 180)}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
+        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
       }).join('\n');
       const argsRows = entries
         .filter(d => Array.isArray(d.chromeArgs) && d.chromeArgs.length > 0)
-        .map(d => `**${d.platformId ?? '?'} (${d.state})**: \`${d.chromeArgs.join(' ')}\``);
+        .map(d => `**${d.platformId ?? '?'} (${d.state})**: \`${redactReportUrlsInText(d.chromeArgs.join(' '))}\``);
       const argsSection = argsRows.length > 0
         ? `\n### Chrome launch args\n${argsRows.join('\n')}\n`
         : '';
@@ -1555,7 +1710,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           // title/price sub-selector names) before a bug report ever showed it, even
           // under FULL. This is a bounded, per-window field (not a log ring buffer),
           // so the wider cap can't blow the report's size budget.
-          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 1400)}`);
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${redactReportUrlsInText(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 1400)}`);
           return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
         });
       const resolveDiagSection = resolveDiagRows.length > 0
@@ -1572,7 +1727,11 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
         .reverse()
         .map(h => {
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
-          const detected = h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
+          const isNativeChallenge = h.mode === 'native-chrome'
+            && String(h.platformId || '').endsWith('-native-challenge');
+          const detected = isNativeChallenge
+            ? (h.result === 'cleared' ? '✅ challenge cleared' : `challenge result=${h.result || '—'}`)
+            : h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
           const title = h.title ? `, title="${String(h.title).replace(/\s+/g, ' ').slice(0, 100)}"` : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
           const close = h.closeDisposition
@@ -1581,10 +1740,11 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           const cookieMeta = Array.isArray(h.authCookiesBeforeClose) && h.authCookiesBeforeClose.length > 0
             ? ` · auth cookies before close=${h.authCookiesBeforeClose.map(c => `${c.name}:${c.persistent ? 'persistent' : 'session'}`).join(',')}`
             : '';
-          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
+          const nativeEvidence = isNativeChallenge ? buildNativeChallengeHistoryEvidence(h) : '';
+          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${nativeEvidence}${title}${h.url ? ` — \`${redactReportUrl(h.url)}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
-        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
+        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
         : '';
       // Scrape/stealth browser liveness — a captcha/login window launches a
       // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here
@@ -1671,7 +1831,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
   } catch (err) { authWindowMarkdown = diagnosticRenderFailureMarkdown('Auth Window Diagnostics', err); }
 
   // ── Recent main-process logs ──────────────────────────────────────────────
-  // Last ~50 main-process log lines, captured by the in-memory ring buffer
+  // Up to 200 main-process log lines, captured by the in-memory ring buffer
   // in logger.js. Critical for diagnosing "the IPC silently failed" reports:
   // the [Accounts] / [StealthBrowser] / etc. error lines that normally only
   // hit stdout (which users never see) are surfaced here. Skip lines older
@@ -1679,7 +1839,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
   // run that happened to share the ring buffer state.
   let mainProcessLogLines = [];
   try {
-    const logs = (getRecentLogs(60) || []).filter(l => l.ts >= PROCESS_START_MS);
+    const logs = (getRecentLogs(200) || []).filter(l => l.ts >= PROCESS_START_MS);
     if (logs.length > 0) {
       mainProcessLogLines = logs.map(l => {
         const t = new Date(l.ts).toISOString().slice(11, 23); // HH:MM:SS.mmm
@@ -1692,7 +1852,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
         // may itself be behind anti-bot walls). These lines are rare (a handful
         // of ERROR entries, not the whole 60-line buffer), so raising just their
         // cap can't blow the section's overall byte budget the way raising the
-        // default for all 60 lines would.
+        // default for every retained line would.
         const raw = (l.message || '').replace(/\r?\n/g, ' ⏎ ');
         const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
@@ -1793,6 +1953,25 @@ ${(aiConfig.geminiWarnings || []).length > 0
 `;
   } catch (err) { aiConfigMarkdown = diagnosticRenderFailureMarkdown('AI Configuration', err); }
 
+  // Cache counters live in their own small section so they remain visible even
+  // when the general AI configuration snapshot has an unrelated render error.
+  let claudeCacheTelemetryMarkdown = '';
+  try {
+    const provider = getAISettings()?.provider || 'gemini';
+    claudeCacheTelemetryMarkdown = buildClaudePromptCacheTelemetryMarkdown(
+      getClaudeCacheTelemetry(), { provider },
+    );
+  } catch (err) {
+    // Unlike a missing/empty telemetry record, a getter failure needs to be
+    // explicit when Claude is selected; otherwise a cache diagnosis would look
+    // like a trustworthy zero-activity result.
+    try {
+      if ((getAISettings()?.provider || 'gemini') === 'claude') {
+        claudeCacheTelemetryMarkdown = diagnosticRenderFailureMarkdown('Claude Prompt Cache Telemetry', err);
+      }
+    } catch { /* keep the rest of the report available */ }
+  }
+
   let jobsConfigMarkdown = '';
   if (hasJobNodes) try {
     const jobsConfig = buildJobsConfigSnapshot();
@@ -1816,7 +1995,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
   const currentNodeIds = new Set((nodes || []).map(n => n?.id).filter(Boolean));
   // Local AI status is persisted on job cards rather than the main-process
   // telemetry singleton. Include it in HANDOFF/FULL so a validation rejection
-  // after a Claude Code rewrite is not mistaken for a missed file poll.
+  // after a Local AI rewrite is not mistaken for a missed file poll.
   // Prefer the renderer's dedicated deep collection (payload.localApplications,
   // gathered via enumerateAllNodes): it covers cards in collapsed groups and
   // parent navigation levels — exactly the cards the fallback manager drives —
@@ -1907,7 +2086,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

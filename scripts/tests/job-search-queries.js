@@ -17,20 +17,24 @@ export default [
     },
   },
   {
-    name: 'Job query bundles preserve empty-role generation and normalize already-seen duplicates only',
+    name: 'Job query bundles normalize text duplicates and discard malformed query values',
     run: () => {
       const queries = flattenJobSearchQueries({
         targetRoleQueries: [],
-        titleQueries: ['  Software Engineer  ', 'software engineer'],
-        suggestedRoleQueries: ['Platform Engineer'],
-        skillsOnlyQueries: ['Kubernetes Go'],
+        titleQueries: ['  Software\u00a0\u00a0Engineer  ', 'software engineer', { query: 'invalid' }, 12],
+        suggestedRoleQueries: ['Platform\nEngineer'],
+        skillsOnlyQueries: ['Kubernetes Go', null],
       });
 
       assert(JSON.stringify(queries) === JSON.stringify([
         'Software Engineer',
         'Platform Engineer',
         'Kubernetes Go',
-      ]), 'empty-role bundles retain every non-empty query group while collapsing only the previously seen literal query');
+      ]), 'empty-role bundles retain valid groups, collapse whitespace-equivalent duplicates, and never stringify malformed values');
+
+      const exactRole = buildExactTargetRoleQueryBundle('  Product\n Manager  ');
+      assert(JSON.stringify(flattenJobSearchQueries(exactRole)) === JSON.stringify(['Product Manager']),
+        'target roles use the same boundary normalization as generated queries');
       return { queries };
     },
   },

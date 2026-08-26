@@ -33,7 +33,10 @@ async function run() {
 
   await safeCall('LinkedIn', () => fetchLinkedInJobs(['software engineer'], null, 7));
   await safeCall('RemoteOK', () => fetchRemoteOKJobs(['engineer', 'developer']));
-  await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['frontend']));
+  // WWR filters against job titles. "engineer" is a broad representative role
+  // that keeps this live availability probe from failing simply because the
+  // rolling feed has no frontend-titled opening at the moment.
+  await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['engineer']));
   await safeCall('Dice', () => fetchDiceListings('software engineer', '', null, 7));
 
   console.log(JSON.stringify(results, null, 2));

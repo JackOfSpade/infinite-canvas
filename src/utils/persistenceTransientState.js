@@ -15,6 +15,10 @@ const JOBSEARCH_TRANSIENT_KEYS = [
   'pendingTargetRole',
   'errorMessage',
   'isRateLimit',
+  // A healthy history-suppressed re-run explanation belongs only to the
+  // active session; reopening must not surface stale run context.
+  'rerunOutcome',
+  'rerunNotice',
   // In-flight marker for achievement-ledger mining (resume-achievement-mining
   // design §3.6) — a millisecond timestamp the renderer sets before a mining
   // generate and clears in a finally, guarding against two cards racing to
@@ -43,6 +47,8 @@ const JOBSEARCH_TRANSIENT_KEYS = [
 const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
   'errorMessage',
   'isRateLimit',
+  'rerunOutcome',
+  'rerunNotice',
   // Same marker, same reason as JOBSEARCH_TRANSIENT_KEYS above — 'sources-ready'
   // is a real hubState a hub can sit in while a Generate-triggered mine (set on
   // the ORIGIN hub via JobCardNode's updateGlobal, not on the mining card

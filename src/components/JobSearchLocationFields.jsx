@@ -2,8 +2,11 @@ import React from 'react';
 
 const inputClass = 'min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25';
 
-function LocationInputs({ value, onChange, fixedCountry = null, countryPlaceholder = 'Country (required)' }) {
+function LocationInputs({ value, onChange, fixedCountry = null, countryPlaceholder = 'Country (required)', residence = false }) {
   const update = (field, next) => onChange?.({ ...value, [field]: next });
+  const cityLabel = residence ? 'Your city while working remotely' : 'Search city';
+  const subdivisionLabel = residence ? 'Your state or province while working remotely' : 'Search state or province';
+  const countryLabel = residence ? 'Your country while working remotely' : 'Search country';
   return (
     <div className="grid grid-cols-2 gap-1">
       <input
@@ -11,7 +14,8 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         data-native-undo="true"
         value={value?.city || ''}
         onChange={(e) => update('city', e.target.value)}
-        placeholder="City (optional)"
+        placeholder={residence ? 'Your city (optional)' : 'City (optional)'}
+        aria-label={cityLabel}
         className={inputClass}
       />
       <input
@@ -19,7 +23,8 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         data-native-undo="true"
         value={value?.subdivision || ''}
         onChange={(e) => update('subdivision', e.target.value)}
-        placeholder="State / province (optional)"
+        placeholder={residence ? 'Your state / province' : 'State / province (optional)'}
+        aria-label={subdivisionLabel}
         className={inputClass}
       />
       <input
@@ -30,6 +35,7 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         placeholder={countryPlaceholder}
         readOnly={!!fixedCountry}
         aria-readonly={!!fixedCountry}
+        aria-label={countryLabel}
         className={`${inputClass} col-span-2 ${fixedCountry ? 'text-white/40 cursor-default' : ''}`}
       />
     </div>
@@ -51,30 +57,33 @@ export function JobSearchLocationFields({
 
       <div className="pt-1 border-t border-white/5">
         <p className="text-[10px] text-blue-200/60 font-medium mb-1">Remote salary comparison</p>
-        <p className="text-[9px] text-white/35 mb-1">Where will you stay when the job starts? Optional; does not affect search results or eligibility.</p>
+        <p className="text-[9px] text-white/35 mb-1">For each company location below, enter where you will live while working remotely. Optional; used only for salary comparison.</p>
         <div className="flex flex-col gap-1.5">
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: United States</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: United States</p>
             <LocationInputs
               value={remoteResidences?.usa}
               onChange={(next) => setRemoteResidence?.('usa', next)}
               fixedCountry="United States"
+              residence
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: Canada</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: Canada</p>
             <LocationInputs
               value={remoteResidences?.canada}
               onChange={(next) => setRemoteResidence?.('canada', next)}
               fixedCountry="Canada"
+              residence
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Remote role scope: worldwide or other (U.S. and Canada allowed)</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: elsewhere or worldwide</p>
             <LocationInputs
               value={remoteResidences?.other}
               onChange={(next) => setRemoteResidence?.('other', next)}
-              countryPlaceholder="Country (optional)"
+              countryPlaceholder="Your country (optional)"
+              residence
             />
           </div>
         </div>

@@ -1,4 +1,5 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildJobBucketingSchema, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, JOB_TAXONOMY_CHUNK_SIZE, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, inspectJobTaxonomyRoleIndexes, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, normalizeJobTaxonomyPlan, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, runBoundedJobTaxonomy, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, validateJobTaxonomyPlan, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { isNonApiJobTask } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -201,26 +202,110 @@ export default [
     },
   },
 {
-    name: 'job bucketing: positional role-label contract structurally covers every input job',
+    name: 'job taxonomy: bounded static plan/classifier schemas remain provider-safe at arbitrary board sizes',
     run: () => {
-      const schema = buildJobBucketingSchema(3);
-      assert(JSON.stringify(schema.required) === JSON.stringify(['salaryRanges', 'roleByIndex'])
-        && !('roles' in schema.properties),
-      'bucketing contract replaces fragile grouped jobIndices with positional role labels');
-      const labels = schema.properties.roleByIndex;
-      assert(labels.minItems === 3 && labels.maxItems === 3 && labels.items.type === 'string' && labels.items.minLength === 1,
-        'bucketing contract requires exactly one role label for every input index');
-      const gemini = toGeminiSchema(schema);
-      assert(gemini.properties.roleByIndex.minItems === 3 && gemini.properties.roleByIndex.maxItems === 3
-        && !('minLength' in gemini.properties.roleByIndex.items),
-      'Gemini receives exact positional coverage bounds while omitting unsupported string constraints');
-      const empty = buildJobBucketingSchema(0).properties.roleByIndex;
-      assert(empty.minItems === 0 && empty.maxItems === 0,
-        'dynamic bucketing contract remains valid and deterministic for an empty defensive input');
-      return { labels: labels.maxItems };
+      const classifier = JOB_TAXONOMY_CLASSIFY_SCHEMA;
+      assert(JSON.stringify(classifier).length < 800,
+      'classifier schema is one fixed, small object rather than an N-property grammar');
+      assert(JSON.stringify(classifier.required) === JSON.stringify(['roleByIndex'])
+        && classifier.properties.roleByIndex.items.type === 'integer'
+        && JOB_TAXONOMY_PLAN_SCHEMA.properties.roleFamilies.maxItems === 12,
+      'planner freezes a bounded vocabulary and classifier returns only vocabulary indexes');
+      const gemini = toGeminiSchema(classifier);
+      assert(gemini.properties.roleByIndex.type === 'ARRAY'
+        && gemini.properties.roleByIndex.items.type === 'INTEGER',
+      'Gemini receives the same bounded integer-index classifier contract');
+      return { schemaBytes: JSON.stringify(classifier).length };
     },
   },
-{
+  {
+    name: 'job taxonomy: bounded executor covers every original index and never returns a partial result',
+    run: async () => {
+      const jobs = Array.from({ length: 124 }, (_, index) => ({
+        title: index === 0 ? 'X'.repeat(1_000_000) : `Role ${index}`,
+        careerDirection: index === 0 ? 'Y'.repeat(1_000_000) : (index % 3 ? 'Engineering' : ''),
+        salary: `$${80 + index}k/yr`,
+      }));
+      const prompts = [];
+      const progressReceipts = [];
+      let classifications = 0;
+      const complete = await runBoundedJobTaxonomy(jobs, {
+        onProgress: progress => progressReceipts.push(progress),
+        callText: async (prompt, options) => {
+          prompts.push({ prompt, options });
+          if (options.task === 'job-taxonomy-plan') {
+            return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+          }
+          classifications += 1;
+          const count = Number(prompt.match(/exactly (\d+) integers/)?.[1]);
+          return { roleByIndex: Array.from({ length: count }, (_, index) => index % 2) };
+        },
+      });
+      assert(classifications === Math.ceil(124 / JOB_TAXONOMY_CHUNK_SIZE)
+        && complete.roleByIndex.length === 124
+        && complete.roleByIndex.every(role => role === 'Engineering' || role === 'Other'),
+      'planner plus fixed-size classifier chunks covers all 124 positions with frozen canonical labels');
+      assert(Math.max(...prompts.map(({ prompt }) => prompt.length)) < 20_000
+        && !prompts[0].prompt.includes('X'.repeat(1000))
+        && !prompts[1].prompt.includes('Y'.repeat(1000)),
+      'one-megabyte listing fields are hard-clamped before every provider prompt');
+      assert(prompts[0].prompt.includes('encode "Under $Xk/yr" as minSalary=1')
+        && prompts[0].prompt.includes('minSalary=0, maxSalary=0'),
+      'planner prompt reserves zero bounds for Unspecified and gives Under ranges an unambiguous sentinel');
+      const progressSequence = progressReceipts
+        .map(progress => `${progress.stage}:${progress.completedBatches}:${progress.processed}`);
+      assert(JSON.stringify(progressSequence) === JSON.stringify([
+        'planning:0:0', 'classifying:0:0',
+        'classifying:1:24', 'classifying:2:48', 'classifying:3:72',
+        'classifying:4:96', 'classifying:5:120', 'classifying:6:124',
+      ]),
+      `taxonomy progress emits one receipt per real transition, without duplicate chunk boundaries (${progressSequence.join(', ')})`);
+      const shortCalls = [];
+      let failed = false;
+      try {
+        await runBoundedJobTaxonomy(jobs, {
+          callText: async (_prompt, options) => {
+            shortCalls.push(options.task);
+            if (options.task === 'job-taxonomy-plan') return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+            return { roleByIndex: [0] };
+          },
+        });
+      } catch { failed = true; }
+      assert(failed && shortCalls.filter(task => task === 'job-taxonomy-classify').length === Math.ceil(124 / JOB_TAXONOMY_CHUNK_SIZE),
+        'a short classifier result rejects the full parallel handoff without exposing a partial taxonomy');
+      const controller = new AbortController();
+      let abortCalls = 0;
+      try {
+        await runBoundedJobTaxonomy(jobs, {
+          signal: controller.signal,
+          callText: async (_prompt, options) => {
+            if (options.task === 'job-taxonomy-plan') return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+            abortCalls += 1;
+            controller.abort();
+            return { roleByIndex: Array(JOB_TAXONOMY_CHUNK_SIZE).fill(0) };
+          },
+        });
+      } catch { /* cancellation is the expected terminal outcome */ }
+      assert(abortCalls === 1, 'cancellation after a classifier response prevents every later chunk call');
+      const shape = inspectJobTaxonomyRoleIndexes([0, 2, 1], 3, 2);
+      assert(shape.outOfRangeCount === 1 && inspectJobTaxonomyRoleIndexes([0, 1], 3, 2).missingCount === 1,
+        'classifier diagnostics reject unknown vocabulary indexes and exact-length shortages');
+      const noOther = normalizeJobTaxonomyPlan({ roleFamilies: ['Engineering'], salaryRanges: [] });
+      assert(!noOther.valid, 'a plan without the reserved Other role is rejected before any classification call');
+      const malformedSalaryPlan = validateJobTaxonomyPlan({
+        roleFamilies: ['Engineering', 'Other'],
+        salaryRanges: [
+          { label: '$120k+/yr', minSalary: 120000, maxSalary: 0 },
+          { label: '$80k–$100k/yr', minSalary: 80000, maxSalary: 100000 },
+          { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+        ],
+      });
+      assert(!malformedSalaryPlan.valid && malformedSalaryPlan.reason.includes('preceding range'),
+        'a schema-valid but gapped salary plan remains in the manual retry loop instead of being silently normalized into another taxonomy');
+      return { chunks: classifications, promptMax: Math.max(...prompts.map(({ prompt }) => prompt.length)) };
+    },
+  },
+  {
     name: 'Gemini registry: supports every compatible current model with safe routing metadata',
     run: () => {
       // 10 ungated ids: Flash, upgrade aliases, Lite, and the two final Gemma
@@ -780,7 +865,7 @@ export default [
       // legacy Local AI selection is intentionally safe: it follows the
       // historic Gemini default instead of leaving unrelated AI features
       // unable to make a request.
-      for (const task of [...getKnownTaskIds(), 'default']) {
+      for (const task of [...getKnownTaskIds(), 'default'].filter(task => !isNonApiJobTask(task))) {
         assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick`);
         assert(providerForTask(task, claudeSettings) === 'claude', `'${task}' follows the Claude Settings pick`);
         assert(providerForTask(task, legacyLocalSettings) === 'gemini', `'${task}' falls back to Gemini for the removed Local AI provider`);
@@ -792,8 +877,7 @@ export default [
         'legacy Local AI and invalid persisted provider values normalize to Gemini');
       const geminiQualityTasks = [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
-        'resume-parse', 'career-file-extract', 'job-query-generation',
-        'job-scoring', 'job-bucketing', 'job-compensation-research', 'job-compensation-assessment', 'default',
+        'default',
       ];
       for (const task of geminiQualityTasks) {
         assert(modelForTask(task, geminiSettings) === 'gemini-3.7-flash',
@@ -806,8 +890,8 @@ export default [
       // Callers that pass an explicit malformed/missing settings snapshot must
       // fail safely to the default provider instead of crashing on
       // `settings.provider` while handling a real task.
-      assert(providerForTask('job-scoring', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
-      assert(modelForTask('job-scoring', null) === 'gemini-3.7-flash', 'model routing remains usable with an explicit null settings snapshot');
+      assert(providerForTask('price-synthesis', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
+      assert(modelForTask('price-synthesis', null) === 'gemini-3.7-flash', 'model routing remains usable with an explicit null settings snapshot');
       return { ok: true };
     },
   },
@@ -823,13 +907,6 @@ export default [
         'vision-product-analysis':   SONNET,
         'price-synthesis':           OPUS,
         'bundle-price-synthesis':    OPUS,
-        'resume-parse':              SONNET,
-        'career-file-extract':       SONNET,
-        'job-query-generation':      SONNET,
-        'job-scoring':               OPUS,
-        'job-bucketing':             SONNET,
-        'job-compensation-research': OPUS,
-        'job-compensation-assessment': OPUS,
         'default':                   SONNET,
         'platform-fit-assessment':   HAIKU,
         'page-status-classify':      HAIKU,
@@ -842,7 +919,7 @@ export default [
       }
       // Every known task (+ the 'default' fallback) is covered above — a task
       // added to TASK_GROUPS without a row here would silently go unverified.
-      assert(new Set([...getKnownTaskIds(), 'default']).size === Object.keys(expected).length,
+      assert(new Set([...getKnownTaskIds(), 'default'].filter(task => !isNonApiJobTask(task))).size === Object.keys(expected).length,
         'the expectation table above covers every known task, including the default fallback');
       return { ok: true };
     },
@@ -855,11 +932,11 @@ export default [
       // reachable with a hand-built settings object that never went through
       // that layer (tests, or a future caller).
       const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { judgment: 'nope', light: null } };
-      assert(modelForTask('job-scoring', badToken) === MODEL_FLOOR.OPUS, 'an unrecognized Judgment token falls back to OPUS (the group default)');
+      assert(modelForTask('price-synthesis', badToken) === MODEL_FLOOR.OPUS, 'an unrecognized Judgment token falls back to OPUS (the group default)');
       assert(modelForTask('text-polish', badToken) === MODEL_FLOOR.HAIKU, 'a null light token falls back to HAIKU (the group default)');
 
       const noClaudeModelsAtAll = { provider: 'claude', anthropicApiKey: 'x' };
-      assert(modelForTask('job-scoring', noClaudeModelsAtAll) === MODEL_FLOOR.OPUS, 'a settings object with no claudeModels key at all still resolves via the group default');
+      assert(modelForTask('price-synthesis', noClaudeModelsAtAll) === MODEL_FLOOR.OPUS, 'a settings object with no claudeModels key at all still resolves via the group default');
       return { ok: true };
     },
   },
@@ -873,7 +950,7 @@ export default [
       // below while Light is left unset, proving the choice is group-scoped.
 
       const sonnetJudgment = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { judgment: 'SONNET' } };
-      assert(modelForTask('job-scoring', sonnetJudgment) === MODEL_FLOOR.SONNET, 'judgment=SONNET moves job-scoring off its OPUS default');
+      assert(modelForTask('price-synthesis', sonnetJudgment) === MODEL_FLOOR.SONNET, 'judgment=SONNET moves price-synthesis off its OPUS default');
       assert(modelForTask('text-polish', sonnetJudgment) === MODEL_FLOOR.HAIKU, 'light (unset) retains its own HAIKU default');
       return { ok: true };
     },
@@ -891,12 +968,15 @@ export default [
       assert(Object.keys(snap.groups).sort().join(',') === 'extraction,judgment,light', 'snapshot.groups contains exactly the three live API groups');
       assert(snap.groups.judgment.family === 'OPUS' && snap.groups.extraction.family === 'SONNET' && snap.groups.light.family === 'HAIKU', 'group summaries resolve to their own defaults');
 
-      const knownTasks = getKnownTaskIds();
-      assert(knownTasks.size > 0, 'sanity: getKnownTaskIds is non-empty');
+      const knownTasks = [...getKnownTaskIds()].filter(task => !isNonApiJobTask(task));
+      assert(knownTasks.length > 0, 'sanity: getKnownTaskIds is non-empty');
       for (const task of knownTasks) {
         assert(snap.tasks[task], `taskModelRoutingSnapshot is missing a row for registered task '${task}'`);
         assert(snap.tasks[task].provider === 'claude', `'${task}' row reports the active provider`);
         assert(typeof snap.tasks[task].model === 'string' && snap.tasks[task].model.length > 0, `'${task}' row carries a real model id, not undefined/empty`);
+      }
+      for (const task of getKnownTaskIds()) {
+        if (isNonApiJobTask(task)) assert(!snap.tasks[task], `'${task}' is excluded because it is a manual non-API handoff, not an API routing row`);
       }
 
       // provider is task-independent (providerForTask doc) — every row
@@ -1467,10 +1547,18 @@ export default [
       // in-flight pre-upgrade batch must behave exactly as it did before.
       const before = Object.keys(getTokenBudgetSnapshot()).sort().join(',');
       const legacy = await withBatchEntries(
-        [succeeded('b0', 'max_tokens', 700), succeeded('b1', 'end_turn', 42, [{ type: 'text', text: 'hi' }])],
+        [
+          succeeded('b0', 'max_tokens', 700),
+          succeeded('b1', 'end_turn', 42, [{ type: 'text', text: 'new-' }, { type: 'text', text: 'json' }]),
+          succeeded('b2', 'end_turn', 42, [{ type: 'tool_use', input: { scores: [] } }]),
+          succeeded('b3', 'refusal', 1),
+        ],
         () => getClaudeBatchResults('batch-budget-test-key', 'mb_test'));
-      assert(legacy.b0.error === 'max_tokens (truncated)' && legacy.b1.ok === true && legacy.b1.text === 'hi',
-        'results still classify correctly with no budget metadata');
+      assert(legacy.b0.error === 'max_tokens (truncated)'
+        && legacy.b1.ok === true && legacy.b1.text === 'new-\njson'
+        && legacy.b2.ok === true && legacy.b2.text === JSON.stringify({ scores: [] })
+        && legacy.b3.ok === false && legacy.b3.error === 'refusal',
+      'legacy batches retain old tool_use decoding while native text JSON concatenates and refusals fail explicitly');
       assert(Object.keys(getTokenBudgetSnapshot()).sort().join(',') === before,
         'a task-less reconcile records nothing and throws nothing');
 

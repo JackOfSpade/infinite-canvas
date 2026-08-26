@@ -113,7 +113,7 @@ export function buildMainProcessLogsMarkdown(lines) {
   if (!Array.isArray(lines) || lines.length === 0) return '';
   return `
 ## Recent Main-Process Logs
-> Last ~60 lines from the main process's logger (ring buffer). Use this to
+> Up to 200 lines from the main process's logger (ring buffer). Use this to
 > see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
 > did and any errors that were swallowed by an IPC handler before the
 > renderer got a useful response.

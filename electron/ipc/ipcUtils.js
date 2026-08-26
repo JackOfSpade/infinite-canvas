@@ -2,8 +2,19 @@
  * IPC Utility functions for robust handler lifecycle management.
  */
 import electronPkg from 'electron';
+import { AsyncLocalStorage } from 'node:async_hooks';
 const { ipcMain } = electronPkg;
 import { logger } from '../logger.js';
+
+// AI handoffs can be reached several async layers below an IPC handler. Keep
+// the originating WebContents in async-local state so a sensitive manual-AI
+// prompt is delivered only to the window that initiated the job, never to a
+// focused or broadcast window.
+const ipcRequestContext = new AsyncLocalStorage();
+
+export function getCurrentIpcRequestContext() {
+  return ipcRequestContext.getStore() || null;
+}
 
 // ── Node Task Registry ──────────────────────────────────────────────────────
 // WebContents -> Map<nodeId, Map<AbortController, { registeredAt, channel }>>.
@@ -72,14 +83,14 @@ function unregisterNodeTask(sender, nodeId, ac) {
 /**
  * Cancel all active background tasks for a specific node.
  */
-export function abortNodeTasks(nodeId, sender = null) {
+export function abortNodeTasks(nodeId, sender = null, reason = new Error('Node deleted')) {
   const owners = sender ? [[sender, senderTaskMap(sender)]] : [...nodeTasks.entries()];
   for (const [owner, tasks] of owners) {
     const set = tasks?.get(nodeId);
     if (!set) continue;
     logger.info(`[IPC] Aborting ${set.size} tasks for sender ${owner?.id ?? '?'} node ${nodeId}`);
     for (const ac of set.keys()) {
-      ac.abort(new Error('Node deleted'));
+      ac.abort(reason);
     }
     tasks.delete(nodeId);
     if (tasks.size === 0) nodeTasks.delete(owner);
@@ -128,8 +139,18 @@ export function snapshotActiveNodeTasks(senderId = null) {
 export function createSenderAbortController(event, timeoutMs = 0) {
   const ac = new AbortController();
   const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
+  // A renderer reload replaces its IPC world but keeps the same WebContents.
+  // Without this listener, an invoke already waiting on a manual-AI paste is
+  // orphaned forever: the old renderer cannot receive its result and the new
+  // renderer no longer owns the invoke continuation. Only a genuine main-frame
+  // navigation tears down that continuation; in-page navigation must not
+  // cancel active work.
+  const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) ac.abort(new Error('Renderer navigated'));
+  };
   
   event.sender.once('destroyed', onSenderDestroyed);
+  event.sender.on?.('did-start-navigation', onMainFrameNavigation);
 
   let timeoutId = null;
   if (timeoutMs > 0) {
@@ -141,6 +162,7 @@ export function createSenderAbortController(event, timeoutMs = 0) {
     signal: ac.signal,
     cleanup: () => {
       if (timeoutId) clearTimeout(timeoutId);
+      event.sender.removeListener?.('did-start-navigation', onMainFrameNavigation);
       if (!event.sender.isDestroyed()) {
         event.sender.removeListener('destroyed', onSenderDestroyed);
       }
@@ -195,7 +217,10 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
     }
 
     try {
-      const result = await handler(event, args, signal);
+      const result = await ipcRequestContext.run(
+        { sender: event.sender, nodeId: nodeId || null, channel },
+        () => handler(event, args, signal),
+      );
       
       // Guard: Window may have been closed during await
       if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };

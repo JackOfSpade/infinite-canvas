@@ -12,6 +12,7 @@ import {
   checkClaimedEquivalence,
   checkCompanySpecificity,
   checkCompoundHyphenation,
+  checkContainerizationTechnologyRoles,
   checkDirectWelcomeClosing,
   checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
@@ -23,6 +24,7 @@ import {
   checkLogisticsContainment,
   checkLogisticsGrounding,
   checkLogisticsLegalStatus,
+  checkLowInformationToolBuild,
   checkModifierAttachment,
   checkNeedGrounding,
   checkNeedsPortfolio,
@@ -40,6 +42,7 @@ import {
   checkRoleThesis,
   checkSentenceLength,
   checkShape,
+  checkToolCallsGardenPath,
   checkTopNeedDisposition,
   checkVagueDomainWorkLabel,
   checkVisualReferencePrecision,
@@ -304,7 +307,26 @@ export default [
       const candidateB = { bulletTexts: [fixtureBulletText(careerChanger)] };
       const fail = checkEvidenceGrounding(candidateAPlan, candidateB);
       assert(!fail.passed && fail.id === 'evidence-grounding', 'candidate A evidence against candidate B résumé is the required negative control');
-      return { pass: pass.detail, negativeControl: fail.detail };
+      const secondaryOnlyFailure = checkEvidenceGrounding({
+        ...groundedPlan,
+        mappings: [
+          { ...groundedPlan.mappings[0], evidence: 'Primary evidence stays exactly with this résumé bullet.' },
+          { evidence: 'alpha beta gamma unrelated phrases remain safely distinct', narrativeRole: 'corroborates', relationToPrevious: 'This secondary proof would corroborate the primary evidence.' },
+        ],
+      }, {
+        bulletTexts: [
+          'Primary evidence stays exactly with this résumé bullet.',
+          'alpha beta gamma delta epsilon',
+        ],
+      });
+      assert(!secondaryOnlyFailure.passed
+        && secondaryOnlyFailure.detail.includes('coverLetterArgument.secondaryEvidence.evidence')
+        && secondaryOnlyFailure.detail.includes('mapping 2')
+        && secondaryOnlyFailure.detail.includes('not cover-letter paragraph 2')
+        && secondaryOnlyFailure.detail.includes('best contiguous run is 3 words (need 5)')
+        && secondaryOnlyFailure.detail.includes('best token overlap is 38% (need 60%)'),
+      'an ungrounded secondary argument anchor identifies its exact non-rendered field and both grounding thresholds');
+      return { pass: pass.detail, negativeControl: fail.detail, secondaryDiagnostic: secondaryOnlyFailure.detail };
     },
   },
   {
@@ -743,6 +765,18 @@ export default [
       ]);
       assert(contextualReference.passed,
         `the attached position uses a proximal reference, while source documents may own reporting verbs for listing-only context: ${contextualReference.detail}`);
+      const bareListingAttribution = checkPostingReference([
+        'The listing describes a rebuild that starts from years of existing workflows and operational data rather than an empty repository.',
+      ]);
+      const explicitListingAttribution = checkPostingReference([
+        'This job listing describes a rebuild that starts from years of existing workflows and operational data rather than an empty repository.',
+      ]);
+      assert(!bareListingAttribution.passed
+        && bareListingAttribution.detail.includes('underspecified source attribution (“The listing describes”)')
+        && bareListingAttribution.detail.includes('name this role and its work directly')
+        && bareListingAttribution.detail.includes('“this job listing” or “this job description”')
+        && explicitListingAttribution.passed,
+      'a bare “The listing describes” opener is redirected to role-facing prose or explicit provenance, while an explicit job-listing attribution remains available when needed');
       const detachedOrUngrammatical = checkPostingReference([
         "The role's focus on service reliability rewards careful prioritization.",
         'The position states that engineers rotate through incident response.',
@@ -872,6 +906,8 @@ export default [
         && visualPoint.passed,
       'screen-guidance prose recognizes varied actors, targets, and pointing constructions while accepting an explicit visible limitation');
       const conditionalClose = checkDirectWelcomeClosing(['I would welcome the chance to talk about that work.']);
+      const conditionalConversation = checkDirectWelcomeClosing(['I would welcome a conversation about how that combination could support the WAVES rebuild.']);
+      const conditionalDiscussion = checkDirectWelcomeClosing(['I’d welcome a discussion about the release path.']);
       const deferentialVariant = checkDirectWelcomeClosing(['I would be pleased to discuss the migration.']);
       const directClose = checkDirectWelcomeClosing(['I welcome the opportunity to discuss how that work applies here.']);
       const nonClosingUse = checkDirectWelcomeClosing([
@@ -895,6 +931,8 @@ export default [
       ]);
       assert(!conditionalClose.passed
         && conditionalClose.detail.includes('make the invitation direct')
+        && !conditionalConversation.passed && conditionalConversation.detail.includes('would welcome a conversation')
+        && !conditionalDiscussion.passed && conditionalDiscussion.detail.includes("I'd welcome a discussion")
         && !deferentialVariant.passed
         && directClose.passed
         && nonClosingUse.passed
@@ -916,6 +954,69 @@ export default [
         && sentences('').length === 0,
       'the shared segmenter keeps abbreviations in one sentence so every sentence-level check counts the same units');
       return { long: long.detail, punctuation: punctuation.detail, register: register.detail, introComma: missingIntroComma.detail, visualPoint: ambiguousPoint.detail, directClose: conditionalClose.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: garden paths, filler bridges, and deployment-role errors receive narrow repairs',
+    run: () => {
+      const gardenPath = checkToolCallsGardenPath([
+        'Rebuilding a system without recreating every existing tool calls for clear evidence about which work belongs in a custom application.',
+      ]);
+      const directPredicate = checkToolCallsGardenPath([
+        'Rebuilding a system without recreating every existing tool requires clear evidence about which work belongs in a custom application.',
+      ]);
+      assert(!gardenPath.passed
+        && gardenPath.detail.includes('garden-path reading with “tool calls for”')
+        && gardenPath.detail.includes('replace “calls for” with “requires”')
+        && directPredicate.passed,
+      'a familiar compound noun cannot conceal the intended “calls for” predicate, while a direct predicate remains legal');
+
+      const fillerBridge = checkLowInformationToolBuild([
+        'For tools that remained in-house, I built software.',
+      ]);
+      const concreteBridge = checkLowInformationToolBuild([
+        'For tools that remained in-house, I built the workflow that reconciled operator changes before release.',
+      ]);
+      const workflowBridge = checkLowInformationToolBuild([
+        'For workflows that remained manual, I built software that reconciled operator changes before release.',
+      ]);
+      const systemBridge = checkLowInformationToolBuild([
+        'For systems that lacked audit trails, I built software that recorded each operator change.',
+      ]);
+      assert(!fillerBridge.passed
+        && fillerBridge.detail.includes('only restates that tools are software')
+        && concreteBridge.passed && workflowBridge.passed && systemBridge.passed,
+      'a terminal category-restating tools bridge is removed or made specific without rejecting concrete tools, workflows, or systems work');
+
+      const mismatchedRoles = checkContainerizationTechnologyRoles([
+        'I containerized it with Docker Compose, Nginx, and Gunicorn so it could be deployed on different virtual-machine configurations.',
+      ]);
+      const accurateRoles = checkContainerizationTechnologyRoles([
+        'I containerized the service with Docker Compose, then configured Nginx as a reverse proxy and Gunicorn as the application server.',
+      ]);
+      const coordinatedRoles = checkContainerizationTechnologyRoles([
+        'I containerized it with Docker Compose and configured Nginx as the reverse proxy.',
+      ]);
+      assert(!mismatchedRoles.passed
+        && mismatchedRoles.detail.includes('Nginx is a web or application server, not a containerization tool')
+        && mismatchedRoles.detail.includes('Docker or Docker Compose for containerization')
+        && accurateRoles.passed && coordinatedRoles.passed,
+      'containerization claims cannot grammatically govern web or application servers, while separate role-accurate predicates pass');
+
+      const combined = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: [
+          'Rebuilding a system without recreating every existing tool calls for clear evidence about which work belongs in a custom application.',
+          'For tools that remained in-house, I built software.',
+          'I containerized it with Docker Compose, Nginx, and Gunicorn so it could be deployed on different virtual-machine configurations.',
+        ],
+      });
+      const failures = new Map(combined.filter(check => !check.passed).map(check => [check.id, check.detail]));
+      assert(failures.has('tool-calls-garden-path')
+        && failures.has('low-information-tool-build')
+        && failures.has('containerization-technology-roles'),
+      `each exact regression case is part of the single-revision prose evaluation: ${[...failures.keys()].join(', ')}`);
+      return { gardenPath: gardenPath.detail, fillerBridge: fillerBridge.detail, mismatchedRoles: mismatchedRoles.detail };
     },
   },
   {
@@ -1224,9 +1325,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 26, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 29, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

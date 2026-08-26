@@ -100,6 +100,54 @@ export default [
     },
   },
   {
+    name: 'application workspace: original job posting link is readable, safe, and print-neutral',
+    run: () => {
+      const normalized = normaliseResumeDownloadBundle({
+        jobUrl: '  https://jobs.example.test/opening?source=canvas&role=senior  ',
+      });
+      assert(normalized.jobUrl === 'https://jobs.example.test/opening?source=canvas&role=senior',
+        'a valid HTTP(S) job URL must be retained in canonical form');
+      for (const unsafe of [
+        'javascript:alert(1)', 'data:text/html,hi', '/relative-job',
+        'https://user:password@jobs.example.test/opening', 'https://jobs.example.test/\nopening',
+      ]) {
+        assert(normaliseResumeDownloadBundle({ jobUrl: unsafe }).jobUrl === '',
+          `unsafe job URL must be rejected: ${JSON.stringify(unsafe)}`);
+      }
+      const doc = buildResumeDocument({
+        docId: 'job-posting-link',
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya</h1></main>',
+        coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya', jobUrl: normalized.jobUrl, jobMarkdown: '# Role' },
+      });
+      const dom = new JSDOM(doc);
+      let link;
+      try {
+        link = dom.window.document.querySelector('.ic-job-posting-link');
+        assert(link?.textContent === 'View original job posting',
+          'the workspace must use reader-friendly link text rather than exposing the URL');
+        assert(link.href === normalized.jobUrl && link.target === '_blank'
+          && link.getAttribute('rel') === 'noopener noreferrer',
+        'the workspace job link must retain only the validated URL and isolate the opened page');
+        assert(doc.includes('@media print') && doc.includes('.ic-workspace-sidebar { display: none !important; }'),
+          'the job link must remain workspace chrome and never enter a submitted PDF');
+      } finally {
+        dom.window.close();
+      }
+      const noLink = new JSDOM(buildResumeDocument({
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya</h1></main>',
+        downloadBundle: { jobUrl: 'javascript:alert(1)' },
+      }));
+      try {
+        assert(!noLink.window.document.querySelector('.ic-job-posting-link'),
+          'an absent or invalid URL must leave no misleading posting link');
+      } finally {
+        noLink.window.close();
+      }
+      return { linkLabel: link?.textContent, unsafeUrlsRejected: 5 };
+    },
+  },
+  {
     name: 'application workspace: Sync replaces download and submits only the selected document to its saved bridge',
     run: async () => {
       let doc = buildResumeDocument({

@@ -107,20 +107,20 @@ const MIN_SCORING_BATCH = 5;
 
 // Per-job OUTPUT token cost by provider family — the budget backstop behind the
 // batch size (it must never let a batch request more output than the cap allows).
-// Gemini Flash engages heavy thinking on this task (~325 tok/job observed; we
-// reuse the calibrated JOB_TOKENS_PER_JOB budget coefficient). Claude emits only
-// the visible score+reasoning (~180/job, no separate thinking budget), so more
-// fit the same output cap. In practice the per-provider quality ceiling below is
-// what binds — both lanes' output-budget max comfortably exceeds it.
-const JOB_OUT_TOKENS_PER_JOB = { claude: 200, gemini: JOB_TOKENS_PER_JOB, default: JOB_TOKENS_PER_JOB };
+// Gemini Flash engages heavy thinking on this task (~325 tok/job observed), and
+// adaptive-thinking Claude can also spend substantial output on the detailed
+// evidence schema. Use the same conservative coefficient for both lanes. In
+// practice the quality ceiling below binds before this budget backstop.
+const JOB_OUT_TOKENS_PER_JOB = { claude: JOB_TOKENS_PER_JOB, gemini: JOB_TOKENS_PER_JOB, default: JOB_TOKENS_PER_JOB };
 
-// Per-provider scoring-batch CEILING. This is a SCORING-QUALITY bound, not a
-// token one: an LLM ranking too many jobs in one shot compresses scores and
-// rushes the reasoning, and a bigger batch has a larger truncation/retry blast
-// radius. Gemini stays at the telemetry-calibrated 15; the stronger paid Claude
-// path scores more per call (≈2× fewer round-trips on a 500-job run) while
-// staying well under the output cap. Tunable.
-const SCORING_BATCH_CEILING = { claude: 30, gemini: 15, default: 15 };
+// Per-provider scoring-batch CEILING. This is a SCORING-QUALITY bound, not an
+// input-window one: an LLM ranking too many jobs in one shot compresses scores
+// and rushes the reasoning, while a bigger batch has a larger truncation/retry
+// blast radius. Adaptive-thinking Claude can consume substantial hidden output
+// on the detailed evidence schema, so it shares the proven 15-job ceiling with
+// Gemini. Keeping each batch below the job-scoring formula's 32k clamp avoids
+// a single oversized first batch holding an entire run at 0/M.
+const SCORING_BATCH_CEILING = { claude: 15, gemini: 15, default: 15 };
 
 /**
  * Jobs to score per LLM call, sized to the model that will actually serve scoring
@@ -135,9 +135,12 @@ const SCORING_BATCH_CEILING = { claude: 30, gemini: 15, default: 15 };
  * model's window and halves it if a pathological JD set doesn't. So this returns
  * a TARGET; input-safety is guaranteed downstream by the count API.
  *
- * @param {string} [model] resolved scoring model id; unknown/missing → safe default
+ * @param {string} [model] resolved scoring transport/model id; unknown/manual → safe default
  */
 export function jobScoringBatchSize(model) {
+  // Job scoring is a manual copy/paste handoff. Its work-unit size must not
+  // change when the user switches an unrelated Claude/Gemini API setting.
+  if (model === 'non-api-ai') model = null;
   const meta = modelMeta(model);
   // A missing model id → conservative 'default' lane (the small 15 ceiling); a
   // real id trusts its resolved provider. (modelMeta defaults unknowns to claude,

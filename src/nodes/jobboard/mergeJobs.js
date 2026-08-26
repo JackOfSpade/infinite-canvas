@@ -1,4 +1,4 @@
-import { jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
+import { jobTitleCompanyLocationKey, jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
 
 /**
  * Merge the scored-job arrays from several Job Search Modules into one deduped
@@ -41,17 +41,17 @@ export function unionScoredJobs(jobArrays, stats) {
     for (const job of arr) {
       if (!job || typeof job !== 'object') continue;
       totalIncoming++;
-      const key = jobTitleCompanyUrlKey(job);
+      const key = boardListingKey(job);
       const existing = byKey.get(key);
       if (!existing) {
         byKey.set(key, job);
         order.push(key);
       } else {
         collisions++;
-        if ((job.matchScore || 0) > (existing.matchScore || 0)) {
+        if (jobMatchScore(job) > jobMatchScore(existing)) {
           byKey.set(key, job); // higher score wins; first-seen position unchanged
           collisionUpgrades++;
-        } else if ((job.matchScore || 0) === (existing.matchScore || 0)
+        } else if (jobMatchScore(job) === jobMatchScore(existing)
           && canSafelyPreferCompensationAssessment(job, existing)) {
           // Compensation is independent of résumé-fit score. On an exact
           // score tie, retain the richer current assessment only when both
@@ -75,6 +75,30 @@ export function unionScoredJobs(jobArrays, stats) {
   }
 
   return order.map(k => byKey.get(k));
+}
+
+/**
+ * A URL is the board's only cross-module proof that two rows are the same
+ * listing. Do not turn two missing URLs into the synthetic
+ * `title|company|` key: that silently drops separate requisitions which have
+ * the same employer and title (a common scrape fallback). Within one search
+ * module, retain the legacy location-aware collapse for duplicate fallback
+ * rows; across modules, no listing proof exists, so preserve both. An object
+ * Map key intentionally makes unlinked legacy rows with no origin unique.
+ */
+function boardListingKey(job) {
+  if (String(job?.url || '').trim()) return jobTitleCompanyUrlKey(job);
+  const originHubId = String(job?.originHubId || '').trim();
+  return originHubId ? `unlinked:${originHubId}|${jobTitleCompanyLocationKey(job)}` : job;
+}
+
+// Saved canvases and provider responses can outlive a renderer update. Treat a
+// numeric-looking legacy score exactly like the current numeric contract;
+// otherwise JavaScript's string comparison makes "9" outrank "80" during a
+// board merge. Invalid values retain the historic zero-score fallback.
+function jobMatchScore(job) {
+  const score = Number(job?.matchScore);
+  return Number.isFinite(score) ? score : 0;
 }
 
 /**

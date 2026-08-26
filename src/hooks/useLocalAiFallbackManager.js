@@ -12,7 +12,7 @@ import {
  * Canvas-level driver for pending Local AI application jobs whose JobCardNode
  * is NOT mounted. Mounted cards poll and import on their own; but hidden cards
  * unmount — a board hiding stale results, a collapsed group, or nested-canvas
- * navigation — which used to silently kill the poll while Claude Code sat
+ * navigation — which used to silently kill the poll while a local coding agent sat
  * waiting for the app's measured feedback on the result.json it had written.
  * This manager keeps every pending handoff alive from Canvas.jsx, which stays
  * mounted for the life of the window.
@@ -112,7 +112,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         return;
       }
       importBusyRef.current = true;
-      writeState(nodeId, jobId, { status: 'importing', message: 'Claude Code result found — importing…' });
+      writeState(nodeId, jobId, { status: 'importing', message: 'Local AI result found — importing…' });
       EventLogger.log(`[LocalAI] fallback import start job=${jobId} card=${nodeId} (card unmounted)`);
       try {
         const imported = await window.electronAPI.importLocalApplication({
@@ -222,7 +222,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         if (disposed) return;
         if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
           settlingRef.current.delete(jobId);
-          writeState(nodeId, jobId, { status: 'completed', message: 'Claude Code saved a newer result — waiting briefly for the final save…' });
+          writeState(nodeId, jobId, { status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
           return;
         }
         if (error?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT') {
@@ -281,14 +281,14 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         const resultSha256 = String(next.resultSha256 || '');
         if (!resultSha256) {
-          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Claude Code result found — waiting for a stable file snapshot…' });
+          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Local AI result found — waiting for a stable file snapshot…' });
           return;
         }
         const settled = settlingRef.current.get(jobId);
         const now = Date.now();
         if (!settled || settled.resultSha256 !== resultSha256) {
           settlingRef.current.set(jobId, { resultSha256, observedAt: now });
-          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Claude Code result found — waiting briefly for the final save…' });
+          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Local AI result found — waiting briefly for the final save…' });
           return;
         }
         if (now - settled.observedAt < LOCAL_AI_RESULT_SETTLE_MS) return;

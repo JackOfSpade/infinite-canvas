@@ -1,19 +1,20 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, X, Sparkles, Check, ChevronDown } from 'lucide-react';
+import { ExternalLink, X, Sparkles, ChevronDown } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
-import { computeJobTreeView, normalizeCompensationAssessment } from './jobsearch/buildJobTree';
+import { computeJobTreeView, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement } from '../utils/localAiApplicationLifecycle';
+import { ApplicationLaunchPromptDialog } from '../components/ApplicationLaunchPromptDialog';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -125,7 +126,7 @@ function compactHiringFitAudit(data) {
   return { strengths, materialGaps, confidence, calibrated };
 }
 
-// Claude Code often makes a sequence of atomic edits while composing one
+// A local coding agent often makes a sequence of atomic edits while composing one
 // revision. Import only after the same complete result has survived a few poll
 // cycles, otherwise a valid intermediate JSON document can be measured as if
 // it were the author's final revision. (LOCAL_AI_RESULT_SETTLE_MS lives in
@@ -160,6 +161,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [showFullReasoning, setShowFullReasoning] = useState(false);
   const [showCompensationDetails, setShowCompensationDetails] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
+  const [applicationLaunchPrompt, setApplicationLaunchPrompt] = useState('');
   // Local AI is deliberately a human-in-the-loop workflow. The durable job
   // folder is authoritative; this persisted pointer lets a remounted card
   // reconnect without implying that an application was submitted.
@@ -173,8 +175,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       ? { ...saved, status: 'completed', message: 'Resuming Local AI result import after restart…' }
       : saved;
   });
-  const [applied, setApplied] = useState(false);
-  const [markingApplied, setMarkingApplied] = useState(false);
   // Per-job context, deliberately separate from the originating hub's career
   // data: a candidate can add a relevant personal project or team-fit detail
   // without mutating the career corpus used by every other job card.
@@ -235,21 +235,23 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [id, data.localApplication, localApplication, localApplicationKey, updateGlobal]);
 
   // Match and compensation disclosures change the card's DOM height
-  // asynchronously through ResizeObserver. Re-run the tree layout only after a
-  // *subsequent* visible measurement change lands in ReactFlow, otherwise a
-  // tall card can overlap the card/root below it. Skipping a null →
-  // first-measurement transition avoids N reflows when a fresh cascade initially
-  // mounts. The same guard also fixes collapse → re-expand: hidden cards unmount
-  // and reset this local disclosure state, so an old 308px measurement can
-  // legitimately become the normal 210px measurement when the card returns.
+  // asynchronously through ResizeObserver. A first measurement only needs a
+  // reflow if it outgrows the row reserved by the initial tree layout; later
+  // visible changes always reflow. This avoids fresh-cascade churn while still
+  // making a newly opened tall card push lower siblings clear. The same guard
+  // also fixes collapse → re-expand: hidden cards unmount and reset this local
+  // disclosure state, so an old 308px measurement can legitimately become the
+  // normal 210px measurement when the card returns.
   useEffect(() => {
     const previousMeasuredHeight = previousMeasuredHeightRef.current;
     previousMeasuredHeightRef.current = measuredHeight;
-    const isVisible = !getNode(id)?.hidden;
-    if (!isVisible
-      || !Number.isFinite(previousMeasuredHeight)
-      || !Number.isFinite(measuredHeight)
-      || previousMeasuredHeight === measuredHeight) return;
+    const node = getNode(id);
+    const shouldReflow = shouldReflowMeasuredJobCard({
+      visible: !!node && !node.hidden,
+      previousMeasuredHeight,
+      measuredHeight,
+    });
+    if (!shouldReflow) return;
     const frame = requestAnimationFrame(() => {
       const hubData = getNode(data.hubId)?.data || {};
       setNodes((nodes) => computeJobTreeView(nodes, data.hubId, {
@@ -270,13 +272,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [id, showFullReasoning, showCompensationDetails]);
   useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
 
-  // Folder the last successful generation actually wrote artifacts to, so
-  // "Mark applied" can record where the résumé/cover letter live. Not part of
-  // `data` — the card stays disposable (no status/notes fields persisted), so
-  // this is scratch state that resets if the card remounts, matching the
-  // "generation ≠ applied" split: nothing here implies an application exists
-  // until the user explicitly marks it.
-  const lastSavedFolderRef = useRef(null);
   // Poll ticks and React state propagation can overlap by a frame. This latch
   // ensures a completed local result is imported exactly once.
   const localImportingRef = useRef(new Set());
@@ -320,30 +315,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // new reference every render and defeat that memoization, unlike every
   // other caller of NodeHandles, which pass only a stable className.
   const handleStyle = useMemo(() => ({ backgroundColor: accentColor }), [accentColor]);
-
-  // Hydrate `applied` from the permanent store on mount (design doc §6.2).
-  // `applied` otherwise starts false on every mount and is set ONLY by this
-  // card's own optimistic markApplied/unmarkApplied calls — but the store is
-  // app-global and outlives the card (a save/reload or app restart remounts
-  // the card with fresh, false-defaulting state). Without this check, a job
-  // marked applied in a PRIOR session shows "Mark applied" again even though
-  // applied-jobs.json still holds the record — silently misrepresenting
-  // persisted state back to the user, the exact thing the undo affordance's
-  // "never silent" design (§6.2) exists to prevent. Best-effort: a failed
-  // check just leaves the optimistic-default false state; it never blocks
-  // the card or shows an error, since "not yet confirmed applied" is the
-  // safe default to render while unsure.
-  useEffect(() => {
-    if (!window.electronAPI?.isJobApplied) return;
-    let cancelled = false;
-    window.electronAPI.isJobApplied({
-      job: { title: data.title, company: data.company, location: data.location, url: data.url, source: data.source },
-    }).then((result) => {
-      if (cancelled || !isMountedRef.current) return;
-      if (result?.success && result.applied) setApplied(true);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [data.title, data.company, data.location, data.url, data.source, isMountedRef]);
 
   const openJobUrl = useCallback(() => {
     const url = normalizeExternalHttpUrl(data.url);
@@ -391,7 +362,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' } : current);
       return;
     }
-    setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Claude Code result…' } : current);
+    setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'importing', message: 'Importing Local AI result…' } : current);
     try {
       const imported = await window.electronAPI.importLocalApplication({
         jobId,
@@ -457,7 +428,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // Import can take long enough for a user to dismiss this card. Hiding a
       // card merely unmounts it and its node remains live; an explicit delete
       // must instead discard the exact sender-owned workspace before it can
-      // be promoted into Applied Jobs.
+      // be promoted into the durable application-bundle destination.
       if (!canSaveImportedLocalApplication(getLiveJobCard(idRef.current), jobId)) {
         await window.electronAPI.discardApplication?.({ workDir: local.workDir });
         EventLogger.log(`[LocalAI] discarded imported workspace job=${jobId}: card was removed before save`);
@@ -477,7 +448,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
       if (isMountedRef.current) {
-        lastSavedFolderRef.current = saved.dir || null;
         setLocalApplication((current) => current?.id === jobId ? {
           ...current,
           status: 'saved',
@@ -502,7 +472,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     } catch (error) {
       if (!isMountedRef.current) return;
       if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
-        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Claude Code saved a newer result — waiting briefly for the final save…' } : current);
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' } : current);
         return;
       }
       if (error?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT') {
@@ -517,7 +487,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveJobCard, isMountedRef]);
 
-  // Claude Code writes result.json manually/asynchronously. Polling only reads
+  // The local coding agent writes result.json manually/asynchronously. Polling only reads
   // that app-owned job; after a short stable-result window, the import happens
   // once the result validates.
   useEffect(() => {
@@ -548,20 +518,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           // Status always supplies the exact file hash. Without it, stay in a
           // safe ready state instead of treating an unknown snapshot as final.
           if (!resultSha256) {
-            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Claude Code result found — waiting for a stable file snapshot…' } : current);
+            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Local AI result found — waiting for a stable file snapshot…' } : current);
             return;
           }
           const settled = localResultSettlingRef.current.get(jobId);
           const now = Date.now();
           if (!settled || settled.resultSha256 !== resultSha256) {
             localResultSettlingRef.current.set(jobId, { resultSha256, observedAt: now });
-            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Claude Code result found — waiting briefly for the final save…' } : current);
+            setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Local AI result found — waiting briefly for the final save…' } : current);
             return;
           }
           if (now - settled.observedAt < LOCAL_AI_RESULT_SETTLE_MS) return;
           if (localImportingRef.current.has(jobId)) return;
           localImportingRef.current.add(jobId);
-          setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'importing', message: 'Claude Code result found — importing…' } : current);
+          setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'importing', message: 'Local AI result found — importing…' } : current);
           try {
             await importCompletedLocalApplication(jobId, resultSha256);
           } finally {
@@ -595,7 +565,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // which merges several modules and holds no career data itself; data.hubId
   // is the board). Not stored per-card, to avoid bloating the canvas file.
   // Application Generate always writes a self-contained Local AI handoff next
-  // to the saved canvas. The Claude Code routine produces the documents, then
+  // to the saved canvas. A local coding agent produces the documents, then
   // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
@@ -620,7 +590,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     if (!(nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile)) {
       addToast({
         title: 'Save Your Canvas First',
-        description: 'Applications are saved next to your canvas in an "Applied Jobs" folder. Save the canvas to a file, then try again.',
+        description: 'Application bundles are saved next to your canvas. Save the canvas to a file, then try again.',
         type: 'error',
       });
       return;
@@ -667,7 +637,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (isMountedRef.current) {
           addToast({
             title: 'Save Your Canvas First',
-            description: 'Applications are saved next to your canvas in an "Applied Jobs" folder. Save the canvas to a file, then try again.',
+            description: 'Application bundles are saved next to your canvas. Save the canvas to a file, then try again.',
             type: 'error',
           });
         }
@@ -743,9 +713,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       if (isMountedRef.current) {
         setLocalApplication(queued.localJob);
+        setApplicationLaunchPrompt(queued.prompt || '');
         addToast({
-          title: 'Application Job Ready',
-          description: 'The job is beside this canvas under .local-ai/jobs. Run your Claude Code routine there; this card will import the completed application automatically.',
+          title: 'Launch Prompt Ready',
+          description: 'Paste the prompt into any local coding agent with filesystem access. This card will import the completed application automatically.',
           type: 'success',
         });
       }
@@ -758,80 +729,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
       }
     } finally {
-      // The lease only covers durable handoff creation. Claude Code execution,
+      // The lease only covers durable handoff creation. Local coding-agent execution,
       // polling, validation, and final save continue independently.
       lease?.release();
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
   }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, getLiveJobCard, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
-
-  // ── Mark applied (design doc §6.2) ──────────────────────────────────────
-  // Generate NEVER auto-marks: generating a résumé is not the same as
-  // submitting it, so this is a separate explicit action. Marking does not
-  // delete the card — the user deletes when they want. The store this writes
-  // to is permanent and app-global (unlike the canvas-scoped, self-expiring
-  // seen-jobs CSV), so a misclick makes a posting invisible across every
-  // canvas forever with no way to reach it again once the card is gone —
-  // which is why the undo affordance stays visible on the button itself
-  // rather than being tucked behind a confirm dialog or a second click target.
-  const markApplied = useCallback(async () => {
-    if (!window.electronAPI?.markJobApplied || data.locked) return;
-    setMarkingApplied(true);
-    try {
-      // handleSafe (electron/ipc/ipcUtils.js) converts a THROWN backend error
-      // (e.g. a full disk, a permissions error, or appliedJobs.js's own
-      // deliberate throw on a corrupt hand-edited store) into a RESOLVED
-      // `{ success: false, error }` — it never rejects the promise. Awaiting
-      // without checking `result.success` used to fall straight through to
-      // setApplied(true) on every failure: the button would read "Applied"
-      // while the on-disk record was never written, so the job would keep
-      // resurfacing in future searches despite the UI's explicit claim that
-      // it never would again.
-      const result = await window.electronAPI.markJobApplied({
-        job: { title: data.title, company: data.company, location: data.location, url: data.url, source: data.source },
-        folder: lastSavedFolderRef.current || undefined,
-      });
-      if (!isMountedRef.current) return;
-      if (!result?.success) {
-        addToast({ title: 'Could Not Mark Applied', description: result?.error || 'Unknown error', type: 'error' });
-        return;
-      }
-      setApplied(true);
-    } catch (e) {
-      if (!isMountedRef.current) return;
-      EventLogger.error('Mark applied failed:', e);
-      addToast({ title: 'Could Not Mark Applied', description: e?.message || String(e), type: 'error' });
-    } finally {
-      if (isMountedRef.current) setMarkingApplied(false);
-    }
-  }, [data.locked, data.title, data.company, data.location, data.url, data.source, addToast, isMountedRef]);
-
-  const unmarkApplied = useCallback(async () => {
-    if (!window.electronAPI?.unmarkJobApplied || data.locked) return;
-    setMarkingApplied(true);
-    try {
-      // Same result-check as markApplied above, mirrored — a failed undo must
-      // not silently report success either (the button would read "Mark
-      // applied" while the permanent record is still on disk, hiding the job
-      // from every future search with no indication anything went wrong).
-      const result = await window.electronAPI.unmarkJobApplied({
-        job: { title: data.title, company: data.company, location: data.location, url: data.url, source: data.source },
-      });
-      if (!isMountedRef.current) return;
-      if (!result?.success) {
-        addToast({ title: 'Could Not Undo', description: result?.error || 'Unknown error', type: 'error' });
-        return;
-      }
-      setApplied(false);
-    } catch (e) {
-      if (!isMountedRef.current) return;
-      EventLogger.error('Unmark applied failed:', e);
-      addToast({ title: 'Could Not Undo', description: e?.message || String(e), type: 'error' });
-    } finally {
-      if (isMountedRef.current) setMarkingApplied(false);
-    }
-  }, [data.locked, data.title, data.company, data.location, data.url, data.source, addToast, isMountedRef]);
 
   return (
     <div
@@ -1083,13 +987,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
-                {localApplication.status === 'queued' ? 'Local AI queued — run Claude Code' :
+                {localApplication.status === 'queued' ? 'Local AI queued — run launch prompt' :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder, run your Claude Code routine, and write its result there. This card checks for it automatically.' : '')}</div>
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.' : '')}</div>
             </div>
           </div>
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && !['saved', 'failed'].includes(localApplication.status) && (
@@ -1135,9 +1039,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
-      {/* Generate full application (always visible, tailored résumé + cover letter)
-          beside Mark Applied — an explicit, separate action recording that the
-          user actually submitted it. Generation never flips this on its own. */}
+      {/* Generate the application bundle. Submission remains a manual action on
+          the employer's site; this disposable hierarchy tracks no application state. */}
       <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
@@ -1148,10 +1051,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
           title={localJobPending
-            ? 'A Local AI job is waiting for your Claude Code routine or is being imported.'
+            ? 'A Local AI job is waiting for the local-agent routine or is being imported.'
             : displayedApplicationRun.state === 'queued'
             ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
-            : 'AI researches the company, then writes a tailored résumé + cover letter and saves both to your Applied Jobs folder'}
+            : 'AI researches the company, then writes a tailored résumé + cover letter and saves the application bundle next to your canvas'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
           {localJobPending
@@ -1161,39 +1064,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
 
-        {/* The trailing "Undo" IS the undo affordance — it must stay visible
-            after marking, not collapse to a plain checkmark and not hide behind
-            hover, because this store is permanent and global: one misclick
-            makes a posting invisible across every canvas forever with no way to
-            reach it once the card is gone (design doc §6.2). State and action
-            are split by a hairline rule and carried by ONE glyph (the Check
-            icon) — the label says what is true, the rule says the rest of the
-            button is a second thing you can do to it, and the red hover says
-            which direction that goes. */}
-        <button
-          onClick={data.locked ? undefined : (e) => { e.stopPropagation(); applied ? unmarkApplied() : markApplied(); }}
-          disabled={markingApplied || !!data.locked}
-          className={`shrink-0 flex items-center justify-center gap-1 px-2.5 py-2 rounded-lg text-[11px] font-semibold transition-colors disabled:opacity-50 ${
-            data.locked
-              ? 'bg-white/5 text-white/20 cursor-default'
-              : applied
-                ? 'bg-emerald-500/15 text-emerald-300 hover:bg-red-500/15 hover:text-red-300'
-                : 'bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/70'
-          }`}
-          title={applied
-            ? 'Marked applied — this is remembered permanently across every canvas so this posting never resurfaces in a future search. Click to undo.'
-            : 'Record that you actually submitted this application (separate from generating it) — remembered permanently so it never resurfaces in a future search'}
-        >
-          {applied ? (
-            <>
-              <Check size={12} className="shrink-0" />
-              Applied
-              <span className="shrink-0 w-px h-3 bg-current opacity-25" aria-hidden="true" />
-              <span className="opacity-70">Undo</span>
-            </>
-          ) : 'Mark applied'}
-        </button>
       </div>
+      <ApplicationLaunchPromptDialog
+        prompt={applicationLaunchPrompt}
+        onClose={() => setApplicationLaunchPrompt('')}
+      />
     </div>
   );
 });

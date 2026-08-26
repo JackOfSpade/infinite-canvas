@@ -14,6 +14,7 @@ import {
   describeJobCollectionLimits,
   getJobCollectionSafetyForMode,
   getJobPlatformSafety,
+  getJobPlatformSelectionStatus,
   getUnsafeJobPlatformIds,
   getEnabledJobSourceIds,
   getRunnableJobSourceIds,
@@ -69,6 +70,26 @@ export default [
         }
       }
       return { sources: allCurrent.length };
+    },
+  },
+  {
+    name: 'job platform selection: country-incompatible sources are disabled in the UI without changing server policy',
+    run: () => {
+      const canadaDice = getJobPlatformSelectionStatus('dice', { jobsPerPlatform: null, pagesPerPlatform: null }, {
+        city: 'Toronto', stateCode: 'ON', country: 'Canada',
+      });
+      assert(canadaDice.enabled === false && canadaDice.code === 'country-incompatible',
+        'Dice must be visibly unavailable for a Canada target before the user starts a run');
+      assert(canadaDice.reason.includes('Canada'), 'country disable must explain the target-specific policy');
+      const canadaIndeed = getJobPlatformSelectionStatus('indeed', { jobsPerPlatform: null, pagesPerPlatform: null }, {
+        city: 'Toronto', stateCode: 'ON', country: 'Canada',
+      });
+      assert(canadaIndeed.enabled, 'Indeed must remain selectable for a Canada target');
+      const usaDice = getJobPlatformSelectionStatus('dice', { jobsPerPlatform: null, pagesPerPlatform: null }, {
+        city: 'Denver', stateCode: 'CO', country: 'United States',
+      });
+      assert(usaDice.enabled, 'Dice must re-enable when the target changes to the supported United States scope');
+      return { canadaDice: canadaDice.code, canadaIndeed: canadaIndeed.enabled, usaDice: usaDice.enabled };
     },
   },
   {

@@ -12,6 +12,7 @@ import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars 
 import { claudeReasoningMaxTokens } from './claudeModels.js';
 import { CLAUDE_FAMILY, isClaudeFamilyToken, claudeModelFor, resolvedClaudeModels, primeClaudeModels } from './modelResolver.js';
 import { handleSafe } from './ipcUtils.js';
+import { NON_API_AI_TRANSPORT, isNonApiJobTask, requestNonApiAi } from './nonApiAi.js';
 import { logger } from '../logger.js';
 
 /**
@@ -61,7 +62,8 @@ const TASK_MODELS = {
   'career-file-extract':       { gemini: 'gemini-3.7-flash' },
   'job-query-generation':      { gemini: 'gemini-3.7-flash' },
   'job-scoring':                { gemini: 'gemini-3.7-flash' },
-  'job-bucketing':              { gemini: 'gemini-3.7-flash' },
+  'job-taxonomy-plan':          { gemini: 'gemini-3.7-flash' },
+  'job-taxonomy-classify':      { gemini: 'gemini-3.7-flash' },
   // Two-step cash-compensation pipeline: grounded research discovers current
   // market evidence; a separate structured pass extracts comparable ranges.
   'job-compensation-research':  { gemini: 'gemini-3.7-flash' },
@@ -102,7 +104,8 @@ const TASK_GROUPS = {
   'resume-parse':              { group: 'extraction' },
   'career-file-extract':       { group: 'extraction' },
   'job-query-generation':      { group: 'extraction' },
-  'job-bucketing':             { group: 'extraction' },
+  'job-taxonomy-plan':         { group: 'extraction' },
+  'job-taxonomy-classify':     { group: 'extraction' },
   'default':                   { group: 'extraction' },
 
   // light — page status classify, text polish, platform-fit: short
@@ -204,19 +207,11 @@ const TASK_MAX_TOKENS = {
   // actual tokens; the reserve is headroom for complete, auditable JSON.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
     Math.min(32000, 2800 + itemCount * 1000),
-  // Bucketing reasons over salaries per category — thinking-heavy (the model
-  // weighs each job's salary against its category's distribution). The old
-  // static 6144 was calibrated against an older lighter-thinking Flash model
-  // and an over-optimistic "~500 visible" estimate; on newer thinking-heavy
-  // models it truncated — real telemetry on a 15-job run: gemini-3.5-flash emitted
-  // 3229 thinking + 2899 visible (=6128) and was STILL cut off at 6144, only
-  // surviving because the dynamic fallback reached a model that didn't think.
-  // Both thinking and visible scale ~linearly with job count (one jobIndex per
-  // job in the output, ~215 thinking + ~195 visible per job observed), so size
-  // it per-item like job-scoring. 4096 base + 400/item gives 15→10k (~1.6x the
-  // observed truncation point), 50→24k, capped at 24576 to bound billing.
-  'job-bucketing':             ({ itemCount = 15 } = {}) =>
-    Math.min(24576, 4096 + itemCount * 400),
+  // Taxonomy planning is fed only bounded aggregate statistics and examples.
+  'job-taxonomy-plan':         4096,
+  // Classification is fixed at 24 jobs and emits compact vocabulary indexes.
+  'job-taxonomy-classify':     ({ itemCount = 24 } = {}) =>
+    Math.min(8192, 2048 + itemCount * 160),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
   // Location-based cohort consolidation makes this per-job structured output
@@ -269,15 +264,17 @@ function pickModel(provider, task, settings) {
 }
 
 /**
- * Which API provider serves `task` — purely the user's Settings choice.
+ * Which transport serves `task`. Job-domain tasks are always manual handoffs;
+ * every other task follows the user's Gemini/Claude API setting.
  *
- * Generic LLM calls support Gemini API and Claude API only. `task` is kept in
- * the signature for API stability (every call site already threads it through)
- * even though the provider selection does not depend on it.
+ * Generic LLM calls support Gemini API and Claude API only. The explicit
+ * manual-task branch prevents job code from being misdiagnosed as an API
+ * request merely because the user last selected Claude or Gemini elsewhere.
  *
  * PURE — no throw, no network.
  */
 export function providerForTask(task, settings = getAISettings()) {
+  if (isNonApiJobTask(task)) return NON_API_AI_TRANSPORT;
   return settings?.provider === 'claude' ? 'claude' : 'gemini';
 }
 
@@ -289,6 +286,7 @@ export function providerForTask(task, settings = getAISettings()) {
  * window/output limits the sizing depends on.
  */
 export function modelForTask(task, settings = getAISettings()) {
+  if (isNonApiJobTask(task)) return NON_API_AI_TRANSPORT;
   return pickModel(providerForTask(task, settings), task, settings);
 }
 
@@ -300,7 +298,7 @@ export function modelForTask(task, settings = getAISettings()) {
  */
 export function taskModelRoutingSnapshot(settings = getAISettings()) {
   const provider = providerForTask(undefined, settings); // task-independent — see providerForTask doc
-  const tasksForReport = getKnownTaskIds();
+  const tasksForReport = [...getKnownTaskIds()].filter(task => !isNonApiJobTask(task));
   const groups = {};
   for (const group of Object.keys(GROUP_DEFAULT_FAMILY)) {
     const configured = settings?.claudeModels?.[group];
@@ -339,6 +337,44 @@ function pickMaxTokens(task, hints = {}, provider = null, model = null) {
       ? Math.max(learnedCap, GEMINI_MAX_OUTPUT_TOKENS)
       : learnedCap;
   return { cap, seed };
+}
+
+// Manual job handoffs do not call, select, or fall back between providers. Keep
+// only task-local token/schema guidance that any chosen chat can follow.
+function manualRequestConfig(task, hints = {}, {
+  cachedPrefix = null,
+  grounding = false,
+  requestKind = 'text',
+} = {}) {
+  const { cap, seed } = pickMaxTokens(task, hints);
+  const handoffSettings = {
+    requestKind,
+    transport: NON_API_AI_TRANSPORT,
+    userContent: cachedPrefix
+      ? { cachedPrefix: 'inlined before the dynamic prompt above' }
+      : { cachedPrefix: null },
+    groundingInstruction: grounding
+      ? 'Use web research in the chosen chat only when the task prompt requests it.'
+      : null,
+    generationParameters: 'controlled by the chosen chat application',
+  };
+  return { maxTokens: cap, formulaSeed: seed, handoffSettings };
+}
+
+/**
+ * Resolve a Claude family only when an actual non-manual Claude feature needs
+ * it. Startup must stay API-silent for someone using only Job Search's
+ * external-chat handoffs, while the first marketplace/workspace Claude call
+ * still gets the same current-model resolution eager startup priming supplied.
+ * The resolver coalesces callers and no-ops against its scoped cache, so later
+ * calls in one logical run retain a stable model for prompt-cache reuse.
+ */
+async function ensureClaudeModelsForApiRequest(provider) {
+  if (provider !== 'claude') return;
+  // Keep shared resolver work independent from one generation's cancellation.
+  // If the first caller aborts, a later API feature should still inherit the
+  // warmed current-model snapshot instead of remaining on MODEL_FLOOR.
+  await primeClaudeModels();
 }
 
 /**
@@ -385,8 +421,31 @@ function raisedCapAfterTruncation(err, { signal, usedCap, task, hints, provider,
  */
 export async function checkPromptFits(prompt, opts = {}) {
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  // Job-domain tasks are handled by the user's own chat application. Never
+  // cross the API boundary for a provider token-count preflight; the returned
+  // permissive local estimate keeps existing batch orchestration intact.
+  if (isNonApiJobTask(task)) {
+    const chars = (cachedPrefix?.length || 0) + (prompt?.length || 0)
+      + (responseSchema ? JSON.stringify(responseSchema).length : 0);
+    const { cap: requestedOutput } = pickMaxTokens(task, hints);
+    return {
+      fits: true,
+      tokens: estimateTokensFromChars(chars),
+      model: 'non-api-ai',
+      provider: 'non-api-ai',
+      via: 'manual',
+      budget: Number.MAX_SAFE_INTEGER,
+      reservedOutput: requestedOutput,
+      contextWindow: Number.MAX_SAFE_INTEGER,
+    };
+  }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  // Startup is intentionally API-silent for the manual Job flows. Once a
+  // non-manual Claude preflight is actually requested, resolve before choosing
+  // its model so count/preflight and the following generation cannot disagree
+  // about context window, cache scope, or output cap.
+  await ensureClaudeModelsForApiRequest(provider);
   const model = pickModel(provider, task, settings);
   const { cap: requestedOutput } = pickMaxTokens(task, hints, provider, model);
 
@@ -464,8 +523,12 @@ const ATTACHMENT_TOKEN_ALLOWANCE = 3000;
  * image/PDF token counts are delegated to the provider (which rejects oversized);
  * this catches the obvious over-window case early with an actionable message.
  */
-async function assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount = 1 } = {}) {
-  const fit = await checkPromptFits(prompt, { task, hints, signal });
+async function assertAttachmentPromptFits(prompt, { task, hints, signal, responseSchema, attachmentCount = 1 } = {}) {
+  // A native Claude JSON format is part of the real request and contributes
+  // input tokens.  Keep attachment preflight aligned with text preflight too;
+  // otherwise a large schema can consume the output reserve after this helper
+  // has declared an image/PDF request safe.
+  const fit = await checkPromptFits(prompt, { task, hints, signal, responseSchema });
   const withAttachments = fit.tokens + Math.max(0, attachmentCount) * ATTACHMENT_TOKEN_ALLOWANCE;
   if (withAttachments > fit.budget) {
     throw new Error(
@@ -494,15 +557,35 @@ async function assertAttachmentPromptFits(prompt, { task, hints, signal, attachm
  *   concatenate the prefix into the prompt and let the provider detect the
  *   repeated prefix. No API-level cache plumbing needed.
  */
+function assertStructuredResponseSchema(responseSchema, caller) {
+  if (responseSchema && typeof responseSchema === 'object' && !Array.isArray(responseSchema)) return;
+  throw new Error(`${caller} requires a responseSchema. Use callLLMRaw for prose or grounded research.`);
+}
+
 export async function callLLMText(prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, retryOnTruncation, responseValidator } = normalizeOpts(opts);
+  assertStructuredResponseSchema(responseSchema, 'callLLMText');
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` (the model that actually served the call) for per-stage
   // telemetry. The Gemini fallback loop writes it; for Claude there's no
   // fallback so we record the picked model directly.
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
+  if (isNonApiJobTask(task)) {
+    const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
+    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+      cachedPrefix, requestKind: 'structured-text',
+    });
+    const result = await requestNonApiAi({
+      prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
+    });
+    if (meta) meta.model = 'non-api-ai';
+    return result;
+  }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  await ensureClaudeModelsForApiRequest(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const capHints = { promptLength: fullLen, ...hints };
@@ -515,7 +598,7 @@ export async function callLLMText(prompt, opts = {}) {
   await assertPromptFits(prompt, { signal, task, hints, responseSchema, cachedPrefix });
   const attempt = async () => {
     if (provider === 'claude') {
-      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, responseSchema, cachedPrefix, task });
       if (meta) meta.model = model;
       return parseAiJson(raw);
     }
@@ -532,7 +615,13 @@ export async function callLLMText(prompt, opts = {}) {
     try {
       return await attempt();
     } catch (err) {
-      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      // Atomic tasks benefit from a one-time raised-cap retry. Chunkable callers
+      // (job scoring) deliberately disable it so their own split/reconcile path
+      // can halve the batch immediately instead of paying for the exact same
+      // oversized prompt twice.
+      const raised = retryOnTruncation && !retriedForCap
+        ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })
+        : null;
       if (!raised) throw enhanceLLMError(err, provider);
       logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
       retriedForCap = true;
@@ -590,8 +679,22 @@ export async function cancelLLMTextBatch(batchId) {
 export async function callLLMRaw(prompt, opts = {}) {
   const { signal, task, hints, grounding, cachedPrefix, excludeModels } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
+  if (isNonApiJobTask(task)) {
+    const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
+    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+      cachedPrefix, grounding, requestKind: 'raw-text',
+    });
+    const result = await requestNonApiAi({
+      prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      requestKind: 'raw-text', signal,
+    });
+    if (meta) meta.model = 'non-api-ai';
+    return result;
+  }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  await ensureClaudeModelsForApiRequest(provider);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const capHints = { promptLength: fullLen, ...hints };
@@ -602,7 +705,7 @@ export async function callLLMRaw(prompt, opts = {}) {
   await assertPromptFits(prompt, { signal, task, hints, cachedPrefix });
   const attempt = async () => {
     if (provider === 'claude') {
-      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: false, grounding, task, cachedPrefix });
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, grounding, task, cachedPrefix });
       if (meta) meta.model = model;
       return raw;
     }
@@ -630,10 +733,25 @@ export async function callLLMRaw(prompt, opts = {}) {
 }
 
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, excludeModels } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, excludeModels, responseValidator } = normalizeOpts(opts);
+  assertStructuredResponseSchema(responseSchema, 'callLLMVision');
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
+  if (isNonApiJobTask(task)) {
+    const capHints = { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints };
+    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+      requestKind: 'structured-vision',
+    });
+    const result = await requestNonApiAi({
+      prompt, task, responseSchema, maxOutputTokens: maxTokens, formulaSeed,
+      handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator, signal,
+    });
+    if (meta) meta.model = 'non-api-ai';
+    return result;
+  }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  await ensureClaudeModelsForApiRequest(provider);
   const model    = pickModel(provider, task, settings);
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
@@ -642,10 +760,10 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Preflight the text prompt + a per-image allowance (image tokens themselves
   // are the provider's authority). Fails loud before sending if clearly over.
-  await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: imagePaths?.length || 0 });
+  await assertAttachmentPromptFits(prompt, { task, hints, signal, responseSchema, attachmentCount: imagePaths?.length || 0 });
   const attempt = async () => {
     if (provider === 'claude') {
-      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
+      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, responseSchema, task });
       if (meta) meta.model = model;
       return parseAiJson(raw);
     }
@@ -679,7 +797,22 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   if (isSensitivePath(path.resolve(String(filePath || '')))) {
     throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
   }
-  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, responseValidator } = normalizeOpts(opts);
+  assertStructuredResponseSchema(responseSchema, 'callLLMDocument');
+  if (isNonApiJobTask(task)) {
+    // The live document request does not use a cached prefix, so do not add
+    // one only to the manual version. This keeps the copied prompt's evidence
+    // stable instead of accidentally changing it between handoff modes.
+    const capHints = { promptLength: prompt?.length || 0, ...hints };
+    const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+      requestKind: 'structured-document',
+    });
+    return requestNonApiAi({
+      prompt, task, responseSchema, maxOutputTokens: maxTokens,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator, signal,
+    });
+  }
   // Word docs (.docx / legacy .doc) can't be sent as inline data — Gemini 400s on
   // the OOXML MIME and Claude reads the ZIP bytes as garbage. Extract the text via
   // macOS textutil and route through the normal TEXT path, which every provider
@@ -692,16 +825,17 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
+  await ensureClaudeModelsForApiRequest(provider);
   const model    = pickModel(provider, task, settings);
   const capHints = { promptLength: prompt?.length || 0, ...hints };
   let { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, capHints, provider, model);
   // Preflight the text prompt + one document allowance (the file's own tokens —
   // PDF pages, etc. — remain the provider's authority). A pathologically large
   // career-file/résumé fails loud here instead of mid-extraction truncation.
-  await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: 1 });
+  await assertAttachmentPromptFits(prompt, { task, hints, signal, responseSchema, attachmentCount: 1 });
   const attempt = async () => {
     if (provider === 'claude') {
-      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
+      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, responseSchema, task });
       return parseAiJson(raw);
     }
     return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, excludeModels });
@@ -729,11 +863,11 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || opts.meta !== undefined || Object.keys(opts).length === 0)) {
-    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [] };
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.responseValidator !== undefined || Object.keys(opts).length === 0)) {
+    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [], retryOnTruncation: opts.retryOnTruncation !== false, responseValidator: typeof opts.responseValidator === 'function' ? opts.responseValidator : null };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.
-  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, excludeModels: [] };
+  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, excludeModels: [], retryOnTruncation: true, responseValidator: null };
 }
 
 /**

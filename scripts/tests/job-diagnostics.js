@@ -1,4 +1,9 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, isUnavailableDetailPage, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
+import { buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
+import { planPartialScoreRecovery } from '../test-dependencies.js';
+import { reconcileSearchFunnel } from '../test-dependencies.js';
+import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
@@ -7,6 +12,8 @@ import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { collapseEventBursts } from '../test-dependencies.js';
 import { buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
+import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
+import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification } from '../../electron/ipc/jobs.js';
 
 export default [
 {
@@ -57,13 +64,89 @@ export default [
     },
   },
 {
+    name: 'native challenge history preserves closure evidence without Cloudflare query tokens',
+    run: () => {
+      const evidence = buildNativeChallengeHistoryEvidence({
+        nativeChallenge: {
+          initialChallengeObserved: true,
+          initialSignal: 'cf-verify-text',
+          pollCount: 7,
+          pollErrorCount: 1,
+          lastClassification: 'cleared',
+          lastTabUrl: 'https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret-token',
+          lastTabTitle: 'Account settings',
+          terminalSource: 'child-exit',
+          exitCode: 0,
+          postCloseVerify: {
+            outcome: 'challenge-cleared', status: 200,
+            reason: 'account page reached',
+            finalUrl: 'https://secure.indeed.com/settings/account?private=token',
+          },
+        },
+      });
+      assert(evidence.includes('initial challenge=yes')
+        && evidence.includes('polls=7')
+        && evidence.includes('terminal=child-exit')
+        && evidence.includes('post-close=challenge-cleared HTTP 200')
+        && evidence.includes('https://secure.indeed.com/settings/account')
+        && !evidence.includes('secret-token')
+        && !evidence.includes('private=token'),
+      'native challenge reports retain decisive lifecycle facts but strip URL query tokens');
+      return { evidence: 'redacted' };
+    },
+  },
+{
+    name: 'session report URLs strip query and fragment tokens in prose and trace fields',
+    run: () => {
+      const prose = redactReportUrlsInText('Anti-bot at https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret#step, retry later.');
+      const traces = renderSessionTraceBlocks([{ id: 'indeed', name: 'Indeed' }], {
+        indeed: { lastTrace: {
+          target: 'https://secure.indeed.com/settings/account?target=secret',
+          finalUrl: 'https://secure.indeed.com/settings/account?final=secret#hash',
+          error: 'Redirected via https://signin.example.test/login?oauth=secret',
+          checks: [{
+            target: 'https://secure.indeed.com/settings/account?q=secret',
+            finalUrl: 'https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret',
+            error: 'failed at https://example.test/path?token=secret',
+          }],
+        } },
+      });
+      assert(prose.includes('https://secure.indeed.com/settings/account, retry later.')
+        && traces.includes('https://secure.indeed.com/settings/account')
+        && !prose.includes('__cf_chl_rt_tk')
+        && !traces.includes('secret')
+        && !traces.includes('oauth=')
+        && !traces.includes('token='),
+      'session/auth report formatting keeps URL identity but never exports query/hash tokens');
+      return { redacted: true };
+    },
+  },
+{
+    name: 'Indeed native challenge and authenticated resume produce accurate verification/session evidence',
+    run: () => {
+      assert(indeedWarningRequiresManualVerification({ resumeState: { mode: 'native-challenge' } })
+        && !indeedWarningRequiresManualVerification({ resumeState: { mode: 'retry-later' } }),
+      'a deferred native challenge counts as manual verification for the run-order history');
+      const fresh = authenticatedIndeedScrapeStatus({
+        preflightStatus: 'authenticated', hasPPID: true,
+        landedUrl: 'https://secure.indeed.com/settings/account?source=resume',
+      }, null);
+      assert(fresh?.lastReason.includes('freshly observed an authenticated session')
+        && fresh?.lastTrace?.status === 'scrape-preflight'
+        && authenticatedIndeedScrapeStatus({ preflightStatus: 'authenticated', hasPPID: true }, { code: 'needs-login' }) === null
+        && authenticatedIndeedScrapeStatus({ preflightStatus: 'unknown', hasPPID: false }, null) === null,
+      'only the scraper\'s affirmative authenticated observation can replace stale restored cache provenance');
+      return { manual: true, freshSession: true };
+    },
+  },
+{
     name: 'Job-hub Node Diagnostics distinguishes fetched listings from kept scoring input',
     run: () => {
       const report = generateMarkdown({
         description: 'Counter wording regression fixture.',
         nodes: [{
           id: 'job-hub-counter-fixture', type: 'jobhub',
-          data: { hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3, scoredJobs: [{}, {}, {}] },
+          data: { hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3, scoredJobs: [{}, {}, {}], enabledSourceIds: ['indeed', 'linkedin'] },
         }],
         edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
         nodeInternals: [{
@@ -72,9 +155,41 @@ export default [
         }],
       }).markdown;
       assert(report.includes('scraped: 31 → kept: 3')
+        && report.includes('enabledSourceIds: indeed,linkedin')
         && !report.includes('hubState: done, scraped: 3, results: 3'),
-      'Node Diagnostics must not label the post-filter scoring input as the total scraped count');
-      return { scraped: 31, kept: 3 };
+      'Node Diagnostics must keep both the post-filter count and the saved source selection visible');
+      const legacyDefaultReport = generateMarkdown({
+        description: 'Legacy source-selection default fixture.',
+        nodes: [{ id: 'legacy-job-hub', type: 'jobhub', data: { hubState: 'done', scoredJobs: [] } }],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [{ id: 'legacy-job-hub', type: 'jobhub', position: { x: 0, y: 0 }, measured: { width: 260, height: 140 } }],
+      }).markdown;
+      assert(legacyDefaultReport.includes('enabledSourceIds: default (all known platforms)'),
+        'Node Diagnostics must disclose the legacy missing allow-list as the all-platform default');
+      return { scraped: 31, kept: 3, legacySelection: 'all' };
+    },
+  },
+{
+    name: 'Job-hub Node Diagnostics exposes career identity and drop-lock reason',
+    run: () => {
+      const nodes = [
+        { id: 'emptyhub', type: 'jobhub', data: { hubState: 'empty' } },
+        { id: 'lockhub1', type: 'jobhub', data: { hubState: 'empty', inputLocked: true } },
+      ];
+      const report = generateMarkdown({
+        description: 'Copied Job Search drop diagnostics fixture.',
+        nodes, edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [], eventLogs: [],
+        nodeInternals: nodes.map((node, index) => ({
+          id: node.id, type: node.type, position: { x: index * 300, y: 0 },
+          measured: { width: 330, height: 813 },
+        })),
+      }).markdown;
+      assert(report.includes('| `emptyhub`')
+        && report.includes('careerIdentity: none, dropLock: none')
+        && report.includes('| `lockhub1`')
+        && report.includes('careerIdentity: present, dropLock: started'),
+      'FULL Node Diagnostics must show whether each copied Job Search can accept a career-file drop and why not');
+      return { empty: 'unlocked', started: 'started' };
     },
   },
 {
@@ -86,7 +201,7 @@ export default [
         concurrency: 4,
         platformCount: 7,
         durations: [
-          { platformId: 'indeed', ms: 500, connected: true, outcome: 'retained-prior', inconclusive: true, reason: 'transient fetch failure' },
+          { platformId: 'indeed', ms: 500, connected: true, outcome: 'retained-prior', inconclusive: true, reason: 'transient fetch failure at https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret' },
           { platformId: 'linkedin', ms: 400, connected: true, outcome: 'verified', reason: 'feed loaded' },
           { platformId: 'mercari', ms: 0, connected: false, outcome: 'skipped-native', reason: 'native read owns login state' },
           { platformId: 'swappa', ms: 0, connected: false, outcome: 'skipped-login-flow', reason: 'login flow owns verification' },
@@ -95,7 +210,8 @@ export default [
           { platformId: 'failed', ms: 10, connected: false, outcome: 'error', error: 'navigation failed' },
         ],
       });
-      assert(report.includes('retained prior: connected (inconclusive verify) — transient fetch failure'),
+      assert(report.includes('retained prior: connected (inconclusive verify) — transient fetch failure at https://secure.indeed.com/settings/account')
+        && !report.includes('__cf_chl_rt_tk') && !report.includes('secret'),
         'verification timing must not render a retained cache state as freshly connected');
       assert(report.includes('verified connected'),
         'verification timing must mark a fresh verifier verdict');
@@ -128,6 +244,8 @@ export default [
       const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
       assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
         'Clipboard cap: roomy budget keeps logs + full event history untouched');
+      assert(roomy.markdown.includes('Up to 200 lines from the main process') && !roomy.markdown.includes('Last ~60 lines'),
+        'Main-process log heading matches the current 200-line ring-buffer request');
       assert(roomy.markdown.includes('**Timestamps:** UTC (`HH:MM:SS.mmm`).')
         && roomy.markdown.includes('**Timestamps:** local time (renderer).'),
       'Clipboard cap: timestamp bases are labeled for main-process and renderer evidence');
@@ -393,6 +511,18 @@ export default [
         const switched = linkedInSameIpRetryDecision('185.98.171.115', 1_000_000, '149.22.82.90', 1_000_001);
         assert(justWalled.skip && justWalled.retryAfterMs > 0 && !cooled.skip && cooled.retryAfterMs === 0 && !switched.skip,
           'Same-IP retry policy must suppress only the immediate retry, then allow a one-minute cooled retry or an IP change');
+
+        const extractorSource = fs.readFileSync(path.resolve('electron/extractors/apiExtractors.js'), 'utf8');
+        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const snapshotSource = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+        assert(extractorSource.includes("preferAuthenticated = false")
+          && extractorSource.includes('authenticatedPage = await browser.newPage()')
+          && extractorSource.includes('applyGuestFallback')
+          && extractorSource.includes('const attempted = attemptedIndexes.size'),
+        'LinkedIn enrichment must prefer the verified profile page, fall back once to the guest SEO page when needed, and report unique attempted jobs rather than a rotation-sensitive index');
+        assert(jobsSource.includes('sameIp.skip && !preferAuthenticated')
+          && snapshotSource.includes('profile session → guest fallback'),
+        'A previous guest wall must not suppress a verified-session Solve, and the report must disclose an authenticated-to-guest fallback');
         return { latestResolve: latest.enrichSuccess, cooledRetryAllowed: !cooled.skip };
       } finally {
         telemetry.nodeId = prior.nodeId;
@@ -502,7 +632,7 @@ export default [
           && degradedReport.includes('source bytes exact · PDF header valid · PDF parse valid (1p, 612x792pt)')
           && degradedReport.includes('Local edit Sync: workspace registered · service listening')
           && degradedReport.includes('Opened destination folder: ✅')
-          && degradedReport.includes('Applied-jobs record for this export: not marked'),
+          && degradedReport.includes('Submission state: not tracked'),
         'FULL report must include the bounded destination readback manifest and reveal result');
 
         const filtered = applyBugReportCode([
@@ -854,7 +984,7 @@ export default [
     name: 'Application prompts preserve evidence scope and reject pseudo-growth metrics',
     run: () => {
       const source = fs.readFileSync(path.join(process.cwd(), 'electron', 'ipc', 'jobApplication.js'), 'utf8');
-      const routine = fs.readFileSync(path.join(process.cwd(), 'local_ai', 'CLAUDE_CODE_ROUTINE.md'), 'utf8');
+      const routine = fs.readFileSync(path.join(process.cwd(), 'local_ai', 'LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
       assert(!source.includes('_retiredRemoteApplicationGeneration')
         && !source.includes("from './llm.js'")
         && routine.includes('Never add an unrecorded outcome')
@@ -1785,7 +1915,6 @@ export default [
             extracted: 0,
             ageDropped: 0,
             historyDropped: 0,
-            hiddenApplied: 0,
             kept: 0,
             diag: {
               closeReason: 'user-closed',
@@ -1826,7 +1955,7 @@ export default [
           glassdoor: {
             ts: Date.now(), extracted: 6, relevanceDropped: 2,
             relevanceRejected: ['Loss Prevention Associate', 'Armed Driver/Messenger'],
-            ageDropped: 0, historyDropped: 0, hiddenApplied: 0, kept: 4,
+            ageDropped: 0, historyDropped: 0, kept: 4,
             enrichment: {
               attempted: 4, enriched: 3, empty: 1,
               emptySamples: [{ title: 'Security Officer', url: 'https://jobs/missing-jd' }],
@@ -2160,6 +2289,80 @@ export default [
     },
 },
 {
+    name: 'job pipeline report: a resolved post-search resume supersedes stale zero-result diagnostics',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves,
+        resumeAttempts: telemetry.resumeAttempts, sourceEvents: telemetry.sourceEvents,
+        scoring: telemetry.scoring,
+      };
+      const now = Date.now();
+      Object.assign(telemetry, {
+        nodeId: 'resolved-resume-reporting', windowId: null,
+        pipeline: { ts: now - 1_000, durationMs: 7_100, active: false, phase: 'completed' },
+        search: {
+          ts: now - 10_000, queries: 1, raw: 0, relevanceDropped: 0, deduped: 0,
+          ageDropped: 0, historyDropped: 0, kept: 0,
+          bySource: { indeed: { count: 0, warning: { code: 'scrape-failed', severity: 'block' } }, },
+        },
+        resolves: {},
+        resumeAttempts: { indeed: [{ t: now, mode: 'native-challenge', outcome: 'resolved', detail: 'extracted=28 · ageDropped=0 · historyDropped=9 · new=19' }] },
+        sourceEvents: { indeed: [{ t: 0, status: 'error', code: 'scrape-failed' }] },
+        scoring: { ts: now, input: 19, selectedForScoring: 19, cappedForBudget: 0, scored: 19, placeholders: 0, unscored: 0, batches: 1, failedBatches: 0 },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['resolved-resume-reporting']), null, null);
+        assert(report.includes('superseded by 1 post-completion resume pass')
+          && report.includes('### Initial Search Pass')
+          && report.includes('Initial-pass counters only')
+          && report.includes('indeed=resume resolved → 19')
+          && !report.includes('real miss to investigate: indeed')
+          && !report.includes('`indeed`: error⚠scrape-failed@+0s')
+          && !report.includes('carried over from a prior run'),
+        'a resolved resume must override stale zero-result, progress, per-source fallback, and carry-over reporting');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+},
+{
+    name: 'job pipeline report: a successful generic Solve supersedes stale zero-result diagnostics',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves,
+        resumeAttempts: telemetry.resumeAttempts, sourceEvents: telemetry.sourceEvents,
+      };
+      const now = Date.now();
+      Object.assign(telemetry, {
+        nodeId: 'resolved-generic-reporting', windowId: null,
+        pipeline: { ts: now - 1_000, durationMs: 7_100, active: false, phase: 'completed' },
+        search: {
+          ts: now - 10_000, queries: 1, raw: 0, relevanceDropped: 0, deduped: 0,
+          ageDropped: 0, historyDropped: 0, kept: 0,
+          bySource: { ziprecruiter: { count: 0, warning: { code: 'scrape-failed', severity: 'block' } } },
+        },
+        resolves: { ziprecruiter: { ts: now, resolved: true, kept: 4, warning: null } },
+        resumeAttempts: {},
+        sourceEvents: { ziprecruiter: [{ t: 0, status: 'error', code: 'scrape-failed' }, { t: 1_000, status: 'done' }] },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['resolved-generic-reporting']), null, null);
+        assert(report.includes('ziprecruiter=Solve resolved → 4')
+          && !report.includes('real miss to investigate: ziprecruiter')
+          && !report.includes('`ziprecruiter`: error⚠scrape-failed@+0s'),
+        'a successful generic Solve must override the stale initial zero/error row and trail');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+},
+{
     name: 'job pipeline report: remote-feed relevance trace shows title evidence, not tags',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -2236,6 +2439,135 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { keyKind: sample.keyKind, samples: result.samples.length };
+    },
+  },
+{
+    name: 'Job search: all country-inapplicable selections fail before mutating prior results',
+    run: () => {
+      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const policyStart = backend.indexOf('const sourceCountryPolicies = summarizeJobSourceCountryPolicies');
+      const runStart = backend.indexOf('const runStartedAt = Date.now()', policyStart);
+      const preflight = backend.slice(policyStart, runStart);
+      assert(policyStart >= 0 && runStart > policyStart
+        && preflight.includes('countryApplicableSourceIds.size === 0')
+        && preflight.includes('noCountryApplicablePlatforms: true')
+        && preflight.includes("status: 'skipped'")
+        && preflight.includes('no prior results were changed'),
+      'an all-inapplicable source selection must fail visibly before run staging/snapshot work');
+
+      const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const dispositionStart = renderer.indexOf('const handlePostSearchResult = useCallback');
+      const dispositionEnd = renderer.indexOf('const runPipeline = useCallback', dispositionStart);
+      const disposition = renderer.slice(dispositionStart, dispositionEnd);
+      assert(!disposition.includes('existingResults.length > 0')
+        && disposition.includes('saveJobAnalysisSnapshot?.({\n          jobs: []')
+        && disposition.includes('scoredJobs: []')
+        && disposition.includes("rerunOutcome: 'no-new-results'"),
+      'a valid zero-new rerun must replace prior results and its analysis snapshot with the empty current run');
+      return { preflight: true, transactionalEmpty: true };
+    },
+},
+{
+    name: 'Job search: zero-new run replaces previous results and shows only 0 new jobs',
+    run: () => {
+      const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
+      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const dispositionStart = renderer.indexOf('const handlePostSearchResult = useCallback');
+      const dispositionEnd = renderer.indexOf('const runPipeline = useCallback', dispositionStart);
+      const disposition = renderer.slice(dispositionStart, dispositionEnd);
+      assert(disposition.includes('scoredJobs: []')
+        && disposition.includes('finalSourceCounts: {}')
+        && disposition.includes('resultCount: 0')
+        && disposition.includes('totalScoredCount: 0')
+        && disposition.includes('scrapedCount: 0'),
+      'zero-new disposition clears every prior result summary');
+      assert(!renderer.includes('data.rerunNotice ? (')
+        && !renderer.includes("title: 'No new jobs'")
+        && doneState.includes("noNewResults ? 'new jobs'")
+        && doneState.includes("? `${gatheredCount || scrapedCount} scraped`"),
+      'zero-new completion has no notice/toast, shows 0 new jobs, and retains the current scraped count');
+      assert(backend.includes('rawCount: relevanceFunnel.raw')
+        && backend.includes('gatheredCount: allJobs.length')
+        && backend.includes('source-card')
+        && backend.includes('count: data.jobs.length')
+        && sourceCard.includes('count  = liveProgress.count'),
+      'provider-level raw diagnostics stay separate from the source-card-aligned gathered total');
+      const freshStart = renderer.indexOf('const visibleGatheredCount = searchResult.gatheredCount');
+      const freshEnd = renderer.indexOf('const startProcessing = useCallback', freshStart);
+      const resumeStart = renderer.indexOf('const visibleGatheredCount = searchResult.gatheredCount', freshStart + 1);
+      const resumeEnd = renderer.indexOf('} catch (error)', resumeStart);
+      assert(freshStart >= 0 && freshEnd > freshStart
+        && renderer.slice(freshStart, freshEnd).includes('gatheredCount: visibleGatheredCount')
+        && resumeStart >= 0 && resumeEnd > resumeStart
+        && renderer.slice(resumeStart, resumeEnd).includes('gatheredCount: visibleGatheredCount'),
+      'fresh and crash-resume paths pass the source-card-aligned gathered count to every visible terminal state');
+      const pausedStart = renderer.indexOf('const handlePostSearchResult = useCallback');
+      const pausedEnd = renderer.indexOf('const runPipeline = useCallback', pausedStart);
+      const pausedPath = renderer.slice(pausedStart, pausedEnd);
+      const resumeScoringStart = renderer.indexOf('const resumeScoring = useCallback');
+      const resumeScoringEnd = renderer.indexOf('const handleResumeRun = useCallback', resumeScoringStart);
+      const resumeScoringPath = renderer.slice(resumeScoringStart, resumeScoringEnd);
+      assert(pausedPath.includes('gatheredCountRef.current = gatheredCount ?? foundJobs.length')
+        && pausedPath.includes('gatheredCount: gatheredCount ?? foundJobs.length')
+        && resumeScoringPath.includes('const pausedGatheredCount = gatheredCountRef.current')
+        && resumeScoringPath.includes('gatheredCount: pausedGatheredCount'),
+      'a sources-ready pause preserves the source-card-aligned total through same-tick Solve/Skip into resumed scoring');
+      assert(resumeScoringPath.includes('saveJobAnalysisSnapshot?.({\n          jobs: []')
+        && resumeScoringPath.includes('Failed to save paused empty-run analysis snapshot')
+        && resumeScoringPath.includes("rerunOutcome: 'no-new-results'")
+        && resumeScoringPath.includes('rerunNotice: null')
+        && resumeScoringPath.includes('pendingBatch: null')
+        && resumeScoringPath.includes('pendingJobsRef.current = null')
+        && resumeScoringPath.includes("hubStateRef.current = 'done'"),
+      'zero-pending resumed scoring replaces the current-run snapshot and reaches the same cleared 0-new-jobs terminal state as a direct empty search');
+      const pausedFixture = { gatheredCount: 5, pendingJobs: [{}, {}, {}] };
+      const resumedGatheredCount = pausedFixture.gatheredCount;
+      const zeroPendingGatheredCount = pausedFixture.gatheredCount;
+      const applyResolvedDelta = (count, delta) => Math.max(0, count + delta);
+      assert(resumedGatheredCount === 5 && pausedFixture.pendingJobs.length === 3
+        && zeroPendingGatheredCount === 5
+        && applyResolvedDelta(5, 2) === 7
+        && applyResolvedDelta(5, -2) === 3,
+      'paused counter contract: 5 gathered remains 5 with 3 pending or zero pending; additive +2 and replacement −2 resolve deltas reconcile card totals');
+      const resolvedStart = renderer.indexOf('const onResolved = (e) =>');
+      const resolvedEnd = renderer.indexOf('document.addEventListener(\'job-source-resolved\'', resolvedStart);
+      const resolvedPath = renderer.slice(resolvedStart, resolvedEnd);
+      const sourceCardResolveStart = sourceCard.indexOf('if (result?.resolved)');
+      const sourceCardResolveEnd = sourceCard.indexOf('} else if (prevForRestore)', sourceCardResolveStart);
+      const sourceCardResolvePath = sourceCard.slice(sourceCardResolveStart, sourceCardResolveEnd);
+      assert(resolvedPath.includes('sourceCountDelta')
+        && resolvedPath.indexOf('if ((e.detail?.jobRunId || null)') < resolvedPath.indexOf('const sourceCountDelta')
+        && resolvedPath.includes('gatheredCountRef.current = Math.max(0')
+        && resolvedPath.includes('gatheredCount: gatheredCountRef.current')
+        && sourceCardResolvePath.includes('sourceCountDelta: nextSourceCount - previousSourceCount')
+        && sourceCardResolvePath.includes('replaceSourceItems')
+        && sourceCardResolvePath.includes('previousSourceCount + resolvedCount'),
+      'resolved source cards emit additive and replacement count deltas, and the guarded hub applies them to the paused gathered total');
+      const backgroundStart = renderer.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
+      const backgroundEnd = renderer.indexOf('const handleJobsSettingsChange = useCallback', backgroundStart);
+      const backgroundPath = renderer.slice(backgroundStart, backgroundEnd);
+      const pipelineStart = renderer.indexOf('const runPipeline = useCallback');
+      const pipelineEnd = renderer.indexOf('const startProcessing = useCallback', pipelineStart);
+      const pipelinePath = renderer.slice(pipelineStart, pipelineEnd);
+      assert(!backgroundPath.includes('gatheredCountRef.current = 0')
+        && pipelinePath.includes('const processingToken = processingRunsRef.current.start();\n    if (!processingToken) return;\n    // This is a new top-level search')
+        && pipelinePath.includes('gatheredCountRef.current = 0'),
+      'a post-run USAJobs append preserves the aggregate gathered counter, while a newly owned top-level pipeline resets it');
+      return { replaced: true, notice: false, label: 'new jobs', rawDiagnostics: 90, visibleGathered: 3 };
+    },
+  },
+{
+    name: 'Job search locations: remote company scope and worker residence are labeled separately',
+    run: () => {
+      const fields = fs.readFileSync(path.resolve('src/components/JobSearchLocationFields.jsx'), 'utf8');
+      assert(fields.includes('Company location for remote job: United States')
+        && fields.includes('where you will live while working remotely')
+        && fields.includes('Your city while working remotely')
+        && !fields.includes('Remote role scope:'),
+      'remote salary fields must identify the company country separately from the worker residence');
+      return { clearLabels: true };
     },
   },
 {
@@ -2344,8 +2676,11 @@ export default [
           bandSummary: [{ label: 'Limited hiring fit (0–79)', count: 1 }], salaryRangeLabels: ['$80k–$120k/yr'],
           roleSummary: [{ name: 'Creative', count: 1, sampleTitles: ['Weekly role'] }],
           taxonomyRepairs: ['canonicalized salary label "$120k process/yr"'],
-          taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, fitBand: 'Limited hiring fit (0–79)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
+          taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, salaryRangeMetadata: { lowerAnnual: 83200, upperAnnual: 104000 }, fitBand: 'Limited hiring fit (0–79)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
           taxonomyAuditOmitted: 0, model: 'gemini-2.5-flash',
+          strategy: 'bounded-plan-chunks', taxonomyStage: 'complete', taxonomyChunksCompleted: 6,
+          taxonomyChunkCount: 6, taxonomyChunkSize: 24, taxonomyRepresentativeCount: 18,
+          taxonomyVocabularySize: 11, provider: 'claude',
           fallback: { preferredModel: 'gemini-3.7-flash', attempts: 1, reason: 'server', counts: { server: 1 } },
           error: null,
         },
@@ -2354,8 +2689,12 @@ export default [
         let report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
         assert(report.includes('Taxonomy validation repaired: canonicalized salary label "$120k process/yr"')
           && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**')
-          && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)'),
-        'job pipeline report makes salary placement, repair evidence, and taxonomy fallback cause visible');
+          && report.includes('salary range disclosed: $83,200–$104,000/yr. Kept the lower endpoint for deterministic placement.')
+          && !report.includes('⚠️ salary range disclosed: $83,200–$104,000/yr')
+          && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)')
+          && report.includes('stage complete · 6/6 chunk(s) · max 24 jobs/request · 18 planning sample(s) · 11 role label(s) · provider `claude`')
+          && !report.includes('stage complete · classification not started'),
+        'job pipeline report makes successful bounded progress, salary placement, repair evidence, and taxonomy fallback cause visible');
 
         // A taxonomy provider may fail after scores are available.
         // Combine must abort transactionally: it may not create a renderer
@@ -2364,7 +2703,17 @@ export default [
           ts: Date.now(), input: 92, roleCount: 0, placed: 0, missing: 92, duplicated: 0,
           bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [],
           taxonomyAuditOmitted: 0, model: 'gemini-3.7-flash', fallback: null,
-          strategy: 'failed-provider', blocked: false, capability: 'job-board-generation', errorCode: 'PROVIDER_UNAVAILABLE',
+          strategy: 'bounded-plan-chunks', taxonomyStage: 'classifying', taxonomyChunksCompleted: 2,
+          taxonomyChunkCount: 4, taxonomyChunkSize: 24, taxonomyRepresentativeCount: 18,
+          taxonomyVocabularySize: 7, provider: 'claude', blocked: false,
+          capability: 'job-board-generation', errorCode: 'PROVIDER_UNAVAILABLE',
+          roleShape: {
+            type: 'object', expectedCount: 92, receivedCount: 90, rawEntryCount: 91,
+            missingCount: 2, blankCount: 1, nonStringCount: 0, extraCount: 1,
+            missingIndices: [17, 91], blankIndices: [44], nonStringIndices: [], extraKeys: ['roles'], omittedIssueIndices: 0,
+          },
+          modelRoleCoverage: { placed: 89, missing: 3, duplicated: 0, invalid: 0, malformedNames: 1 },
+          failureSamples: [{ index: 17, title: 'Solutions Architect', source: 'google', suggestedDirection: 'Cloud Architecture' }],
           error: 'Gemini quota exhausted while organizing the Job Board.',
         };
         report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
@@ -2372,8 +2721,14 @@ export default [
           && report.includes('no new job results were added')
           && report.includes('existing board was left unchanged')
           && report.includes('Gemini quota exhausted while organizing the Job Board.')
+          && report.includes('stage classifying · 2/4 chunk(s) · max 24 jobs/request')
+          && report.includes('18 planning sample(s) · 7 role label(s) · provider `claude`')
+          && report.includes('90/92 required entries received')
+          && report.includes('missing [17, 91]')
+          && report.includes('Usable role coverage: 89/92 placed')
+          && report.includes('#17 [google] "Solutions Architect"')
           && !report.includes('deterministic likelihood'),
-        'FULL/JOBS records an allowed-provider taxonomy failure as a transactional abort, never a renderer fallback');
+        'FULL/JOBS records a transactional abort plus bounded structural evidence, never a renderer fallback');
 
       } finally {
         Object.assign(telemetry, saved);
@@ -2393,7 +2748,9 @@ export default [
         nodeId: 'scoring-audit-diagnostics', windowId: null, search: null, resolves: {}, bucketing: null,
         scoring: {
           ts: Date.now(), input: 2, selectedForScoring: 2, cappedForBudget: 0, scored: 2,
-          placeholders: 0, batches: 2, failedBatches: 0, unscored: 0, models: ['gemini-test'],
+          placeholders: 0, batches: 2, failedBatches: 0, providerCalls: 4,
+          partialRecoveryCalls: 2, partialRecoveryRowAttempts: 3,
+          unscored: 0, models: ['gemini-test'],
           fallbacks: [{
             servedModel: 'gemini-2.5-flash', preferredModel: 'gemini-3.7-flash',
             attempts: 1, reason: 'server', counts: { server: 1 },
@@ -2423,6 +2780,9 @@ export default [
           && report.includes('served `gemini-2.5-flash`')
           && report.includes('server: 1 earlier model(s) failed'),
         'FULL/JOBS scoring section preserves fallback cause after the main-process log rolls over');
+        assert(report.includes('4 provider call(s)')
+          && report.includes('2 targeted partial-row recovery call(s) covering 3 row-attempt(s)'),
+        'FULL/JOBS distinguishes top-level batches from targeted partial-response recovery calls');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2510,13 +2870,20 @@ export default [
           url: 'https://www.ziprecruiter.com/jobs/example-4',
           snippet: 'Complete employer-supplied job description. '.repeat(20),
         },
+        {
+          source: 'glassdoor', title: 'Long list excerpt after panel 429',
+          url: 'https://www.glassdoor.ca/job-listing/example?jl=5',
+          snippet: 'Long list-card text that must not masquerade as a verified panel description. '.repeat(12),
+          descriptionDeferredReason: 'description-rate-limited',
+        },
       ]);
       assert(filtered.jobs.length === 1
         && filtered.jobs[0]?.title === 'Complete listing'
-        && filtered.dropped.length === 3
+        && filtered.dropped.length === 4
+        && filtered.quality.deferred === 1
         && filtered.quality.empty === 1
         && filtered.quality.short === 2,
-      'brief and empty listings are omitted before scoring/history while complete listings remain eligible');
+      'brief, empty, and explicitly unresolved listings are omitted before scoring/history even when a list excerpt exceeds 400 chars');
       return { ok: true };
     },
   },
@@ -2558,7 +2925,8 @@ export default [
       const parseableSalaries = ['$60,000 - $75,000', '$82,000 - $95,000', '$71,500 - $88,000', '$64,000 - $79,000', '$90,000 - $110,000', '$58,000 - $66,000'];
       const usajobsJobs = [...lostCadenceSamples, ...parseableSalaries].map((salary, i) => ({
         title: `Analyst ${i}`, company: 'Agency', location: 'Remote', source: 'usajobs-regression-test',
-        salary, posted: '2026-08-01', url: `https://example.com/usajobs/${i}`, snippet: longSnippet,
+        salary, posted: '2026-08-01', url: `https://example.com/usajobs/${i}`,
+        snippet: i === 0 ? `${longSnippet}\nPay: $19.75 - $19.75 per hour` : longSnippet,
       }));
       const diceJobs = [{
         title: 'Engineer', company: 'Acme', location: 'Remote', source: 'dice-regression-test',
@@ -2596,6 +2964,9 @@ export default [
           'field-quality warning reports the missing unit without claiming a recoverable source cadence');
         assert(lostCadenceSamples.some(s => report.includes(`"${s}"`)),
           'field-quality warning includes a real offending sample value, as the old garbage warning did');
+        assert(report.includes('recovered-description pay context exists for 1 bounded sample(s), so cadence reconciliation is possible without guessing')
+          && report.includes('raw "$19.75 - $19.75 / PH" ↔ JD "Pay: $19.75 - $19.75 per hour"'),
+        'FULL/QUALITY distinguishes a source-wide missing cadence from a list field whose same-job description already carries the recoverable unit');
         assert(report.includes('1 implausibly tiny explicit annual amount')
           && report.includes('"$18.75 - $19.70 a year"'),
         'field-quality warning identifies corrupt tiny annual pay separately from a missing cadence');
@@ -2846,6 +3217,21 @@ export default [
       assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
       const cleared = mergeSourceProgress(terminal, { status: 'done', count: 12, warning: null, url: null });
       assert(cleared.warning === null && cleared.url === null, 'Source progress merge: explicit null should clear sticky fields');
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const restoresNativeVerificationOutcome = sourceCard.includes('const rawRestoreWarning = result?.warning || prevForRestore?.warning || null')
+        && sourceCard.includes("resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel")
+        && sourceCard.includes("? { shortLabel: 'Verification not confirmed' }")
+        && sourceCard.includes("resumeState?.mode === 'native-challenge' && !rawRestoreWarning.actionLabel")
+        && sourceCard.includes("? { actionLabel: 'Retry verification' }")
+        && sourceCard.includes('if (rawRestoreWarning) {')
+        && sourceCard.includes("status: 'error'")
+        && sourceCard.includes('warning: restoreWarning');
+      assert(sourceCard.includes("status: isJobSourceWarningGating(nextWarning) ? 'error' : 'done'")
+        && sourceCard.includes('const resolveInFlightRef = useRef(false)')
+        && sourceCard.includes('resolveInFlightRef.current = true')
+        && sourceCard.includes('resolveInFlightRef.current = false')
+        && restoresNativeVerificationOutcome,
+      'a derived blocking warning remains an error, rapid Continue clicks are single-flight, and a failed native verification keeps its returned outcome visible');
       return { terminal, advanced, cleared };
     },
   },
@@ -2987,31 +3373,49 @@ export default [
     run: () => {
       const base = { model: 'claude-sonnet-4-6', maxTokens: 8000, cachedPrefix: 'PROFILE' };
       const schema = { type: 'object', properties: {} };
-      // responseSchema → forced submit_response tool, no JSON prefill.
+      // responseSchema → native Structured Outputs format, no JSON prefill.
       const p1 = buildAnthropicMessageParams('JOBS', { ...base, responseSchema: schema });
       assert(p1.model === 'claude-sonnet-4-6' && p1.max_tokens === 8000, 'carries model + max_tokens');
       assert(p1.thinking?.type === 'adaptive', 'modern Claude requests explicitly enable adaptive thinking');
       assert(p1.output_config?.effort === 'medium', 'modern Claude requests explicitly use medium effort');
-      assert(p1.tools?.[0]?.name === 'submit_response' && p1.tools[0].input_schema === schema, 'responseSchema → submit_response tool');
-      assert(p1.tool_choice?.type === 'tool' && p1.tool_choice?.name === 'submit_response', 'responseSchema → forced tool_choice');
-      assert(p1.messages.length === 1, 'tool-use mode adds no assistant prefill');
+      assert(p1.output_config?.format?.type === 'json_schema'
+        && p1.output_config.format.schema.additionalProperties === false,
+      'responseSchema → native transformed JSON-schema output format');
+      assert(!p1.tools && !p1.tool_choice, 'responseSchema does not create a fake submit_response tool');
+      assert(p1.messages.length === 1, 'structured-output mode adds no assistant prefill');
       assert(p1.messages[0].content[0].cache_control?.type === 'ephemeral', 'cached prefix carried into params');
       const count = buildAnthropicTokenCountParams('JOBS', { ...base, responseSchema: schema });
       const { max_tokens: _maxTokens, ...liveWithoutOutputCap } = p1;
       assert(JSON.stringify(count) === JSON.stringify(liveWithoutOutputCap),
-        'token-count params are derived from the live request shape and differ only by max_tokens (including forced tool_choice)');
-      // expectJson (no schema) → NO assistant prefill. Current models 400 on
-      // an assistant-role prefill turn ("This model does not support
-      // assistant message prefill" — verified live against claude-opus-5 /
-      // claude-sonnet-5 / claude-fable-5), so the old `{ role: 'assistant',
-      // content: '{' }` branch was removed; expectJson is now a no-op on the
-      // request shape (parseAiJson handles the resulting prose/fence slop
-      // instead). This must resolve IDENTICALLY to the plain (no-schema,
-      // no-expectJson) case below.
-      const p2 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100, expectJson: true });
+        'token-count params are derived from the live request shape and differ only by max_tokens (including output format)');
+      const taxonomySchema = JOB_TAXONOMY_CLASSIFY_SCHEMA;
+      const taxonomy = buildAnthropicMessageParams('JOBS', {
+        ...base, responseSchema: taxonomySchema,
+      });
+      const taxonomyRole = taxonomy.output_config?.format?.schema?.properties?.roleByIndex;
+      const productionSizedSchema = JOB_TAXONOMY_CLASSIFY_SCHEMA;
+      assert(taxonomy.output_config?.format?.type === 'json_schema'
+        && taxonomy.output_config.format.schema.additionalProperties === false
+        && taxonomyRole?.type === 'array'
+        && taxonomyRole?.items?.type === 'integer'
+        && JSON.stringify(productionSizedSchema) === JSON.stringify(taxonomySchema),
+      'Job Board classification uses one fixed JSON output grammar independent of total job count');
+      assert(!('minimum' in taxonomyRole.items)
+        && taxonomyRole.items.description.includes('minimum'),
+      'Anthropic SDK transforms unsupported numeric constraints into output-schema guidance');
+      const taxonomyCount = buildAnthropicTokenCountParams('JOBS', {
+        ...base, responseSchema: taxonomySchema,
+      });
+      const { max_tokens: _taxonomyMax, ...taxonomyLiveWithoutCap } = taxonomy;
+      assert(JSON.stringify(taxonomyCount) === JSON.stringify(taxonomyLiveWithoutCap),
+        'structured token-count and live requests use the identical transformed output schema');
+      // A plain (prose) request must not acquire a JSON prefill or output
+      // grammar. Structured public LLM entry points reject missing schemas;
+      // this lower-level builder also serves grounded prose.
+      const p2 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
       assert(!p2.tools && !p2.tool_choice && p2.messages.length === 1 && p2.messages[0].role === 'user',
-        'expectJson no longer adds an assistant prefill turn — single user message, no envelope');
-      // plain → single user turn, no envelope.
+        'plain prose has a single user message and no JSON envelope');
+      // Plain request construction is stable across repeated calls.
       const p3 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
       assert(!p3.tools && !p3.tool_choice && p3.messages.length === 1, 'plain → single user message, no envelope');
       const haiku = getClaudeDefaultReasoningConfig(MODEL_FLOOR.HAIKU);
@@ -3021,6 +3425,33 @@ export default [
       assert(claudeReasoningMaxTokens(MODEL_FLOOR.HAIKU, 512) === CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET + 1024,
         'manual-thinking models reserve room for both the medium reasoning budget and a visible answer');
       return { ok: true };
+  },
+},
+{
+    name: 'Job taxonomy indexed-role contract normalizes legacy arrays and diagnoses malformed objects without retaining labels',
+    run: () => {
+      const complete = { 0: 'Platform Architecture', 1: 'Data Engineering', 2: 'Platform Architecture' };
+      const normalized = normalizeJobBoardRoleByIndex(complete, 3);
+      assert(JSON.stringify(normalized) === JSON.stringify(['Platform Architecture', 'Data Engineering', 'Platform Architecture'])
+        && validateJobBoardRoleTaxonomy(normalized, 3).valid,
+      'a complete required-key object expands deterministically into the existing ordered role contract');
+      const legacy = ['Engineering', 'Design'];
+      assert(normalizeJobBoardRoleByIndex(legacy, 2) === legacy,
+        'legacy exact arrays remain accepted without mutation');
+      const productionSized = Array.from({ length: 124 }, (_, index) => `Role ${index % 7}`);
+      assert(validateJobBoardRoleTaxonomy(productionSized, 124).valid
+        && !validateJobBoardRoleTaxonomy(productionSized.slice(0, 123), 124).valid,
+      'local atomic validation accepts all 124 assignments and rejects a one-row-short provider result');
+      const shape = inspectJobBoardRoleByIndex({ 0: 'Engineering', 2: ' ', 3: 42, surprise: 'x' }, 4);
+      assert(shape.type === 'object' && shape.receivedCount === 3
+        && shape.missingCount === 1 && shape.missingIndices.join(',') === '1'
+        && shape.blankCount === 1 && shape.blankIndices.join(',') === '2'
+        && shape.nonStringCount === 1 && shape.nonStringIndices.join(',') === '3'
+        && shape.extraCount === 1 && shape.extraKeys.join(',') === 'surprise',
+      'shape diagnostics distinguish missing, blank, non-string, and extra entries by bounded index metadata');
+      assert(!JSON.stringify(shape).includes('Engineering') && !JSON.stringify(shape).includes('surprise":"x'),
+        'shape diagnostics retain no provider labels or values');
+      return { normalized: normalized.length, defects: shape.missingCount + shape.blankCount + shape.nonStringCount + shape.extraCount };
     },
   },
 {
@@ -3147,6 +3578,72 @@ export default [
     },
   },
 {
+    name: 'Job search funnel: every raw candidate has a persisted disposition',
+    run: () => {
+      const reconciled = reconcileSearchFunnel({
+        raw: 336,
+        relevanceDropped: 0,
+        deduped: 336,
+        ageDropped: 0,
+        historyDropped: 0,
+        descriptionEvidenceDropped: { total: 79 },
+        kept: 257,
+      });
+      assert(reconciled.reconciled && reconciled.expectedKept === 257 && reconciled.unexplainedDelta === 0,
+        `336→257 is explained when 79 low-evidence rows are persisted in the funnel, got ${JSON.stringify(reconciled)}`);
+
+      const missing = reconcileSearchFunnel({
+        raw: 336,
+        relevanceDropped: 0,
+        deduped: 336,
+        ageDropped: 0,
+        historyDropped: 0,
+        descriptionEvidenceDropped: { total: 0 },
+        kept: 257,
+      });
+      assert(!missing.reconciled && missing.unexplainedDelta === -79,
+        `an unexplained 79-row loss must fail reconciliation, got ${JSON.stringify(missing)}`);
+      return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped };
+    },
+  },
+{
+    name: 'Live scoring: partial rows retry only absent or calibration-invalid indices',
+    run: () => {
+      const partial = planPartialScoreRecovery([
+        { index: 2, matchScore: 20 },
+        { index: 0, matchScore: 80 },
+        { index: 2, matchScore: 99 },
+        { index: 7, matchScore: 5 },
+      ], 4);
+      assert(partial.usable && partial.missingIndices.join(',') === '1,3'
+        && partial.alignedScores.map(score => score?.matchScore ?? null).join(',') === '80,,20,',
+      'partial rows must retain original index order, ignore duplicate/out-of-range rows, and request only omitted indices');
+
+      const complete = planPartialScoreRecovery([
+        { index: 1, matchScore: 40 }, { index: 0, matchScore: 70 },
+      ], 2);
+      assert(complete.usable && complete.missingIndices.length === 0
+        && complete.alignedScores.map(score => score.matchScore).join(',') === '70,40',
+      'out-of-order complete rows must not schedule a missing-index recovery');
+
+      const unusable = planPartialScoreRecovery([{ index: 9, matchScore: 1 }], 2);
+      assert(!unusable.usable && unusable.alignedScores === null && unusable.missingIndices.length === 0,
+        'a response with no requested index must remain eligible for the existing recursive split fallback');
+
+      const job = { title: 'Frontend Engineer', snippet: 'Required: React experience.' };
+      const invalid = {
+        index: 0, matchScore: 95, reasoning: 'Strong fit.', careerDirection: 'Frontend',
+        requirementAssessments: [], materialGaps: [], confidence: 'high', experienceAssessment: {},
+      };
+      const semantic = prepareLiveScoringResults([invalid], [job], {
+        candidateText: 'Built React interfaces for internal tools.', candidateRoles: [],
+      });
+      assert(semantic.scores[0] === null && semantic.placeholderCount === 1,
+        'an indexed but calibration-invalid row remains a final-null recovery candidate rather than a genuine score');
+      return { missing: partial.missingIndices.length, semanticInvalid: semantic.placeholderCount };
+    },
+  },
+{
     name: 'Scoring audit: retains batch evidence and flags identical cross-batch JD drift',
     run: () => {
       const jd = 'Perform scheduled cleanings, update signage, inspect electrical components, and maintain automated teller machines. '.repeat(6);
@@ -3173,6 +3670,63 @@ export default [
         && !JSON.stringify(audit.rows).includes('Unsupported upbeat model prose.'),
         'bounded rows retain score calibration evidence without retaining ungrounded model prose');
       return { ok: true, anomalies: audit.anomalies.length };
+  },
+},
+{
+    name: 'Scoring audit: placeholder evidence survives bounds and reordered anomaly lookup',
+    run: () => {
+      const jd = 'Maintain automated teller machines, update signage, inspect electrical components, and complete preventative maintenance. '.repeat(6);
+      const ordinary = Array.from({ length: 50 }, (_, index) => ({
+        title: index < 2 ? 'Bank Equipment Technician' : `Ordinary role ${index}`,
+        company: index < 2 ? 'Cennox' : `Company ${index}`,
+        location: index === 0 ? 'Madison, AL' : index === 1 ? 'Phoenix, AZ' : 'Toronto, ON',
+        source: 'dice',
+        url: `https://jobs/ordinary-${index}`,
+        snippet: index < 2 ? jd : `Ordinary job ${index} ${jd}`,
+        matchScore: index === 0 ? 55 : index === 1 ? 35 : 40,
+        careerDirection: index < 2 ? 'Field Services' : 'Other',
+        reasoning: index < 2 ? 'Grounded score.' : 'Ordinary grounded score.',
+      }));
+      const placeholder = {
+        title: 'Late placeholder role', company: 'Example', location: 'Toronto, ON', source: 'ziprecruiter',
+        url: 'https://jobs/placeholder', snippet: jd, matchScore: 50, careerDirection: 'Other', reasoning: 'Unable to score',
+      };
+      const audit = buildScoringAudit([
+        ...ordinary.map((job, index) => ({ batch: index === 1 ? 2 : 1, job })),
+        { batch: 3, job: placeholder },
+      ]);
+      assert(audit.rows.length === 50 && audit.omitted === 1,
+        `placeholder prioritization must retain the existing 50-row bound and omitted count, got ${audit.rows.length}/${audit.omitted}`);
+      assert(audit.rows[0].placeholder === true && audit.rows[0].title === 'Late placeholder role'
+        && audit.rows[0].url === 'https://jobs/placeholder',
+      'a late canonical placeholder must displace ordinary evidence and lead the bounded audit');
+      assert(audit.anomalies.length === 1 && audit.anomalies[0].first.index === 0 && audit.anomalies[0].second.index === 1,
+        'cross-batch anomalies retain original source indices after placeholder prioritization');
+
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'placeholder-audit-diagnostics', windowId: null, search: null, resolves: {}, bucketing: null,
+        scoring: {
+          ts: Date.now(), input: 51, selectedForScoring: 51, cappedForBudget: 0, scored: 51,
+          placeholders: 1, batches: 3, failedBatches: 0, unscored: 0, models: ['claude-test'], audit,
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['placeholder-audit-diagnostics']), null, null);
+        assert(report.includes('Late placeholder role') && report.includes('⚠️ placeholder (not analyzed)')
+          && report.includes('URL: https://jobs/placeholder') && report.includes('reason: "Unable to score"'),
+        'the first ten report evidence rows visibly identify the otherwise-late placeholder');
+        assert(report.includes('20-point cross-batch drift') && report.includes('https://jobs/ordinary-0')
+          && report.includes('https://jobs/ordinary-1'),
+        'anomaly rendering resolves rows by their original indices after placeholder prioritization');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { rows: audit.rows.length, omitted: audit.omitted, anomalies: audit.anomalies.length };
     },
   },
 {
@@ -3584,6 +4138,41 @@ export default [
     },
   },
 {
+    name: 'Glassdoor salary reconciliation uses explicit same-job description cadence without guessing',
+    run: () => {
+      const observed = {
+        source: 'glassdoor',
+        salary: '$1 - $100K (Employer provided)',
+        snippet: 'Benefits include health coverage.\nPay: $1.00-$100,000.00 per year\nThe role is based in Ontario.',
+      };
+      const repaired = reconcileGlassdoorSalaryFromDescription(observed);
+      assert(repaired.salary === 'Up to $100,000/yr'
+        && parseSalaryToNumeric(repaired.salary) === 100000,
+      'Glassdoor sentinel lower bound is replaced by the description-grounded annual ceiling');
+
+      const ordinary = reconcileGlassdoorSalaryFromDescription({
+        source: 'glassdoor', salary: '$20 - $24 (Employer provided)',
+        description: 'Pay range: $20 - $24 per hour.',
+      });
+      assert(ordinary.salary === '$20 - $24 per hour'
+        && parseSalaryToNumeric(ordinary.salary) === 41600,
+      'a normal explicitly cadenced description range retains both grounded endpoints and currency');
+
+      const alreadyUsable = { ...observed, salary: '$42/hour' };
+      const anotherSource = { ...observed, source: 'indeed' };
+      const unlabeled = { ...observed, snippet: 'The company raised $100,000 per year for community grants.' };
+      const cadenceMissing = { ...observed, snippet: 'Pay: $80,000 - $100,000.' };
+      assert(reconcileGlassdoorSalaryFromDescription(alreadyUsable) === alreadyUsable,
+        'an already-usable Glassdoor salary remains authoritative and is not replaced');
+      assert(reconcileGlassdoorSalaryFromDescription(anotherSource) === anotherSource,
+        'another source is outside the Glassdoor-only recovery boundary');
+      assert(reconcileGlassdoorSalaryFromDescription(unlabeled) === unlabeled
+        && reconcileGlassdoorSalaryFromDescription(cadenceMissing) === cadenceMissing,
+      'unlabelled money and pay without an explicit cadence remain untouched');
+      return { observed: repaired.salary, ordinary: ordinary.salary };
+    },
+  },
+{
     name: 'Job taxonomy: salary cadence parser and canonical range repairs',
     run: () => {
       assert(parseSalaryToNumeric('$1.6K - $2.0K/wk') === 83200, 'salary parser: decimal weekly salary annualizes');
@@ -3629,6 +4218,9 @@ export default [
         'salary anomaly: implausibly wide hourly range exposes both annualized endpoints without changing placement');
       assert(salaryRangeAnomaly('$15.68–$26.61 an hour') === null,
         'salary anomaly: ordinary compensation ranges stay quiet');
+      const ordinaryRange = salaryRangeMetadata('$94,600–$176,000 a year');
+      assert(ordinaryRange?.lowerAnnual === 94600 && ordinaryRange?.upperAnnual === 176000 && ordinaryRange?.ratio === 1.9,
+        'salary range metadata preserves ordinary endpoint evidence without classifying it as an anomaly');
       // Regression: Google and Glassdoor both prefix USD amounts with a country
       // code ("US$50K–US$250K a year"). The endpoint pattern used to require a
       // bare `$` or digit right after the separator, so the letters in `US$250K`
@@ -3859,6 +4451,8 @@ export default [
         'https://www.google.com/rmkt/collect/995393872/?fmt=8',
         'https://www.google.com/ccm/collect?rcb=14&frm=0',
         'https://csp.withgoogle.com/csp/IdentityRotateCookiesHttp',
+        'https://ca.indeed.com/rc/gd/png?a=glassdoor-company-spotlight-pixel',
+        'https://itad.indeed.com/ita/v1/publisher?flowPage=glassdoor&flowType=company-spotlight',
       ];
       for (const url of ignoredUrls) {
         assert(isIgnorableManualBrowserTelemetry({ url }), `known telemetry noise should be ignored: ${url}`);
@@ -3874,6 +4468,10 @@ export default [
         url: 'https://www.google.com/search?q=jobs',
         text: 'Fetch API cannot load https://csp.withgoogle.com/csp/IdentityRotateCookiesHttp. Refused to connect.',
       }), 'Google cookie-rotation ORB/CSP noise embedded in console text is ignored');
+      assert(isIgnorableManualBrowserTelemetry({
+        url: 'https://www.glassdoor.ca/Job/jobs.htm',
+        text: "Access to fetch at 'https://itad.indeed.com/ita/v1/publisher?flowPage=glassdoor&flowType=company-spotlight' from origin 'https://www.glassdoor.ca' has been blocked by CORS policy",
+      }), 'Glassdoor’s embedded Indeed company-spotlight CORS message is ignored');
 
       // The classifier is intentionally not a blanket third-party/CSP filter.
       // Unknown dependencies and first-party job-page failures are precisely
@@ -3890,6 +4488,8 @@ export default [
         'lookalike hostnames do not inherit a known tracker exclusion');
       assert(!isIgnorableManualBrowserTelemetry({ url: 'https://www.google.com/search?q=rmkt+jobs' }),
         'ordinary first-party Google requests are retained; only the exact /rmkt/ endpoint is noise');
+      assert(!isIgnorableManualBrowserTelemetry({ url: 'https://ca.indeed.com/viewjob?jk=real-job' }),
+        'ordinary Indeed job requests remain visible; only exact Glassdoor spotlight endpoints are noise');
       assert(!isIgnorableManualBrowserTelemetry({
         url: 'https://www.ziprecruiter.com/app.js',
         text: "Connecting to 'https://api.ziprecruiter.com/jobs' violates CSP; connect-src also allows https://googleads.g.doubleclick.net",
@@ -4033,12 +4633,32 @@ export default [
         queryIndex: 1,
         queryTotal: 1,
         pageNum: 1,
+        strategy: 'list-card-panel',
+        panelSelector: 'span.OOyDTc, span.ejCXj',
         itemTotal: 25,
         attempted: 17,
         expanded: 15,
         missing: 1,
         panelTimeouts: 1,
         selectionMismatches: 1,
+        blockingModalsDismissed: 2,
+        blockingModalFailures: 1,
+        modalSamples: [
+          {
+            itemIndex: 3,
+            stage: 'before-card',
+            signature: 'glassdoor-job-alert',
+            control: 'aria-label-close',
+            outcome: 'dismissed',
+          },
+          {
+            itemIndex: 4,
+            stage: 'after-card',
+            signature: 'glassdoor-job-alert',
+            control: 'none',
+            outcome: 'missing-control',
+          },
+        ],
         titleBypassed: 96,
         aborted: true,
         interruptedAt: 18,
@@ -4084,14 +4704,96 @@ export default [
         null,
       );
       assert(report.includes('Browser card traversal (bounded batch summaries)')
-        && report.includes('Google for Jobs · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
+        && report.includes('Google for Jobs · strategy=list-card-panel · panel="span.OOyDTc, span.ejCXj" · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · blocking-popup-dismissed 2 · blocking-popup-dismiss-failed 1 · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
         && report.includes('#7 key=Systems Architect at Example reason=card-not-found')
         && report.includes('#16 key=Principal Systems Architect at Example reason=panel-timeout')
+        && report.includes('Blocking popup handling:')
+        && report.includes('#3 · stage=before-card · signature=glassdoor-job-alert · control=aria-label-close · outcome=dismissed')
+        && report.includes('⚠️ #4 · stage=after-card · signature=glassdoor-job-alert · control=none · outcome=missing-control')
         && report.includes('Click transition samples (expected → hit):')
         && report.includes('#1 · physical #1/108 expected key=google-card-1 title=First Systems Architect → hit key=google-card-1 title=First Systems Architect via primary → selected title=First Systems Architect [selection verified]')
         && report.includes('⚠️ #2 · physical #5/108 · 3 physical cards skipped since previous expected key=google-card-2 title=Second Systems Architect → hit key=google-card-3 title=Third Systems Architect via data-share-url [MISMATCH] → selected title=Fourth Systems Architect [SELECTION MISMATCH]'),
-      'FULL/CARDWALK diagnostics must preserve physical positions, post-click selection identity, failed positions, and cancellation context, not only a misleading expanded aggregate');
-      return { total: 25, attempted: 17, expanded: 15, titleBypassed: 96, selectionMismatches: 1, failures: 2, transitions: 2 };
+      'FULL/CARDWALK diagnostics must preserve physical positions, popup dismissal outcomes, post-click selection identity, failed positions, and cancellation context, not only a misleading expanded aggregate');
+      return { total: 25, attempted: 17, expanded: 15, titleBypassed: 96, selectionMismatches: 1, blockingModalsDismissed: 2, blockingModalFailures: 1, failures: 2, transitions: 2 };
+    },
+  },
+{
+    name: 'FULL card-walk diagnostics name Glassdoor opportunity-modal recovery separately from selector misses',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const scrapeTelemetry = getManualScraperTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        active: scrapeTelemetry.active,
+        events: scrapeTelemetry.events,
+        fieldAnomalies: scrapeTelemetry.fieldAnomalies,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'glassdoor-opportunity-modal-diagnostics',
+        windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 30, deduped: 30, ageDropped: 0, historyDropped: 0, kept: 30 },
+      });
+      scrapeTelemetry.active = null;
+      scrapeTelemetry.events = [];
+      scrapeTelemetry.fieldAnomalies = [];
+      recordManualScraperTelemetry({
+        phase: 'card-walk',
+        sourceId: 'glassdoor',
+        srcName: 'Glassdoor',
+        queryIndex: 1,
+        queryTotal: 1,
+        pageNum: 1,
+        strategy: 'list-card-panel',
+        panelSelector: '[data-brandviews*="joblisting-description"]',
+        itemTotal: 30,
+        attempted: 5,
+        expanded: 2,
+        missing: 3,
+        panelRateLimits: 1,
+        panelRequestsIssued: 9,
+        proactivePanelCooldowns: 1,
+        panelJsonResponses: 8,
+        panelJsonPayloads: 7,
+        panelJsonDescriptionFallbacks: 1,
+        panelJsonFieldRecoveries: { salary: 2, posted: 1, company: 0 },
+        // Match the live producer: card-walk snapshots configuration before
+        // any checkpoint is due, rather than hand-constructing a due policy.
+        panelPacing: descriptionPanelPacing('glassdoor', 0),
+        blockingModalsDismissed: 1,
+        blockingModalFailures: 1,
+        failureSamples: [
+          { itemIndex: 3, key: 'Jr/Int/Snr Naval Architect Technologist', reason: 'blocking-popup-dismiss-failed' },
+        ],
+      }, { updateActive: false });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['glassdoor-opportunity-modal-diagnostics']), null, null);
+        const walkLine = report.split('\n').find(line => line.includes('Glassdoor · strategy=list-card-panel')) || '';
+        assert(walkLine.includes('blocking-popup-dismissed 1')
+          && walkLine.includes('blocking-popup-dismiss-failed 1')
+          && walkLine.includes('missing-target 3')
+          && walkLine.includes('panel-http-429 1 (source throttle; walk stopped)')
+          && walkLine.includes('panel-pace 4.5s + 12s/8')
+          && walkLine.includes('proactive-panel-cooldowns 1')
+          && walkLine.includes('panel-requests 9')
+          && walkLine.includes('same-request-json 7/8 usable')
+          && walkLine.includes('json-description-fallback 1')
+          && walkLine.includes('json-field-recovery salary=2,posted=1'),
+        'FULL/CARDWALK distinguishes Glassdoor source throttling, same-request JSON recovery, and popup outcomes from stale card selectors');
+        assert(report.includes('#3 key=Jr/Int/Snr Naval Architect Technologist reason=blocking-popup-dismiss-failed'),
+          'the bounded failure samples retain the exact popup-close failure position and job identity');
+      } finally {
+        Object.assign(telemetry, {
+          nodeId: saved.nodeId,
+          windowId: saved.windowId,
+          search: saved.search,
+        });
+        scrapeTelemetry.active = saved.active;
+        scrapeTelemetry.events = saved.events;
+        scrapeTelemetry.fieldAnomalies = saved.fieldAnomalies;
+      }
+      return { dismissed: 1, closeFailures: 1, rateLimits: 1, pacedRequests: 9, attempted: 5 };
     },
   },
 {
@@ -4224,6 +4926,93 @@ export default [
     },
   },
 {
+    name: 'job pipeline report: challenge phases retain classifier evidence after source teardown',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search };
+      Object.assign(telemetry, {
+        nodeId: 'challenge-signal-diagnostics',
+        windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 0, deduped: 0, ageDropped: 0, historyDropped: 0, kept: 0 },
+      });
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({
+        phase: 'challenge-hard-block',
+        sourceId: 'glassdoor',
+        srcName: 'Glassdoor',
+        reason: 'hard-block',
+        title: 'Just a moment...',
+        bodyHead: 'Humans only. Glassdoor uses advanced security systems.',
+        pageState: { interactive: false, cfFrame: false, turnstileWidget: false, recaptchaFrames: 0 },
+      });
+      // A terminal source event replaces `active`; the retained event trail must
+      // still carry the decisive classifier inputs in FULL/JOBS.
+      recordManualScraperTelemetry({ phase: 'source-finished', sourceId: 'glassdoor', srcName: 'Glassdoor', count: 0 });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['challenge-signal-diagnostics']), null, null);
+        const phaseLine = report.split('\n').find(line => line.includes('challenge-hard-block')) || '';
+        assert(phaseLine.includes('reason=hard-block')
+          && phaseLine.includes('title="Just a moment..."')
+          && phaseLine.includes('turnstileWidget')
+          && phaseLine.includes('Humans only'),
+        'retained challenge phase shows reason, title, structured signals, and bounded body evidence');
+      } finally {
+        resetManualScraperTelemetry();
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: detail challenge telemetry keeps the wait-vs-stop evidence',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search };
+      Object.assign(telemetry, {
+        nodeId: 'detail-challenge-policy-diagnostics',
+        windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1 },
+      });
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({
+        phase: 'detail-challenge',
+        sourceId: 'glassdoor',
+        srcName: 'Glassdoor',
+        key: 'Principal Architect',
+        reason: 'hard-block',
+        title: 'Just a moment...',
+        repeatCount: 2,
+        hardBlock: true,
+        finalUrl: 'https://www.glassdoor.ca/job-listing/principal-architect.htm',
+        bodyHead: 'Humans only. Glassdoor uses advanced security systems to keep its site safe.',
+        pageState: {
+          interactive: false,
+          terminalHardBlockText: true,
+          cfFrame: false,
+          turnstileWidget: false,
+          recaptchaFrames: 0,
+        },
+      }, { updateActive: false });
+      // A later ordinary source phase must not evict the decisive detail diagnostic.
+      recordManualScraperTelemetry({ phase: 'source-finished', sourceId: 'glassdoor', srcName: 'Glassdoor', count: 1 });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['detail-challenge-policy-diagnostics']), null, null);
+        const detailLine = report.split('\n').find(line => line.includes('detail-challenge')
+          && line.includes('Principal Architect') && line.includes('reason=hard-block')) || '';
+        assert(detailLine.includes('reason=hard-block')
+          && detailLine.includes('repeat=2')
+          && detailLine.includes('title="Just a moment..."')
+          && detailLine.includes('terminalHardBlockText')
+          && detailLine.includes('Humans only'),
+        'FULL/JOBS keeps the detail challenge reason, retry count, title, DOM state, and bounded page text after teardown');
+      } finally {
+        resetManualScraperTelemetry();
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
     name: 'job pipeline report: Glassdoor Location Cache section is absent with no location skips and an empty cache',
     run: () => {
       // Scrape telemetry is a process-global singleton, so this negative case
@@ -4305,6 +5094,267 @@ export default [
     },
   },
 {
+    name: 'Glassdoor detail enrichment keeps the successful country host and recognizes the Humans only hard block',
+    run: () => {
+      const detail = 'https://fr.glassdoor.ca/job-listing/staff-engineer-acme-JV_IC2281069.htm?jl=101';
+      const canadaList = 'https://www.glassdoor.ca/Job/canada-engineer-jobs.htm?locId=3&locT=N';
+      const pinned = pinGlassdoorDetailUrlToListHost(detail, canadaList);
+      assert(new URL(pinned).hostname === 'www.glassdoor.ca'
+        && new URL(pinned).pathname === '/job-listing/staff-engineer-acme-JV_IC2281069.htm'
+        && new URL(pinned).searchParams.get('jl') === '101',
+      'a regional Canada listing is pinned to the already-successful .ca session without changing its path or query');
+      assert(new URL(pinGlassdoorDetailUrlToListHost(
+        'https://www.glassdoor.ca/job-listing/example.htm?jl=2',
+        'https://www.glassdoor.com/Job/jobs.htm',
+      )).hostname === 'www.glassdoor.com',
+      'a .com search keeps detail enrichment on .com rather than applying a fixed country host');
+      assert(pinGlassdoorDetailUrlToListHost('https://boards.greenhouse.io/acme/jobs/1', canadaList)
+        === 'https://boards.greenhouse.io/acme/jobs/1',
+      'an unrelated employer/ATS URL is never rewritten as Glassdoor');
+
+      const humansOnly = 'Humans only Glassdoor has been built on the contributions of real employees and job seekers. If you have been mistakenly blocked from accessing our site, review the Help Center. Ray ID: a307f0152a7d860b';
+      assert(hasManualVerificationText(humansOnly) && hasManualHardBlockText(humansOnly),
+        'Glassdoor\'s current non-interactive Humans only copy is classified as a terminal hard block');
+      assert(!hasManualVerificationText('Staff Software Engineer at Nubank. Build reliable credit card services.'),
+        'an ordinary job description does not false-positive as a verification wall');
+      assert(isDetachedDetailFrameError("Attempted to use detached Frame 'F35FF1A2'")
+        && isDetachedDetailFrameError('Navigating frame was detached')
+        && !isDetachedDetailFrameError('Navigation timeout of 12000 ms exceeded'),
+      'a dead Puppeteer detail frame is terminal for the batch while an ordinary bounded timeout remains per-listing');
+      return { host: new URL(pinned).hostname, hardBlockRecognized: true };
+    },
+  },
+{
+    name: 'Glassdoor Humans only page remains solvable when interactive challenge machinery is present',
+    run: () => {
+      const turnstile = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'just-a-moment-title',
+        hasTerminalHardBlockText: true,
+        hasCloudflareTurnstileWidget: true,
+        hasNormalContent: false,
+      });
+      assert(turnstile.isChallenge && turnstile.interactive && !turnstile.isHardBlock
+        && turnstile.reason === 'just-a-moment-title',
+      'terminal Glassdoor copy cannot override a live Turnstile widget');
+
+      const frame = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasTerminalHardBlockText: true,
+        hasCloudflareChallengeFrame: true,
+        hasNormalContent: false,
+      });
+      assert(frame.isChallenge && frame.interactive && !frame.isHardBlock,
+        'a Cloudflare challenge iframe keeps the browser in the human-solve wait');
+
+      const textOnly = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasTerminalHardBlockText: true,
+        hasNormalContent: false,
+      });
+      assert(textOnly.isChallenge && !textOnly.interactive && textOnly.isHardBlock
+        && textOnly.reason === 'hard-block',
+      'the same terminal copy with no interactive machinery remains a fast terminal block');
+
+      const googleWithoutCaptcha = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'google-sorry-recaptcha',
+        hasNormalContent: false,
+      });
+      assert(googleWithoutCaptcha.isHardBlock,
+        'Google unusual-traffic pages without a rendered captcha remain terminal');
+
+      const normal = classifyManualChallengeSignals({
+        isChallenge: false,
+        reason: 'none',
+        hasNormalContent: true,
+      });
+      assert(!normal.isChallenge && !normal.isHardBlock && !normal.interactive,
+        'ordinary content remains challenge-free');
+      return { turnstileHardBlock: turnstile.isHardBlock, textOnlyHardBlock: textOnly.isHardBlock };
+    },
+  },
+{
+    name: 'challenge transition keeps a post-Turnstile terminal-looking page open through its stable grace',
+    run: () => {
+      const interactive = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'just-a-moment-title',
+        hasTerminalHardBlockText: true,
+        hasCloudflareTurnstileWidget: true,
+        hasNormalContent: false,
+      });
+      const terminal = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasTerminalHardBlockText: true,
+        hasNormalContent: false,
+      });
+      const presented = resolveManualChallengeTransition({
+        signals: interactive, sawInteractiveChallenge: false, terminalSince: null, now: 1_000, graceMs: 10_000,
+      });
+      assert(presented.disposition === 'interactive' && presented.sawInteractiveChallenge,
+        'a live Turnstile begins the human-solve wait and establishes transition history');
+
+      const justLostWidget = resolveManualChallengeTransition({
+        signals: terminal, sawInteractiveChallenge: presented.sawInteractiveChallenge,
+        terminalSince: presented.terminalSince, now: 2_000, graceMs: 10_000,
+      });
+      const almostStable = resolveManualChallengeTransition({
+        signals: terminal, sawInteractiveChallenge: justLostWidget.sawInteractiveChallenge,
+        terminalSince: justLostWidget.terminalSince, now: 11_999, graceMs: 10_000,
+      });
+      const stableTerminal = resolveManualChallengeTransition({
+        signals: terminal, sawInteractiveChallenge: almostStable.sawInteractiveChallenge,
+        terminalSince: almostStable.terminalSince, now: 12_000, graceMs: 10_000,
+      });
+      assert(justLostWidget.disposition === 'terminal-settling'
+        && justLostWidget.terminalSince === 2_000
+        && almostStable.disposition === 'terminal-settling'
+        && almostStable.terminalElapsedMs === 9_999
+        && stableTerminal.disposition === 'hard-block'
+        && stableTerminal.terminalElapsedMs === 10_000,
+      'a no-widget terminal-looking page after a solve cannot close immediately; it stops only after a full stable grace');
+
+      const returnedWidget = resolveManualChallengeTransition({
+        signals: interactive, sawInteractiveChallenge: justLostWidget.sawInteractiveChallenge,
+        terminalSince: justLostWidget.terminalSince, now: 3_000, graceMs: 10_000,
+      });
+      const initialTerminal = resolveManualChallengeTransition({
+        signals: terminal, sawInteractiveChallenge: false, terminalSince: null, now: 2_000, graceMs: 10_000,
+      });
+      assert(returnedWidget.disposition === 'interactive-returned' && returnedWidget.terminalSince === null
+        && initialTerminal.disposition === 'hard-block',
+      'a re-rendered widget returns to the foreground human wait, while a never-interactive terminal page still stops promptly');
+      return { graceMs: stableTerminal.terminalElapsedMs, postSolve: justLostWidget.disposition };
+    },
+  },
+{
+    name: 'detail challenge policy foregrounds solvable or transitioning pages and stops only terminal blocks',
+    run: () => {
+      const interactive = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'cloudflare-challenge-frame',
+        hasCloudflareChallengeFrame: true,
+        hasNormalContent: false,
+      });
+      const terminal = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasTerminalHardBlockText: true,
+        hasNormalContent: false,
+      });
+      const liveWidget = resolveManualDetailChallengeDisposition({
+        signals: interactive, now: 1_000, graceMs: 10_000,
+      });
+      const transitioning = resolveManualDetailChallengeDisposition({
+        signals: terminal, sawInteractiveChallenge: liveWidget.sawInteractiveChallenge,
+        terminalSince: liveWidget.terminalSince, now: 2_000, graceMs: 10_000,
+      });
+      const stableTerminal = resolveManualDetailChallengeDisposition({
+        signals: terminal, sawInteractiveChallenge: transitioning.sawInteractiveChallenge,
+        terminalSince: transitioning.terminalSince, now: 12_000, graceMs: 10_000,
+      });
+      const initialTerminal = resolveManualDetailChallengeDisposition({
+        signals: terminal, now: 1_000, graceMs: 10_000,
+      });
+      const noChallenge = resolveManualDetailChallengeDisposition({
+        signals: { isChallenge: false, isHardBlock: false }, now: 1_000, graceMs: 10_000,
+      });
+      assert(liveWidget.disposition === 'foreground-wait'
+        && transitioning.disposition === 'foreground-wait'
+        && transitioning.terminalElapsedMs === 0
+        && stableTerminal.disposition === 'terminal-stop'
+        && initialTerminal.disposition === 'terminal-stop'
+        && noChallenge.disposition === 'none',
+      'detail-tab challenges foreground an interactive page and its terminal transition for the human, but stop only an initial or grace-stable no-widget terminal page');
+      return { interactive: liveWidget.disposition, settled: stableTerminal.disposition };
+    },
+  },
+{
+    name: 'Glassdoor terminal detail hard blocks do not offer a fake Solve loop',
+    run: () => {
+      const rootWarning = {
+        code: 'description-detail-hard-block', severity: 'block', action: 'none',
+        evidence: 'Glassdoor returned the Humans only page.',
+        suggestion: 'Do not keep retrying Glassdoor.',
+      };
+      const warning = buildResolvedDescriptionWarning(
+        'glassdoor',
+        rootWarning,
+        [],
+        [{ title: 'Solutions Architect' }, { title: 'Platform Architect' }],
+      );
+      assert(warning.code === 'description-detail-hard-block'
+        && warning.action === 'none'
+        && warning.shortLabel === 'Wait, then rerun'
+        && warning.evidence.includes('0 description-complete listing(s)')
+        && warning.evidence.includes('2 still lack a full description')
+        && warning.suggestion.includes('There is no interactive challenge to solve')
+        && !canAttemptJobSourceResolve(warning),
+      'a resolved list page must retain the terminal detail-block cause and suppress another immediate Solve');
+      assert(!canAttemptJobSourceResolve({ code: 'cloudflare-hard-block', severity: 'block' })
+        && canAttemptJobSourceResolve({ code: 'http-403', severity: 'block' }),
+      'older persisted terminal hard-block warnings are also non-resolvable, while a real 403 challenge stays solvable');
+      return { code: warning.code, canResolve: canAttemptJobSourceResolve(warning) };
+    },
+  },
+{
+    name: 'ZipRecruiter Appcast restriction recovery is narrow, bounded, and offers an IP-change retry',
+    run: () => {
+      const restrictedCopy = 'Access is temporarily restricted\n\nWe detected unusual activity from your device or network.';
+      assert(isAppcastTemporaryRestriction({
+        url: 'https://click.appcast.io/track/abc?source=ziprecruiter',
+        visibleText: restrictedCopy,
+      })
+        && !isAppcastTemporaryRestriction({
+          url: 'https://www.appcast.io/track/abc',
+          visibleText: restrictedCopy,
+        })
+        && !isAppcastTemporaryRestriction({
+          url: 'https://click.appcast.io/track/abc',
+          visibleText: 'Access is temporarily restricted',
+        })
+        && !isAppcastTemporaryRestriction({
+          url: 'not a URL',
+          visibleText: restrictedCopy,
+        }),
+      'only Appcast click redirects carrying both visible restriction markers enter the ZipRecruiter recovery path');
+      assert(zipRecruiterAppcastRestrictionBackoffMs(1) === 6_000
+        && zipRecruiterAppcastRestrictionBackoffMs(2) === 12_000
+        && zipRecruiterAppcastRestrictionBackoffMs(99) === 15_000
+        && zipRecruiterAppcastRestrictionBackoffMs(0) === 6_000,
+      'Appcast retries have a bounded exponential backoff and never spin immediately');
+
+      const warning = buildResolvedDescriptionWarning(
+        'ziprecruiter',
+        {
+          code: 'description-appcast-temporary-restriction',
+          severity: 'block',
+          shortLabel: 'Switch IP, then retry',
+          actionLabel: 'Retry after IP change',
+          evidence: 'Appcast restriction remained after the one automatic recovery.',
+          suggestion: 'Switch ProtonVPN, then retry.',
+        },
+        [{ title: 'Recovered Architect' }],
+        [{ title: 'Blocked Architect' }],
+      );
+      assert(warning.code === 'description-appcast-temporary-restriction'
+        && warning.severity === 'block'
+        && warning.actionLabel === 'Retry after IP change'
+        && warning.shortLabel === 'Switch IP, then retry'
+        && warning.evidence.includes('1 description-complete listing(s)')
+        && warning.evidence.includes('1 still lack a full description')
+        && warning.suggestion.includes('Switch ProtonVPN')
+        && canAttemptJobSourceResolve(warning)
+        && isJobSourceWarningGating(warning),
+      'an exhausted Appcast detail recovery pauses the source but preserves the existing user-driven retry path after an IP change');
+      return { backoffMs: zipRecruiterAppcastRestrictionBackoffMs(2), retryAction: warning.actionLabel };
+    },
+  },
+{
     name: 'ZipRecruiter detail enrichment reads external application pages without form automation and bounds 429 retry waits',
     run: () => {
       assert(shouldNavigateForDescription('ziprecruiter', 'https://www.ziprecruiter.com/jobs/acme/platform-architect?lvk=abc'),
@@ -4317,13 +5367,26 @@ export default [
         'an external Trakstar page is eligible for one read-only text extraction without clicking its form');
       assert(!shouldNavigateForDescription('ziprecruiter', 'file:///Users/example/job.html'),
         'only ordinary HTTP(S) detail URLs are eligible for external-page enrichment');
-      assert(shouldNavigateForDescription('glassdoor', 'https://example.com/apply'),
-        'the ZipRecruiter ownership guard cannot change another source\'s navigation policy');
+      const glassdoorPolicy = descriptionNavigationDecision(
+        'glassdoor',
+        'https://fr.glassdoor.ca/job-listing/platform-architect.htm?jl=101',
+      );
+      assert(!shouldNavigateForDescription('glassdoor', 'https://www.glassdoor.ca/job-listing/platform-architect.htm?jl=101')
+        && !shouldNavigateForDescription('glassdoor', 'https://example.com/apply')
+        && glassdoorPolicy.reason === 'glassdoor-list-card-panel-only',
+      'Glassdoor description enrichment is structurally list-card-only: no detail or external URL may reach goto(), even if a future config accidentally enables detail navigation');
+      assert(isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home?closed_job_redirect=1')
+        && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/jobseeker/home')
+        && !isZipRecruiterClosedDetailRedirect('https://www.ziprecruiter.com/c/Acme/Job/Software-Engineer/-in-Toronto,ON?jid=abc')
+        && !isZipRecruiterClosedDetailRedirect('https://jobs.example.com/jobseeker/home?closed_job_redirect=1'),
+      'only ZipRecruiter\'s explicit closed-job redirect is retired; ordinary home, job, and external URLs remain eligible');
       assert(isUnavailableDetailPage({ isNotFound: true })
         && isUnavailableDetailPage({ workdayPostingAvailable: false })
+        && isUnavailableDetailPage({ zipRecruiterClosedJobRedirect: true })
         && !isUnavailableDetailPage({ workdayPostingAvailable: true })
+        && !isUnavailableDetailPage({ zipRecruiterClosedJobRedirect: false })
         && !isUnavailableDetailPage({}),
-      'an HTTP-200 Workday bootstrap marked postingAvailable=false is treated as a closed listing, while an ordinary available/unknown page remains eligible for recovery');
+      'an HTTP-200 Workday bootstrap marked postingAvailable=false or ZipRecruiter closed-job redirect is treated as a closed listing, while an ordinary available/unknown page remains eligible for recovery');
       assert(zipRecruiterRetryAfterMs('120') === 60_000
         && zipRecruiterRetryAfterMs('', 0) === 45_000
         && zipRecruiterRetryAfterMs('invalid', 0) === 45_000
@@ -4771,6 +5834,52 @@ export default [
       const fSrc = computeJobTreeView(tree(), 'hub', { sourceFilter: 'dice' });
       assert(hiddenOf(fSrc, 'c2') === false && hiddenOf(fSrc, 'c1') === true, 'flat: source filter keeps only matching source');
       return { ok: true };
+    },
+  },
+{
+    name: 'Job tree first card measurement reflows only when it exceeds its reserved row',
+    run: () => {
+      // A first measurement is normally skipped to avoid one complete tree
+      // layout per initially mounted card. It cannot be skipped when the card
+      // is taller than the 280px slot used while it was still unmeasured: that
+      // is the opening-an-upper-list-over-an-open-lower-list regression.
+      assert(!shouldReflowMeasuredJobCard({ visible: false, previousMeasuredHeight: null, measuredHeight: 884 })
+        && !shouldReflowMeasuredJobCard({ visible: true, previousMeasuredHeight: null, measuredHeight: null })
+        && !shouldReflowMeasuredJobCard({ visible: true, previousMeasuredHeight: null, measuredHeight: 280 })
+        && !shouldReflowMeasuredJobCard({ visible: true, previousMeasuredHeight: 884, measuredHeight: 884 }),
+      'hidden, invalid, reserved-height, and unchanged measurements do not reflow');
+      assert(shouldReflowMeasuredJobCard({ visible: true, previousMeasuredHeight: null, measuredHeight: 884 })
+        && shouldReflowMeasuredJobCard({ visible: true, previousMeasuredHeight: 884, measuredHeight: 280 }),
+      'a first tall measurement and every later visible change reflow');
+
+      const oneCardTree = (height) => [
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'upper', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['role'], expanded: true } },
+        { id: 'role', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', childIds: ['top-1'], expanded: true, visibleCount: 10 } },
+        { id: 'top-1', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, ...(Number.isFinite(height) ? { measured: { width: 280, height } } : {}), data: { hubId: 'hub', matchScore: 90, source: 'lever' } },
+        { id: 'lower', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['lower-card'], expanded: false } },
+        { id: 'lower-card', type: 'jobcard', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 80, source: 'lever' } },
+      ];
+      const twoCardTree = (heights = []) => [
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'upper', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['role'], expanded: true } },
+        { id: 'role', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', childIds: ['top-1', 'top-2'], expanded: true, visibleCount: 10 } },
+        { id: 'top-1', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, ...(Number.isFinite(heights[0]) ? { measured: { width: 280, height: heights[0] } } : {}), data: { hubId: 'hub', matchScore: 90, source: 'lever' } },
+        { id: 'top-2', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, ...(Number.isFinite(heights[1]) ? { measured: { width: 280, height: heights[1] } } : {}), data: { hubId: 'hub', matchScore: 89, source: 'lever' } },
+        { id: 'lower', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['lower-card'], expanded: false } },
+        { id: 'lower-card', type: 'jobcard', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 80, source: 'lever' } },
+      ];
+      const initial = computeJobTreeView(oneCardTree(), 'hub', {}, COL_X, true);
+      const initialLowerY = initial.find(n => n.id === 'lower')?.position?.y;
+      const firstTall = computeJobTreeView(oneCardTree(884), 'hub', {}, COL_X, true);
+      const firstTallLowerY = firstTall.find(n => n.id === 'lower')?.position?.y;
+      const bothTall = computeJobTreeView(twoCardTree([884, 400]), 'hub', {}, COL_X, true);
+      const bothTallLowerY = bothTall.find(n => n.id === 'lower')?.position?.y;
+      assert(initialLowerY === 280
+        && firstTallLowerY === 924
+        && bothTallLowerY === 1_364,
+      `opening geometry reserves 280px/card, then uses measured height + 40px gap (got ${initialLowerY} → ${firstTallLowerY} → ${bothTallLowerY})`);
+      return { initialLowerY, firstTallLowerY, bothTallLowerY };
     },
   },
 {

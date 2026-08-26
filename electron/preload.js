@@ -58,8 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   // Local AI is intentionally a manual, file-based handoff. These handlers
-  // never invoke or automate Claude Code; the user runs the documented local
-  // routine and returns here to validate/import result.json.
+  // never invoke or automate a local coding agent; the user runs the documented
+  // provider-neutral routine and returns here to validate/import result.json.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
   discardLocalApplication: (args) => ipcRenderer.invoke('discard-local-application', args),
   getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
@@ -67,10 +67,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importLocalApplication: (args) => ipcRenderer.invoke('import-local-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   discardApplication: (args) => ipcRenderer.invoke('discard-application', args),
-  markJobApplied:   (args) => ipcRenderer.invoke('mark-job-applied', args),
-  unmarkJobApplied: (args) => ipcRenderer.invoke('unmark-job-applied', args),
-  loadAppliedJobs:  (args) => ipcRenderer.invoke('load-applied-jobs', args),
-  isJobApplied:     (args) => ipcRenderer.invoke('is-job-applied', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
@@ -92,6 +88,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Board Combine runs this after global taxonomy validation and before cards
   // are built, so compensation context is still available on the full jobs.
   researchJobCompensation: (args) => ipcRenderer.invoke('research-job-compensation', args),
+
+  // ── Non-API AI handoff ─────────────────────────────────────────────────
+  // The main process emits a fully materialized prompt here when a job task
+  // needs the user to run it in their own AI chat.  Keeping the request id in
+  // both directions lets a renderer retry a validation failure without ever
+  // resolving a different pending AI call.
+  onNonApiAiRequest: createListener('non-api-ai-request'),
+  onNonApiAiSettled: createListener('non-api-ai-settled'),
+  // Subscribe before asking the main process to replay sender-owned pending
+  // handoffs so an app-level dialog remount cannot leave a live prompt in the
+  // listener/replay gap. A true renderer navigation cancels its job instead.
+  replayPendingNonApiAiRequests: () => ipcRenderer.invoke('replay-pending-non-api-ai-requests'),
+  submitNonApiAiResponse: (args) => ipcRenderer.invoke('submit-non-api-ai-response', args),
+  cancelNonApiAiRequest: (requestId) => ipcRenderer.invoke('cancel-non-api-ai-request', { requestId }),
+  revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
 
   // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),

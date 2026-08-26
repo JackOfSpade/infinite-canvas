@@ -1,4 +1,5 @@
-import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, appliedKeysFor, appliedRecordMatches, applyRefuteVerdicts, assert, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, canonicalizeCompany, canonicalizeJobUrl, canonicalizeLocation, canonicalizeTitle, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, filterOutApplied, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, markJobApplied, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
   {
@@ -21,7 +22,7 @@ export default [
     },
   },
 {
-    name: 'jobs history: skip diagnostics attribute in-batch URL collisions to their source',
+    name: 'jobs history: conflicting URL identities fail open instead of hiding a different listing',
     run: async () => {
       const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-skips-'));
       const canvasPath = path.join(base, 'job-search.json');
@@ -30,15 +31,19 @@ export default [
           { source: 'google', company: 'Acme', title: 'First role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
           { source: 'google', company: 'Beta', title: 'Second role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
         ]);
-        assert(result.written === 1, `only the first URL-colliding job writes, got ${result.written}`);
-        assert(result.skips?.url === 1 && result.skips?.inBatch === 1 && result.skips?.bySource?.google === 1,
-          `skip diagnostics classify and attribute the collision, got ${JSON.stringify(result.skips)}`);
-        assert(result.skips?.collisionSamples?.length === 1
-          && result.skips.collisionSamples[0].sameListing === false
-          && result.skips.collisionSamples[0].first.title === 'First role'
-          && result.skips.collisionSamples[0].duplicate.title === 'Second role',
-        `collision diagnostics retain the bounded conflicting pair, got ${JSON.stringify(result.skips?.collisionSamples)}`);
-        return { ok: true, skips: result.skips };
+        assert(result.written === 2, `both visibly different URL-colliding jobs must write, got ${result.written}`);
+        assert(result.skips?.url === 0 && result.skips?.inBatch === 0,
+          `a conflicting URL must not be counted as a suppressed duplicate, got ${JSON.stringify(result.skips)}`);
+
+        const history = await loadJobsHistory(canvasPath);
+        const againstHistory = dedupAgainstHistory([
+          { source: 'google', company: 'Acme', title: 'First role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
+          { source: 'google', company: 'Gamma', title: 'Genuinely new role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
+        ], history);
+        assert(againstHistory.removed === 1 && againstHistory.kept.length === 1
+          && againstHistory.kept[0].title === 'Genuinely new role',
+        `history suppression must remove the matching visible listing but fail open for a conflicting one, got ${JSON.stringify(againstHistory)}`);
+        return { ok: true, written: result.written, kept: againstHistory.kept.length };
       } finally {
         await fs.promises.rm(base, { recursive: true, force: true });
       }
@@ -705,7 +710,7 @@ export default [
 {
     name: 'tokenBudget: seed/hard-cap pure paths + non-finite samples rejected',
     run: () => {
-      assert(TOKEN_HARD_CAP === 40000, 'hard cap is raised to 40,000 for the larger scoring floor');
+      assert(TOKEN_HARD_CAP === 64000, 'hard cap leaves the 32,000 scoring floor room to self-heal past an observed 40,000-token truncation');
       // No recorded data → returns the seed unchanged (the common path).
       assert(effectiveCap('tb-unit-seed', 5000) === 5000, 'no data → seed unchanged');
       // A non-positive seed falls back to the hard cap (max headroom).
@@ -716,6 +721,9 @@ export default [
       recordTokenUsage('tb-unit-inf', NaN);
       recordTruncation('tb-unit-inf', Infinity);
       assert(effectiveCap('tb-unit-inf', 4000) === 4000, 'Infinity/NaN samples do not poison the cap');
+      recordTruncation('tb-unit-scoring-hard-cap', 40000, 32000);
+      assert(effectiveCap('tb-unit-scoring-hard-cap', 32000) === 48000,
+        'a real scoring truncation at the former 40,000 ceiling immediately self-heals with 20% headroom');
       return { ok: true };
     },
   },
@@ -980,7 +988,7 @@ export default [
       assert(tasks.size > 0 && !tasks.has('default'), 'known task set is non-empty and excludes "default"');
       // Every task must resolve to a real Gemini fallback OR a current Claude id —
       // catches a typo'd / retired model id slipped into the per-task table.
-      const validModels = new Set([...GEMINI_MODEL_FALLBACKS, ...catalog]);
+      const validModels = new Set([...GEMINI_MODEL_FALLBACKS, ...catalog, NON_API_AI_TRANSPORT]);
       for (const t of tasks) {
         const m = modelForTask(t);
         assert(validModels.has(m), `task "${t}" resolves to a known model (got ${m})`);
@@ -1316,159 +1324,6 @@ export default [
       assert(wasManualSolveRequired('indeed') === false, 'unmarked source stays false');
       resetManualSolveTracking();
       assert(wasManualSolveRequired('ebay') === false, 'reset clears prior-run marks');
-      return { ok: true };
-    },
-  },
-{
-    // Achievement-mining design doc §6.3's format-variance table, case by
-    // case. This module is "the piece most likely to be quietly wrong" per
-    // the doc — a false negative just re-shows a job (annoying), a false
-    // positive permanently disappears a real opening (not recoverable), so
-    // every case below is a real source shape, not a synthetic one.
-    name: 'locationIdentity: format-variance table (§6.3) folds every source shape to one key; unknown location is always ""',
-    run: () => {
-      // ZipRecruiter reconstructs from a URL slug (every '-' -> ' '), so a
-      // genuinely hyphenated place name from ANY other source must fold to
-      // the identical token or the two never match.
-      assert(canonicalizeLocation('Winston-Salem, NC') === 'winston salem, nc', 'ZipRecruiter hyphen-slug: "Winston-Salem" folds to the space-joined form');
-      assert(canonicalizeLocation('Winston-Salem, NC') === canonicalizeLocation('Winston Salem, NC'), 'hyphenated and space-joined spellings of the same city produce the SAME key');
-
-      // Indeed's addressLocality fallback is sometimes a bare city with no
-      // state anywhere in the record. Must NOT guess a state — a bare city
-      // canonicalizes to itself and only matches another bare "austin".
-      assert(canonicalizeLocation('Austin') === 'austin', 'Indeed bare-city-no-state: no state is fabricated');
-      assert(canonicalizeLocation('Austin') !== canonicalizeLocation('Austin, TX'), 'a bare city must NOT match a located version of the same city (no guessing)');
-
-      // USAJobs's PositionLocationDisplay embeds the state INSIDE the city
-      // segment too ("Washington DC, District of Columbia") — must collapse
-      // onto the same key as a plain "Washington, DC" from another source.
-      assert(canonicalizeLocation('Washington DC, District of Columbia') === 'washington, dc', 'USAJobs embedded-state city segment de-duplicates against its own state segment');
-      assert(canonicalizeLocation('Washington DC, District of Columbia') === canonicalizeLocation('Washington, DC'), 'USAJobs shape collapses onto the same key as a plain "city, ST" source');
-
-      // Remote variants: leading-"remote" shapes AND the short exact-token
-      // list (WWR/RemoteOK free-text fields) all fold to one 'remote' token.
-      for (const raw of ['Remote', 'Remote - US', 'Remote (US)', 'Remote, United States', 'Fully Remote', 'Anywhere', 'WFH', 'Distributed', 'Work From Home']) {
-        assert(canonicalizeLocation(raw) === 'remote', `remote variant "${raw}" folds to the single 'remote' token`);
-      }
-
-      // Country-token stripping, both comma-separated and paren-merged shapes.
-      assert(canonicalizeLocation('Denver, CO, United States') === 'denver, co', 'trailing "United States" (comma-separated) is stripped');
-      assert(canonicalizeLocation('Denver, CO (US)') === 'denver, co', 'trailing "(US)" (paren-merged onto the state segment) is stripped');
-
-      // State full-name <-> 2-letter code fold, either direction — Glassdoor's
-      // two extraction strategies (Apollo cache vs DOM) are exactly the kind
-      // of same-listing/two-formats case this exists for.
-      assert(canonicalizeLocation('Denver, Colorado') === 'denver, co', 'full state name folds to its 2-letter code');
-      assert(canonicalizeLocation('Denver, CO') === canonicalizeLocation('Denver, Colorado'), 'code and full-name spellings of the same state produce the SAME key');
-
-      // A lone segment that IS a full subdivision name (no city at all) reads
-      // as the state, not as a city literally named "California".
-      assert(canonicalizeLocation('California') === 'ca', 'a bare state name with no city resolves as the state');
-
-      // Diacritic folding (Google/LinkedIn scraped card text).
-      assert(canonicalizeLocation('Montréal, QC') === 'montreal, qc', 'diacritics are NFD-stripped ("Montréal" -> "montreal")');
-
-      // UNKNOWN LOCATION NEVER MATCHES — canonicalizeLocation itself always
-      // returns '' for every flavor of "no location", which is what makes the
-      // tupleKey-level invariant (tested below) hold.
-      for (const raw of ['', '   ', null, undefined, 42, {}]) {
-        assert(canonicalizeLocation(raw) === '', `canonicalizeLocation(${JSON.stringify(raw)}) is the empty "unknown" string, never a guess`);
-      }
-
-      // Whitespace-collapsing disagreement the two legacy modules had
-      // (jobIdentity's keyPart doesn't collapse, jobsHistory's normText does)
-      // — this module always collapses, for BOTH title and company.
-      assert(canonicalizeTitle('Senior   Accountant') === canonicalizeTitle('Senior Accountant'), 'canonicalizeTitle collapses internal whitespace');
-      assert(canonicalizeCompany('Acme   Corp') === canonicalizeCompany('Acme Corp'), 'canonicalizeCompany collapses internal whitespace');
-      return { ok: true };
-    },
-  },
-{
-    // Applied-jobs identity (design doc §6.2/§6.3): urlKey match OR tupleKey
-    // match, with the "unknown location never matches" invariant enforced at
-    // THIS layer (appliedRecordMatches), not just in canonicalizeLocation.
-    name: 'Applied-jobs identity: urlKey vs tupleKey branches, same title+company across two cities never collides, unknown location never matches',
-    run: () => {
-      // Same title + same company, DIFFERENT city = a DIFFERENT job (§6.3's
-      // stated product decision) — must not collide even with no URL at all.
-      const jobDenver = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: '' };
-      const recordAustin = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Austin, TX', url: '' };
-      assert(appliedRecordMatches(jobDenver, recordAustin) === false, 'same title+company, different city → NOT a match');
-
-      // Tuple branch: same title+company+location matches despite case/
-      // whitespace/state-spelling differences and a completely different (or
-      // absent) URL — identity here is the tuple, not the link.
-      const jobT1 = { title: 'Data Analyst', company: 'Beta LLC', location: 'Denver, CO', url: '' };
-      const jobT2 = { title: 'data   analyst', company: 'BETA LLC', location: 'Denver, Colorado', url: 'https://different.example.com/x' };
-      assert(appliedRecordMatches(jobT1, jobT2) === true, 'tuple branch matches on title+company+location regardless of URL/case/state-spelling');
-
-      // URL branch: a tracking-param query string must not defeat the match —
-      // dropped query params (utm_source, session tokens) are exactly what
-      // canonicalizeJobUrl's "drop query except jk" rule is for.
-      const jobA = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: 'https://boards.greenhouse.io/acme/jobs/111?utm_source=indeed&utm_campaign=x' };
-      const recordA = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: 'https://boards.greenhouse.io/acme/jobs/111' };
-      assert(appliedRecordMatches(jobA, recordA) === true, 'tracking-param query string does not defeat the URL match');
-
-      // Indeed jk-stub: the redirect PATH is identical across every listing —
-      // identity lives in the `jk` param, which must survive even though every
-      // OTHER query param (a per-scrape session token) differs.
-      const jobJk1 = { title: 'X', company: 'Y', location: '', url: 'https://www.indeed.com/rc/clk?jk=abc123&other=1' };
-      const recordJk1 = { title: 'X', company: 'Y', location: '', url: 'https://www.indeed.com/rc/clk?jk=abc123&other=999' };
-      assert(appliedRecordMatches(jobJk1, recordJk1) === true, 'Indeed jk-stub: same jk, different session token → matches on jk alone');
-      assert(canonicalizeJobUrl('https://www.indeed.com/rc/clk?jk=abc123') !== canonicalizeJobUrl('https://www.indeed.com/rc/clk?jk=xyz789'), 'Indeed jk-stub: DIFFERENT jk never matches');
-
-      // A redirect stub with NO jk carries no usable identity at all —
-      // canonicalizeJobUrl returns '' rather than treating the shared path as
-      // an identity (that would collapse every different listing onto one key).
-      assert(canonicalizeJobUrl('https://www.indeed.com/pagead/clk?other=1') === '', 'a redirect stub with no jk canonicalizes to "" (no usable URL identity)');
-      const jobNoJk = { title: 'Bare Title', company: 'Bare Co', location: '', url: 'https://www.indeed.com/pagead/clk?other=1' };
-      const recordNoJk = { title: 'Bare Title', company: 'Bare Co', location: '', url: 'https://www.indeed.com/pagead/clk?other=2' };
-      assert(appliedRecordMatches(jobNoJk, recordNoJk) === false, 'a jk-less redirect stub falls through to the tuple branch, which then correctly fails on unknown location');
-
-      // UNKNOWN LOCATION NEVER MATCHES — not even two unknown-location records
-      // for the exact same title+company. This is the enforcement point: an
-      // empty tupleKey must never leak through as a wildcard on EITHER side.
-      const jobU1 = { title: 'Support Engineer', company: 'Widgets Inc', location: '', url: '' };
-      const jobU2 = { title: 'Support Engineer', company: 'Widgets Inc', location: '', url: '' };
-      assert(appliedRecordMatches(jobU1, jobU2) === false, 'two unknown-location records, same title+company, no url → still NOT a match');
-      assert(appliedKeysFor(jobU1).tupleKey === '', 'appliedKeysFor: an unknown location produces an empty tupleKey, never a partial key');
-      return { ok: true };
-    },
-  },
-{
-    // A corrupt applied-jobs.json (readStoreSync deliberately throws — see its
-    // own doc-comment) must not propagate out of filterOutApplied and discard
-    // an entire already-gathered batch of jobs from search-jobs/resolve-job-
-    // source/resume-job-source. It must also invalidate a previously-valid
-    // cache immediately when a user externally hand-edits the safety-valve file.
-    name: 'filterOutApplied: detects external corruption after a valid cached read, skips safely, and recovers once fixed',
-    run: () => {
-      const dir = electronPkg.app.getPath('userData');
-      fs.mkdirSync(dir, { recursive: true });
-      const filePath = path.join(dir, 'applied-jobs.json');
-      const jobs = [{ title: 'VP Finance', company: 'Acme Corp', location: 'Denver, CO', url: 'https://example.com/jobs/vp-finance-1' }];
-      // Prime a known-good cache first. The external corrupt write below must
-      // not be masked by stale in-memory records from this valid read.
-      fs.writeFileSync(filePath, JSON.stringify({ version: 1, records: [] }, null, 2), 'utf8');
-      const primed = filterOutApplied(jobs);
-      assert(primed.jobs.length === 1 && !primed.error, 'valid empty store primes the cache cleanly');
-
-      fs.writeFileSync(filePath, '{ this is not valid json,', 'utf8');
-      const result = filterOutApplied(jobs);
-      assert(Array.isArray(result.jobs) && result.jobs.length === 1, 'a corrupt store must not discard the already-gathered jobs array');
-      assert(result.hiddenApplied === 0, 'nothing can be confirmed hidden when the store itself could not be read');
-      assert(typeof result.error === 'string' && result.error.length > 0, 'the failure is reported via `error`, not swallowed entirely (so callers can surface a visible warning)');
-
-      // Recovery: fixing the file on disk (the store's own documented recovery
-      // path — "the user can open it and delete one line") must be picked up on
-      // the very next call, no stale-cache stickiness from the failed read.
-      fs.writeFileSync(filePath, JSON.stringify({ version: 1, records: [] }, null, 2), 'utf8');
-      const record = markJobApplied(jobs[0], {});
-      assert(record && record.title === 'VP Finance', 'once the file is fixed, the store is usable again');
-      const after = filterOutApplied(jobs);
-      assert(after.jobs.length === 0 && after.hiddenApplied === 1, 'the just-marked job is now correctly filtered out');
-
-      fs.rmSync(filePath, { force: true });
       return { ok: true };
     },
   },

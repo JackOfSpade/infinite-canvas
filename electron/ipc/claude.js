@@ -8,6 +8,8 @@ import { buildAnthropicMessageParams, buildAnthropicTokenCountParams } from './a
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { claudeModelFor, claudeModelsInUse, CLAUDE_FAMILY } from './modelResolver.js';
 import { appendGroundedSourceAppendix } from './groundedSourceAppendix.js';
+import { recordClaudeCacheUsage } from './claudeCacheTelemetry.js';
+import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './schemaValidation.js';
 
 // A document/image node's filePath is sourced from loaded canvas JSON, which
 // (unlike the local-file:// preview protocol) had NO path check at all before
@@ -107,73 +109,6 @@ export async function probeClaude(apiKey, model = claudeModelFor(CLAUDE_FAMILY.S
   }
 }
 
-// "2" → 2, "4.5" → 4.5, "moderate" → "moderate". Used when pulling a value out
-// of leaked tool-call XML, which always arrives as a string even for an integer
-// field — so the rebuilt object matches the schema's numeric types.
-function coerceScalar(s) {
-  const t = String(s).trim();
-  if (t === '') return t;
-  const n = Number(t);
-  return Number.isFinite(n) && String(n) === t ? n : t;
-}
-
-/**
- * Repair a model-emitted tool-use `input` against its schema. Tool-use forces a
- * tool CALL but does NOT strictly validate the input the model fills in: for a
- * NESTED object property the model can fumble the nesting, leaking the inner
- * fields up to the parent level and/or dumping raw tool-call XML
- * (`<parameter name="x">v`) into a string value. Observed in a price-synthesis
- * call where `comp_breakdown` arrived as
- *   comp_breakdown: "\n<parameter name=\"anchor_count\">2", adjusted_count: 4, bound_count: 4
- * instead of { anchor_count: 2, adjusted_count: 4, bound_count: 4 } — which made
- * the downstream consumer read 0/0/0 and report a "thin anchor base" that was
- * never real.
- *
- * Walks the schema and, for each object-typed property that did NOT arrive as a
- * plain object, reconstructs it from (a) `<parameter name="k">v` pairs embedded
- * in the malformed value and (b) the property's own sub-keys that leaked to this
- * level (only keys not legitimately defined at this level, so a real sibling is
- * never stolen). Schema-driven → repairs ANY structured-output call, and a no-op
- * when the input is already well-formed. Returns whether anything was repaired.
- */
-function repairToolInput(value, schema, repaired = { count: 0 }) {
-  if (!schema || typeof value !== 'object' || value === null) return repaired;
-  if (schema.type === 'object' && schema.properties) {
-    for (const [key, sub] of Object.entries(schema.properties)) {
-      if (!sub) continue;
-      if (sub.type === 'object' && sub.properties) {
-        const current = value[key];
-        if (current && typeof current === 'object' && !Array.isArray(current)) {
-          repairToolInput(current, sub, repaired); // already an object — recurse for deeper nesting
-          continue;
-        }
-        const rebuilt = {};
-        if (typeof current === 'string') {
-          for (const m of current.matchAll(/<parameter\s+name="([^"]+)">\s*([^<]*)/g)) {
-            rebuilt[m[1]] = coerceScalar(m[2]);
-          }
-        }
-        for (const subKey of Object.keys(sub.properties)) {
-          if (subKey in rebuilt) continue;
-          // Only adopt a leaked field — one that belongs to the sub-object but
-          // isn't a legitimate property at this level.
-          if (subKey in value && !(subKey in schema.properties)) {
-            rebuilt[subKey] = value[subKey];
-            delete value[subKey];
-          }
-        }
-        if (Object.keys(rebuilt).length > 0) {
-          value[key] = rebuilt;
-          repaired.count++;
-        }
-      } else if (sub.type === 'array' && sub.items && Array.isArray(value[key])) {
-        for (const el of value[key]) repairToolInput(el, sub.items, repaired);
-      }
-    }
-  }
-  return repaired;
-}
-
 /**
  * Which `web_search` tool version to send for `model`.
  *
@@ -231,16 +166,22 @@ export function formatClaudeGroundedResponse(content) {
   return appendGroundedSourceAppendix(prose, sources);
 }
 
-async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding }) {
+async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, responseSchema, cachedPrefix, task, grounding }) {
+  // The Messages API cannot simultaneously return citation-bearing web-search
+  // content and a constrained JSON-output response.  No public LLM entry point
+  // intentionally combines them, so fail before billing rather than silently
+  // dropping the requested research tool below.
+  if (grounding && responseSchema) {
+    const error = new Error(`Claude grounding and structured output cannot be combined for task '${task || 'unknown'}'. Run the grounded research pass before the structured extraction pass.`);
+    error.code = 'CLAUDE_GROUNDING_STRUCTURED_OUTPUT_CONFLICT';
+    throw error;
+  }
   // Build the shared Anthropic request shape — cache_control prefix block +
-  // the tool-use schema that forces the submit_response tool. Extracted to
+  // native JSON output schema. Extracted to
   // anthropicRequest.js so the async Message Batches path and the free
   // token-count preflight build the IDENTICAL request (see its doc).
-  // `expectJson && !grounding` is preserved so grounding keeps priority in the
-  // branch below, even though expectJson no longer alters the request shape
-  // (the JSON prefill it used to add now 400s — see anthropicRequest.js).
   const params = buildAnthropicMessageParams(userContent, {
-    model, maxTokens, responseSchema, cachedPrefix, expectJson: expectJson && !grounding,
+    model, maxTokens, responseSchema, cachedPrefix,
   });
   if (grounding && !responseSchema) {
     // Server-side web search: Anthropic runs the searches during this single
@@ -252,19 +193,23 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     // Carries its own per-search billing.
     params.tools = [{ type: webSearchToolType(model), name: 'web_search', max_uses: 8 }];
   }
-  // Stream rather than the one-shot `.create()`. With our high per-task caps
-  // (job-bucketing provisions up to ~24576 output tokens) a single non-streaming
+  // Stream rather than the one-shot `.create()`. With our high per-task caps,
+  // a single non-streaming
   // request can exceed the SDK's 10-minute non-streaming guard and is rejected
   // outright with "Streaming is required for operations that may take longer
-  // than 10 minutes" — which is exactly what broke job-bucketing on Claude.
+  // than 10 minutes".
   // `.finalMessage()` accumulates the SSE stream into the identical Message
-  // shape (content/tool_use blocks, usage incl. cache_read/creation tokens,
+  // shape (content blocks, usage incl. cache_read/creation tokens,
   // stop_reason), so every downstream read below is unchanged. The AbortSignal
   // is honored the same way via the request options arg.
   const response = await anthropic.messages.stream(params, { signal }).finalMessage();
 
   const stopReason = response.stop_reason;
   const usage = response.usage;
+  // Keep durable-in-session visibility into cache writes/hits. This records
+  // before stop-reason validation so truncated calls remain visible in cost
+  // diagnostics too; Anthropic's input_tokens excludes cache-read tokens.
+  recordClaudeCacheUsage({ task, model, cachedPrefix, usage });
   // Same diagnostic pattern as Gemini: log stop_reason + token usage on every
   // call so bug reports can distinguish a hit max_tokens cap from a model
   // refusal or a genuine model bug. Previously the only signal was the
@@ -278,7 +223,7 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
   const cacheTag = (cacheRead || cacheWrite)
     ? ` cache:read=${cacheRead ?? 0}/write=${cacheWrite ?? 0}`
     : '';
-  logger.info(`[Claude] stop_reason=${stopReason} usage=in:${usage?.input_tokens ?? '?'} out:${usage?.output_tokens ?? '?'} cap:${maxTokens}${responseSchema ? ' (tool-use)' : ''}${cacheTag}`);
+  logger.info(`[Claude] stop_reason=${stopReason} usage=in:${usage?.input_tokens ?? '?'} out:${usage?.output_tokens ?? '?'} cap:${maxTokens}${responseSchema ? ' (structured-output)' : ''}${cacheTag}`);
 
   // Feed the self-calibrating token budget (output_tokens is the billable
   // output; a max_tokens stop records a sample at the cap so the budget grows
@@ -306,6 +251,25 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     throw new Error(`AI response stopped — the prompt plus its reserved output exceeded ${model}'s context window (input ${usage?.input_tokens ?? '?'} tok + up to ${maxTokens} output). Send fewer/smaller inputs for task '${task || 'unknown'}'.`);
   }
 
+  // A constrained grammar guarantees the shape of a completed answer, not that
+  // Claude will answer at all. Do not let a refusal become an opaque downstream
+  // JSON parse error (or a silent placeholder in a legacy batch reconciliation).
+  if (stopReason === 'refusal') {
+    const error = new Error(`Claude refused the request for task '${task || 'unknown'}'.`);
+    error.code = 'CLAUDE_REFUSAL';
+    throw error;
+  }
+
+  // `pause_turn` is explicitly incomplete: Anthropic requires callers to send
+  // the returned assistant content back in a continuation request.  This app
+  // has no continuation protocol for one-shot structured calls, and returning
+  // a partial JSON/prose result here would make it look complete downstream.
+  if (stopReason === 'pause_turn') {
+    const error = new Error(`Claude paused before completing task '${task || 'unknown'}'; the partial response was discarded. Retry the task.`);
+    error.code = 'CLAUDE_PAUSE_TURN';
+    throw error;
+  }
+
   // Web-search (grounding) response: the answer is spread across one or more
   // `text` blocks, interleaved with server_tool_use / web_search_tool_result
   // blocks. Keep the prose plus public URLs from text citations / result
@@ -316,22 +280,30 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     return txt;
   }
 
-  // Tool-use response: pull the tool_use block's `input`, repair any nested
-  // object the model mis-emitted (leaked fields / tool-call XML in a string),
-  // then re-stringify so the shared parseAiJson (jsonRepair.js) downstream can
-  // JSON.parse it like any other JSON.
+  // Native Structured Outputs returns JSON in text blocks. Validate against
+  // the original response schema here before preserving the normal string
+  // contract for the shared parser downstream.
   if (responseSchema) {
-    const toolBlock = response.content.find(b => b.type === 'tool_use');
-    if (!toolBlock) {
-      throw new Error(`Claude tool-use response missing tool_use block (stop_reason=${stopReason || 'unknown'}).`);
+    const json = (response.content || [])
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
+    if (!json) throw new Error(`Claude structured-output response missing JSON text (stop_reason=${stopReason || 'unknown'}).`);
+    let parsed;
+    try {
+      parsed = JSON.parse(json);
+    } catch (cause) {
+      const error = new Error(`Claude returned invalid JSON for structured output on task '${task || 'unknown'}': ${cause?.message || cause}.`);
+      error.code = 'STRUCTURED_OUTPUT_INVALID_JSON';
+      throw error;
     }
-    const { count } = repairToolInput(toolBlock.input, responseSchema);
-    if (count > 0) {
-      // Surface the repair so a bug report shows the model emitted non-conforming
-      // structured output (rather than the silent 0/0/0 it used to produce).
-      logger.warn(`[Claude] Repaired ${count} malformed nested field(s) in tool input for task '${task || 'unknown'}' — model leaked sub-fields/param-XML instead of nesting them.`);
-    }
-    return JSON.stringify(toolBlock.input);
+    // Claude's documented structured-output enum/const exception permits
+    // casing drift. Canonicalize a unique case-insensitive match back to the
+    // schema spelling before local validation and application parsing.
+    parsed = canonicalizeResponseSchemaEnums(parsed, responseSchema);
+    assertResponseMatchesSchema(parsed, responseSchema, { provider: 'Claude', task });
+    return JSON.stringify(parsed);
   }
 
   // Thinking-enabled models commonly put a thinking block before their text
@@ -345,40 +317,29 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     .join('\n')
     .trim();
   if (!text) throw new Error(`No content returned from Claude (stop_reason=${stopReason || 'unknown'}).`);
-  // Return the model's text verbatim, whatever `expectJson` says.
-  //
-  // This used to prepend a '{' when the text didn't already start with one,
-  // because the request had prefilled the assistant turn with '{' and the
-  // continuation therefore omitted it. That prefill is gone (current models
-  // 400 on it — see anthropicRequest.js), so the model now emits the WHOLE
-  // object. Keeping the prepend would actively corrupt the common slop case:
-  // "Here is the JSON:\n{...}" doesn't start with '{', so it would become
-  // "{Here is the JSON:\n{...}" — turning output that parseAiJson recovers
-  // trivially into something it cannot.
-  //
-  // parseAiJson (jsonRepair.js) already locates the object inside surrounding
-  // prose or fences, which is exactly what this branch was guarding against.
+  // Prose callers deliberately receive the text verbatim. Structured callers
+  // have returned above after native JSON-schema validation.
   return text;
 }
 
-export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, cachedPrefix = null, task = null, grounding = false } = {}) {
+export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, responseSchema = null, cachedPrefix = null, task = null, grounding = false } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding });
+  return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, responseSchema, cachedPrefix, task, grounding });
 }
 
 /**
  * Count the input tokens a text message would consume, via Anthropic's FREE
  * `messages.count_tokens` endpoint (separate rate limits, no billing). The
  * message shape mirrors createMessage exactly — cached-prefix block + prompt,
- * plus the tool definition when a responseSchema is in play — so the count
+ * plus the output format when a responseSchema is in play — so the count
  * matches what the real call would send. Returns the integer `input_tokens`.
  * Used by the preflight (checkPromptFits) to size/split prompts before sending.
  */
 export async function countClaudeInputTokens(prompt, model, apiKey, { cachedPrefix = null, responseSchema = null, signal = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   // Build from the exact same source as live + batch calls. The count endpoint
-  // omits only max_tokens; tool_choice is part of its accepted request shape
-  // and must stay in sync with the real forced-tool request.
+  // omits only max_tokens and keeps output_config.format in sync with the
+  // corresponding live request.
   const params = buildAnthropicTokenCountParams(prompt, {
     model,
     maxTokens: 1,
@@ -389,7 +350,7 @@ export async function countClaudeInputTokens(prompt, model, apiKey, { cachedPref
   return res?.input_tokens ?? 0;
 }
 
-export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
+export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, responseSchema = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   const tempFiles = [];
 
@@ -438,7 +399,7 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
     }));
 
     const userContent = [...contentParts, { type: 'text', text: prompt }];
-    return await createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, task });
+    return await createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, responseSchema, task });
   } finally {
     if (tempFiles.length > 0) {
       const { cleanupTempFile } = await import('./heicUtils.js');
@@ -447,12 +408,12 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
   }
 }
 
-export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
+export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, responseSchema = null, task = null } = {}) {
   assertAttachmentPathSafe(filePath);
   const ext = path.extname(filePath).toLowerCase();
 
   if (IMAGE_MIME_MAP[ext]) {
-    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
+    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, formulaSeed, responseSchema, task });
   }
 
   // Word docs (.doc/.docx) never reach here — callLLMDocument (llm.js) intercepts
@@ -473,13 +434,13 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
       },
       { type: 'text', text: prompt }
     ];
-    return createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, task });
+    return createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, responseSchema, task });
   }
 
   const textContent = await fs.promises.readFile(filePath, 'utf8');
   // Forward `task` so recordTokenUsage captures this call's output-token sample
   // (the image/PDF branches above already do — text files were silently dropped).
-  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
+  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, responseSchema, task });
 }
 
 // ── Legacy Message Batches recovery ───────────────────────────────────────
@@ -501,8 +462,9 @@ export async function cancelClaudeBatch(apiKey, batchId) {
 
 /**
  * Download batch results → { [custom_id]: { ok, text|null, error|null } }.
- * For tool-use responses, `text` is JSON.stringify(tool_use.input) — the same
- * string shape callClaudeText returns, so the caller parses it identically.
+ * For legacy tool-use responses, `text` is JSON.stringify(tool_use.input).
+ * Native JSON-output responses use their text blocks directly. Both return the
+ * same JSON-string shape callClaudeText returns, so callers parse identically.
  *
  * A batch item can be `result.type === 'succeeded'` (the request itself
  * completed) while still having hit its per-item max_tokens cap mid-response —
@@ -555,13 +517,21 @@ export async function getClaudeBatchResults(apiKey, batchId, { task = null, caps
       out[customId] = { ok: false, text: null, error: 'model_context_window_exceeded (truncated)' };
       continue;
     }
+    if (msg?.stop_reason === 'refusal') {
+      out[customId] = { ok: false, text: null, error: 'refusal' };
+      continue;
+    }
     const toolBlock = msg?.content?.find(b => b.type === 'tool_use');
     if (toolBlock) {
       out[customId] = { ok: true, text: JSON.stringify(toolBlock.input), error: null };
-    } else {
-      const txt = msg?.content?.find(b => b.type === 'text')?.text;
-      out[customId] = txt ? { ok: true, text: txt, error: null } : { ok: false, text: null, error: 'empty' };
+      continue;
     }
+    const txt = (msg?.content || [])
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
+    out[customId] = txt ? { ok: true, text: txt, error: null } : { ok: false, text: null, error: 'empty' };
   }
   return out;
 }

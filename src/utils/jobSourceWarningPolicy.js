@@ -21,6 +21,22 @@ export function jobSourceWarningAction(warning) {
 }
 
 /**
+ * Whether a source warning represents something the resolver can actually
+ * change in its shared-profile Chrome window. A terminal hard block has no
+ * checkbox, captcha, or login control, so offering Solve only creates an
+ * open/auto-close/retry loop while the IP/session restriction remains active.
+ * Keep the code allow-list here as well as honoring the explicit action field
+ * so older persisted warnings get the corrected behavior after an upgrade.
+ */
+export function canAttemptJobSourceResolve(warning) {
+  if (!warning || warning.action === 'none') return false;
+  return ![
+    'cloudflare-hard-block',
+    'description-detail-hard-block',
+  ].includes(warning.code);
+}
+
+/**
  * Drop stale backend warnings for sources the user already handled while the
  * multi-source search was still in flight.
  */

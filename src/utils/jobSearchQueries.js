@@ -11,13 +11,25 @@ const QUERY_GROUP_KEYS = [
 
 /** A target-role run has exactly one scrape query and no generated variations. */
 export function buildExactTargetRoleQueryBundle(targetRole) {
-  const role = String(targetRole || '').trim();
+  const role = normalizeJobSearchQuery(targetRole);
   return {
     targetRoleQueries: role ? [role] : [],
     titleQueries: [],
     suggestedRoleQueries: [],
     skillsOnlyQueries: [],
   };
+}
+
+/**
+ * A query is eventually sent to every enabled job source, so this boundary is
+ * deliberately strict about accepting only user/model text. String coercion
+ * turns malformed structured-output values into searches such as
+ * "[object Object]", which wastes a full source run and obscures the actual
+ * query-generation error. Whitespace is also normalized before deduping: it
+ * has no search meaning but otherwise lets equivalent queries run twice.
+ */
+function normalizeJobSearchQuery(value) {
+  return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 }
 
 export function flattenJobSearchQueries(queryBundle) {
@@ -28,7 +40,7 @@ export function flattenJobSearchQueries(queryBundle) {
     const group = queryBundle?.[key];
     if (!Array.isArray(group)) continue;
     for (const value of group) {
-      const query = String(value || '').trim();
+      const query = normalizeJobSearchQuery(value);
       if (!query) continue;
       const identity = query.toLowerCase();
       if (seen.has(identity)) continue;

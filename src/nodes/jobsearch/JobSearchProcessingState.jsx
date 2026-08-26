@@ -90,6 +90,18 @@ export function JobSearchProcessingState({
       {hubState === 'scoring' && scoringProgress?.total > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1">
           {scoringProgress.scored} / {scoringProgress.total} scored
+          {scoringProgress.batch != null && scoringProgress.batchTotal != null && (
+            <> · batch {scoringProgress.batch}/{scoringProgress.batchTotal}</>
+          )}
+          {scoringProgress.phase === 'running' && scoringProgress.attemptSize != null && (
+            <> · scoring {scoringProgress.attemptSize} job{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
+          )}
+          {scoringProgress.phase === 'splitting' && (
+            <> · retrying smaller batch…</>
+          )}
+          {scoringProgress.phase === 'recovering-missing-rows' && scoringProgress.attemptSize != null && (
+            <> · recovering {scoringProgress.attemptSize} unresolved score row{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
+          )}
         </p>
       )}
       {resumeSummary && (

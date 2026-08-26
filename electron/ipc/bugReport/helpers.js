@@ -2,6 +2,40 @@
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
 // they live here rather than being duplicated or buried in one module.
 
+/**
+ * Keep the diagnostic identity of a URL while removing query/hash data.
+ *
+ * Session and challenge URLs routinely carry short-lived OAuth, Cloudflare,
+ * redirect, or tracking tokens. A bug report only needs the origin/path to
+ * identify the page that was reached; exporting the rest is both unnecessary
+ * and unsafe. The fallback also covers malformed/relative URL-shaped strings.
+ */
+export function redactReportUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return `${parsed.origin}${parsed.pathname}`;
+    }
+    return raw.split(/[?#]/, 1)[0];
+  } catch {
+    return raw.split(/[?#]/, 1)[0];
+  }
+}
+
+/** Remove query/hash data from every absolute HTTP(S) URL embedded in prose. */
+export function redactReportUrlsInText(value) {
+  return String(value || '').replace(/https?:\/\/[^\s`<>"|]+/gi, (match) => {
+    // Sentence/table punctuation is not part of the URL. Preserve it after the
+    // redacted identity so prose remains readable.
+    const suffixMatch = match.match(/[)\]}.,;:]+$/);
+    const suffix = suffixMatch?.[0] || '';
+    const url = suffix ? match.slice(0, -suffix.length) : match;
+    return `${redactReportUrl(url)}${suffix}`;
+  });
+}
+
 // "(Ns ago)" suffix for a timestamp — shared by the pipeline snapshot builders.
 export const ago = (ts) => {
   if (!ts) return '';
@@ -164,14 +198,14 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   const ambiguousShell = entry?.connected && entry?.lastTrace?.ambiguousShell;
   const connected = entry?.connected
     ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
-      : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
+      : redirectMismatch ? `⚠️ true (redirected to ${redactReportUrl(entry.lastTrace.finalUrl)} — expected path containing "${mustContain}")`
         : ambiguousShell ? '⚠️ true (AMBIGUOUS shell — no positive logged-in signal; may be a client-rendered login page)'
           : entry?.restoredFromDisk ? '✅ true (restored from prior process)' : '✅ true')
     : entry ? '❌ false' : '— (no entry)';
   const lastConfirmed = entry?.ts
     ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
     : '—';
-  const reason = entry?.lastReason ? entry.lastReason.replace(/\|/g, '\\|') : '—';
+  const reason = entry?.lastReason ? redactReportUrlsInText(entry.lastReason).replace(/\|/g, '\\|') : '—';
   return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
 }).join('\n');
 
@@ -181,13 +215,13 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
   if (!t) return '';
   const lines = [
     `**${p.name}** (\`${p.id}\`):`,
-    `  - target: \`${t.target || '—'}\``,
-    t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
+    `  - target: \`${redactReportUrl(t.target) || '—'}\``,
+    t.finalUrl != null ? `  - finalUrl: \`${redactReportUrl(t.finalUrl)}\`` : null,
     t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
     t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
     t.pageTitle ? `  - pageTitle: \`${String(t.pageTitle).replace(/`/g, "'").slice(0, 160)}\`` : null,
     t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
-    t.error ? `  - error: \`${t.error}\`` : null,
+    t.error ? `  - error: \`${redactReportUrlsInText(t.error)}\`` : null,
     typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
     Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
     t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
@@ -197,13 +231,13 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     lines.push('  - checks:');
     for (const check of t.checks) {
       const parts = [
-        check.target || '—',
+        redactReportUrl(check.target) || '—',
         check.status != null ? `HTTP ${check.status}` : null,
-        check.finalUrl || null,
+        check.finalUrl ? redactReportUrl(check.finalUrl) : null,
         check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
         check.antiBot ? `antiBot=${check.antiBot}` : null,
         check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
-        check.error ? `error=${check.error}` : null,
+        check.error ? `error=${redactReportUrlsInText(check.error)}` : null,
       ].filter(Boolean);
       lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
       // Surface the captured visible-text head per check. The top-level bodyHead

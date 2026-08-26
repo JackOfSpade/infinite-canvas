@@ -1,15 +1,17 @@
 /**
  * Pure builders for the Anthropic Messages request SHAPE — the cache_control
- * prefix block plus the tool-use / JSON-prefill envelope. Extracted here, free
+ * prefix block plus the native JSON-output envelope. Extracted here, free
  * of the SDK and any side effects, so the synchronous path (createMessage) and
  * the free token-count preflight (countClaudeInputTokens) construct the exact
- * same request from one place. The cache_control placement + submit_response
- * tool envelope are scoring-correctness-critical and must never silently
+ * same request from one place. The cache_control placement + JSON schema
+ * envelope are scoring-correctness-critical and must never silently
  * diverge between preflight and the actual call.
  * Unit-tested in scripts/test-runner.js.
  */
 
 import { claudeReasoningMaxTokens, getClaudeDefaultReasoningConfig } from './claudeModels.js';
+import { jsonSchemaOutputFormat } from '@anthropic-ai/sdk/helpers/json-schema';
+import { assertAnthropicStructuredOutputLimits, assertResponseSchemaVocabularySupported } from './schemaValidation.js';
 
 /**
  * Build the `user` turn content. With a cachedPrefix, split it into an ephemeral
@@ -31,52 +33,67 @@ export function buildCachedUserContent(userContent, cachedPrefix) {
 }
 
 /**
+ * The exact native Structured Outputs schema Anthropic receives.  Keep this
+ * conversion public and pure so the manual-AI handoff can disclose the full
+ * provider request configuration without sending a request or reimplementing
+ * the SDK helper in a second place.
+ */
+export function toAnthropicResponseSchema(responseSchema) {
+  return jsonSchemaOutputFormat(responseSchema).schema;
+}
+
+/**
  * Build the base Messages request params shared by the live + batch paths:
- * `{ model, max_tokens, messages }`, the model's shared reasoning policy, plus the tool-use envelope when a
- * responseSchema is given (force the `submit_response` tool so the model returns
- * structured JSON with the right top-level keys). Grounding / web-search is
+ * `{ model, max_tokens, messages }`, the model's shared reasoning policy, plus
+ * native Structured Outputs when a responseSchema is given.  Grounding / web-search is
  * live-only (streamed) and is intentionally NOT handled here — createMessage
  * layers it on after calling this.
  *
  * ── Why there is no assistant-prefill branch ───────────────────────────────
- * This used to push a `{ role: 'assistant', content: '{' }` turn when
- * `expectJson` was set without a schema, so the model would continue straight
- * into JSON. **Current models reject that outright.** Verified live against the
- * API on 2026-08-12:
+ * This used to push a `{ role: 'assistant', content: '{' }` turn to coax
+ * unstructured JSON. **Current models reject that outright.** Verified live
+ * against the API on 2026-08-12:
  *
  *   claude-opus-5    400  "This model does not support assistant message
  *   claude-sonnet-5  400   prefill. The conversation must end with a user
  *   claude-fable-5   400   message."
  *   claude-haiku-4-5 200  (older model — still accepts it)
  *
- * Anthropic removed prefill across the 4.6+ family. Every current call site
- * happens to pass a responseSchema, so the dead branch never fired in practice
- * — but it was a live landmine: the moment any caller omitted `responseSchema`
- * while leaving `callLLMText`'s default `expectJson: true`, that task would
- * hard-400 on Opus and Sonnet while continuing to work on Haiku, which is an
- * unpleasant thing to debug.
- *
- * The replacement is nothing: `expectJson` now only signals intent to the
- * prompt layer, and the response is parsed by parseAiJson (jsonRepair.js),
- * which already tolerates fences, preamble, and trailing prose — the exact
- * slop the prefill existed to prevent. `expectJson` is kept in the signature
- * because callers still pass it and it stays meaningful for non-Anthropic
- * paths; it simply no longer changes the Anthropic request shape.
+ * Anthropic removed prefill across the 4.6+ family. Structured callers now
+ * require `responseSchema`, which uses native Structured Outputs; prose callers
+ * use the raw path. There is intentionally no unstructured-JSON fallback.
  *
  * @param {string|Array|*} userContent
- * @param {{model:string, maxTokens:number, responseSchema?:object|null, cachedPrefix?:string|null, expectJson?:boolean}} opts
- * @returns {{model:string, max_tokens:number, messages:object[], thinking?:object, output_config?:object, tools?:object[], tool_choice?:object}}
+ * Anthropic's JSON output grammar supports a constrained subset of JSON Schema.
+ * `jsonSchemaOutputFormat` transforms unsupported constraints into descriptive
+ * guidance and adds `additionalProperties:false` recursively, so callers must
+ * still validate business constraints locally.
+ *
+ * @param {{model:string, maxTokens:number, responseSchema?:object|null, cachedPrefix?:string|null}} opts
+ * @returns {{model:string, max_tokens:number, messages:object[], thinking?:object, output_config?:object}}
  */
-export function buildAnthropicMessageParams(userContent, { model, maxTokens, responseSchema = null, cachedPrefix = null, expectJson = false }) {
-  void expectJson;  // retained in the signature; no longer shapes the request (see doc above)
+export function buildAnthropicMessageParams(userContent, { model, maxTokens, responseSchema = null, cachedPrefix = null }) {
   const messages = [{ role: 'user', content: buildCachedUserContent(userContent, cachedPrefix) }];
   const reasoning = getClaudeDefaultReasoningConfig(model);
   const params = { model, max_tokens: claudeReasoningMaxTokens(model, maxTokens), messages };
   if (reasoning.thinking) params.thinking = reasoning.thinking;
-  if (reasoning.outputConfig) params.output_config = reasoning.outputConfig;
   if (responseSchema) {
-    params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
-    params.tool_choice = { type: 'tool', name: 'submit_response' };
+    // Reject contracts our local post-response validator cannot enforce before
+    // either a billed Messages request or count_tokens reaches Anthropic.
+    assertResponseSchemaVocabularySupported(responseSchema);
+    assertAnthropicStructuredOutputLimits(responseSchema);
+    // Merge, don't replace, the model's reasoning effort.  `format` is the
+    // native Structured Outputs API: unlike a forced fake tool, it returns the
+    // JSON as the response text and is constrained for every schema-bound call.
+    params.output_config = {
+      ...(reasoning.outputConfig || {}),
+      format: {
+        type: 'json_schema',
+        schema: toAnthropicResponseSchema(responseSchema),
+      },
+    };
+  } else if (reasoning.outputConfig) {
+    params.output_config = reasoning.outputConfig;
   }
   return params;
 }
@@ -85,7 +102,7 @@ export function buildAnthropicMessageParams(userContent, { model, maxTokens, res
  * Build the corresponding free `messages.count_tokens` payload.
  *
  * The count endpoint deliberately has no `max_tokens`, but it accepts the
- * same messages, tools, and tool_choice fields as a real Messages request.
+ * same messages and `output_config` fields as a real Messages request.
  * Deriving this from the live/batch builder keeps a future schema or cache
  * envelope change from silently making the preflight count a different prompt.
  */

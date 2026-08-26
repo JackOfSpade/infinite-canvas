@@ -173,6 +173,81 @@ const QUERY_DELAY_MS = [3000, 5000];
 const CARD_SELECTOR  = '[data-testid="jobTitle"] a, .jobTitle a, h2.jobTitle a, a[data-jk]';
 const PANEL_SELECTOR = '#jobsearch-ViewjobPaneWrapper, .jobsearch-RightPane, [data-testid="jobPanel"], #vjs-container';
 const DESC_SELECTOR  = '#jobDescriptionText, .jobsearch-jobDescriptionText, [data-testid="job-description"]';
+const DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
+const MAX_ENRICH_ATTEMPTS_PER_JOB = 4;
+
+function indeedDescriptionLength(job) {
+  return String(job?.description || job?.snippet || '').replace(/\s+/g, ' ').trim().length;
+}
+
+// Keep per-listing enrichment provenance small enough to retain on a recovery
+// row without turning retries into an unbounded diagnostic trace. These fields
+// are intentionally private; they let the low-evidence gate/report explain
+// whether the row came from a card, direct retry, or an unavailable detail URL.
+export function recordIndeedEnrichmentAttempt(job, { stage, outcome, reason = null, length = null } = {}) {
+  if (!job || typeof job !== 'object') return;
+  const entry = {
+    stage: String(stage || 'unknown').slice(0, 32),
+    outcome: String(outcome || 'unknown').slice(0, 32),
+    ...(reason ? { reason: String(reason).slice(0, 80) } : {}),
+    ...(Number.isFinite(length) ? { length: Math.max(0, Math.floor(length)) } : {}),
+  };
+  const previous = Array.isArray(job._enrichAttempts) ? job._enrichAttempts : [];
+  job._enrichAttempts = [...previous.slice(-(MAX_ENRICH_ATTEMPTS_PER_JOB - 1)), entry];
+}
+
+function logIndeedResidualEnrichmentDiagnostics(jobs) {
+  const residual = (Array.isArray(jobs) ? jobs : [])
+    .filter(job => indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS)
+    .slice(0, 8);
+  for (const job of residual) {
+    const attempts = Array.isArray(job._enrichAttempts) ? job._enrichAttempts : [];
+    const trail = attempts.map(attempt => `${attempt.stage}:${attempt.outcome}${attempt.reason ? `(${attempt.reason})` : ''}`).join('>') || 'none';
+    logger.info(`[Indeed/Browser][QUALITY] residual low-evidence path=${job._extractPath || 'unknown'} chars=${indeedDescriptionLength(job)} key=${job.jobkey || 'none'} attempts=${trail} title="${String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100)}"`);
+  }
+}
+
+function retainIndeedResidualDiagnostics(jobs) {
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    if (indeedDescriptionLength(job) >= DESCRIPTION_EVIDENCE_MIN_CHARS) delete job._enrichAttempts;
+  }
+}
+
+// Snapshot every bounded per-row attempt before successful rows shed their
+// private trails. This preserves the run-level 14/16-style evidence without
+// carrying retry internals into scoring cards/history for every healthy job.
+function summarizeIndeedEnrichmentAttempts(jobs) {
+  const stages = {};
+  let rowsWithAttempts = 0;
+  let attempted = 0;
+  let enriched = 0;
+  let empty = 0;
+  let challenge = 0;
+  let unavailable = 0;
+  let error = 0;
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const trail = Array.isArray(job?._enrichAttempts) ? job._enrichAttempts : [];
+    if (trail.length) rowsWithAttempts += 1;
+    for (const attempt of trail) {
+      const stage = String(attempt?.stage || 'unknown').slice(0, 32);
+      const outcome = String(attempt?.outcome || 'unknown').slice(0, 32);
+      const summary = stages[stage] || (stages[stage] = {
+        attempted: 0, recovered: 0, short: 0, blank: 0,
+        challenge: 0, unavailable: 0, error: 0, other: 0,
+      });
+      summary.attempted += 1;
+      if (Object.hasOwn(summary, outcome)) summary[outcome] += 1;
+      else summary.other += 1;
+      attempted += 1;
+      if (outcome === 'recovered') enriched += 1;
+      if (outcome === 'blank' || outcome === 'short') empty += 1;
+      if (outcome === 'challenge') challenge += 1;
+      if (outcome === 'unavailable') unavailable += 1;
+      if (outcome === 'error') error += 1;
+    }
+  }
+  return { rowsWithAttempts, attempted, enriched, empty, challenge, unavailable, error, stages };
+}
 
 // An expired detail URL is neither a missing description nor a bot wall.  In
 // particular, retrying it cannot recover score evidence, so keep this narrow
@@ -276,13 +351,24 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       const awayDesc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
       if (awayDesc) {
         const job = keyToJob.get(awayVjk) || pageJobs[i];
-        if (job) { job.description = awayDesc; job.snippet = awayDesc; enriched++; }
+        if (job) {
+          job.description = awayDesc;
+          job.snippet = awayDesc;
+          recordIndeedEnrichmentAttempt(job, {
+            stage: 'card-panel',
+            outcome: awayDesc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+            length: awayDesc.length,
+          });
+          enriched++;
+        }
       } else {
         const sigs = await getChallengeSignals(page);
         if (sigs.isChallenge) {
+          recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
           logger.warn(`[Indeed/Browser] CF signal on navigated-away page at card ${i + 1}/${limit} (${sigs.reason})`);
           return { enriched, cfBlankAt: i };
         }
+        recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'blank', length: 0 });
       }
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 400)));
@@ -298,14 +384,25 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
     const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
     if (description) {
       const job = keyToJob.get(vjk) || pageJobs[i];
-      if (job) { job.description = description; job.snippet = description; enriched++; }
+      if (job) {
+        job.description = description;
+        job.snippet = description;
+        recordIndeedEnrichmentAttempt(job, {
+          stage: 'card-panel',
+          outcome: description.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+          length: description.length,
+        });
+        enriched++;
+      }
     } else {
       // Blank panel — may be early CF interference before the full challenge page appears.
       const sigs = await getChallengeSignals(page);
       if (sigs.isChallenge) {
+        recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
         logger.warn(`[Indeed/Browser] CF signal during enrichment at card ${i + 1}/${limit} (${sigs.reason})`);
         return { enriched, cfBlankAt: i };
       }
+      recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'blank', length: 0 });
     }
 
     if (i < limit - 1) await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
@@ -439,11 +536,13 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
         const signals = await getChallengeSignals(page);
         if (signals.isChallenge) {
           challengeReason = signals.reason || 'challenge';
+          recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'challenge', reason: challengeReason });
           logger.warn(`[Indeed/Browser] Description retry blocked (${challengeReason}) after ${index}/${targets.length} listing(s)`);
           break;
         }
         const unavailableReason = await getIndeedUnavailableReason(page);
         if (unavailableReason) {
+          recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'unavailable', reason: unavailableReason });
           unavailable.push({
             key: sourceJobKey(job),
             title: String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 140),
@@ -457,12 +556,20 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
         if (description.length >= 400) {
           job.description = description;
           job.snippet = description;
+          recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'recovered', length: description.length });
           recovered++;
+        } else {
+          recordIndeedEnrichmentAttempt(job, {
+            stage: 'exact-retry',
+            outcome: description ? 'short' : 'blank',
+            length: description.length,
+          });
         }
         if (index < targets.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 1500 + Math.round(Math.random() * 1000)));
         }
       } catch (error) {
+        recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'error', reason: error.message });
         logger.warn(`[Indeed/Browser] Description retry failed (${job.jobkey || job.url || 'no-key'}): ${error.message}`);
       }
     }
@@ -472,6 +579,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     const remaining = activeRows.filter(job =>
       String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
     ).length;
+    retainIndeedResidualDiagnostics(activeRows);
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
     return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };
   } finally {
@@ -1002,7 +1110,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // navigating to job URLs — starting immediately after 90 challenges means
     // CF is still active and the re-enrichment gets blocked on the first request.
     // Heuristic: 30s per 10 challenges, capped at 120s.
-    const missingDescJobs = allJobs.filter(j => !j.description || j.description.trim() === '');
+    const missingDescJobs = allJobs.filter(job =>
+      !job.descriptionDeferredReason && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
+    );
     let reEnriched = 0;
     if (missingDescJobs.length > 0 && !signal?.aborted && !manualChallenge) {
       if (totalChallenges > 0) {
@@ -1021,15 +1131,35 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 800)));
           const sigs = await getChallengeSignals(page);
           if (sigs.isChallenge) {
+            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'challenge', reason: sigs.reason });
             logger.warn(`[Indeed/Browser] Re-enrich: CF active (${sigs.reason}) — skipping remaining ${missingDescJobs.length - ri}, CF window still hot`);
             break;
           }
+          const unavailableReason = await getIndeedUnavailableReason(page);
+          if (unavailableReason) {
+            job.descriptionDeferredReason = `indeed-${unavailableReason}`;
+            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'unavailable', reason: unavailableReason });
+            logger.info(`[Indeed/Browser] Re-enrich retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+            continue;
+          }
           const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-          if (desc) { job.description = desc; job.snippet = desc; reEnriched++; }
+          if (desc) {
+            job.description = desc;
+            job.snippet = desc;
+            recordIndeedEnrichmentAttempt(job, {
+              stage: 're-enrich',
+              outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+              length: desc.length,
+            });
+            if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) reEnriched++;
+          } else {
+            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'blank', length: 0 });
+          }
           if (ri < missingDescJobs.length - 1) {
             await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
           }
         } catch (e) {
+          recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'error', reason: e.message });
           logger.warn(`[Indeed/Browser] Re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
         }
       }
@@ -1039,7 +1169,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       // one clean chance to settle before the caller has to ask the user whether
       // low-evidence rows should be scored. Keep it bounded to the residual set:
       // it is a recovery attempt, not another crawl of every result.
-      const residualDescJobs = missingDescJobs.filter(job => !job.description || job.description.trim() === '');
+      const residualDescJobs = missingDescJobs.filter(job =>
+        !job.descriptionDeferredReason && indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS
+      );
       if (residualDescJobs.length > 0 && !signal?.aborted) {
         logger.info(`[Indeed/Browser] Slow re-enriching ${residualDescJobs.length} residual job(s)`);
         let slowRecovered = 0;
@@ -1053,15 +1185,35 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             await new Promise(r => setTimeout(r, 3000 + Math.round(Math.random() * 1000)));
             const sigs = await getChallengeSignals(page);
             if (sigs.isChallenge) {
+              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'challenge', reason: sigs.reason });
               logger.warn(`[Indeed/Browser] Slow re-enrich: CF active (${sigs.reason}) — skipping remaining ${residualDescJobs.length - ri}, CF window still hot`);
               break;
             }
+            const unavailableReason = await getIndeedUnavailableReason(page);
+            if (unavailableReason) {
+              job.descriptionDeferredReason = `indeed-${unavailableReason}`;
+              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'unavailable', reason: unavailableReason });
+              logger.info(`[Indeed/Browser] Slow re-enrich retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+              continue;
+            }
             const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-            if (desc) { job.description = desc; job.snippet = desc; slowRecovered++; }
+            if (desc) {
+              job.description = desc;
+              job.snippet = desc;
+              recordIndeedEnrichmentAttempt(job, {
+                stage: 'slow-re-enrich',
+                outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+                length: desc.length,
+              });
+              if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) slowRecovered++;
+            } else {
+              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'blank', length: 0 });
+            }
             if (ri < residualDescJobs.length - 1) {
               await new Promise(r => setTimeout(r, 1500 + Math.round(Math.random() * 1000)));
             }
           } catch (e) {
+            recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'error', reason: e.message });
             logger.warn(`[Indeed/Browser] Slow re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
           }
         }
@@ -1069,6 +1221,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         logger.info(`[Indeed/Browser] Slow re-enrich complete: ${slowRecovered}/${residualDescJobs.length} recovered`);
       }
     }
+    logIndeedResidualEnrichmentDiagnostics(allJobs);
+    const enrichment = summarizeIndeedEnrichmentAttempts(allJobs);
+    retainIndeedResidualDiagnostics(allJobs);
 
     // Compact per-query summary — 1 line per query so the full run picture fits
     // within the 60-line ring buffer regardless of how long the scrape ran.
@@ -1129,6 +1284,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       relevanceDropped: 0,
       preCapRelevanceDropped: 0,
       relevanceRejected: [],
+      enrichment,
       sessionDiagnostics,
     };
 

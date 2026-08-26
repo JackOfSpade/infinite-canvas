@@ -12,8 +12,6 @@ import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
-import { registerAppliedJobsHandlers } from './ipc/appliedJobs.js';
-import { primeClaudeModels } from './ipc/modelResolver.js';
 import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
@@ -24,6 +22,7 @@ import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { registerLlmHandlers } from './ipc/llm.js';
+import { registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import fs from 'fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -834,26 +833,14 @@ if (!gotTheLock) {
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
-    registerAppliedJobsHandlers();
     registerMarketplaceHandlers();
     registerAccountsHandlers();
     registerGeminiHandlers();
     registerBugReportHandlers();
     registerNetworkHandlers();
     registerSettingsHandlers();
+    registerNonApiAiHandlers();
     registerLlmHandlers();
-
-    // Warm the Claude model resolver before anything can call an LLM. It
-    // never throws (falls back to MODEL_FLOOR on any failure — see
-    // modelResolver.js's own doc) and this call is fire-and-forget so it
-    // can't delay window creation. Priming matters because prompt caches are
-    // MODEL-SCOPED: if resolution happened lazily on the first LLM call
-    // instead, a resolution that flipped mid-run (e.g. a second window
-    // priming concurrently) would silently invalidate every cached prefix
-    // and re-bill it at full rate (design doc §8.3 guard 2).
-    primeClaudeModels().catch((err) => {
-      logger.warn(`[main] primeClaudeModels() rejected unexpectedly (should be impossible — it catches internally): ${err?.message || err}`);
-    });
 
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by Claude design and replaced

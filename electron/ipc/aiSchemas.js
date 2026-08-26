@@ -2,7 +2,8 @@
  * Response schemas for AI calls.
  *
  * Passed to callLLM*({ responseSchema }) — Gemini uses them as
- * `generationConfig.responseSchema`, Claude uses them as tool input_schema.
+ * `generationConfig.responseSchema`, Claude uses them as
+ * `output_config.format` JSON schemas.
  * Both providers then guarantee the model output matches the schema exactly:
  * valid JSON, required fields present, enums respected, types correct.
  *
@@ -203,50 +204,62 @@ export const MARKETPLACE_HUB_SCAN_SCHEMA = {
 // creates only the remaining taxonomy metadata:
 //   1. salaryRanges    — salary bands fitted to the distribution; renderer
 //      places jobs by parsed salary. Always include an "Unspecified" range.
-//   2. roleByIndex     — exactly one role-family label per input job. The
-//      server groups matching labels into the persisted `{ name, jobIndices }`
-//      shape. This turns complete index coverage from an advisory prompt rule
-//      into a provider-visible structural constraint.
+//   2. roleFamilies — a bounded, global vocabulary shared by all job chunks.
+//   3. roleByIndex  — a chunk-local positional list of integer indexes into
+//      the frozen roleFamilies vocabulary.
 //
-// The count is input-specific, so this must be built at the call site rather
-// than exported as one static schema. Gemini's adapter preserves min/maxItems;
-// Claude receives the same standard JSON Schema as its forced tool input.
-export function buildJobBucketingSchema(jobCount = 0) {
-  const count = Math.max(0, Math.floor(Number(jobCount) || 0));
-  return {
+// This deliberately stays a FIXED schema regardless of job count. An earlier
+// index-keyed object generated one required property for every job. Claude
+// Structured Outputs compiles those properties into its output grammar, and large
+// board combines (for example 124 jobs) exceed Anthropic's grammar-size limit
+// before the model sees the request. Exact length/nonblank validation is
+// therefore a local, atomic guard below rather than a provider grammar rule.
+export const JOB_TAXONOMY_ROLE_FAMILY_LIMIT = 12;
+
+const SALARY_RANGES_SCHEMA = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 5,
+  items: {
     type: 'object',
-    required: ['salaryRanges', 'roleByIndex'],
+    required: ['label', 'minSalary', 'maxSalary'],
     properties: {
-      salaryRanges: {
-        type: 'array',
-        // One Unspecified-only range is legitimate when every input lacks
-        // parseable compensation; the semantic sanitizer still supplies real
-        // ranges when a model misses them despite observed pay.
-        minItems: 1,
-        maxItems: 5,
-        items: {
-          type: 'object',
-          required: ['label', 'minSalary', 'maxSalary'],
-          properties: {
-            label:     { type: 'string', minLength: 1, description: 'Annual display label, e.g. "$120k+/yr", "$80k–$120k/yr", "Unspecified". The server canonicalizes it from the numeric bounds.' },
-            minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 for the Unspecified range' },
-            maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended ("$200k+") or Unspecified' },
-          },
-        },
-      },
-      roleByIndex: {
-        type: 'array',
-        minItems: count,
-        maxItems: count,
-        items: {
-          type: 'string',
-          minLength: 1,
-          description: 'A concise non-empty role-family label for the job at this exact input index. Reuse exactly the same label for jobs in the same family.',
-        },
-      },
+      label:     { type: 'string', minLength: 1, description: 'Annual display label, e.g. "$120k+/yr", "$80k–$120k/yr", "Unspecified". The server canonicalizes it from the numeric bounds.' },
+      minSalary: { type: 'integer', description: 'Lower bound USD/yr; use 1 for an Under-$X range and 0 only for Unspecified' },
+      maxSalary: { type: 'integer', description: 'Upper bound USD/yr; use 0 only if open-ended ("$200k+") or Unspecified' },
     },
-  };
-}
+  },
+};
+
+/** Bounded global planning response — never receives the full job list. */
+export const JOB_TAXONOMY_PLAN_SCHEMA = {
+  type: 'object',
+  required: ['salaryRanges', 'roleFamilies'],
+  properties: {
+    salaryRanges: SALARY_RANGES_SCHEMA,
+    roleFamilies: {
+      type: 'array',
+      minItems: 1,
+      maxItems: JOB_TAXONOMY_ROLE_FAMILY_LIMIT,
+      items: { type: 'string', minLength: 1, description: 'Canonical concise role-family label.' },
+      description: `A compact, non-overlapping global vocabulary of at most ${JOB_TAXONOMY_ROLE_FAMILY_LIMIT} role families.`,
+    },
+  },
+};
+
+/** Fixed classifier contract; exact chunk length is a local atomic guard. */
+export const JOB_TAXONOMY_CLASSIFY_SCHEMA = {
+  type: 'object',
+  required: ['roleByIndex'],
+  properties: {
+    roleByIndex: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'integer', minimum: 0, description: 'Zero-based index into the supplied frozen roleFamilies vocabulary.' },
+      description: 'One vocabulary index for every chunk job, in chunk input order. The server validates exact length and index range.',
+    },
+  },
+};
 
 // ── Resume parse: file → structured profile ────────────────────────────────
 export const RESUME_PARSE_SCHEMA = {
@@ -658,8 +671,8 @@ export const ACHIEVEMENT_REFUTE_SCHEMA = {
 };
 
 // ── Job scoring: per-job match + categorization ────────────────────────────
-// Wrapped in an object envelope because Claude's tool input_schema requires
-// type: 'object' at the top level. Consumer reads parsed.scores.
+// Wrapped in an object envelope because the provider JSON-schema response
+// contract is object-shaped. Consumer reads parsed.scores.
 export const JOB_SCORING_SCHEMA = {
   type: 'object',
   required: ['scores'],

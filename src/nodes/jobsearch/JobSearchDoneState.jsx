@@ -52,43 +52,34 @@ export function JobSearchDoneState({
   setTargetRole,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
-  // Jobs dropped from this search because they matched an existing entry in
-  // the permanent applied-jobs store (docs/resume-achievement-mining-design.md
-  // §6.2) — surfaced by electron/ipc/jobs.js's filterOutApplied at every
-  // gather site. Filtering must never be silent: a job vanishing with no
-  // explanation is indistinguishable from a scraper bug.
-  hiddenApplied = 0,
+  // A completed run with no eligible results replaces the old result set.
+  rerunOutcome = null,
 }) {
   const { addToast } = useToast();
   // `testMode` is retained only for old persisted hubs. New runs record the
   // actual scoring behavior through `aiSkipped` / `collectionOnly`.
   const skippedAi = aiSkipped || collectionOnly || testMode;
   const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
+  const noNewResults = rerunOutcome === 'no-new-results';
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
 
       {/* Result count */}
       <div className="text-emerald-400 text-2xl font-bold">{count}</div>
-      <p className="text-white/40 text-xs">{skippedAi ? 'jobs collected' : 'jobs scored'}</p>
+      <p className="text-white/40 text-xs">
+        {noNewResults ? 'new jobs' : skippedAi ? 'jobs collected' : 'jobs scored'}
+      </p>
 
-      {/* Scraped → kept funnel */}
+      {/* Keep the current run's collection total visible even when no jobs
+          survive into the new result set. */}
       {(gatheredCount > 0 || scrapedCount > 0) && (
         <p className="text-white/25 text-[10px] mt-0.5">
-          {gatheredCount > 0 && scrapedCount != null && gatheredCount !== scrapedCount
+          {noNewResults
+            ? `${gatheredCount || scrapedCount} scraped`
+            : gatheredCount > 0 && scrapedCount != null && gatheredCount !== scrapedCount
             ? `${gatheredCount} scraped → ${scrapedCount} kept`
             : `${gatheredCount || scrapedCount} scraped`}
-        </p>
-      )}
-
-      {/* Already-applied jobs dropped from this search — never silent, same
-          style as the scraped→kept line above. */}
-      {hiddenApplied > 0 && (
-        <p
-          className="text-white/25 text-[10px]"
-          title="Jobs matching a posting you already marked applied are dropped from these results so they don't resurface"
-        >
-          {hiddenApplied} hidden (already applied)
         </p>
       )}
 
@@ -195,6 +186,7 @@ export function JobSearchDoneState({
             setEnabledSourceIds={setEnabledSourceIds}
             collectionLimits={collectionLimits}
             availableSourceIds={availableSourceIds}
+            searchLocation={searchLocation}
           />
         </div>
       )}

@@ -5,7 +5,7 @@
  * Why this exists: the Local AI handoff used to be driven ONLY by a poll
  * interval inside JobCardNode. Hidden cards unmount (collapse, a board hiding
  * stale results, nested-canvas navigation), which silently killed the poll —
- * Claude Code would write result.json and wait forever on a manifest nobody
+ * A local coding agent would write result.json and wait forever on a manifest nobody
  * was ever going to update. The canvas-level manager keeps every pending job
  * alive; this module gives both drivers one source of truth for who owns a
  * job at any moment (exactly one driver: the mounted card if there is one,

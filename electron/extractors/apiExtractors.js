@@ -318,7 +318,7 @@ export function linkedInBrowserUnavailableResult(jobs, error) {
   };
 }
 
-export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
+export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
 
   // Count jobs without URLs before touching the browser — these are silently
@@ -343,7 +343,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     browser = await getStealthBrowser();
   } catch (err) {
     logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
-    return linkedInBrowserUnavailableResult(jobs, err);
+    return { ...linkedInBrowserUnavailableResult(jobs, err), usedAuthenticated: preferAuthenticated, authenticatedFallback: false };
   }
   // Browser-process identity for this pass. Returned to the caller so the bug
   // report's egress-IP trail can show whether consecutive passes ran on the SAME
@@ -353,13 +353,19 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   // recovers it, it's the browser too — not the IP.
   const browserInfo = getStealthBrowserInfo();
 
-  // Enrichment runs in an isolated context with NO cookies.
-  // When the shared browser context is used (browser.newPage()), the new tab
-  // inherits the LinkedIn login cookies → LinkedIn serves the React SPA version
-  // of job detail pages, which has zero JSON-LD and no server-rendered description
-  // (probe-confirmed 2026-05-28). An isolated context is anonymous → it serves the
-  // guest/SEO version, which server-renders a full JobPosting JSON-LD block at
-  // DOMContentLoaded. Stealth flags (UA, WebGL, etc.) still apply.
+  // Prefer the user's verified LinkedIn session when one is available. The old
+  // implementation *always* created an isolated context, explicitly discarding
+  // that session and consequently reporting a healthy LinkedIn login alongside
+  // repeated "guest wall" Solve passes. Authenticated pages are an SPA and may
+  // not expose JSON-LD at DOMContentLoaded, but their rendered description is
+  // available through the selector fallback below after a short hydration wait.
+  //
+  // If the authenticated page does not yield a description (a stale session,
+  // changed layout, or an individual restricted listing), fall back once to the
+  // established cookie-free SEO path. That preserves recovery for users without
+  // a session without silently treating a cached `connected` verdict as proof.
+  // Guest contexts remain isolated so their cookies never contaminate the saved
+  // Chrome profile. Stealth flags (UA, WebGL, etc.) still apply in both modes.
   //
   // Context rotation (the wall lever): LinkedIn walls anonymous guest access to
   // job-view pages after ~4 requests. If that ceiling is tracked per guest
@@ -370,7 +376,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   // is IP/fingerprint-based (rotation can't help) and we stop.
   const MAX_CONTEXT_ROTATIONS = 80; // safety cap (~255 jobs / ~4 per ctx ≈ 64)
   let isolatedCtx = null;
+  let authenticatedPage = null;
   let page = null;
+  let mode = preferAuthenticated ? 'authenticated' : 'guest';
+  let authenticatedFallback = false;
   let contextRotations = 0;
   let jobsThisContext = 0; // completed (non-walling) navigations on the current context
   const rotateContext = async () => {
@@ -380,8 +389,24 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     jobsThisContext = 0;
   };
+  const applyGuestFallback = async (reason) => {
+    if (mode !== 'authenticated') return false;
+    logger.info(`[LinkedIn/Browser] authenticated description path unavailable (${reason}); falling back to guest SEO context`);
+    await authenticatedPage?.close().catch(() => {});
+    authenticatedPage = null;
+    mode = 'guest';
+    authenticatedFallback = true;
+    await rotateContext();
+    return true;
+  };
   try {
-    await rotateContext(); // initial context (contextRotations stays 0 — see below)
+    if (mode === 'authenticated') {
+      authenticatedPage = await browser.newPage();
+      page = authenticatedPage;
+      await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    } else {
+      await rotateContext(); // initial context (contextRotations stays 0 — see below)
+    }
   } catch (err) {
     logger.warn(`[LinkedIn/Browser] Cannot open tab for enrichment: ${err.message}`);
     await isolatedCtx?.close().catch(() => {});
@@ -420,6 +445,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   // is still the jobs/view URL at that moment. 3+ in a row = stop.
   let consecutiveEvalErrors = 0;
   const JS_REDIRECT_WALL_THRESHOLD = 3;
+  // Count unique candidate rows that were actually navigated. The former
+  // index-based value excluded the walling row, included URL-less rows, and
+  // became misleading after a context rotation retried the same URL.
+  const attemptedIndexes = new Set();
 
   // Shared login-wall URL pattern. Applied to both the pre-evaluate finalUrl
   // (HTTP redirects) and the post-evaluate page.url() (JS redirects).
@@ -462,6 +491,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
       let navOk = false;
 
       try {
+        attemptedIndexes.add(i);
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         navOk = true;
 
@@ -470,8 +500,22 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
 
         // HTTP-redirect login wall: LinkedIn changed the URL to an auth page.
         if (LOGIN_WALL_RE.test(finalUrl)) {
+          if (await applyGuestFallback('authenticated session redirected to an auth page')) {
+            i--; continue;
+          }
           if (await handleWall(finalUrl, i)) break;
           i--; continue; // retry this job on the fresh context
+        }
+
+        // The authenticated LinkedIn app hydrates its description after
+        // DOMContentLoaded; the guest SEO page already has JSON-LD and doesn't
+        // need this wait. A bounded wait is substantially cheaper than throwing
+        // away the user's session for every job.
+        if (mode === 'authenticated') {
+          await page.waitForFunction(() => {
+            const selectors = ['#job-details', '.jobs-description-content__text', '.jobs-description__content', '.jobs-box__html-content'];
+            return selectors.some(sel => (document.querySelector(sel)?.textContent || '').trim().length > 50);
+          }, { timeout: 4000 }).catch(() => {});
         }
 
         // Description extractor — runs inside the page context (no closures).
@@ -555,8 +599,17 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
           if (firstFailNote === null) {
             firstFailNote = `eval-error · post-eval URL: ${(result.postEvalUrl || '?').slice(0, 80)} · job: ${finalUrl.slice(0, 60)}`;
           }
+          // A profile-page execution failure is enough to abandon that
+          // representation for this pass. Waiting for three failures would
+          // leave the first two candidates stranded until a later Solve.
+          if (mode === 'authenticated' && await applyGuestFallback('authenticated page evaluation failed')) {
+            i--; continue;
+          }
           // JS-redirect login wall: LinkedIn redirected mid-evaluate.
           if (LOGIN_WALL_RE.test(result.postEvalUrl || '')) {
+            if (await applyGuestFallback('authenticated session redirected while reading the page')) {
+              i--; continue;
+            }
             if (await handleWall(result.postEvalUrl, i)) break;
             i--; continue; // retry this job on the fresh context
           }
@@ -564,10 +617,20 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
           // treat as a systematic wall; rotate-and-retry (handleWall stops if a
           // fresh context fails too).
           if (consecutiveEvalErrors >= JS_REDIRECT_WALL_THRESHOLD) {
+            if (await applyGuestFallback('authenticated page evaluation repeatedly failed')) {
+              i--; continue;
+            }
             if (await handleWall(result.postEvalUrl || page.url(), i - (consecutiveEvalErrors - 1))) break;
             i--; continue; // retry on the fresh context
           }
         } else {
+          // The profile page rendered but never exposed a usable description.
+          // Try the guest SEO representation once before classifying the row as
+          // genuinely description-less; otherwise a logged-in user receives no
+          // benefit from their session and the report never explains why.
+          if (mode === 'authenticated' && await applyGuestFallback('no usable rendered description')) {
+            i--; continue;
+          }
           noDesc++;
           // Classify: gutted soft-block page (no title, no JSON-LD) vs a real page
           // that genuinely lacks a description. The former is recoverable.
@@ -626,23 +689,24 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   } finally {
     // Closing the isolated context also closes its pages and frees cookies.
     await isolatedCtx?.close().catch(() => {});
+    await authenticatedPage?.close().catch(() => {});
   }
 
-  const attempted = loginWallAt !== null
-    ? loginWallAt
-    : (stoppedNoInternetAt !== null ? stoppedNoInternetAt : enriched.length);
+  const attempted = attemptedIndexes.size;
   const failParts = [];
   if (navErrors > 0) failParts.push(`${navErrors} nav-err`);
   if (evalErrors > 0) failParts.push(`${evalErrors} eval-err`);
   if (noDesc > 0) failParts.push(`${noDesc} no-desc [${noDescSoftBlock} soft-block, ${noDescGenuine} genuine]`);
   const failSuffix = failParts.length ? ` (${failParts.join(', ')})` : '';
-  const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${enriched.length - loginWallAt - 1} skipped` : '';
+  const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${Math.max(0, enriched.length - attempted)} remaining` : '';
   const offlineSuffix = noInternet ? ` — STOPPED: egress offline at job ${(stoppedNoInternetAt ?? 0) + 1}, ${enriched.length - (stoppedNoInternetAt ?? enriched.length) - 1} unattempted` : '';
   const rotateSuffix = contextRotations > 0 ? ` — ${contextRotations} context rotation(s)` : '';
   const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
   logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${offlineSuffix}${firstFailSuffix}`);
   return {
     jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations, noInternet,
+    usedAuthenticated: preferAuthenticated,
+    authenticatedFallback,
     // Failure breakdown so a caller can categorise the residual still-empty jobs.
     // noDesc splits into soft-block (gutted page — recoverable on a later pass)
     // vs genuine (real page, no description — permanent). The continuous loop uses
@@ -1953,7 +2017,30 @@ export function isPlaceholderIndeedJobKey(key) {
     if (diff !== 1) ascending = false;
     if (diff !== 15) descending = false;
   }
-  return ascending || descending;
+  if (ascending || descending) return true;
+
+  // The live phantom `890abcdef0123456` has one extra nibble in an otherwise
+  // cyclic ascending run (`89abcdef0123456` after removing that nibble).
+  // Restrict this near-family tolerance to a 16-character key and require the
+  // remaining 15 characters to be an *exact* cyclic run. This is deliberately
+  // much narrower than a fuzzy "hex-like" test that could discard a real job.
+  if (k.length !== 16) return false;
+  for (let skip = 0; skip < k.length; skip++) {
+    for (const expectedDiff of [1, 15]) {
+      let previous = null;
+      let run = true;
+      for (let i = 0; i < k.length; i++) {
+        if (i === skip) continue;
+        if (previous !== null) {
+          const diff = (parseInt(k[i], 16) - parseInt(previous, 16) + 16) % 16;
+          if (diff !== expectedDiff) { run = false; break; }
+        }
+        previous = k[i];
+      }
+      if (run) return true;
+    }
+  }
+  return false;
 }
 
 function salaryText(salary, fallback = '') {
@@ -2191,6 +2278,13 @@ function extractDomJobs(html) {
       const key = normalizeIndeedJobKey(card.getAttribute?.('data-jk')) ||
         normalizeIndeedJobKey(titleEl?.getAttribute?.('data-jk')) ||
         extractJobKeyFromUrl(rawUrl);
+      // DOM cards can carry the same synthetic `data-jk` filler as embedded
+      // payloads. Keep key-less cards (they may be real), but never let a
+      // positively identified placeholder through this independent path.
+      if (key && isPlaceholderIndeedJobKey(key)) {
+        logger.debug(`[Indeed/extract] Rejected placeholder-shaped DOM jobkey "${key}" title="${title}" — template/companion card, not a real listing`);
+        return;
+      }
       jobs.push({
         title,
         company: compactText(card.querySelector('[data-testid="company-name"], .companyName')?.textContent, 180),
@@ -2201,6 +2295,7 @@ function extractDomJobs(html) {
         jobkey: key,
         posted: compactText(card.querySelector('[data-testid="job-age"], .date, [class*="jobAge"], [class*="datePosted"]')?.textContent, 120),
         source: 'indeed',
+        _extractPath: 'dom',
       });
     } catch { /* skip malformed card */ }
   });
@@ -2238,17 +2333,21 @@ function anchorDescriptionlessIndeedJsonJobs(jsonJobs, domJobs) {
 // passed in by the Puppeteer scraper via page.evaluate(). When provided it
 // replaces the broken HTML marker approach (which hits a CSS URL, not data).
 export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
-  const nextDataRaw = extractNextDataJobs(html);
-  const mosaicRaw = windowMosaicResults
+  const tagExtractPath = (jobs, path) => {
+    const tagged = (Array.isArray(jobs) ? jobs : []).map(job => ({ ...job, _extractPath: path }));
+    tagged.rejectedPlaceholderCount = jobs?.rejectedPlaceholderCount || 0;
+    return tagged;
+  };
+  const nextDataRaw = tagExtractPath(extractNextDataJobs(html), 'nextData');
+  const mosaicRaw = tagExtractPath(windowMosaicResults
     ? collectIndeedJobsFromObject(windowMosaicResults)
-    : extractMosaicJobs(html);
+    : extractMosaicJobs(html), 'mosaic');
   const dom      = extractDomJobs(html);
   const nextData = anchorDescriptionlessIndeedJsonJobs(nextDataRaw, dom);
   const mosaic = anchorDescriptionlessIndeedJsonJobs(mosaicRaw, dom);
   // nextData/mosaic each carry a .rejectedPlaceholderCount from the JSON-walk
-  // guard (collectIndeedJobsFromObject) — the DOM path never sets one, since
-  // it doesn't walk Indeed's embedded JSON and isn't exposed to the phantom
-  // template/companion blocks that guard rejects.
+  // guard (collectIndeedJobsFromObject). DOM applies the same key-shape guard
+  // directly while walking cards, but does not currently aggregate that count.
   const rejectedPlaceholders = (nextData.rejectedPlaceholderCount || 0) + (mosaic.rejectedPlaceholderCount || 0);
   const rejectedUnanchoredDescriptionless = (nextData.rejectedUnanchoredDescriptionlessCount || 0) + (mosaic.rejectedUnanchoredDescriptionlessCount || 0);
   logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}${rejectedPlaceholders > 0 ? `, rejected-placeholder: ${rejectedPlaceholders}` : ''}${rejectedUnanchoredDescriptionless > 0 ? `, rejected-descriptionless-json-only: ${rejectedUnanchoredDescriptionless}` : ''}`);

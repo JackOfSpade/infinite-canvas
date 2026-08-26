@@ -1,7 +1,7 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
 import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
-import { attachCompensationRemoteResidences } from '../../src/nodes/jobboard/mergeJobs.js';
+import { attachCompensationRemoteResidences, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
 
 export default [
   {
@@ -54,6 +54,24 @@ export default [
       assert(sourceJobs.every(job => !Object.hasOwn(job, 'compensationRemoteResidences')),
         'attaching transient research context must not mutate source modules’ stored scored jobs');
       return { origins: attached.length, sourceUntouched: true };
+    },
+  },
+  {
+    name: 'Job Board merge retains unlinked requisitions and compares legacy numeric score strings numerically',
+    run() {
+      const higherLegacyScore = { title: 'Analyst', company: 'Acme', url: 'https://jobs.example/analyst', matchScore: '80' };
+      const lowerLegacyScore = { ...higherLegacyScore, matchScore: '9' };
+      const unlinkedA = { title: 'Developer', company: 'Acme', location: 'Toronto', originHubId: 'search-a', matchScore: 70 };
+      const unlinkedB = { ...unlinkedA, originHubId: 'search-b', matchScore: 75 };
+      const stats = {};
+      const merged = unionScoredJobs([[lowerLegacyScore, unlinkedA], [higherLegacyScore, unlinkedB]], stats);
+
+      assert(merged.length === 3, `separate rows without listing URLs must not collapse into one, got ${merged.length}`);
+      assert(merged[0] === higherLegacyScore,
+        'numeric-looking legacy scores must compare numerically, so 80 beats 9 rather than lexicographically losing to it');
+      assert(stats.collisions === 1 && stats.collisionUpgrades === 1,
+        `only the linked duplicate should register as a score-upgrade collision, got ${JSON.stringify(stats)}`);
+      return { jobs: merged.length, scoreUpgrades: stats.collisionUpgrades };
     },
   },
   {
@@ -118,6 +136,18 @@ export default [
         && handler.includes('event, nodeId, requestId, signal')
         && main.includes('requestId: requestId || null'),
       'the optional request id must travel through IPC and every compensation progress event without breaking non-board callers');
+      const bucketHandlerStart = main.indexOf("handleSafe('bucket-jobs'");
+      const bucketHandler = main.slice(bucketHandlerStart, main.indexOf("handleSafe('resolve-job-source'", bucketHandlerStart));
+      assert(bucketHandler.includes('runBoundedJobTaxonomy(jobs')
+        && bucketHandler.includes('strategy: \'bounded-plan-chunks\'')
+        && bucketHandler.includes('inspectJobBoardRoleByIndex(result?.roleByIndex')
+        && bucketHandler.includes('normalizeJobBoardRoleByIndex(result?.roleByIndex'),
+      'Job Board bucketing uses bounded plan/classify calls and validates exact all-job coverage before normalization');
+      assert(bucketHandler.includes('taxonomyChunksCompleted: taxonomyProgress.completedBatches')
+        && bucketHandler.includes('taxonomyChunkCount: taxonomyProgress.batchCount')
+        && bucketHandler.includes('taxonomyVocabularySize: taxonomyProgress.vocabularySize')
+        && !bucketHandler.includes('taxonomyChunksCompleted: result?.batchCount'),
+      'successful bucketing telemetry retains bounded-run progress instead of reading orchestration fields stripped by taxonomy sanitization');
       return { ordering: ['bucket', 'taxonomy', 'compensation', 'build'], exactNodeProgress: true, transientCleanup: true };
     },
   },

@@ -1021,8 +1021,13 @@ const JOB_LOGIN_PLATFORMS = {
       'log in to glassdoor',
       // Current anonymous /member/home redirect: the public /Job/index.htm page
       // keeps a generic "Sign In" nav item, so use the adjacent anonymous-only
-      // resume CTA as a high-signal phrase instead of matching bare "sign in".
+      // resume/CV CTA as a high-signal phrase instead of matching bare "sign in".
+      // The Canadian shell inserts its search-nav copy between "Sign in" and
+      // this CTA (and localizes resume as CV), so the old contiguous signal
+      // falsely marked that anonymous page connected.
       'sign in upload your resume - let employers find you',
+      'upload your resume - let employers find you',
+      'upload your cv - let employers find you',
     ],
   },
   // /jobseeker/home is the post-login landing page — authenticated sessions stay

@@ -1,4 +1,6 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
+import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 
 export default [
 {
@@ -489,6 +491,24 @@ export default [
       // in but it never registered" case we need to distinguish).
       const closed = buildAuthAttemptRecord({ platformId: 'poshmark', result: 'closed', mode: 'puppeteer-visible' });
       assert(closed.loginDetected === false, 'closed without detection → detected=false');
+      const challengeCleared = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'cleared', mode: 'native-chrome',
+      });
+      assert(challengeCleared.loginDetected === null,
+        'native challenge clearance is not a login claim or a failed login detection');
+      const nativeClosure = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'closed', mode: 'native-chrome',
+        nativeChallenge: {
+          initialChallengeObserved: true, pollCount: 4, pollErrorCount: 0,
+          lastClassification: 'cleared', lastTabUrl: 'https://secure.indeed.com/settings/account?token=secret',
+          terminalSource: 'child-exit-after-clean', exitCode: 0,
+          postCloseVerify: { outcome: 'clean-tab-observed', reason: 'first-party-url-and-title-before-exit' },
+        },
+      });
+      assert(nativeClosure.nativeChallenge?.pollCount === 4
+        && nativeClosure.nativeChallenge?.terminalSource === 'child-exit-after-clean'
+        && nativeClosure.nativeChallenge?.postCloseVerify?.outcome === 'clean-tab-observed',
+      'completed native challenges retain bounded poll/exit/verification evidence after the live diagnostic is cleared');
       // Explicit loginDetected wins over the result-derived default.
       assert(buildAuthAttemptRecord({ result: 'closed', loginDetected: true }).loginDetected === true, 'explicit loginDetected overrides the result default');
       // autoDetectedLoginSignal (native path field) is accepted as the signal source.
@@ -594,6 +614,39 @@ export default [
       ], 'https://ca.indeed.com/jobs?__cf_chl_rt_tk=token');
       assert(selected?.url === 'https://ca.indeed.com/jobs?__cf_chl_rt_tk=token',
         'native handoff polls the pending tab for the requested strict hostname, not an unrelated/restored tab');
+      const initialChallengeTab = {
+        windowIndex: 4,
+        tabIndex: 1,
+        url: 'https://secure.indeed.com/settings/account?__cf_chl_rt_tk=token',
+        title: 'Just a moment...',
+      };
+      const tabIdentity = nativeIndeedChallengeTabIdentity(initialChallengeTab);
+      assert(tabIdentity === '4:1', 'native tab identity is a bounded window/tab pair');
+      const redirected = selectNativeIndeedChallengeTab([
+        { windowIndex: 1, tabIndex: 1, url: 'https://www.indeed.com/jobs?q=old', title: 'Old search | Indeed' },
+        { windowIndex: 4, tabIndex: 1, url: 'https://ca.indeed.com/jobs?q=architect', title: 'Software Architect Jobs | Indeed' },
+      ], initialChallengeTab.url, { trackedTabIdentity: tabIdentity });
+      assert(redirected?.windowIndex === 4
+        && classifyNativeIndeedChallengeTab(redirected) === 'cleared',
+      'once this app tab was observed pending, its post-challenge regional redirect remains attributable even with an older clean Indeed tab open');
+      assert(classifyNativeIndeedChallengeTab({ url: 'https://ca.indeed.com/jobs?q=x', title: 'Attention Required!' }) === 'hard-block'
+        && classifyNativeIndeedChallengeTab({ url: 'https://ca.indeed.com/jobs?q=x', title: '' }) === 'unknown',
+      'exit fallback only accepts an affirmative clean title, never an empty/loading or hard-block page');
+      const cleanAtExit = { at: 3_100, url: 'https://secure.indeed.com/settings/account', title: 'Account settings' };
+      const acceptedExit = nativeIndeedChallengeExitDisposition({
+        cleanObservationAtExit: cleanAtExit,
+        startedAt: 0,
+        cookieStoreCommitted: false,
+      });
+      const bareClose = nativeIndeedChallengeExitDisposition({
+        cleanObservationAtExit: null,
+        startedAt: 0,
+        cookieStoreCommitted: true,
+      });
+      assert(acceptedExit.result === 'cleared' && acceptedExit.terminalSource === 'child-exit-after-clean',
+        'a clean first-party tab captured before the child exits resumes the handoff even if the stability timer had not elapsed');
+      assert(bareClose.result === 'closed' && bareClose.postCloseOutcome === 'profile-checkpoint-only',
+        'a profile checkpoint after a manual close is diagnostic evidence, not clearance success without a clean tab snapshot');
       return { ok: true };
     },
   },
@@ -918,13 +971,43 @@ export default [
     },
   },
 {
+    name: 'captcha resolve window recognizes Cloudflare Turnstile and challenge iframe variants',
+    run: () => {
+      const selectors = CAPTCHA_RESOLVE_CHALLENGE_SELECTORS.map(entry => entry.selector).join(' ');
+      assert(selectors.includes('.cf-turnstile')
+        && selectors.includes('cf-chl-widget')
+        && selectors.includes('challenges.cloudflare.com')
+        && selectors.includes('#cf-challenge-running'),
+      'the explicit Solve window must not auto-close while any supported Cloudflare widget is visible');
+      return { selectors: CAPTCHA_RESOLVE_CHALLENGE_SELECTORS.length };
+  },
+},
+{
+    name: 'captcha resolve no-extractor pages require an observed challenge before auto-close',
+    run: () => {
+      const cleanPage = { noChallenge: true, consentVisible: false, textLength: 2000 };
+      assert(shouldAutoCloseCaptchaResolveWithoutExtractor(cleanPage) === false,
+        'a normal page opened by Solve must remain user-controlled when this window never observed a challenge');
+      assert(shouldAutoCloseCaptchaResolveWithoutExtractor({ ...cleanPage, sawChallenge: true }) === true,
+        'after a visible challenge disappears, a substantial recovered page may auto-close and resume');
+      assert(shouldAutoCloseCaptchaResolveWithoutExtractor({ ...cleanPage, sawChallenge: true, consentVisible: true }) === false,
+        'a consent overlay must keep even a previously challenged page open');
+      assert(shouldAutoCloseCaptchaResolveWithoutExtractor({ ...cleanPage, sawChallenge: true, textLength: 20 }) === false,
+        'a tiny redirect/loading body is not enough evidence of a recovered no-extractor page');
+      return { requiresObservedChallenge: true };
+    },
+  },
+{
     name: 'Glassdoor startup verifier rejects the anonymous public jobs landing page',
     run: () => {
       const cfg = getJobLoginConfig('glassdoor');
       const anonymous = 'Recommended Jobs For You | Glassdoor Job Search Skip to main content Search Notifications Loading... Sign In Upload your resume - let employers find you Your job';
+      const anonymousCanadianShell = 'Recommended Jobs For You | Glassdoor Job Search Skip to main content Search Notifications Loading... Sign in Find your perfect job Search Upload your CV - let employers find you';
       const loggedIn = 'Recommended Jobs For You | Glassdoor Job Search Search Notifications Saved Jobs Profile Recommended for you';
       assert(getSoftLoginWallMatch(anonymous, cfg) === 'sign in upload your resume - let employers find you',
         'Glassdoor anonymous /Job/index.htm body must not fall through to connected:true');
+      assert(getSoftLoginWallMatch(anonymousCanadianShell, cfg) === 'upload your cv - let employers find you',
+        'Glassdoor’s regional anonymous shell may separate Sign in from the CV CTA, but must still reject the false connected verdict');
       assert(getSoftLoginWallMatch(loggedIn, cfg) === null,
         'Glassdoor logged-in jobs body must not false-positive as a login wall');
       return { ok: true };

@@ -319,8 +319,13 @@ export function checkEvidenceGrounding(plan = {}, evidence = {}) {
       }
     }
     if (!grounded) {
+      const evidencePath = mappingIndex === 0
+        ? 'coverLetterArgument.primaryEvidence.evidence'
+        : mappingIndex === 1
+          ? 'coverLetterArgument.secondaryEvidence.evidence'
+          : `coverLetterArgument.mappings[${mappingIndex}].evidence`;
       return result('evidence-grounding', false,
-        `mapping ${mappingIndex + 1} shares a longest ${bestRun}-word run and ${Math.round(bestOverlap * 100)}% token overlap with résumé bullets`);
+        `${evidencePath} (mapping ${mappingIndex + 1}; non-rendered argument evidence, not cover-letter paragraph ${mappingIndex + 1}) is insufficiently grounded in final résumé bullets: best contiguous run is ${bestRun} words (need ${MIN_EVIDENCE_SHINGLE_WORDS}) and best token overlap is ${Math.round(bestOverlap * 100)}% (need ${Math.round(MIN_EVIDENCE_TOKEN_OVERLAP * 100)}%)`);
     }
   }
   return result('evidence-grounding', true, `${mappings.length} mapping(s) grounded in résumé bullets`);
@@ -1101,6 +1106,76 @@ export function checkAdditiveSeam(paragraphs = []) {
     `${list.length} paragraph(s) join their evidence without a bare additive connective`);
 }
 
+// In “every existing tool calls for”, the ordinary compound noun “tool calls”
+// wins on a first pass even though “calls for” is the predicate. This is a
+// garden-path, not a punctuation issue, so the repair must choose a predicate
+// that cannot attach to “tool” (for example, “requires” or “demands”).
+const TOOL_CALLS_GARDEN_PATH = /\btool\s+calls\s+for\b/iu;
+
+/** Prevent a familiar compound noun from obscuring the intended predicate. */
+export function checkToolCallsGardenPath(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const match = TOOL_CALLS_GARDEN_PATH.exec(sentence);
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} creates a garden-path reading with “${boundedDetailValue(match[0])}”; readers initially parse “tool calls” as a compound noun, so replace “calls for” with “requires” or recast the sentence`);
+    }
+  }
+  return observationResult('tool-calls-garden-path', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) avoid the “tool calls for” garden path`);
+}
+
+// “For tools that remained in-house, I built software.” only repeats its own
+// category: a tool is software, so the sentence supplies neither a decision,
+// constraint, mechanism, nor result. Keep this terminal form deliberately
+// closed; a following specific object or result makes it ordinary evidence.
+const LOW_INFORMATION_TOOL_BUILD = /^for\s+tools?\b[^.!?]{0,100},?\s+i\s+(?:built|developed|wrote|created)\s+software[.!?]?$/iu;
+
+/** Reject a category-restating bridge sentence that cannot advance the argument. */
+export function checkLowInformationToolBuild(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const match = LOW_INFORMATION_TOOL_BUILD.exec(text(sentence));
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(sentence)}”, which only restates that tools are software; replace it with the supported decision, constraint, mechanism, or result—or remove it`);
+    }
+  }
+  return observationResult('low-information-tool-build', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) avoid category-restating software claims`);
+}
+
+// These are web/application servers and reverse proxies, not containerization
+// tools. The check reads the local “containerized … with/using/via …” grammar,
+// not the mere co-occurrence of Docker and a server elsewhere in a paragraph.
+const NON_CONTAINER_SERVER_TOOL = /\b(?:Nginx|Gunicorn|uWSGI|Apache|Tomcat|Caddy|HAProxy|Traefik|IIS|Passenger|Puma|Unicorn|mod_wsgi)\b/iu;
+const CONTAINERIZATION_WITH_TOOL = /\bcontaineri[sz](?:e|ed|ing)\b[^.!?]{0,180}\b(?:with|using|via)\b[^.!?]{0,180}/iu;
+const SEPARATE_DEPLOYMENT_ROLE_CLAUSE = /(?:,?\s+(?:and\s+)?then|,?\s+while|,?\s+where|,?\s+and)\s+(?:configured|used|ran|placed|served|deployed|operated|set\s+up)\b/iu;
+
+/** Ensure each deployment technology is governed by a verb describing its actual role. */
+export function checkContainerizationTechnologyRoles(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const containerizationPhrase = CONTAINERIZATION_WITH_TOOL.exec(sentence);
+      if (!containerizationPhrase) continue;
+      // A later “then configured Nginx …” clause has supplied Nginx with its
+      // own role; do not mistake that separate predicate for a member of the
+      // preceding “containerized with …” list.
+      const governedTools = containerizationPhrase[0].split(SEPARATE_DEPLOYMENT_ROLE_CLAUSE, 1)[0];
+      const serverMatch = NON_CONTAINER_SERVER_TOOL.exec(governedTools);
+      if (!serverMatch) continue;
+      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(containerizationPhrase[0])}”; ${serverMatch[0]} is a web or application server, not a containerization tool—name Docker or Docker Compose for containerization and describe ${serverMatch[0]}'s server or proxy role separately`);
+    }
+  }
+  return observationResult('containerization-technology-roles', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) give deployment technologies role-accurate verbs`);
+}
+
 // Advertisement-object nouns are usually a sign that the letter is talking to
 // the source document instead of the employer. One narrow exception is needed
 // for honest provenance: a source document may own a reporting verb when the
@@ -1109,6 +1184,7 @@ export function checkAdditiveSeam(paragraphs = []) {
 // report anything.
 const POSTING_REFERENCE_PATTERN = /\b(?:your|the|this)\s+(?:job\s+)?(?:posting|advert(?:isement)?)\b|\bjob\s+ad\b|\bas\s+advertised\b/giu;
 const SOURCE_DOCUMENT_ATTRIBUTION = /^(?:the|this)\s+(?:(?:job|role|position)\s+)?(?:posting|listing|description|advert(?:isement)?)\s+(?:describes?|states?|notes?|identifies?|specifies?|indicates?|outlines?|explains?)\b/iu;
+const BARE_LISTING_ATTRIBUTION = /^(?:the|this)\s+listing\s+(?:describes?|states?|notes?|identifies?|specifies?|indicates?|outlines?|explains?)\b/iu;
 const NON_SOURCE_REPORTING_SUBJECT = /^(?:the|this)\s+(?:role|position|job)\s+(?:describes?|states?|says?|notes?|mentions?|indicates?|specifies?|outlines?|explains?)\b/iu;
 const DETACHED_TARGET_POSITION = /^the\s+(?:role|position)(?:'s|\s+(?:needs?|requires?|focus(?:es)?|centers?|involves?|offers?|calls?|is|would|can|will|seeks?))\b/iu;
 
@@ -1120,6 +1196,10 @@ export function checkPostingReference(paragraphs = []) {
     const seen = new Set();
     for (const sentence of sentences(list[index])) {
       const sourceAttribution = SOURCE_DOCUMENT_ATTRIBUTION.exec(sentence);
+      const bareListingAttribution = BARE_LISTING_ATTRIBUTION.exec(sentence);
+      if (bareListingAttribution) {
+        observations.push(`paragraph ${index + 1} begins with underspecified source attribution (“${boundedDetailValue(bareListingAttribution[0])}”); name this role and its work directly, or, when provenance genuinely matters, say “this job listing” or “this job description”`);
+      }
       const invalidSource = NON_SOURCE_REPORTING_SUBJECT.exec(sentence);
       if (invalidSource) {
         observations.push(`paragraph ${index + 1} makes the target position the source of a statement (“${boundedDetailValue(invalidSource[0])}”); make the source document the grammatical subject when attribution is required`);
@@ -1341,7 +1421,7 @@ export function checkVisualReferencePrecision(paragraphs = []) {
 // line with an unnecessary conditional. This check is intentionally limited
 // to that stock cover-letter formula; other valid uses of “would welcome” are
 // not rewritten by a general lexical ban.
-const CONDITIONAL_WELCOME_CLOSE = /\bI\s+(?:(?:would|'d)\s+welcome\s+(?:the\s+)?(?:chance|opportunity)|(?:would|'d)\s+be\s+(?:glad|happy|pleased)\s+to\s+(?:discuss|talk|speak|connect|share|explore))\b/iu;
+const CONDITIONAL_WELCOME_CLOSE = /\bI(?:\s+would|'d)\s+welcome\s+(?:(?:the\s+)?(?:chance|opportunity)|(?:a\s+)?(?:conversation|discussion))\b|\bI\s+(?:would|'d)\s+be\s+(?:glad|happy|pleased)\s+to\s+(?:discuss|talk|speak|connect|share|explore)\b/iu;
 
 // A closing can be grammatically direct yet still leave the reader with only
 // the writer's wish to have a conversation or learn more. Keep this family
@@ -1559,6 +1639,9 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkModifierAttachment(paragraphs),
     checkAnchorRelevance(paragraphs, jobText, researchText),
     checkAdditiveSeam(paragraphs),
+    checkToolCallsGardenPath(paragraphs),
+    checkLowInformationToolBuild(paragraphs),
+    checkContainerizationTechnologyRoles(paragraphs),
     checkPostingReference(paragraphs),
     checkClaimedEquivalence(paragraphs),
     checkSentenceLength(paragraphs),

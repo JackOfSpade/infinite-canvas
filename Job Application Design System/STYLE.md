@@ -1472,10 +1472,13 @@ employer, team, product, or operational practice that comes only from the job
 listing is the listing's description, not independently verified fact. Attribute
 that description plainly; reserve an unqualified external assertion for reliable
 research. The attribution should clarify provenance, not become repetitive
-hedging. A reporting verb belongs to the source document, never to the target
-position or work being described. Refer to the position attached to the
-application with a proximal determiner unless the sentence explicitly contrasts
-it with another role.
+hedging. Discuss the target scope as *this role* or the work itself; do not use
+impersonal source framing such as “the listing describes” for ordinary role
+responsibilities. Use listing attribution only when it establishes the
+provenance of an unverified employer or company assertion. A reporting verb
+belongs to the source document, never to the target position or work being
+described. Refer to the position attached to the application with a proximal
+determiner unless the sentence explicitly contrasts it with another role.
 
 Audit before shipping: grep the filled letter for the forbidden
 openers before rendering, the same discipline as the dash gate:
@@ -1579,6 +1582,30 @@ belongs to an undefined surface. Literal language may still be concise; the
 test is whether a new reader can identify what did what to which thing without
 supplying missing context.
 
+**Read word boundaries literally too.** A sentence can be grammatical under its
+intended parse yet still send a new reader down the wrong path when adjacent
+words form a familiar compound or phrase across a clause boundary. Test the
+first read, not just the eventual grammar: if the reader could initially take
+the adjoining words as a different unit, recast the verb or clause. Do not use
+a comma to force a subject–verb break. For example, where a noun ending in
+“tool” is followed by a verb phrase beginning “calls for,” choose a verb such
+as “requires” so the reader never first sees the unrelated compound “tool
+calls.”
+
+**Give each technology its actual operation.** A technology name earns its
+place only when the governing verb accurately describes what it did in the
+system. Do not group components with distinct roles under one operation merely
+because they were deployed together. A container orchestrator can coordinate or
+define containers; a web server can serve or proxy; an application server can
+run the application. Describe those operations separately rather than saying a
+web server or application server “containerized” a service.
+
+**Delete category restatements.** A bridge sentence must add a decision,
+mechanism, constraint, result, or relation to the argument. A sentence that
+only restates its own category — for example, “For tools that remained
+in-house, I built software” — supplies no evidence or transition. Rewrite it
+with the distinction that matters, or delete it.
+
 **5. Keep coordinated elements grammatically parallel.** Coordination
 signals — `from X through/to Y`, `both X and Y`, `either X or Y`,
 `not only X but also Y`, and any list construction — promise the
@@ -1674,7 +1701,8 @@ contribution to the target work. A sentence that ends only on what the candidate
 wants to learn, hear, or discuss leaves the argument pointed inward; revise it
 so the invitation carries the role-facing contribution forward. Keep the
 invitation direct and present-tense without relying on conditional or deferential
-boilerplate.
+boilerplate: “I welcome a conversation” is direct; “I would welcome a
+conversation” or “I would welcome a discussion” is not.
 
 ### 11.3 Accent &amp; the close
 

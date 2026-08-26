@@ -1676,13 +1676,15 @@ export default [
         url: 'https://www.google.com/search?htidocid=ABC123&foo=session-a',
       });
       const same = dedupKeysFor({
-        url: 'https://google.com/search?foo=session-b&htidocid=abc123',
+        url: 'https://google.com/search?foo=session-b&htidocid=ABC123',
       });
       const different = dedupKeysFor({
         url: 'https://google.com/search?htidocid=DEF456',
       });
-      assert(a.includes('u:https://google.com/search?htidocid=abc123') && a.some(k => same.includes(k)),
+      assert(a.includes('u:https://google.com/search?htidocid=ABC123') && a.some(k => same.includes(k)),
         'same Google listing ignores session params but retains stable htidocid');
+      assert(!a.some(k => dedupKeysFor({ url: 'https://google.com/search?htidocid=abc123' }).includes(k)),
+        'Google htidocid stays case-sensitive because it is opaque/base64-like');
       assert(!a.some(k => different.includes(k)),
         'different Google htidocid values never collapse through the shared /search path');
       const replayGoogleA = dedupKeysFor({

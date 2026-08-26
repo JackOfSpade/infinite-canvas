@@ -4,64 +4,13 @@ import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../utils/canvasInteractions';
 
 import { findNonOverlappingPlacement } from '../utils/layoutUtils';
-import { isProductImageFile } from '../utils/fileDropUtils';
-import { canSellHubAcceptDisplayPhotoDrop, getHubDropRejectLabel, getHubFileDropMode } from '../utils/hubDropEligibility';
+import { getHubDropRejectLabel, getHubFileDropMode } from '../utils/hubDropEligibility';
+import { buildHubHoverState, filePayloadFromDraggedNodes, fileSupportedByHub } from '../utils/hubNodeDrop';
 import { appendPhotoFiles } from '../utils/photoPathList';
 
 // ────────────────────────────────────────────────────────────────────────────
 
 const HUB_DROP_TARGET_TYPES = new Set(['jobhub', 'sellhub']);
-
-function filePayloadFromDraggedNodes(nodes) {
-  return (nodes || [])
-    .filter(n => n?.type === 'document' && typeof n.data?.filePath === 'string' && n.data.filePath.trim())
-    .map(n => ({
-      nodeId: n.id,
-      filePath: n.data.filePath,
-      filename: n.data.filename || n.data.filePath.split(/[\\/]/).pop() || 'file',
-    }));
-}
-
-function fileSupportedByHub(hubType, file) {
-  const name = file?.filename || file?.filePath || '';
-  if (hubType === 'jobhub') return !/\.app$/i.test(name);
-  if (hubType === 'sellhub') return isProductImageFile(file);
-  return false;
-}
-
-function buildHubHoverState(targetHub, dragSet) {
-  if (!targetHub) return null;
-  if (targetHub.data?.locked) {
-    return { kind: 'reject', label: 'Locked' };
-  }
-
-  const filePayload = filePayloadFromDraggedNodes(dragSet);
-  if (filePayload.length === 0) {
-    return { kind: 'reject', label: 'Unsupported component' };
-  }
-
-  const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
-  if (acceptedFiles.length === 0) {
-    return {
-      kind: 'reject',
-      label: targetHub.type === 'jobhub' ? 'Unsupported resume file' : 'Images only',
-    };
-  }
-
-  if (canSellHubAcceptDisplayPhotoDrop(targetHub)) {
-    return { kind: 'accept', label: 'Add display photos' };
-  }
-
-  const lockLabel = getHubDropRejectLabel(targetHub);
-  if (lockLabel) {
-    return { kind: 'reject', label: lockLabel };
-  }
-
-  return {
-    kind: 'accept',
-    label: targetHub.type === 'jobhub' ? 'Use as resume' : 'Use as photos',
-  };
-}
 
 function findHubDropTarget(dragSet, getIntersectingNodes) {
   for (const dragged of dragSet) {
@@ -127,9 +76,16 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
 
-    if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'jobboard' && node.type !== 'sellhub') {
+    // Every movable non-hub node participates in hub-hover validation, including
+    // a Job Board. Boards are not valid career files, but excluding them here
+    // meant the user got no red cue explaining that the board is not a career
+    // file before it silently snapped back on release. Group absorption remains
+    // limited to the ordinary node types handled by the drop-stop path below.
+    if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
       const intersections = getIntersectingNodes(node);
-      const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
+      const targetGroup = node.type === 'jobboard'
+        ? null
+        : intersections.find(n => n.type === 'group' && !n.data?.locked);
       const newTargetId = targetGroup ? targetGroup.id : null;
 
       if (targetGroupIdRef.current !== newTargetId) {
@@ -243,7 +199,8 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         const draggedIds = dragSet.map(n => n.id);
         if (filePayload.length === 0) {
           restoreDragStartPositions(draggedIds);
-          EventLogger.log(`Rejected non-file node drop onto ${targetHub.type}; restored drag position`);
+          const draggedSummary = dragSet.map(n => `${n.id}:${n.type || 'unknown'}`).join(',');
+          EventLogger.log(`Rejected non-file node drop [${draggedSummary}] onto ${targetHub.type} ${targetHub.id}; restored drag position`);
           return;
         }
 

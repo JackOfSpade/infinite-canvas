@@ -5,7 +5,7 @@
 `OUTPUT_BUNDLE_ROOT: Applied Jobs`
 
 Edit both values above before running this routine, or override either value in
-the instruction you give Claude Code. Values in the launch instruction win:
+the instruction you give local AI agent. Values in the launch instruction win:
 
 - `INPUT_JOBS_ROOT` is the `.local-ai/jobs` folder beside the saved canvas file
   you want to process. An absolute path is clearest.
@@ -17,8 +17,7 @@ Infinite Canvas creates the normal application hierarchy below the output root:
 
 `<OUTPUT_BUNDLE_ROOT>/<Company>/<Location>/<Role>/`
 
-Use the Claude Pro or Max subscription authenticated in Claude Code. Do not
-switch to Anthropic Console/API credits for this routine.
+Use any local coding agent with filesystem and shell access. The routine is provider-neutral and does not require a vendor-specific API.
 
 ## Run one queued job
 
@@ -37,7 +36,7 @@ switch to Anthropic Console/API credits for this routine.
    A matching `render-retry-required` record is not an AI authoring job:
    leave its exact result untouched and tell the user to choose **Retry layout
    check** in Infinite Canvas. Do not select it ahead of a draft or revision
-   that Claude Code can actually complete.
+   that local AI agent can actually complete.
    Skip feedback whose hash does not match: Infinite Canvas must import or
    remeasure it itself. Inspect only the
    per-job manifest, filenames, and these app-generated feedback fields while
@@ -78,9 +77,13 @@ switch to Anthropic Console/API credits for this routine.
    verified fact: frame its source plainly. Use an unqualified assertion about
    the employer only when reliable research verifies it. This source framing
    must remain natural and must not become repetitive hedging.
-   When attribution is required, make the source document the grammatical
-   subject of its reporting verb; the target position is the thing described,
-   not a document or speaker. Refer to the position attached to this
+   Use `this role` or the work itself when discussing target scope; do not
+   introduce ordinary role responsibilities with impersonal source framing such
+   as `the listing describes`. Use job-listing attribution only when it is
+   needed to establish the provenance of an unverified employer or company
+   assertion. When attribution is required, make the source document the
+   grammatical subject of its reporting verb; the target position is the thing
+   described, not a document or speaker. Refer to the position attached to this
    application with a proximal determiner unless the sentence explicitly
    contrasts it with another role.
    Apply this evidence boundary in every document: assert explicit career facts;
@@ -146,8 +149,17 @@ switch to Anthropic Console/API credits for this routine.
    supported actions directly. Read every sentence once as a recruiter seeing
    it for the first time. Reject idiom, figurative personification, or an
    implied actor, artifact, or action when the reader must translate it or
-   reconstruct what it literally means. In interface or ownership claims,
-   name the concrete actor, artifact, and action instead. Honest
+   reconstruct what it literally means. Also scan every clause boundary: if
+   adjacent words form a familiar compound or alternate parse that a reader is
+   likely to take first, recast the sentence rather than inserting punctuation
+   to force the intended grammar. In interface or ownership claims, name the
+   concrete actor, artifact, and action instead. Every named technology needs a
+   governing verb that describes its actual role. Do not group tools with
+   distinct roles under one operation: a container orchestrator, web server,
+   and application server require distinct descriptions. Reject a bridge
+   sentence that merely restates a category (`For tools that remained in-house,
+   I built software`) without adding a decision, mechanism, constraint, or
+   result. Honest
    qualification exists to prevent a misleading claim or answer an explicit
    application question; otherwise state supported adjacent experience
    positively and stop at its evidence boundary. Then revise and perform
@@ -176,7 +188,7 @@ switch to Anthropic Console/API credits for this routine.
    narrate intermediate drafts, and do not reveal private chain-of-thought or
    intermediate drafts, during this loop. Keep the draft and its checks in the
    model response state until the final JSON is ready. Do not materialize HTML,
-   JSON, helper scripts, validation scripts, checklists, or notes in a Claude
+   JSON, helper scripts, validation scripts, checklists, or notes in an agent
    scratchpad, `/tmp`, the repository, or any other path. Do not create an
    ad-hoc validator or checker; apply the published contract directly. After a
    terminal imported receipt is reached, provide only the concise required
@@ -188,7 +200,7 @@ switch to Anthropic Console/API credits for this routine.
    or force compact density merely to guess at a page count; Infinite Canvas
    renders and measures it afterwards.
 
-   Canonical checklist, version 1:
+   Canonical checklist, version 2:
 
    - `resume-source-grounding`
    - `resume-priority-alignment`
@@ -217,7 +229,7 @@ switch to Anthropic Console/API credits for this routine.
 
    Use the full requirements in steps 3–5 and the design-system references to
    decide each item. The identifiers are an index, not a replacement for those
-   rules. Confirm that `input.json.qualityChecklist` is version 1 and contains
+   rules. Confirm that `input.json.qualityChecklist` is version 2 and contains
    this exact ordered set; if it differs, use the app-owned input contract and
    do not silently omit an item. `result.json` must include every identifier exactly once, all with
    `status: "pass"` and a specific verification note. Infinite Canvas rejects
@@ -365,10 +377,13 @@ switch to Anthropic Console/API credits for this routine.
    and action over figurative shorthand whenever it would otherwise obscure
    what an interface, system, or owner actually does. When stating an employer
    need, address the employer or work directly instead of treating its source
-   document as the audience. When listing-only context requires attribution,
-   make that document the reporting subject; never assign a communication verb
-   to the target position itself. Refer to the selected position proximally
-   unless the sentence explicitly distinguishes it from another role. Never
+   document as the audience. Refer to the selected scope as `this role` or the
+   work itself, not `the listing describes`; use listing attribution only when
+   it establishes the provenance of an unverified employer or company
+   assertion. When listing-only context requires attribution, make that
+   document the reporting subject; never assign a communication verb to the
+   target position itself. Refer to the selected position proximally unless the
+   sentence explicitly distinguishes it from another role. Never
    join two pieces of evidence with a
    bare additive connective such as `I also built` or `... too`: state the
    relation that makes the second piece advance the argument, and introduce a
@@ -390,9 +405,10 @@ switch to Anthropic Console/API credits for this routine.
    If the final paragraph invites a conversation, use direct present-tense
    language and connect the candidate's relevant contribution to the specific
    target work. Do not end solely on what the candidate wants to learn, hear,
-   or discuss. Avoid
-   conditional or deferential closing boilerplate. Apply this as a register
-   rule, not as a template for the closing sentence.
+   or discuss. Avoid conditional or deferential closing boilerplate: write `I
+   welcome a conversation` rather than `I would welcome a conversation` or `I
+   would welcome a discussion`. Apply this as a register rule, not as a
+   template for the closing sentence.
    Hyphenate compound modifiers (`in-house`, `end-to-end ownership`,
    `full-stack engineer`, `district-wide`, `third-party integrations`,
    `real-time data`, `open-source project`) and use one spelling of a compound
@@ -438,7 +454,7 @@ switch to Anthropic Console/API credits for this routine.
    helper for the exact bytes just written. A later overwrite is allowed only
    in response to matching `revision-required` or `invalid` feedback.
 
-7. Keep this SAME Claude Code run active for the measured handoff. After each
+7. Keep this SAME local AI agent run active for the measured handoff. After each
    `result.json` write, wait for Infinite Canvas (which must remain open) to
    render it. Invoke the app-owned helper immediately, before any other tool
    call or additional quality pass. Use the app-owned helper
@@ -489,7 +505,7 @@ switch to Anthropic Console/API credits for this routine.
      diagnosis (for example, "My diagnosis is that several bullets wrap too
      long").
    - Continue through every measured revision requested by the app in this same
-     Claude Code session. There is no fixed round limit. These layout-feedback
+     local AI agent session. There is no fixed round limit. These layout-feedback
      rounds are separate from your private drafting critique.
    - If matching `fit-feedback.json` has status `render-retry-required`, the
      app could not verify the layout for those
@@ -540,7 +556,7 @@ effective `OUTPUT_BUNDLE_ROOT` value copied exactly. Write it to
   "status": "completed",
   "outputBundleRoot": "Applied Jobs",
   "qualityReview": {
-    "checklistVersion": 1,
+    "checklistVersion": 2,
     "criteria": [
       { "id": "resume-source-grounding", "status": "pass", "evidence": "All résumé claims were traced to supplied career evidence without broadening scope." },
       { "id": "resume-priority-alignment", "status": "pass", "evidence": "Direct evidence for the highest-priority role needs appears first." },

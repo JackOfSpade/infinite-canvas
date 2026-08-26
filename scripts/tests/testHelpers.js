@@ -14,14 +14,18 @@ export function runExtractorFixtureTest({ name, file, extractor, minCount = 1, s
     url: 'https://example.com',
     runScripts: 'outside-only',
   });
-  // Extractors return either a bare array or { items, yieldStats } — mirror the
-  // browserPool unwrap so the fixture asserts on the items array either way.
-  const raw = dom.window.eval(extractor);
-  const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
-  assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
-  assert(result.length >= minCount, `${name}: expected at least ${minCount} result(s), got ${result.length}`);
-  if (sampleAssert) sampleAssert(result[0], result);
-  return { count: result.length, sample: result[0] };
+  try {
+    // Extractors return either a bare array or { items, yieldStats } — mirror
+    // the browserPool unwrap so the fixture asserts on the items array.
+    const raw = dom.window.eval(extractor);
+    const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
+    assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
+    assert(result.length >= minCount, `${name}: expected at least ${minCount} result(s), got ${result.length}`);
+    if (sampleAssert) sampleAssert(result[0], result);
+    return { count: result.length, sample: result[0] };
+  } finally {
+    dom.window.close();
+  }
 }
 
 export function runZeroResultFixtureTest({ name, file, extractor }) {
@@ -30,9 +34,13 @@ export function runZeroResultFixtureTest({ name, file, extractor }) {
     url: 'https://example.com',
     runScripts: 'outside-only',
   });
-  const raw = dom.window.eval(extractor);
-  const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
-  assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
-  assert(result.length === 0, `${name}: expected 0 results, got ${result.length}`);
-  return { count: result.length };
+  try {
+    const raw = dom.window.eval(extractor);
+    const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
+    assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
+    assert(result.length === 0, `${name}: expected 0 results, got ${result.length}`);
+    return { count: result.length };
+  } finally {
+    dom.window.close();
+  }
 }

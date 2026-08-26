@@ -7,6 +7,10 @@ const REASON_LIMIT = 240;
 const URL_LIMIT = 240;
 const LARGE_DELTA = 15;
 const ADJUSTMENT_LIMIT = 4;
+// These are the only deterministic fallback reasons emitted by
+// jobBatchReconcile.buildScoredJob. Keep their rows in bounded diagnostics even
+// when a large run would otherwise push them past the ordinary first-N sample.
+const PLACEHOLDER_REASONS = new Set(['AI format error', 'Unable to score']);
 
 function normalizedText(value) {
   return String(value || '')
@@ -79,13 +83,23 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
       // deterministic grounded explanation. Deliberately never retain the
       // provider's raw narrative in compact diagnostics.
       reason: String(job.reasoning || '').replace(/\s+/g, ' ').trim().slice(0, REASON_LIMIT),
+      placeholder: PLACEHOLDER_REASONS.has(String(job.reasoning || '').replace(/\s+/g, ' ').trim()),
       descriptionChars: fp.normalized.length,
       descriptionFingerprint: fp.hash,
       _normalizedDescription: fp.normalized,
     };
   });
 
-  const bounded = prepared.slice(0, Math.max(0, limit));
+  const boundedLimit = Math.max(0, limit);
+  // A placeholder is a score-shaped row the model did not genuinely analyze.
+  // It is higher-value failure evidence than an ordinary score, so reserve the
+  // existing fixed-size audit for them first and fill any remaining slots with
+  // the usual original-order sample.
+  const placeholderRows = prepared.filter(row => row.placeholder);
+  const bounded = [
+    ...placeholderRows.slice(0, boundedLimit),
+    ...prepared.filter(row => !row.placeholder).slice(0, Math.max(0, boundedLimit - placeholderRows.length)),
+  ];
   const anomalies = [];
   for (let i = 0; i < bounded.length; i++) {
     for (let j = i + 1; j < bounded.length; j++) {
@@ -124,6 +138,7 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
       adjustments: row.adjustments,
       direction: row.direction,
       reason: row.reason,
+      placeholder: row.placeholder,
       descriptionChars: row.descriptionChars,
       descriptionFingerprint: row.descriptionFingerprint,
     })),

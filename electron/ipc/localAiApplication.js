@@ -1,9 +1,9 @@
 /**
  * Human-in-the-loop Local AI application jobs.
  *
- * This module deliberately does not launch, scrape, or automate Claude Code.
+ * This module deliberately does not launch, scrape, or automate a local AI agent.
  * The app writes a private, app-owned job folder; the user runs the supplied
- * routine in Claude Code; Claude writes one constrained result.json; then this
+ * routine in any local coding agent; that agent writes one constrained result.json; then this
  * process validates and imports it through the same application-save capability
  * used by API generation. A subscription UI must never be treated as an API.
  */
@@ -38,10 +38,21 @@ const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 // Keep enough recent observations to investigate a live handoff, while the
 // monotonic counter preserves the fact that older observations existed.
 const MAX_LOCAL_AI_HANDOFF_HISTORY = 32;
-const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Never delay the relevance of a background fact. Frame an unfamiliar prior employer with the candidate’s role or relationship, then use the shortest unambiguous reference. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
-const COVER_LETTER_COPY_PRECISION_RULE = 'Punctuate introductory phrases so the transition into the main subject is immediately clear. Read every sentence once as a recruiter seeing it for the first time; reject idiom, figurative personification, or an implied actor, artifact, or action when the reader must translate it or reconstruct what it literally means. In interface or ownership claims, name the concrete actor, artifact, and action instead. Keep communication verbs attached to an actual document or speaker rather than assigning them to the work or position being described. When describing interface guidance, distinguish metaphorical reference from visible on-screen indication and state only the literal limitation. When a closing invites further conversation, use direct present-tense language and connect the candidate’s relevant contribution to the specific target work; do not end solely on what the candidate wants to learn, hear, or discuss, and reject conditional or deferential boilerplate.';
+const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Never delay the relevance of a background fact. Frame an unfamiliar prior employer with the candidate’s role or relationship, then use the shortest unambiguous reference. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. Refer to the target scope as this role or the work itself; use job-listing attribution only when it establishes the provenance of an unverified employer or company assertion. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, category-restatement bridge sentences that add no decision, mechanism, constraint, or result, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
+const COVER_LETTER_COPY_PRECISION_RULE = 'Punctuate introductory phrases so the transition into the main subject is immediately clear. Read every sentence once as a recruiter seeing it for the first time; reject idiom, figurative personification, or an implied actor, artifact, or action when the reader must translate it or reconstruct what it literally means. Also scan each clause boundary for an accidental familiar compound or alternate parse: if adjacent words can first read as a different unit, recast the sentence instead of using punctuation to force its intended grammar. In interface or ownership claims, name the concrete actor, artifact, and action instead. Keep communication verbs attached to an actual document or speaker rather than assigning them to the work or position being described. Give each named technology a governing verb that describes its actual role, and never group technologies with distinct roles under one operation. When describing interface guidance, distinguish metaphorical reference from visible on-screen indication and state only the literal limitation. When a closing invites further conversation, use direct present-tense language and connect the candidate’s relevant contribution to the specific target work; do not end solely on what the candidate wants to learn, hear, or discuss, and reject conditional or deferential boilerplate, including would welcome a conversation or discussion.';
 
-export const APPLICATION_QUALITY_CHECKLIST_VERSION = 1;
+export const APPLICATION_QUALITY_CHECKLIST_VERSION = 2;
+const LEGACY_APPLICATION_QUALITY_CHECKLIST_VERSION = 1;
+const SUPPORTED_APPLICATION_QUALITY_CHECKLIST_VERSIONS = new Set([
+  LEGACY_APPLICATION_QUALITY_CHECKLIST_VERSION,
+  APPLICATION_QUALITY_CHECKLIST_VERSION,
+]);
+
+function expectedApplicationQualityChecklistVersion(inputVersion = null) {
+  if (inputVersion == null) return APPLICATION_QUALITY_CHECKLIST_VERSION;
+  if (SUPPORTED_APPLICATION_QUALITY_CHECKLIST_VERSIONS.has(inputVersion)) return inputVersion;
+  throw new Error(`Local AI job input has an unsupported quality checklist version: ${String(inputVersion)}.`);
+}
 
 // Stable writer-facing acceptance contract. Each final handoff must explicitly
 // account for every item; the host separately runs every deterministic check
@@ -62,10 +73,10 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'cover-minimum-evidence', document: 'coverLetter', requirement: 'Only minimum-sufficient evidence is used; each additional proof has an explicit supporting role.' },
   { id: 'cover-priority-alignment', document: 'coverLetter', requirement: 'The argument connects distinctive candidate evidence to an emphasized employer need.' },
   { id: 'cover-opening', document: 'coverLetter', requirement: 'The first sentence adds substantive information and advances the argument immediately.' },
-  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance.' },
-  { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; the selected position is referenced proximally, and listing-only employer context is attributed with its source document—not the target position—as the reporting subject.' },
-  { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditionally deferential closing language; a final invitation connects the candidate’s contribution to target work.' },
-  { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing; they use literal first-read language with concrete actors, artifacts, and actions where needed, and contain no semicolon or dash clause splices.' },
+  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance; bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
+  { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; target scope is stated as this role or the work itself and the selected position is referenced proximally, while listing-only employer context is attributed only when provenance is necessary, with its source document—not the target position—as the reporting subject.' },
+  { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditional/deferential closing language; a final invitation uses direct present tense and connects the candidate’s contribution to target work.' },
+  { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing; they pass a literal first-read and word-boundary parse, use concrete actors, artifacts, and actions where needed, give every named technology a role-accurate governing verb without grouping distinct roles under one operation, and contain no semicolon or dash clause splices.' },
   { id: 'cover-figure-discipline', document: 'coverLetter', requirement: 'Every figure is necessary and appears in the selected résumé evidence.' },
   { id: 'cover-legal-status', document: 'coverLetter', requirement: 'The letter contains no citizenship, residency, visa, or work-authorization statement.' },
   { id: 'cover-envelope', document: 'coverLetter', requirement: 'The host-owned identity, contact, salutation, and closing are not contradicted or inferred.' },
@@ -108,7 +119,7 @@ function contentHash(value) {
 function localAiProjectRoot(canvasFilePath = '') {
   // The canonical launcher runs the packaged .app from <project>/release/.
   // Walk upward from both cwd and the executable so that packaged local builds
-  // still hand jobs to the source project Claude Code is scoped to. A copied,
+  // still hand jobs to the source project the local coding agent is scoped to. A copied,
   // standalone .app falls back to the saved canvas's folder.
   const seeds = [process.env.INFINITE_CANVAS_PROJECT_ROOT, process.cwd(), path.dirname(process.execPath || '')]
     .filter(Boolean);
@@ -198,7 +209,7 @@ async function readLocalAiTerminalReceipt(canvasRoot, jobId) {
   }
 }
 
-// The job folder intentionally holds private career context while Claude Code
+// The job folder intentionally holds private career context while a local coding agent
 // works. A completed application is promoted into its final bundle and then
 // removed by save-application; this guard is for abandoned/manual jobs only.
 // It runs on the next Generate, never while an existing job is being used.
@@ -216,7 +227,7 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
   }
   const cutoff = Date.now() - LOCAL_AI_STALE_JOB_RETENTION_MS;
   // Terminal receipts have no candidate content and exist solely to bridge the
-  // Claude Code polling race after a successful save. Expire them with the
+  // Local AI polling race after a successful save. Expire them with the
   // same retention window as abandoned jobs.
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   const receiptEntries = await fs.promises.readdir(receiptsRoot, { withFileTypes: true });
@@ -365,7 +376,7 @@ async function ensureProjectRoutine(projectRoot) {
     mode: 0o700,
     label: 'Local AI routine folder',
   });
-  const routineTarget = path.join(routineDir, 'CLAUDE_CODE_ROUTINE.md');
+  const routineTarget = path.join(routineDir, 'LOCAL_AI_APPLICATION_ROUTINE.md');
   const waitHelperTarget = path.join(routineDir, 'wait-for-handoff.mjs');
   const bundledDir = process.resourcesPath ? path.join(process.resourcesPath, 'local_ai') : '';
 
@@ -397,13 +408,40 @@ async function ensureProjectRoutine(projectRoot) {
   // The editable routine and app-owned wait helper travel together. The helper
   // makes the terminal receipt/folder-cleanup race deterministic for standalone
   // builds where the project initially has no local_ai directory.
-  await copyBundledIfMissing(routineTarget, 'CLAUDE_CODE_ROUTINE.md', 'Local AI routine');
+  await copyBundledIfMissing(routineTarget, 'LOCAL_AI_APPLICATION_ROUTINE.md', 'Local AI routine');
   await copyBundledIfMissing(waitHelperTarget, 'wait-for-handoff.mjs', 'Local AI handoff wait helper');
   return routineTarget;
 }
 
-function promptFor(jobId) {
-  return `# Run Local AI application job ${jobId}\n\nRead and follow the project routine at \`local_ai/CLAUDE_CODE_ROUTINE.md\`. Process only the folder containing this prompt; it is job \`${jobId}\` under the routine's configured \`INPUT_JOBS_ROOT\`. Copy the effective \`OUTPUT_BUNDLE_ROOT\` value exactly into \`result.json.outputBundleRoot\`. Write no other files.\n`;
+function promptFor({ jobId, workingFolder, canvasRoot, routinePath }) {
+  const inputJobsRoot = localJobsRoot(canvasRoot);
+  const outputBundlePath = path.join(canvasRoot, 'Applied Jobs');
+  return `Run exactly one actionable Local AI application job from the Infinite Canvas project.
+
+Use any local coding agent with filesystem and shell access. This workflow is provider-neutral; do not switch to a vendor API or require a particular vendor's CLI.
+
+These launch values are authoritative and override placeholders in the routine:
+
+WORKING_FOLDER: ${workingFolder}
+ROOT_LOCATION: ${canvasRoot}
+ROUTINE_PATH: ${routinePath}
+INPUT_JOBS_ROOT: ${inputJobsRoot}
+OUTPUT_BUNDLE_ROOT: Applied Jobs
+OUTPUT_BUNDLE_PATH: ${outputBundlePath}
+JOB_ID: ${jobId}
+
+Start in WORKING_FOLDER, then read and follow the complete routine at ROUTINE_PATH. ROOT_LOCATION is the folder containing the currently saved canvas. Resolve OUTPUT_BUNDLE_ROOT relative to ROOT_LOCATION, so the final hierarchy remains ./Applied Jobs/<Company>/<Location>/<Role>/.
+
+Process only JOB_ID. Do not select a different queued job. If that job is no longer actionable, stop without changing any files.
+
+Keep this same local-agent run active for the complete measured handoff. Handle every matching \`revision-required\`, legacy \`revision-exhausted\`, and \`invalid\` response exactly as prescribed. After every \`result.json\` write, invoke the app-owned handoff helper immediately and continue waiting without a timeout or iteration limit.
+
+Stop only upon a matching terminal receipt, matching \`render-retry-required\` feedback, disappearance of the job folder without a matching receipt, or explicit user interruption. Report acceptance and measured page counts only when supported by the matching terminal receipt.
+
+Write only the selected job's UTF-8 \`result.json\`. Do not modify project source, canvas data, input/context files, feedback, or generated bundles directly. Infinite Canvas owns validation, rendering, and the final save beneath OUTPUT_BUNDLE_PATH.
+
+No response needs to be pasted back into Infinite Canvas. Completion is communicated through the routine's local filesystem handoff.
+`;
 }
 
 function sanitizeResumeMainHtml(raw) {
@@ -629,8 +667,9 @@ function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index) 
   const minimumShared = finalTokens.length === 1 ? 1 : 2;
   if (!finalTokens.length || shared.length < minimumShared) {
     const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
+    const ordinal = `${unit} ${index + 1}`;
     const detail = shared.length ? `shared meaningful token(s): ${shared.slice(0, 4).join(', ')}` : 'no shared meaningful tokens';
-    throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] has career-data quotes unrelated to its final ${unit} (${detail}; need ${minimumShared}).`);
+    throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] (${ordinal}) has career-data quotes unrelated to its final ${unit} (${detail}; need ${minimumShared}).`);
   }
 }
 
@@ -744,12 +783,12 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
   return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };
 }
 
-function sanitizeQualityReview(raw = {}, sourceContext = null) {
+function sanitizeQualityReview(raw = {}, sourceContext = null, expectedChecklistVersion = APPLICATION_QUALITY_CHECKLIST_VERSION) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Local AI result must include qualityReview for both documents.');
   }
-  if (raw.checklistVersion !== APPLICATION_QUALITY_CHECKLIST_VERSION) {
-    throw new Error(`Local AI qualityReview.checklistVersion must be ${APPLICATION_QUALITY_CHECKLIST_VERSION}.`);
+  if (raw.checklistVersion !== expectedChecklistVersion) {
+    throw new Error(`Local AI qualityReview.checklistVersion must be ${expectedChecklistVersion}.`);
   }
   const documentReview = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -774,7 +813,7 @@ function sanitizeQualityReview(raw = {}, sourceContext = null) {
   const coverLetter = documentReview(raw.coverLetter, 'coverLetter');
   assertCoverLetterReviewAttestsToArgument(coverLetter.rationale);
   const qualityReview = {
-    checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+    checklistVersion: expectedChecklistVersion,
     criteria: sanitizeApplicationQualityCriteria(raw.criteria),
     resume: documentReview(raw.resume, 'resume'),
     coverLetter,
@@ -791,8 +830,8 @@ function sanitizeQualityReview(raw = {}, sourceContext = null) {
 // fit-feedback.json too large for the handoff reader's 64 KB safety cap.
 function compactLocalAiQualityReview(review = {}) {
   return {
-    checklistVersion: review?.checklistVersion === APPLICATION_QUALITY_CHECKLIST_VERSION
-      ? APPLICATION_QUALITY_CHECKLIST_VERSION
+    checklistVersion: SUPPORTED_APPLICATION_QUALITY_CHECKLIST_VERSIONS.has(review?.checklistVersion)
+      ? review.checklistVersion
       : null,
     criteria: Array.isArray(review?.criteria) ? review.criteria.slice(0, APPLICATION_QUALITY_CRITERIA.length).map(item => ({
       id: cleanText(item?.id, 120),
@@ -854,6 +893,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
   const coverPlan = localCoverLetterPlan(coverLetterArgument);
   const hasTrustedCareerData = Object.prototype.hasOwnProperty.call(options || {}, 'careerData');
   const careerData = hasTrustedCareerData ? cleanText(options.careerData, MAX_CAREER_DATA_CHARS) : '';
+  const expectedChecklistVersion = expectedApplicationQualityChecklistVersion(options?.qualityChecklistVersion);
   const coverFailures = [
     checkRoleThesis(coverPlan),
     checkMappingNarrativeStructure(coverPlan),
@@ -882,7 +922,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
       resumeEvidence,
       coverLetter,
       coverLetterArgument,
-    }),
+    }, expectedChecklistVersion),
     outputBundleRoot: output.relative,
     outputBundleRootPath: output.resolved,
   };
@@ -1152,7 +1192,7 @@ async function readLocalFitFeedback(root, dir) {
 
 // A HARD validation failure writes nothing at all today: no bundle, no fit
 // feedback, no receipt, no manifest event. The error reaches only the
-// renderer, but per local_ai/CLAUDE_CODE_ROUTINE.md step 7 the waiting Claude
+// renderer, but per local_ai/LOCAL_AI_APPLICATION_ROUTINE.md step 7 the waiting local agent
 // Code session may read only fit-feedback.json, manifest.json, result.json and
 // the handoff receipt — so a rejected result is indistinguishable from an app
 // that never ran. The rejection record below gives the same active session a
@@ -1229,7 +1269,7 @@ export async function queueLocalApplicationJob(args = {}, signal = null) {
   // deliberately NOT. This separation keeps a portable canvas self-contained
   // without creating a second editable routine beside every canvas.
   const routineProjectRoot = localAiProjectRoot(canvas.canonicalCanvasFilePath);
-  await ensureProjectRoutine(routineProjectRoot);
+  const routinePath = await ensureProjectRoutine(routineProjectRoot);
   throwIfAborted(signal);
   const realRoot = await ensureDirectoryWithinRoot(canvas.canvasRoot, localJobsRoot(canvas.canvasRoot), {
     mode: 0o700,
@@ -1261,17 +1301,23 @@ export async function queueLocalApplicationJob(args = {}, signal = null) {
     const manifest = {
       version: LOCAL_AI_APPLICATION_VERSION, id, status: 'queued', createdAt: input.createdAt,
       canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot,
-      files: ['input.json', 'context/job-listing.md', 'context/career-data.txt', 'CLAUDE_CODE_PROMPT.md', 'result.json'],
+      files: ['input.json', 'context/job-listing.md', 'context/career-data.txt', 'LOCAL_AI_PROMPT.md', 'result.json'],
     };
+    const launchPrompt = promptFor({
+      jobId: id,
+      workingFolder: routineProjectRoot,
+      canvasRoot: canvas.canvasRoot,
+      routinePath,
+    });
     await ensureDirectoryWithinRoot(dir, path.join(dir, 'context'), { mode: 0o700, label: 'Local AI context folder' });
     await Promise.all([
       atomicJson(path.join(dir, 'input.json'), input), atomicJson(path.join(dir, 'manifest.json'), manifest),
       fs.promises.writeFile(path.join(dir, 'context', 'job-listing.md'), formatOriginalJobListingMarkdown(job), { encoding: 'utf8', mode: 0o600 }),
       fs.promises.writeFile(path.join(dir, 'context', 'career-data.txt'), careerData, { encoding: 'utf8', mode: 0o600 }),
-      fs.promises.writeFile(path.join(dir, 'CLAUDE_CODE_PROMPT.md'), promptFor(id), { encoding: 'utf8', mode: 0o600 }),
+      fs.promises.writeFile(path.join(dir, 'LOCAL_AI_PROMPT.md'), launchPrompt, { encoding: 'utf8', mode: 0o600 }),
     ]);
     throwIfAborted(signal);
-    return { id, status: 'queued', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: 'Local AI job is ready beside this canvas in .local-ai/jobs. Run CLAUDE_CODE_PROMPT.md with your subscription-authenticated Claude Code session.' };
+    return { id, status: 'queued', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, prompt: launchPrompt, message: 'Local AI job is ready beside this canvas in .local-ai/jobs. Paste LOCAL_AI_PROMPT.md into any local coding agent with filesystem access.' };
   } catch (error) {
     await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -1432,13 +1478,16 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
       message: 'Result imported — waiting for the bundle save to settle.',
     };
   }
-  let status = 'queued'; let message = 'Awaiting result.json from Claude Code.'; let resultSha256 = null;
+  let status = 'queued'; let message = 'Awaiting result.json from Local AI.'; let resultSha256 = null;
   try {
     const rawText = await readOwnedFile(root, path.join(dir, 'result.json'));
     resultSha256 = contentHash(rawText);
     try {
       const raw = JSON.parse(rawText);
-      const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job, { careerData });
+      const validated = validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job, {
+        careerData,
+        qualityChecklistVersion: input?.qualityChecklist?.version,
+      });
       const feedback = await readLocalFitFeedback(root, dir);
       // Only the two MEASURED verdicts may hold a valid result back. The
       // rejection record shares this file and matches on hash, so the
@@ -1456,7 +1505,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
     } catch (error) {
       // HARD rejection: nothing is rendered, saved, or measured, and the error
       // otherwise reaches only the renderer. Record it in the one job-folder
-      // file the waiting Claude Code session is allowed to read, then rethrow
+      // file the waiting local coding agent is allowed to read, then rethrow
       // into the outer catch, which still owns the user-facing status message.
       // Mirror that catch's ENOENT rule so a stray missing-file error can never
       // leave a rejection record on a job still reported as 'queued'.
@@ -1469,7 +1518,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
   return {
     id: jobId, status, folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath,
     createdAt: manifest.createdAt, message,
-    // The renderer uses this to distinguish a genuinely new Claude Code save
+    // The renderer uses this to distinguish a genuinely new Local AI save
     // from another poll of the same valid result before beginning an expensive
     // measured import.
     resultSha256: status === 'completed' ? resultSha256 : null,
@@ -1524,6 +1573,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   const careerData = cleanText(careerDataRaw, MAX_CAREER_DATA_CHARS);
   if (manifest.id !== jobId || input?.jobId !== jobId || input?.version !== LOCAL_AI_APPLICATION_VERSION) throw new Error('Local AI job input is invalid.');
   assertManifestCanvasOwnership(manifest, input, canvas);
+  const expectedChecklistVersion = expectedApplicationQualityChecklistVersion(input?.qualityChecklist?.version);
   // Gate on the manifest BEFORE touching result.json: during the save window
   // the settling verdict must not depend on the result file's presence.
   if (manifestImportFreshlySettling(manifest)) {
@@ -1533,13 +1583,16 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   }
   const resultRaw = await readOwnedFile(root, path.join(dir, 'result.json'));
   if (expectedResultSha256 && contentHash(resultRaw) !== expectedResultSha256) {
-    const error = new Error('Claude Code saved a newer result while the prior result was settling. Waiting for the final save before import.');
+    const error = new Error('Local AI saved a newer result while the prior result was settling. Waiting for the final save before import.');
     error.code = 'LOCAL_AI_RESULT_CHANGED';
     throw error;
   }
   let result;
   try {
-    result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job, { careerData });
+    result = validateLocalApplicationResult(JSON.parse(resultRaw), jobId, canvas.canvasRoot, input.job, {
+      careerData,
+      qualityChecklistVersion: expectedChecklistVersion,
+    });
   } catch (error) {
     // The poll path normally rejects first — an import only ever begins from
     // status 'completed' — so this covers the narrow race where result.json is
@@ -1559,7 +1612,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   // click. Same allow-list the status path uses.
   const measuredPriorFeedback = matchingPriorFeedback
     && ['revision-required', 'revision-exhausted'].includes(priorFeedback?.status);
-  // A renderer can retry an IPC request after a slow render, and Claude Code
+  // A renderer can retry an IPC request after a slow render, and a local coding agent
   // can leave the card mounted while it is reading the app's feedback. Once a
   // particular result has already produced trusted measured feedback, never
   // render it again: doing so would inflate revision rounds and overwrite the
@@ -1696,11 +1749,12 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
       resultSha256: contentHash(resultRaw),
       documentSha256,
       qualityReview: compactLocalAiQualityReview(result.qualityReview),
+      qualityChecklistVersion: expectedChecklistVersion,
       requestedAt: new Date().toISOString(),
       targetPageCount,
       resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null },
       coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null },
-      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${APPLICATION_QUALITY_CHECKLIST_VERSION} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. The cover letter's reported type-area utilization is informational only: a short letter is a supported outcome with no minimum utilization, so never lengthen it to fill its page. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
+      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${expectedChecklistVersion} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. ${resumeUnderfilled ? 'The app measured an underfilled one-page résumé. Reassess omitted, source-supported evidence and add only distinct facts that materially improve this job-specific résumé; do not add generic filler, unsupported detail, or repetition merely to occupy space.' : 'Cut generic, redundant, weakly related, or low-evidence content first.'} ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. The cover letter's reported type-area utilization is informational only: a short letter is a supported outcome with no minimum utilization, so never lengthen it to fill its page. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
       message: fitMessage,
     };
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), feedback);
@@ -1743,7 +1797,7 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   // Printing the tabbed workspace makes PDF production depend on injected tab
   // controls that are irrelevant to the document itself.
   const jobListingMarkdown = formatOriginalJobListingMarkdown(input.job);
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobMarkdown: jobListingMarkdown } });
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', jobMarkdown: jobListingMarkdown } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
   if (!resumePdf) {
@@ -1848,7 +1902,8 @@ export function registerLocalAiApplicationHandlers() {
         await discardQueuedJob();
         throwIfAborted(signal);
       }
-      return { localJob };
+      const { prompt, ...durableLocalJob } = localJob;
+      return { localJob: durableLocalJob, prompt };
     } catch (error) {
       if (signal?.aborted) await discardQueuedJob();
       throw error;

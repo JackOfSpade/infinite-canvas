@@ -699,7 +699,7 @@ try {
   const claudeOnlyLabels = ['Judgment', 'Extraction', 'Light'];
 
   assert.equal(await settingsPanel.getByRole('button', { name: 'Local AI', exact: true }).count(), 0, 'Settings must not expose Local AI as a provider');
-  assert.equal(await settingsPanel.getByText('Claude Code handoff', { exact: true }).count(), 0, 'Settings must not expose the removed Local AI mode panel');
+  assert.equal(await settingsPanel.getByText('Local AI Handoff', { exact: true }).count(), 0, 'Settings must not expose a Local AI mode panel');
   assert.equal(await settingsPanel.getByText('Generation', { exact: true }).count(), 0, 'Settings must not expose a dead Claude Generation model control');
 
   // A Gemini-first install must not expose controls that have no effect on its

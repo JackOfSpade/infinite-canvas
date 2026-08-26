@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useState, useContext } from 'react';
+import React, { useCallback, useEffect, useState, useContext, useRef } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
-import { isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
+import { canAttemptJobSourceResolve, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
@@ -40,7 +40,16 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // jobs every time the user re-solves a source.
   const nav = useContext(CanvasNavigationContext);
   const [progress, setProgress] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
+  // A Solve can finish after several intermediate progress events. Keep the
+  // latest displayed source count in a ref so the resolved event carries the
+  // exact card-total delta the hub needs for its aggregate counter.
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
   const [resolving, setResolving] = useState(false);
+  // `setResolving(true)` does not update this closure until React renders, so a
+  // quick double-click could otherwise open two native Chrome verification
+  // windows. Keep a synchronous latch for the actual IPC lifetime.
+  const resolveInFlightRef = useRef(false);
   // Local-only dismiss: clicking Skip on a warned card just hides the
   // Solve/Skip + warning text on this card. Doesn't touch hub state — the
   // next Re-run Search will refetch this source fresh and re-emit progress.
@@ -90,7 +99,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       setDismissed(false);
       setProgress(prev => ({
         ...(prev || {}),
-        status: 'done',
+        // A derived gate can arrive after the source's last normal progress
+        // event said `done`. It is not a successful completion from the
+        // person's perspective: the card still needs a decision. Preserve
+        // that truth in the card and persisted diagnostics instead of showing
+        // the contradictory "done (scrape-failed)" state.
+        status: isJobSourceWarningGating(nextWarning) ? 'error' : 'done',
         count: nextWarning.sourceJobCount ?? prev?.count ?? 0,
         url: nextWarning.url || prev?.url || null,
         warning: nextWarning,
@@ -135,7 +149,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   }, [data.hubId, progress?.status, progress?.warning, id, deleteElements]);
 
   const handleSolve = async () => {
-    if (resolving || hubLocked) return;
+    if (resolving || resolveInFlightRef.current || hubLocked) return;
     const warningAction = progress?.warning?.action;
     const resumeState = progress?.warning?.resumeState;
     // "Open listing" is intentionally not a source resolve. A ZipRecruiter
@@ -153,6 +167,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       return;
     }
     if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
+    resolveInFlightRef.current = true;
     setResolving(true);
     // Optimistically clear the red error/warning so the card reads as "working"
     // the instant Solve is clicked — not after the (now multi-minute) resolve
@@ -215,6 +230,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         const replaceSourceItems = !!result.replaceSourceItems;
         const replaceMatchingItems = !!result.replaceMatchingItems;
         const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
+        const previousSourceCount = Number.isFinite(progressRef.current?.count)
+          ? Math.max(0, progressRef.current.count)
+          : 0;
+        const nextSourceCount = replaceSourceItems
+          ? resolvedCount
+          : replaceMatchingItems
+            ? (previousSourceCount || resolvedCount)
+            : previousSourceCount + resolvedCount;
         const nextCount = (prev) => replaceSourceItems
           ? resolvedCount
           : replaceMatchingItems
@@ -225,14 +248,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
           // when the source comes back still-warned (LinkedIn re-walled / same
           // warm IP). Captcha/resume paths don't return a warning → stays null.
-          // hiddenApplied is resolve-job-source/resume-job-source's OWN
-          // filterOutApplied count (electron/ipc/jobs.js) — jobs this Solve/
-          // Continue extracted that turned out to already be applied. Without
-          // forwarding it, the hub's onResolved listener has no way to know
-          // this resolve suppressed anything, and the funnel undercounts.
           detail: {
             hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, replaceMatchingItems, removedItemKeys,
-            warning: result.warning || null, hiddenApplied: result.hiddenApplied || 0,
+            sourceCountDelta: nextSourceCount - previousSourceCount,
+            warning: result.warning || null,
             jobRunId,
           },
         }));
@@ -240,31 +259,39 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // Another query for this source was also blocked. Keep the card visible
           // and re-arm it with the next URL so the user can solve in sequence
           // without re-running the full search.
-          setProgress(prev => prev ? {
-            ...prev,
-            status: 'error',
-            url: result.nextBlockedUrl,
-            count: nextCount(prev),
-            warning: {
-              code: 'http-403',
-              severity: 'block',
-              evidence: 'An additional search query for this source was also blocked.',
-              suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
-            },
-          } : prev);
+          setProgress(prev => {
+            const next = prev ? {
+              ...prev,
+              status: 'error',
+              url: result.nextBlockedUrl,
+              count: nextCount(prev),
+              warning: {
+                code: 'http-403',
+                severity: 'block',
+                evidence: 'An additional search query for this source was also blocked.',
+                suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
+              },
+            } : prev;
+            progressRef.current = next;
+            return next;
+          });
         } else if (result.warning) {
           // Partial success that's still flagged (e.g. LinkedIn rate-limit: got
           // some descriptions but hit the guest IP ceiling). Keep the returned
           // warning + action button so the user can retry later, rather than
           // clearing to a clean done. LinkedIn replacement responses show the
           // replacement size; incremental captcha/Continue responses add.
-          setProgress(prev => prev ? {
-            ...prev,
-            status: 'error',
-            url: result.warning?.url || prev.url,
-            warning: result.warning,
-            count: nextCount(prev),
-          } : prev);
+          setProgress(prev => {
+            const next = prev ? {
+              ...prev,
+              status: 'error',
+              url: result.warning?.url || prev.url,
+              warning: result.warning,
+              count: nextCount(prev),
+            } : prev;
+            progressRef.current = next;
+            return next;
+          });
         } else {
           setDismissed(true);
           // Clear the warning AND update the card's local
@@ -275,21 +302,72 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // resolve didn't take effect even though it fully did.
           // The owning hub will dismiss clean source cards together after the
           // all-sources terminal grace period.
-          setProgress(prev => prev ? {
-            ...prev,
-            status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
-            warning: null,
-            count: nextCount(prev),
-          } : prev);
+          setProgress(prev => {
+            const next = prev ? {
+              ...prev,
+              status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
+              warning: null,
+              count: nextCount(prev),
+            } : prev;
+            progressRef.current = next;
+            return next;
+          });
         }
-      } else if (prevForRestore) {
-        // Solve didn't complete. Restore the actionable warning so the card goes
-        // back to red — but only if our optimistic 'Solving…' state is still in
-        // place (a fresh backend event, e.g. LinkedIn's re-emitted error, would
-        // have replaced detail, and we must not clobber that newer state).
-        setProgress(prev => (prev && prev.detail === 'Solving…') ? prevForRestore : prev);
+      } else {
+        const rawRestoreWarning = result?.warning || prevForRestore?.warning || null;
+        const restoreWarning = rawRestoreWarning ? {
+          ...rawRestoreWarning,
+          // Native verification failures are common for this path; keep the
+          // existing action-label copy so the card explains exactly why the
+          // solve was not confirmed.
+          ...((resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel)
+            ? { shortLabel: 'Verification not confirmed' }
+            : {}),
+          ...((resumeState?.mode === 'native-challenge' && !rawRestoreWarning.actionLabel)
+            ? { actionLabel: 'Retry verification' }
+            : {}),
+          resumeState: rawRestoreWarning.resumeState || resumeState || prevForRestore?.warning?.resumeState,
+        } : null;
+
+        if (rawRestoreWarning) {
+          // A backend failure leaves no inline job items but should still emit a
+          // source-level resolve event so JobSearchNode can re-sync its blocking
+          // warning list after onRetryStart's optimistic trim.
+          setProgress(prev => {
+            if (!prev || prev.detail !== 'Solving…') return prev;
+            const next = {
+              ...prevForRestore,
+              status: 'error',
+              detail: null,
+              url: rawRestoreWarning.url || prev.url,
+              warning: restoreWarning,
+            };
+            progressRef.current = next;
+            return next;
+          });
+          document.dispatchEvent(new CustomEvent('job-source-resolved', {
+            detail: {
+              hubId: data.hubId,
+              sourceId: data.sourceId,
+              items: [],
+              replaceSourceItems: false,
+              replaceMatchingItems: false,
+              removedItemKeys: [],
+              sourceCountDelta: 0,
+              warning: restoreWarning,
+              jobRunId,
+            },
+          }));
+        } else if (prevForRestore) {
+          // Solve didn't complete. Restore the actionable warning so the card goes
+          // back to red — but only if our optimistic 'Solving…' state is still in
+          // place (a fresh backend event, e.g. LinkedIn's re-emitted error, would
+          // have replaced detail, and we must not clobber that newer state).
+          setProgress(prev => (prev && prev.detail === 'Solving…') ? prevForRestore : prev);
+        }
       }
     } finally {
+      resolveInFlightRef.current = false;
       setResolving(false);
     }
   };
@@ -347,6 +425,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
 
   const warning = liveProgress?.warning;
   const warningAction = jobSourceWarningAction(warning);
+  const warningCanResolve = canAttemptJobSourceResolve(warning);
   const warningBlocksScoring = isJobSourceWarningGating(warning);
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
@@ -454,12 +533,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         stopClick
         note={!warningBlocksScoring ? 'Scoring continues automatically; dismissing only hides this warning.' : null}
       />}
-      {/* Solve / Skip row — Solve appears when we have a failed URL to open.
+      {/* Solve / Skip row — Solve appears when we have a failed URL to open and
+          the warning represents something the visible resolver can change.
           For config-missing (USAJobs no API key) the suggestion text above
           already directs the user to set the env var — no Solve button. */}
       {warning && !dismissed && (
         <div className="flex border-t border-white/10">
-          {(progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn)) && !hasInfo && (!hasWarn || warningBlocksScoring) && (
+          {warningCanResolve && (progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn)) && !hasInfo && (!hasWarn || warningBlocksScoring) && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}

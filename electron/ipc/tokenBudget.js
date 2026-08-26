@@ -31,10 +31,10 @@ const store = lazyStore('token-budgets');
 const WINDOW       = 30;     // rolling samples kept per task
 const MIN_SAMPLES  = 8;      // trust the learned cap only after this many
 const HEADROOM     = 1.2;    // p95 × this — bias upward (truncation is billed)
-const HARD_CAP     = 40000;  // absolute ceiling — bounds runaway billing
-// Job scoring now has a 32k formula ceiling. Leave meaningful room above that
-// floor for self-calibration after a truncation rather than pinning the very
-// first learned increase at the absolute ceiling.
+const HARD_CAP     = 64000;  // provider-safe ceiling — bounds runaway billing
+// Job scoring now has a 32k formula ceiling and has been observed truncating at
+// the former 40k hard cap. 64k matches the conservative Claude-family output
+// limit while leaving the censored 40k sample room to self-heal to 48k.
 
 function allUsage() {
   return store.get('usage') || {};

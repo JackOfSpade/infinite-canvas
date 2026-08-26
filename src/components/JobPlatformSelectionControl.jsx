@@ -1,7 +1,6 @@
 import React, { useId, useState } from 'react';
 import { JOB_SOURCE_BY_ID } from '../utils/constants';
-import { getEnabledJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
-import { getJobPlatformSafety } from '../utils/jobPlatformSafety';
+import { getEnabledJobSourceIds, getJobPlatformSelectionStatus, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 
 /** Per-hub source allow-list for the next job-search run. */
 export function JobPlatformSelectionControl({
@@ -9,6 +8,7 @@ export function JobPlatformSelectionControl({
   setEnabledSourceIds,
   collectionLimits,
   availableSourceIds,
+  searchLocation = null,
   disabled = false,
 }) {
   const idPrefix = useId();
@@ -18,7 +18,7 @@ export function JobPlatformSelectionControl({
   const selectedSet = new Set(selected);
   const [attemptedUnsafeId, setAttemptedUnsafeId] = useState(null);
   const unsafe = available
-    .map(sourceId => getJobPlatformSafety(sourceId, collectionLimits))
+    .map(sourceId => getJobPlatformSelectionStatus(sourceId, collectionLimits, searchLocation))
     .filter(status => !status.enabled);
   const unsafeIds = new Set(unsafe.map(status => status.sourceId));
   const warningId = `${idPrefix}-platform-warning`;
@@ -66,7 +66,7 @@ export function JobPlatformSelectionControl({
                 id={inputId}
                 type="checkbox"
                 checked={selectedSet.has(sourceId) && !safety}
-                disabled={disabled}
+                disabled={disabled || !!safety}
                 aria-disabled={!!safety}
                 aria-describedby={safety ? warningId : undefined}
                 onChange={() => toggle(sourceId)}

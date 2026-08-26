@@ -813,6 +813,8 @@ const INJECTED_CHROME_CSS = `
 .ic-workspace-kicker { margin: 0 0 5px; color: #d6a86c; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
 .ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
 .ic-workspace-context { margin: 8px 0 18px; color: #cfc2b0; font-size: 12px; }
+.ic-job-posting-link { display: inline-flex; align-items: center; margin: -8px 0 18px; color: #f7f1e6; font-size: 12px; font-weight: 600; text-underline-offset: 3px; }
+.ic-job-posting-link:hover { color: #fffaf0; }
 .ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
 .ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
 .ic-workspace-sidebar .ic-toolbar .ic-hint { margin: 5px 0 0; color: #cfc2b0; font-size: 11px; }
@@ -1097,6 +1099,23 @@ function contentSecurityPolicyMeta(scriptNonce) {
   return `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(policy)}">`;
 }
 
+// Job URLs are scraped input and the finished workspace is an executable HTML
+// file, so preserve only absolute web URLs with a real host.  In particular,
+// keep credentials and control characters out of an artifact that can be
+// forwarded or opened outside the app. Returning the URL parser's canonical
+// href gives the workspace one stable source value without ever rendering a
+// raw, untrusted string.
+function safeJobPostingUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw.length > 2048 || hasUnsafeAsciiControl(raw)) return '';
+  try {
+    const parsed = new URL(raw);
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
+      || !parsed.hostname || parsed.username || parsed.password) return '';
+    return parsed.href;
+  } catch { return ''; }
+}
+
 // A résumé HTML file is intentionally standalone: people routinely open it
 // directly from its application folder. A browser cannot write that file, so
 // Sync uses a narrowly-scoped localhost capability created by the Electron
@@ -1190,6 +1209,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
   return {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
+    jobUrl: safeJobPostingUrl(raw.jobUrl),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
     resumePdfBase64,
     coverLetterPdfBase64,
@@ -1470,7 +1490,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
-function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary }) {
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, skillOpportunityError, coverLetterCheckSummary }) {
   const insights = normaliseSkillInsights(skillInsights);
   const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
   const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
@@ -1492,6 +1512,10 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
     && cityKey(candidateLocation) && cityKey(jobLocation) && cityKey(candidateLocation) !== cityKey(jobLocation);
   const context = [title, company].filter(Boolean).join(' · ')
     || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
+  const safeOriginalJobUrl = safeJobPostingUrl(jobUrl);
+  const originalJobLink = safeOriginalJobUrl
+    ? `<a class="ic-job-posting-link" href="${escapeHtml(safeOriginalJobUrl)}" target="_blank" rel="noopener noreferrer">View original job posting</a>`
+    : '';
   const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
   <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
   <p class="ic-insight-meta">${escapeHtml(item.importance || 'high')} impact · ${item.kind === 'verify' ? 'nearby — verify first' : 'learn first'}</p>
@@ -1532,6 +1556,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <p class="ic-workspace-kicker">Application workspace</p>
   <h1 class="ic-workspace-title">Application, with receipts.</h1>
   <p class="ic-workspace-context">${escapeHtml(context)}</p>
+  ${originalJobLink}
   ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
@@ -2153,7 +2178,11 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter });
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
-  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary });
+  const bundle = normaliseResumeDownloadBundle(downloadBundle);
+  const workspace = buildSkillWorkspace({
+    skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl,
+    skillOpportunityError, coverLetterCheckSummary,
+  });
   main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);

@@ -1,7 +1,7 @@
 /**
  * Job-application import and export IPCs.
  *
- * Application authoring is a local Claude Code handoff. This module owns the
+ * Application authoring is a Local AI handoff. This module owns the
  * shared document helpers plus sender-bound import/export capabilities used
  * after localAiApplication validates an app-owned result. `save-application`
  * writes the resulting bundle beside the saved canvas; it never accepts
@@ -1154,12 +1154,12 @@ export function registerJobApplicationHandlers() {
     const whereLocation = sanitizeFilePart(location, 'Unknown Location');
     const role = sanitizeFilePart(jobTitle, 'Role');
     // Local AI registers a pre-validated project-relative root chosen in its
-    // editable Claude Code routine. The canvas-adjacent root remains a safe
+    // editable provider-neutral routine. The canvas-adjacent root remains a safe
     // compatibility fallback for an already-registered workspace.
-    let appliedJobsDir;
+    let applicationOutputRoot;
     if (pending.applicationRoot) {
       const registeredRoot = path.resolve(pending.applicationRoot);
-      appliedJobsDir = await ensureDirectoryWithinRoot(registeredRoot, registeredRoot, {
+      applicationOutputRoot = await ensureDirectoryWithinRoot(registeredRoot, registeredRoot, {
         mode: 0o700,
         label: 'Registered Local AI application root',
       });
@@ -1172,14 +1172,14 @@ export function registerJobApplicationHandlers() {
       }
       const canonicalCanvasFile = await fs.promises.realpath(canvasFilePath);
       const canvasRoot = path.dirname(canonicalCanvasFile);
-      appliedJobsDir = await ensureDirectoryWithinRoot(canvasRoot, path.join(canvasRoot, 'Applied Jobs'), {
+      applicationOutputRoot = await ensureDirectoryWithinRoot(canvasRoot, path.join(canvasRoot, 'Applied Jobs'), {
         mode: 0o700,
         label: 'Applied Jobs folder',
       });
     }
-    const dir = path.join(appliedJobsDir, where, whereLocation, role);
+    const dir = path.join(applicationOutputRoot, where, whereLocation, role);
     exportDir = dir;
-    await ensureDirectoryWithinRoot(appliedJobsDir, dir, {
+    await ensureDirectoryWithinRoot(applicationOutputRoot, dir, {
       mode: 0o700,
       label: 'Application destination',
     });

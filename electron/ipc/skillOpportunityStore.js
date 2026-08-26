@@ -4,8 +4,8 @@
  * it answers a long-term learning-prioritization question across applications
  * and must never be pruned when a canvas is removed or a job gets old.
  *
- * The store is deliberately sync and atomic, following appliedJobs.js. A
- * record operation has no await between read and write, and temp-file rename
+ * The store is deliberately sync and atomic. A record operation has no await
+ * between read and write, and temp-file rename
  * means a crash cannot replace a good histogram with truncated JSON. Unlike a
  * preferences cache, a corrupt file is a loud error: silently starting over
  * would erase the user’s accumulated evidence of skill demand.

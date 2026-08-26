@@ -251,10 +251,8 @@ export function pickGlassdoorLocation(results, canonical) {
 // Colorado, USA") — so we resolve the token to its code and match BOTH
 // spellings, else an in-state suburb reads as out-of-area. Keys are codes;
 // values keep their spaces for the word-boundary regex.
-// Exported so src/utils/locationIdentity.js can fold state/province names <->
-// codes for applied-job identity matching without duplicating this table —
-// see that module for why a second copy would be a correctness hazard (two
-// tables drifting apart silently breaks the "same state" match).
+// Exported for salary-currency inference and browser location matching so those
+// consumers share one subdivision table instead of drifting copies.
 export const US_STATES = {
   al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california',
   co: 'colorado', ct: 'connecticut', de: 'delaware', fl: 'florida', ga: 'georgia',
