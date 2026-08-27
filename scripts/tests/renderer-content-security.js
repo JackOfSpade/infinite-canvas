@@ -1,6 +1,8 @@
 import { JSDOM } from 'jsdom';
 import { renderMarkdown } from '../../src/utils/markdownRenderer.js';
 import { escapeHtmlAttribute, normalizeExternalHttpUrl } from '../../src/utils/urlSafety.js';
+import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../../src/utils/jobListingUrl.js';
+import { describeUnexpectedNetworkTarget } from '../test-stubs/networkGuard.mjs';
 import { assert } from './testHelpers.js';
 
 function markdownDocument(source) {
@@ -52,6 +54,60 @@ export default [
         assert(normalizeExternalHttpUrl(unsafe) === '', `unsafe external scheme must be rejected: ${unsafe}`);
       }
       return { accepted: normalizeExternalHttpUrl('example.test/path') };
+    },
+  },
+  {
+    name: 'unit network guard keeps sensitive request details out of failure output',
+    run() {
+      const target = describeUnexpectedNetworkTarget('https://client-id:client-secret@api.example.test/v1/jobs/secret-requisition?api_key=private-token#response-token');
+      assert(target === 'https://api.example.test/<path redacted>'
+        && !target.includes('client-secret')
+        && !target.includes('private-token')
+        && !target.includes('response-token'),
+      'an unexpected unit-test network error must identify only a safe origin and never echo credentials, query values, or fragments');
+      return { target };
+    },
+  },
+  {
+    name: 'job listing links repair legacy Google Jobs share URLs without exposing query values',
+    run() {
+      const legacy = 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=Opaque-ID%3D%3D&hl=en-CA#fpstate=tldetail&htivrt=jobs&htiq&htidocid=Opaque-ID%3D%3D';
+      const job = {
+        source: 'google',
+        title: 'AI Platform Architect',
+        company: 'Aalo Atomics',
+        location: 'Austin, TX',
+        url: legacy,
+      };
+      const repaired = normalizeJobListingExternalUrl(job);
+      const parsed = new URL(repaired);
+      assert(isGoogleJobsInternalUrl(legacy), 'legacy Google card/share route must be recognized');
+      assert(parsed.pathname === '/search' && parsed.searchParams.get('udm') === '8',
+        'legacy Google route must be repaired to the current Jobs search surface');
+      assert(parsed.searchParams.get('q') === 'AI Platform Architect Aalo Atomics Austin, TX jobs',
+        'blank Google q/htiq must fall back to the saved job identity');
+      assert(parsed.searchParams.get('htidocid') === 'Opaque-ID==',
+        'opaque Google card identity must survive click-time repair');
+      assert(!repaired.includes('ibp=') && !repaired.includes('/webhp'),
+        'repaired destination must not retain the obsolete ibp/webhp route');
+      const direct = 'https://careers.example.test/jobs/42?ref=board';
+      assert(normalizeJobListingExternalUrl({ ...job, url: direct, googleCardUrl: legacy }) === direct,
+        'a future direct employer URL must win over the internal Google card identity');
+      const lookalike = 'https://www.google.com.evil.test/search?udm=8&htidocid=attacker-controlled';
+      assert(!isGoogleJobsInternalUrl(lookalike)
+        && normalizeJobListingExternalUrl({ ...job, url: lookalike }) === lookalike,
+      'only a real Google host can be treated as an internal Jobs route; a lookalike host must stay an ordinary external link');
+      const diagnostic = summarizeJobListingUrl(job, repaired);
+      assert(diagnostic.rawQuery === 'empty' && diagnostic.documentId === 'present' && diagnostic.repaired,
+        'event diagnostics must report URL shape, not raw query values');
+      const pathDiagnostic = summarizeJobListingUrl({
+        url: 'https://careers.example.test/jobs/secret-requisition-id?tracking=private',
+      });
+      assert(pathDiagnostic.rawRoute === 'careers.example.test/jobs/:segment'
+        && !JSON.stringify(pathDiagnostic).includes('secret-requisition-id')
+        && !JSON.stringify(pathDiagnostic).includes('tracking'),
+      'link diagnostics retain safe route vocabulary while redacting opaque path and query tokens');
+      return { route: parsed.pathname, repaired: diagnostic.repaired };
     },
   },
 ];

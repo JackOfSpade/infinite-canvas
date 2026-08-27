@@ -156,6 +156,7 @@ function publicRequest(record, validationError = record.validationError || null)
     nodeId: record.nodeId,
     batch: record.batch,
     batchTotal: record.batchTotal,
+    itemCount: record.itemCount,
     attachments: [...record.attachmentPaths],
     validationError,
   };
@@ -214,6 +215,7 @@ export function requestNonApiAi({
   handoffSettings,
   batch,
   batchTotal,
+  itemCount,
   retryOnTruncation,
   responseValidator,
   signal,
@@ -230,6 +232,7 @@ export function requestNonApiAi({
     sender,
     nodeId: context.nodeId || null,
     ...cleanBatchMetadata(batch, batchTotal),
+    itemCount: cleanBatchNumber(itemCount),
     task,
     responseSchema,
     responseValidator: typeof responseValidator === 'function' ? responseValidator : null,

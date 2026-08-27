@@ -127,8 +127,54 @@ function rowLabel(row, index) {
   return text(row?.requirementText ?? row?.requirement ?? row?.name ?? row?.title ?? row?.label) || `Requirement ${index + 1}`;
 }
 
-function isMaterialGap(priority, status, requirementGrounded) {
+export function nonScoringJobConstraintKind(row) {
+  const source = normalizeText([
+    rowLabel(row, 0),
+    ...quotes(row?.jobEvidence ?? row?.jobQuote ?? row?.postingEvidence ?? row?.requirementEvidence),
+  ].join(' '));
+  if (!source) return null;
+
+  // A posting can combine an authorization condition with a separately scored
+  // professional credential in one terse requirement row.  Exempting that
+  // whole row because it mentions citizenship would also exempt an active
+  // clearance, license, or certification, contrary to the scoring rubric.
+  // Keep such rows professional: the auditor can still show the logistical
+  // wording, but cannot silently erase the credential from fit calibration.
+  const includesProfessionalCredential = /\b(?:security\s+clearance|top\s+secret|secret\s+clearance|ts\s*\/?\s*sci|public\s+trust|professional\s+licen[cs]e|licensed\s+(?:engineer|architect|accountant|nurse|attorney)|\b(?:cpa|rn|p\.?eng)\b|bar\s+admission|board[- ]?certif(?:ied|ication))\b/.test(source);
+  if (includesProfessionalCredential) return null;
+
+  // These are application logistics, not evidence of professional capability.
+  // Keep them in the requirement audit so a person can still see the posting's
+  // constraint, but never let them lower the hiring-fit score or confidence.
+  if (/\b(?:work|employment)\s+(?:authori[sz]ation|eligibility)\b/.test(source)
+    || /\b(?:authori[sz]ed|eligible|entitled|cleared)\s+to\s+work\b/.test(source)
+    || /\bright\s+to\s+work\b/.test(source)
+    || /\bvisa\s+sponsorship\b/.test(source)
+    || /\bsponsorship\s+(?:is\s+)?(?:not\s+)?(?:available|required|provided)\b/.test(source)
+    || /\bu\.?s\.?\s+citizen(?:ship)?\b/.test(source)
+    || /\bcitizenship\s+(?:is\s+)?required\b/.test(source)
+    || /\bpermanent\s+(?:u\.?s\.?\s+)?resident\b/.test(source)
+    || /\bgreen\s+card\b/.test(source)) {
+    return 'work-authorization';
+  }
+
+  if (/\b(?:work[- ]?location|location\s+(?:availability|requirement)|relocation|onsite\s+availability|on[- ]site\s+availability|current\s+u\.?s\.?\s+base)\b/.test(source)
+    || /\bbased\s+in\s+(?:the\s+)?[a-z]/.test(source)
+    || /\bmust\s+be\s+(?:based|located|resident|residing)\s+(?:in|within)\b/.test(source)
+    || /\b(?:located|reside|residing)\s+within\b/.test(source)
+    || /\bwilling(?:ness)?\s+to\s+(?:work|be)\s+on[- ]?site\b/.test(source)
+    || /\bwilling(?:ness)?\s+to\s+relocate\b/.test(source)
+    || /\bwork\s+on[- ]?site\s+(?:in|at)\b/.test(source)
+    || /\b(?:on[- ]?site|hybrid)\s+(?:in|at)\s+[a-z]/.test(source)
+    || /\bremote\s+(?:within|from|only\s+in)\b/.test(source)) {
+    return 'location';
+  }
+  return null;
+}
+
+function isMaterialGap(priority, status, requirementGrounded, scoreImpact = 'scored') {
   return requirementGrounded
+    && scoreImpact === 'scored'
     && priority !== 'preferred'
     && (status === 'not_documented' || status === 'contradicted' || status === 'unclear');
 }
@@ -151,12 +197,16 @@ function normalizeRequirement(row, index, { jobText, candidateText }) {
     : reportedStatus;
   const rawPriority = row?.priority ?? row?.importance ?? row?.weight;
   const priority = normalizePriority(rawPriority);
-  const materialGap = isMaterialGap(priority, effectiveStatus, requirementGrounded);
+  const scoreExclusionReason = nonScoringJobConstraintKind(row);
+  const scoreImpact = scoreExclusionReason ? 'informational' : 'scored';
+  const materialGap = isMaterialGap(priority, effectiveStatus, requirementGrounded, scoreImpact);
   return {
     id: text(row?.id) || `requirement-${index + 1}`,
     requirement: rowLabel(row, index),
     reportedPriority: reportedPriority(rawPriority),
     priority,
+    scoreImpact,
+    scoreExclusionReason,
     reportedStatus,
     effectiveStatus,
     jobEvidence: job.grounded,
@@ -402,7 +452,7 @@ function applyDatedTenureToRequirements(rows, experience) {
     return {
       ...row,
       effectiveStatus,
-      materialGap: isMaterialGap(row.priority, effectiveStatus, row.grounding.requirementGrounded),
+      materialGap: isMaterialGap(row.priority, effectiveStatus, row.grounding.requirementGrounded, row.scoreImpact),
       datedTenure: {
         categoryId: category.id,
         requiredMinimumYears: category.requiredMinimumYears,
@@ -422,12 +472,16 @@ function confidenceLevel(value) {
 
 function effectiveConfidence(reported, requirementRows, legacy) {
   if (legacy) return 'unknown';
-  const total = requirementRows.length;
-  const groundedCount = requirementRows.filter(row => row.grounding.requirementGrounded).length;
+  // Location and work-authorization rows are retained for audit, but do not
+  // describe professional fit and must not dilute its evidence coverage.
+  const scoredRows = requirementRows.filter(row => row.scoreImpact === 'scored');
+  if (!scoredRows.length) return reported;
+  const total = scoredRows.length;
+  const groundedCount = scoredRows.filter(row => row.grounding.requirementGrounded).length;
   const ratio = total ? groundedCount / total : 0;
-  const hasRejectedEvidence = requirementRows.some(row => row.grounding.rejectedJobEvidence.length > 0
+  const hasRejectedEvidence = scoredRows.some(row => row.grounding.rejectedJobEvidence.length > 0
     || row.grounding.rejectedCandidateEvidence.length > 0);
-  const materialNotDocumented = requirementRows.filter(row => row.materialGap && row.effectiveStatus === 'not_documented');
+  const materialNotDocumented = scoredRows.filter(row => row.materialGap && row.effectiveStatus === 'not_documented');
   const hasCriticalNotDocumented = materialNotDocumented.some(row => row.priority === 'critical');
   // An explicit contradiction can be highly certain when both source quotes
   // are grounded. A documentation gap is different: it makes the assessment
@@ -449,28 +503,54 @@ function rawScoreOf(raw) {
   return raw?.rawScore ?? raw?.fitScore ?? raw?.matchScore ?? raw?.score;
 }
 
-function evidenceLabels(rows, limit = 2) {
-  return rows.slice(0, limit)
-    .map(row => row.jobEvidence[0])
-    .filter(Boolean);
+function requirementLabels(rows) {
+  return [...new Set(rows.map(row => text(row.requirement)).filter(Boolean))];
 }
 
-function calibratedReasoning({ legacy, strengths, materialGaps, adjustments, rawScore, adjustedScore }) {
-  if (legacy) return 'This is an uncalibrated legacy fit score because structured, grounded requirement evidence was not supplied.';
+function joinLabels(labels) {
+  if (labels.length === 0) return '';
+  if (labels.length === 1) return `“${labels[0]}”`;
+  if (labels.length === 2) return `“${labels[0]}” and “${labels[1]}”`;
+  return `${labels.slice(0, -1).map(label => `“${label}”`).join(', ')}, and “${labels.at(-1)}”`;
+}
+
+function coverageDescription(confidence) {
+  const { effective, groundedRequirementCount, requirementCount } = confidence;
+  if (!requirementCount) return `Effective confidence is ${effective}; no scored requirement inventory was supplied for coverage`;
+  const percentage = Math.round((groundedRequirementCount / requirementCount) * 100);
+  return `Effective confidence is ${effective}; evidence coverage is ${groundedRequirementCount}/${requirementCount} grounded scored posting requirement${requirementCount === 1 ? '' : 's'} (${percentage}%)`;
+}
+
+function calibratedReasoning({
+  legacy,
+  strengths,
+  adjacentMatches,
+  materialGaps,
+  rejectedRows,
+  adjustments,
+  rawScore,
+  adjustedScore,
+  confidence,
+}) {
+  if (legacy) return 'This is an uncalibrated legacy fit score because structured, grounded requirement evidence was not supplied. Effective confidence and evidence coverage are unavailable.';
   const clauses = [];
-  const strengthEvidence = evidenceLabels(strengths);
+  const directLabels = requirementLabels(strengths);
+  const adjacentLabels = requirementLabels(adjacentMatches);
   const documentationGaps = materialGaps.filter(row => row.effectiveStatus === 'not_documented');
   const contradictions = materialGaps.filter(row => row.effectiveStatus === 'contradicted');
   const unclearGaps = materialGaps.filter(row => row.effectiveStatus === 'unclear');
-  if (strengthEvidence.length) clauses.push(`Directly grounded evidence supports ${strengthEvidence.map(value => `“${value}”`).join(' and ')}`);
-  const documentationEvidence = evidenceLabels(documentationGaps);
-  const contradictionEvidence = evidenceLabels(contradictions);
-  const unclearEvidence = evidenceLabels(unclearGaps);
-  if (documentationEvidence.length) clauses.push(`${documentationEvidence.map(value => `“${value}”`).join(' and ')} ${documentationEvidence.length === 1 ? 'is' : 'are'} not documented in the supplied career data`);
-  if (contradictionEvidence.length) clauses.push(`Supplied candidate evidence conflicts with ${contradictionEvidence.map(value => `“${value}”`).join(' or ')}`);
-  if (unclearEvidence.length) clauses.push(`Supplied evidence is inconclusive for ${unclearEvidence.map(value => `“${value}”`).join(' or ')}`);
+  if (directLabels.length) clauses.push(`Direct strengths: ${joinLabels(directLabels)} ${directLabels.length === 1 ? 'is' : 'are'} directly supported by supplied career evidence`);
+  if (adjacentLabels.length) clauses.push(`Adjacent, transferable support—not equivalent evidence—applies to ${joinLabels(adjacentLabels)}`);
+  const documentationLabels = requirementLabels(documentationGaps);
+  const contradictionLabels = requirementLabels(contradictions);
+  const unclearLabels = requirementLabels(unclearGaps);
+  if (documentationLabels.length) clauses.push(`Verified material requirement${documentationLabels.length === 1 ? '' : 's'} ${joinLabels(documentationLabels)} ${documentationLabels.length === 1 ? 'is' : 'are'} not documented in the supplied career data`);
+  if (contradictionLabels.length) clauses.push(`Supplied candidate evidence conflicts with verified material requirement${contradictionLabels.length === 1 ? '' : 's'} ${joinLabels(contradictionLabels)}`);
+  if (unclearLabels.length) clauses.push(`Supplied evidence is inconclusive for verified material requirement${unclearLabels.length === 1 ? '' : 's'} ${joinLabels(unclearLabels)}`);
+  const rejectedLabels = requirementLabels(rejectedRows.filter(row => row.scoreImpact === 'scored'));
+  if (rejectedLabels.length) clauses.push(`Assessment limitation: cited evidence for ${joinLabels(rejectedLabels)} could not be verified against the supplied records`);
+  clauses.push(coverageDescription(confidence));
   if (adjustments.length) clauses.push(`The score was calibrated from ${rawScore} to ${adjustedScore} under the evidence-gap rule`);
-  if (!clauses.length) return 'The score was audited against the supplied requirement and candidate evidence; no grounded material gap was identified.';
   return `${clauses.join('. ')}.`;
 }
 
@@ -511,9 +591,14 @@ export function validateAndNormalizeFitAssessment(raw, {
   const criticalGaps = requirementRows.filter(row => row.priority === 'critical' && row.materialGap);
   const importantGaps = requirementRows.filter(row => row.priority === 'important' && row.materialGap);
   const criticalAdjacent = requirementRows.filter(row => row.priority === 'critical'
+    && row.scoreImpact === 'scored'
     && row.grounding.requirementGrounded && row.effectiveStatus === 'adjacent');
   const materialGaps = requirementRows.filter(row => row.materialGap);
   const strengths = requirementRows.filter(row => row.effectiveStatus === 'direct'
+    && row.scoreImpact === 'scored'
+    && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
+  const adjacentMatches = requirementRows.filter(row => row.effectiveStatus === 'adjacent'
+    && row.scoreImpact === 'scored'
     && row.grounding.requirementGrounded && row.grounding.candidateClaimGrounded);
   let adjustedScore = rawScore;
   const adjustments = [];
@@ -539,15 +624,33 @@ export function validateAndNormalizeFitAssessment(raw, {
     }
   }
   const rejectedRequirementRows = requirementRows.filter(row => !row.grounding.requirementGrounded);
-  const groundedRows = requirementRows.filter(row => row.grounding.requirementGrounded);
+  // Include a label for any row whose cited posting or candidate evidence was
+  // rejected. The public explanation deliberately omits the rejected quote.
+  const rejectedEvidenceRows = requirementRows.filter(row => !row.grounding.requirementGrounded
+    || row.grounding.rejectedJobEvidence.length > 0
+    || row.grounding.rejectedCandidateEvidence.length > 0);
+  const scoredRequirementRows = requirementRows.filter(row => row.scoreImpact === 'scored');
+  const groundedRows = scoredRequirementRows.filter(row => row.grounding.requirementGrounded);
   const reportedConfidence = confidenceLevel(safeRaw?.confidence ?? safeRaw?.confidenceLevel);
+  const confidence = {
+    // `reported` is retained only for audit. UI should show `effective`,
+    // which accounts for rejected evidence and incomplete requirement rows.
+    reported: reportedConfidence,
+    effective: effectiveConfidence(reportedConfidence, requirementRows, legacy),
+    groundedRequirementCount: groundedRows.length,
+    requirementCount: scoredRequirementRows.length,
+    groundedRequirementRatio: scoredRequirementRows.length ? groundedRows.length / scoredRequirementRows.length : 0,
+  };
   const reasoning = calibratedReasoning({
     legacy,
     strengths,
+    adjacentMatches,
     materialGaps,
+    rejectedRows: rejectedEvidenceRows,
     adjustments,
     rawScore,
     adjustedScore,
+    confidence,
   });
   return {
     schemaVersion: 1,
@@ -556,21 +659,16 @@ export function validateAndNormalizeFitAssessment(raw, {
     rawScore,
     adjustedScore,
     adjustments,
-    confidence: {
-      // `reported` is retained only for audit. UI should show `effective`,
-      // which accounts for rejected evidence and incomplete requirement rows.
-      reported: reportedConfidence,
-      effective: effectiveConfidence(reportedConfidence, requirementRows, legacy),
-      groundedRequirementCount: groundedRows.length,
-      requirementCount: requirementRows.length,
-      groundedRequirementRatio: requirementRows.length ? groundedRows.length / requirementRows.length : 0,
-    },
+    confidence,
     // Stable, canonical evidence-status counts let the UI and saved audits
     // distinguish absent documentation from an explicit contradiction without
     // relying on prose or legacy status labels.
     statusCounts: statusCounts(requirementRows),
     requirementRows,
     strengths: strengths.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
+    // Adjacent evidence is intentionally visible apart from a direct strength:
+    // it is transferable context, not proof of an equivalent requirement.
+    adjacentMatches: adjacentMatches.map(row => ({ id: row.id, requirement: row.requirement, priority: row.priority })),
     materialGaps: materialGaps.map(row => ({
       id: row.id,
       requirement: row.requirement,

@@ -163,7 +163,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const setScoreThreshold = useCallback((val) => {
     updateGlobal(id, { scoreThreshold: val });
     applyCardFilters({ scoreThreshold: val });
-    EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}% id=${id}`);
+    EventLogger.log(`[JobBoard] hiring-fit filter ≥${val}/100 id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
   // Re-apply filters on mount — card opacities are stripped from save files.

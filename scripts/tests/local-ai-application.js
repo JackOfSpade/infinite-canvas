@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
@@ -532,7 +532,7 @@ export default [
     },
   },
   {
-    name: 'Local AI application lifecycle: hidden cards retain jobs, deleted cards discard only their exact handoff',
+    name: 'Local AI application lifecycle: display deletion preserves active jobs and regeneration cleans only its replaced terminal handoff',
     run: async () => {
       const project = await createCanvasProject();
       const otherProject = await createCanvasProject();
@@ -556,6 +556,13 @@ export default [
         const pendingCard = { id: 'card-pending', type: 'jobcard', data: { localApplication: pendingPrior } };
         assert(queuedLocalApplicationSettlement(pendingCard, localJob, pendingPrior).action === 'discard',
           'even an expected prior handoff cannot be replaced while it is still pending');
+        const savedPrior = { id: 'prior-saved', status: 'saved', canvasFilePath: project.canvasFilePath };
+        assert(replacedLocalApplicationForCleanup(savedPrior, localJob, true) === savedPrior,
+          'an accepted regeneration selects the exact terminal handoff it replaced for cleanup');
+        assert(replacedLocalApplicationForCleanup(savedPrior, localJob, false) === null
+          && replacedLocalApplicationForCleanup(pendingPrior, localJob, true) === null
+          && replacedLocalApplicationForCleanup(localJob, localJob, true) === null,
+        'cleanup cannot run before replacement acceptance, against an active writer, or against the replacement itself');
         const changedCard = { id: 'card-changed', type: 'jobcard', data: { localApplication: { id: 'newer-job', status: 'saved' } } };
         assert(queuedLocalApplicationSettlement(changedCard, localJob, { id: 'older-job', status: 'saved' }).action === 'discard',
           'a terminal handoff that changed after the request began remains protected from a late response');
@@ -576,7 +583,7 @@ export default [
           'an idempotent discard request from a different canvas cannot remove the owning canvas job');
         const discarded = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
         assert(discarded.discarded && discarded.removedJob && !fs.existsSync(queued.folder),
-          'deleting a card removes its exact trusted Local AI directory rather than retaining candidate context');
+          'an explicit exact-id cleanup can remove a replaced trusted Local AI directory');
         const repeated = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
         assert(repeated.discarded && !repeated.removedJob,
           'a duplicate deletion is idempotent after the exact job has already been removed');
@@ -590,7 +597,7 @@ export default [
           }, controller.signal);
         } catch (error) { aborted = /Node deleted/.test(String(error?.message || error)); }
         assert(aborted, 'a cancelled queue task rejects before materializing a Local AI job folder');
-        return { hiddenPersists: true, deletedDiscards: true, cancellationCooperative: true };
+        return { hiddenPersists: true, displayDeletionPreserves: true, replacementCleanupExact: true, cancellationCooperative: true };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
         await fs.promises.rm(otherProject.root, { recursive: true, force: true });

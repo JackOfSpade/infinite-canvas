@@ -169,6 +169,16 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  JOBLINK: {
+    label: 'Job Listing Links',
+    description: 'External job-link diagnostics — bounded per-source URL-shape health plus JobCard dispatch/rejection outcomes. Use when an Open listing button reaches an error page, the wrong posting, or nothing at all. Query values and tracking tokens are never included. Included automatically in FULL.',
+    logFilter: line =>
+      /\[JobCard\].*external-link|open.?external|job.*(?:url|link)|(?:google|indeed|glassdoor|ziprecruiter).*?(?:url|link)/i.test(line),
+    // Keep lightweight nodes so the compact structural link audit can inspect
+    // current card data, while omitting the large diagnostics/media sections.
+    excludeSections: ['edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   CAREERCACHE: {
     label: 'Career File Parse Cache',
     description: 'Career-file parse cache behavior — parse/cache hits and misses, key/fingerprint mismatch cases, stored profile reuse boundaries, and parser/model/schema invalidation reasons.',
@@ -286,6 +296,14 @@ export const CODE_DEFINITIONS = {
     description: 'Cross-restart login durability diagnostics — browser-profile file checkpoints, restored cache provenance, per-platform auth-cookie-on-disk presence (never values), the close-lifecycle table (including which Chrome executable and profile directory each login window used), and startup verification. Use when login works until the app closes/reopens, OR when a login window and a later scrape/read used a different Chrome binary or profile within the SAME session (they cannot share cookies — e.g. a native login window vs. a Puppeteer-launched scrape). Included automatically in FULL.',
     logFilter: line =>
       /auth|login|log.?in|session|cookie|profile|checkpoint|persist|restor|startup verify|browser.*(?:close|exit|kill)|SIGTERM|SIGKILL|StealthBrowser|Accounts/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  RECOVERY: {
+    label: 'Job Recovery After Restart',
+    description: 'Interrupted Job Search recovery audit — saved run manifest/staging-ledger health plus current and last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste; never includes job contents or AI prompt/response text. Included automatically in FULL.',
+    logFilter: line =>
+      /\[JobSearch\]|\[Jobs\]|job.?run|jobs?.(?:staging|run)|saved (?:AI prompt|scrape)|resume(?:d|ing)? (?:job|saved|search)|manual ai|non-api-ai|copy\/?paste|cancel.?node.?task/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

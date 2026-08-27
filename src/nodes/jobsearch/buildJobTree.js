@@ -882,7 +882,8 @@ export function buildJobTreeNodes({
         // it defensively for legacy/future schemas, and it must travel through
         // every valid AI-taxonomized board tree.
         compensationAssessment: job.compensationAssessment,
-        source: job.source, url: job.url, posted: job.posted, language: job.language,
+        source: job.source, url: job.url, googleCardUrl: job.googleCardUrl,
+        applySource: job.applySource, posted: job.posted, language: job.language,
         // The ORIGIN search module's id (the board merges cards from several
         // modules, each with its own career data) — the card's "Generate
         // Résumé" reads careerData from this hub. A string reference, not a

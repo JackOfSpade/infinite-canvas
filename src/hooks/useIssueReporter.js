@@ -201,6 +201,13 @@ export function useIssueReporter({
       // and (b) survives filter codes that drop the `nodes` section — the
       // HANDOFF lens excludes `nodes` yet exists precisely for this state.
       const allNodesDeep = typeof enumerateAllNodes === 'function' ? enumerateAllNodes() : nodes;
+      // Filtered reports omit the heavyweight node payload, but recovery
+      // sidecars identify their source hub by id. Carry only this compact deep
+      // id index across that boundary so a valid grouped hub is not reported as
+      // deleted after RECOVERY drops `nodes`.
+      const currentNodeIds = [...new Set((allNodesDeep || [])
+        .map(node => typeof node?.id === 'string' ? node.id : null)
+        .filter(Boolean))];
       const localApplications = (allNodesDeep || []).flatMap((n) => {
         const localApplication = n?.type === 'jobcard' ? n?.data?.localApplication : null;
         return localApplication?.id ? [{
@@ -220,11 +227,12 @@ export function useIssueReporter({
           eventsShown: filteredLogs.length,
           eventsTotal: rawLogs.length,
           omittedSections: Array.from(sectionExclusions),
-          // Stamp node-presence NOW (from the intact `nodes`) so module sections
+          // Stamp node-presence NOW (from the intact deep graph) so module sections
           // survive a filter code that drops the `nodes` section — otherwise a
           // JOBS/MARKET report loses the very diagnostics it was meant to surface.
-          hasJobNodes: nodes.some(n => isJobNodeType(n?.type)),
-          hasSellNodes: nodes.some(n => isSellNodeType(n?.type)),
+          hasJobNodes: (allNodesDeep || []).some(n => isJobNodeType(n?.type)),
+          hasSellNodes: (allNodesDeep || []).some(n => isSellNodeType(n?.type)),
+          currentNodeIds,
         } : null,
         nodes: reportNodes,
         edges,

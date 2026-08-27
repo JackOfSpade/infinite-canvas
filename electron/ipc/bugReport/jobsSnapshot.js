@@ -8,8 +8,10 @@ import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
+import { getJobAnalysisPaths, snapshotOwnedByCanvas } from '../jobAnalysisPaths.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
-import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
+import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
+import { ago, modelTag, pipelineScope, formatAge, redactReportUrl, redactReportUrlsInText } from './helpers.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 // The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
 // electron/ipc/jobs.js both use it) — imported directly rather than
@@ -46,6 +48,255 @@ export function buildJobsConfigSnapshot() {
       skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
     },
   };
+}
+
+function collectJobLinkRows(nodes) {
+  const rows = [];
+  const seenObjects = new WeakSet();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object' || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    if (!Array.isArray(value)) {
+      const source = String(value.source || '').trim().toLowerCase();
+      const title = String(value.title || '').replace(/\s+/g, ' ').trim();
+      const looksLikeJob = source && title && (
+        value.company != null || value.location != null || value.posted != null
+        || value.matchScore != null || value.googleCardUrl != null
+      );
+      if (looksLikeJob) rows.push(value);
+    }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) visit(child);
+  };
+  visit(nodes);
+  const unique = new Map();
+  for (const row of rows) {
+    const key = [row.source, row.title, row.company, row.location, row.url || row.googleCardUrl]
+      .map(value => String(value || '').trim())
+      .join('\u0000');
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  return [...unique.values()];
+}
+
+function googleLinkShape(row) {
+  const publicUrl = String(row?.url || '').trim();
+  const identityUrl = String(row?.googleCardUrl || publicUrl).trim();
+  let parsed = null;
+  try { parsed = new URL(identityUrl); } catch { /* reported below as invalid */ }
+  const fragment = parsed ? new URLSearchParams(String(parsed.hash || '').replace(/^#/, '')) : null;
+  const queryPresent = !!(parsed?.searchParams.get('q') || fragment?.get('htiq'));
+  const idPresent = !!(parsed?.searchParams.get('htidocid') || fragment?.get('htidocid')
+    || /(?:^|\/)docid=/i.test((() => { try { return decodeURIComponent(parsed?.hash || ''); } catch { return ''; } })()));
+  return {
+    publicMissing: !publicUrl,
+    publicInternal: isGoogleJobsInternalUrl(publicUrl),
+    direct: !!publicUrl && !isGoogleJobsInternalUrl(publicUrl),
+    legacy: parsed?.searchParams.get('ibp') === 'htl;jobs',
+    blankQuery: !!parsed && !queryPresent,
+    missingId: !!parsed && !idPresent,
+    webhp: parsed?.pathname === '/webhp',
+    route: parsed ? `${parsed.hostname}${parsed.pathname}` : '(invalid)',
+  };
+}
+
+/**
+ * Compact structural listing-link audit for FULL/JOBLINK reports. Query and
+ * fragment values are never rendered; only presence/route facts are exported.
+ */
+export function buildJobLinkSnapshot(nodes) {
+  const rows = collectJobLinkRows(nodes);
+  if (rows.length === 0) return '';
+  const bySource = new Map();
+  for (const row of rows) {
+    const source = String(row.source || 'unknown').trim().toLowerCase() || 'unknown';
+    if (!bySource.has(source)) bySource.set(source, []);
+    bySource.get(source).push(row);
+  }
+  const lines = [`- Unique job rows inspected: ${rows.length}`];
+  for (const [source, sourceRows] of [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (source !== 'google') {
+      const missing = sourceRows.filter(row => !String(row.url || '').trim()).length;
+      lines.push(`- \`${source}\`: ${sourceRows.length} total · ${missing} missing public URL`);
+      continue;
+    }
+    const shapes = sourceRows.map(row => ({ row, ...googleLinkShape(row) }));
+    const count = field => shapes.filter(shape => shape[field]).length;
+    lines.push(`- \`google\`: ${sourceRows.length} total · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing public URL(s)`);
+    lines.push(`  - Identity-route health: ${count('legacy')} legacy \`ibp=htl;jobs\` · ${count('blankQuery')} blank search query · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
+    const affected = shapes.filter(shape => shape.publicInternal || shape.blankQuery || shape.webhp).slice(0, 3);
+    for (const shape of affected) {
+      const title = String(shape.row.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100);
+      lines.push(`  - ⚠️ "${title.replace(/"/g, "'")}" — route \`${shape.route}\` · q=${shape.blankQuery ? 'empty' : 'present'} · htidocid=${shape.missingId ? 'missing' : 'present'} · public=${shape.publicInternal ? 'internal-google' : shape.publicMissing ? 'missing' : 'direct'}`);
+    }
+  }
+  return `
+## Job Listing Link Diagnostics
+> Structural link health from the current canvas. Query/fragment values and tracking tokens are never exported. New Google rows should keep their internal card identity separate from the direct employer/apply URL.
+
+${lines.join('\n')}
+`;
+}
+
+// Recovery data deliberately lives beside a saved canvas rather than in the
+// canvas itself: processing hub state is stripped during save so an interrupted
+// run cannot reopen as a permanently-pending card.  This compact reader is
+// intentionally independent of the in-memory jobs telemetry singleton, which
+// is empty after an app restart — the precise time recovery evidence matters.
+const JOB_RUN_MANIFEST_SUFFIX = '.jobs-run.json';
+const JOB_RUN_STAGING_SUFFIX = '.jobs-staging.jsonl';
+function recoveryPathsForCanvas(canvasFilePath) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
+  const dir = path.dirname(canvasFilePath);
+  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
+  const analysis = getJobAnalysisPaths(canvasFilePath, path.join(app.getPath('userData'), 'job-search'));
+  return {
+    manifest: path.join(dir, `${base}${JOB_RUN_MANIFEST_SUFFIX}`),
+    staging: path.join(dir, `${base}${JOB_RUN_STAGING_SUFFIX}`),
+    currentSnapshot: analysis.jsonPath,
+    lastSuccessSnapshot: analysis.lastSuccessJsonPath,
+    legacyCurrentSnapshot: analysis.legacyJsonPath,
+    legacyLastSuccessSnapshot: analysis.legacyLastSuccessJsonPath,
+  };
+}
+
+function readRecoveryText(filePath) {
+  try {
+    return { exists: true, text: fs.readFileSync(filePath, 'utf8') };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { exists: false };
+    return { exists: true, errorCode: error?.code || 'READ_ERROR' };
+  }
+}
+
+function parseRecoveryJson(filePath) {
+  const read = readRecoveryText(filePath);
+  if (!read.exists || read.errorCode) return read;
+  try { return { ...read, value: JSON.parse(read.text) }; }
+  catch { return { ...read, parseError: true }; }
+}
+
+function recoveryTimestampLabel(value) {
+  // Snapshots persist ISO strings while run staging persists epoch milliseconds.
+  // Coerce both formats before handing the value to formatAge; Number(ISO) is
+  // NaN and previously made every healthy saved snapshot read "not recorded".
+  const timestamp = typeof value === 'string' ? Date.parse(value) : Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? formatAge(timestamp) : 'not recorded';
+}
+
+function recoveryCanvasCorrelation(recordedCanvasPath, canvasFilePath) {
+  if (!recordedCanvasPath) return 'canvas not recorded';
+  try {
+    return path.resolve(recordedCanvasPath) === path.resolve(canvasFilePath)
+      ? 'canvas matches this report'
+      : '⚠️ canvas differs from this report';
+  } catch {
+    return 'canvas correlation unavailable';
+  }
+}
+
+function recoveryHubCorrelation(nodeId, currentNodeIds) {
+  if (!nodeId) return 'hub not recorded';
+  return currentNodeIds?.has?.(nodeId)
+    ? `hub \`${nodeId}\` is present in this canvas`
+    : `⚠️ hub \`${nodeId}\` is not present in this canvas`;
+}
+
+function profileCountLabel(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return 'profile absent';
+  const fields = Object.keys(profile).length;
+  const roles = Array.isArray(profile.workHistory) ? profile.workHistory.length : 0;
+  const skills = Array.isArray(profile.skills) ? profile.skills.length : 0;
+  return `profile present (${fields} field(s) · ${roles} work-history row(s) · ${skills} skill(s))`;
+}
+
+function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, currentNodeIds) {
+  let parsed = parseRecoveryJson(filePath);
+  let legacyIgnored = false;
+  const legacyIgnoredLabel = () => legacyIgnored ? ' · ⚠️ unowned legacy artifact ignored' : '';
+  // New namespaced records take precedence. A legacy directory-scoped record
+  // is a fallback only when it explicitly identifies this same saved canvas;
+  // otherwise another canvas in the folder could leak stale recovery facts.
+  if ((parsed.exists === false || parsed.parseError) && legacyFilePath) {
+    const legacy = parseRecoveryJson(legacyFilePath);
+    if (legacy.value && snapshotOwnedByCanvas(legacy.value, canvasFilePath)) {
+      parsed = { ...legacy, legacyOwned: true };
+    } else if (legacy.exists) {
+      legacyIgnored = true;
+    }
+  }
+  if (!parsed.exists) return `- ${label}: absent${legacyIgnoredLabel()}`;
+  if (parsed.errorCode) return `- ${label}: ⚠️ unreadable (\`${parsed.errorCode}\`)${legacyIgnoredLabel()}`;
+  if (parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
+    return `- ${label}: ⚠️ present but not parseable JSON${legacyIgnoredLabel()}`;
+  }
+  const snapshot = parsed.value;
+  const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : 0;
+  const recoveryJobs = Array.isArray(snapshot.descriptionRecoveryJobs) ? snapshot.descriptionRecoveryJobs.length : 0;
+  const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
+  const recordedCanvas = snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath || null;
+  return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobs} score-ready job(s) · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshot.runId || 'not recorded'}\` · ${recoveryHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${legacyIgnoredLabel()}`;
+}
+
+/**
+ * File-backed crash/quit recovery facts for FULL and the focused RECOVERY
+ * report lens.  Never render a prompt, AI response, job title, or job body:
+ * this is strictly metadata/counts required to establish whether a restart can
+ * recover an interrupted collection/scoring handoff.
+ */
+export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Set()) {
+  const paths = recoveryPathsForCanvas(canvasFilePath);
+  if (!paths) {
+    return `
+## Job Recovery Diagnostics
+> Durable crash/quit-recovery metadata. Job contents and AI prompt/response text are never included.
+
+- No saved canvas path is available, so canvas-scoped recovery sidecars cannot be inspected.
+`;
+  }
+
+  const manifest = parseRecoveryJson(paths.manifest);
+  const staging = readRecoveryText(paths.staging);
+  const lines = [];
+  if (!manifest.exists) {
+    lines.push('- Run manifest: absent');
+  } else if (manifest.errorCode) {
+    lines.push(`- Run manifest: ⚠️ unreadable (\`${manifest.errorCode}\`)`);
+  } else if (manifest.parseError || !manifest.value || typeof manifest.value !== 'object' || Array.isArray(manifest.value)) {
+    lines.push('- Run manifest: ⚠️ present but not parseable JSON');
+  } else {
+    const run = manifest.value;
+    const sourceEntries = Object.entries(run.sources || {});
+    const sourceSummary = sourceEntries
+      .slice(0, 20)
+      .map(([sourceId, source]) => `\`${sourceId}\`=${source?.status || 'unknown'}`)
+      .join(', ');
+    const extraSources = sourceEntries.length > 20 ? ` · ${sourceEntries.length - 20} more` : '';
+    lines.push(`- Run manifest: parseable · stage **${String(run.stage || 'unknown').replace(/`/g, "'")}** · run \`${run.runId || 'not recorded'}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${recoveryHubCorrelation(run.inputs?.nodeId, currentNodeIds)} · canvas is this report`);
+    lines.push(`- Sources (${sourceEntries.length}): ${sourceSummary || '(none recorded)'}${extraSources}`);
+  }
+
+  if (!staging.exists) {
+    lines.push('- Staging ledger: absent');
+  } else if (staging.errorCode) {
+    lines.push(`- Staging ledger: ⚠️ unreadable (\`${staging.errorCode}\`)`);
+  } else {
+    const rows = staging.text.split(/\r?\n/).filter(line => line.trim());
+    let parsedRows = 0;
+    let tornRows = 0;
+    for (const row of rows) {
+      try { JSON.parse(row); parsedRows += 1; } catch { tornRows += 1; }
+    }
+    lines.push(`- Staging ledger: present · ${parsedRows} parseable row(s) · ${tornRows} torn/unparseable row(s)`);
+  }
+
+  lines.push(snapshotRecoveryLine('Current saved scrape', paths.currentSnapshot, paths.legacyCurrentSnapshot, canvasFilePath, currentNodeIds));
+  lines.push(snapshotRecoveryLine('Last successful saved scrape', paths.lastSuccessSnapshot, paths.legacyLastSuccessSnapshot, canvasFilePath, currentNodeIds));
+  return `
+## Job Recovery Diagnostics
+> Durable crash/quit-recovery metadata read from the saved canvas directory. Job contents and AI prompt/response text are never included. A clean canvas state after restart is expected; these sidecars determine whether recovery is possible.
+
+${lines.join('\n')}
+`;
 }
 
 /**
@@ -155,6 +406,18 @@ function historyReportValue(value, fallback, max = 240) {
   return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
 }
 
+// Job detail/search URLs commonly carry opaque provider IDs, tracking values,
+// or short-lived challenge tokens in their query string. The report only needs
+// the host/path that was reached; keeping the raw query both wastes the
+// clipboard budget and risks exporting data that should stay in the browser.
+function reportUrl(value, fallback = '(no URL)', max = 240) {
+  return historyReportValue(redactReportUrl(value), fallback, max);
+}
+
+function reportText(value, fallback, max = 240) {
+  return historyReportValue(redactReportUrlsInText(value), fallback, max);
+}
+
 function historyJobReportValue(job, { includeSeenDate = false } = {}) {
   const row = job || {};
   const seen = includeSeenDate
@@ -164,7 +427,7 @@ function historyJobReportValue(job, { includeSeenDate = false } = {}) {
     `title="${historyReportValue(row.title, '(untitled)')}"; ` +
     `company="${historyReportValue(row.company, '(unknown company)')}"; ` +
     `location="${historyReportValue(row.location, '(no location)')}"; ` +
-    `url=${historyReportValue(row.url, '(no URL)', 500)}`;
+    `url=${reportUrl(row.url, '(no URL)', 500)}`;
 }
 
 function historyKeyKindLabel(kind) {
@@ -182,8 +445,10 @@ function historyDropEvidenceLines(samples, totalDropped, indent = '') {
   return [
     `${indent}- History suppression evidence (${bounded.length}/${total} bounded sample${plural}):`,
     ...bounded.map((sample) => {
-      const key = historyReportValue(sample?.key, '(unknown key)', 320);
       const kind = historyKeyKindLabel(sample?.keyKind);
+      const key = sample?.keyKind === 'url'
+        ? reportUrl(sample?.key, '(unknown key)', 320)
+        : reportText(sample?.key, '(unknown key)', 320);
       return `${indent}  - Dropped {${historyJobReportValue(sample?.dropped)}} → matched ${kind} key \`${key}\` against history {${historyJobReportValue(sample?.history, { includeSeenDate: true })}}`;
     }),
   ];
@@ -849,7 +1114,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .join(', ');
       lines.push(`- ℹ️ **Description-evidence filter:** deferred ${descriptionDropped.total} unresolved listing(s) (${descriptionDropped.deferred || 0} explicitly deferred after a source response failure, ${descriptionDropped.empty || 0} empty, ${descriptionDropped.short || 0} below 400 characters) before scoring and before seen-history; they remain recoverable by Solve or a later run when full posting evidence is available${bySource ? ` · ${bySource}` : ''}.`);
       for (const sample of Array.isArray(descriptionDropped.samples) ? descriptionDropped.samples : []) {
-        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.deferredReason ? ` · deferred=${sample.deferredReason}` : ''}${sample.url ? ` · ${sample.url}` : ''}`);
+        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.deferredReason ? ` · deferred=${reportText(sample.deferredReason, '(unrecorded)', 160)}` : ''}${sample.url ? ` · ${reportUrl(sample.url)}` : ''}`);
       }
     }
 
@@ -861,10 +1126,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // Also runs field-quality checks for salary/posted to catch selector
     // regressions (e.g. salary="Monday to Friday", posted all-empty).
     try {
-      const snapPath = canvasFilePath
-        ? path.join(path.dirname(canvasFilePath), 'job-search-last-scrape.json')
-        : path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
-      const snapData = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
+      const analysisPaths = getJobAnalysisPaths(
+        canvasFilePath,
+        path.join(app.getPath('userData'), 'job-search'),
+      );
+      let snapData;
+      try {
+        snapData = JSON.parse(fs.readFileSync(analysisPaths.jsonPath, 'utf8'));
+      } catch (primaryError) {
+        // Old artifacts shared one directory filename. Use one only after its
+        // JSON proves ownership; otherwise a same-folder canvas can never
+        // contaminate live field-quality diagnostics.
+        if (!canvasFilePath || !analysisPaths.legacyJsonPath) throw primaryError;
+        const legacyData = JSON.parse(fs.readFileSync(analysisPaths.legacyJsonPath, 'utf8'));
+        if (!snapshotOwnedByCanvas(legacyData, canvasFilePath)) throw primaryError;
+        snapData = legacyData;
+      }
       const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
       const recoveryJobs = Array.isArray(snapData?.descriptionRecoveryJobs)
         ? snapData.descriptionRecoveryJobs
@@ -1144,7 +1421,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           }
           if (q.descShort > 0) {
             const lensStr = q.descShortLens.join(', ');
-            const samples = q.descShortEx.map(ex => `"${ex.title}" (${ex.length} chars) [${ex.url}]`).join('; ');
+            const samples = q.descShortEx.map(ex => `"${ex.title}" (${ex.length} chars) [${reportUrl(ex.url)}]`).join('; ');
             issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})${samples ? ` · samples: ${samples}` : ''}`);
           }
           // Encoding corruption — UTF-8 read as Latin-1 ("'"→"â€™", em-dash→"â€"",
@@ -1244,8 +1521,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       : '(none observed)';
     lines.push(`\n### Browser session preflight — Indeed${ago(isess.ts)}`);
     lines.push('> Was the browser that ran the scrape actually logged in, and which profile/binary did it use? Observations only — never an asserted cause.');
-    lines.push(`- Landed URL: \`${String(isess.landedUrl || '(unrecorded)').replace(/`/g, "'").slice(0, 240)}\``);
-    lines.push(`- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${isess.preflightReason}\`` : ''}`);
+    lines.push(`- Landed URL: \`${reportUrl(isess.landedUrl, '(unrecorded)')}\``);
+    lines.push(`- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${reportText(isess.preflightReason, '(unrecorded)')}\`` : ''}`);
     lines.push(`- PPID session cookie present: ${ppidLabel}`);
     lines.push(`- Cookie names observed: ${cookieList}`);
     lines.push(`- Chrome executable: \`${String(isess.executablePath || '(unrecorded)').replace(/`/g, "'")}\``);
@@ -1288,10 +1565,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         `updated ${Math.max(0, Math.round(ageMs / 1000))}s ago`,
       ].filter(Boolean);
       lines.push(`- Current: ${bits.join(' · ')}`);
-      if (a.url) lines.push(`  - URL: ${String(a.url).slice(0, 240)}`);
-      if (a.reason) lines.push(`  - Reason: ${a.reason}`);
+      if (a.url) lines.push(`  - URL: ${reportUrl(a.url)}`);
+      if (a.reason) lines.push(`  - Reason: ${reportText(a.reason, '(unrecorded)', 360)}`);
       if (a.key) lines.push(`  - Key: ${a.key}`);
-      if (a.evidence) lines.push(`  - Evidence: ${String(a.evidence).slice(0, 360)}`);
+      if (a.evidence) lines.push(`  - Evidence: ${reportText(a.evidence, '(unrecorded)', 360)}`);
       // Anti-bot challenge diagnostics — present when a challenge fired. These rank
       // the cause: a datacenter/hosting egress IP points at IP reputation; the
       // browser profile rules out "wasn't headful"; the incident ID aids vendor
@@ -1389,7 +1666,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.title ? `title=${JSON.stringify(String(e.title).slice(0, 100))}` : null,
           e.pageState ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
           e.status != null ? `HTTP=${e.status}` : null,
-          e.finalUrl ? `url=${String(e.finalUrl).slice(0, 140)}` : null,
+          e.finalUrl ? `url=${reportUrl(e.finalUrl, '(unrecorded)', 140)}` : null,
           e.bodyHead ? `body=${JSON.stringify(String(e.bodyHead).slice(0, 180))}` : null,
           e.error ? `err=${String(e.error).slice(0, 160)}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
@@ -1619,20 +1896,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       for (const e of networkErrors.slice(-20)) {
         const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
         const detail = e.status ? `HTTP ${e.status}` : e.errorText;
-        lines.push(`- [-${ageS}s] ${e.method} ${e.url} → ${detail}`);
+        lines.push(`- [-${ageS}s] ${e.method} ${reportUrl(e.url, '(unrecorded)')} → ${reportText(detail, '(unrecorded)', 240)}`);
       }
     }
     if (consoleLogs.length > 0) {
       lines.push('**Console:**');
       for (const e of consoleLogs.slice(-40)) {
         const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
-        // Mark a clipped URL tail. Without the ellipsis a truncated value reads as
-        // a COMPLETE one: a ZipRecruiter search URL cut at exactly 60 chars ended
-        // on "…&location=" and looked like the app had sent an empty location
-        // param — a bug that was never there, chased on a real report.
-        const tail = e.url ? e.url.split('/').pop() : '';
+        // Use the redacted source path, never the raw query string. This keeps
+        // console provenance while avoiding opaque provider/challenge tokens.
+        const tail = e.url ? reportUrl(e.url, '', 180).split('/').pop() : '';
         const src = e.url ? ` (${tail.slice(0, 60)}${tail.length > 60 ? '…' : ''}${e.line != null ? `:${e.line}` : ''})` : '';
-        lines.push(`- [-${ageS}s] [${e.type}] ${e.text}${src}`);
+        lines.push(`- [-${ageS}s] [${e.type}] ${reportText(e.text, '(no message)', 300)}${src}`);
       }
     }
   }
@@ -1675,7 +1950,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const unavailable = Array.isArray(r.unavailableDescriptions) ? r.unavailableDescriptions : [];
         lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
         for (const item of unavailable.slice(0, 5)) {
-          lines.push(`  - Removed unavailable listing: "${String(item?.title || '(untitled)').replace(/[\r\n]+/g, ' ').slice(0, 140)}"${item?.url ? ` · ${String(item.url).slice(0, 500)}` : ''}${item?.reason ? ` (${item.reason})` : ''}`);
+          lines.push(`  - Removed unavailable listing: "${String(item?.title || '(untitled)').replace(/[\r\n]+/g, ' ').slice(0, 140)}"${item?.url ? ` · ${reportUrl(item.url, '(no URL)', 500)}` : ''}${item?.reason ? ` (${reportText(item.reason, '(unrecorded)', 180)})` : ''}`);
         }
         continue;
       }
@@ -1692,8 +1967,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       } else {
         mergeNote = ` → **new (to history): ${r.kept}**`;
       }
+      const extractionLabel = r.enrichment ? 'score-safe returned' : 'inline-extracted';
       lines.push(
-        `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted}${r.relevanceDropped > 0 ? ` → title-relevance-dropped ${r.relevanceDropped}` : ''} → age-dropped ${r.ageDropped} → ` +
+        `- \`${sourceId}\`${ago(r.ts)}: ${extractionLabel} ${r.extracted}${r.relevanceDropped > 0 ? ` → title-relevance-dropped ${r.relevanceDropped}` : ''} → age-dropped ${r.ageDropped} → ` +
         `already-seen/history ${r.historyDropped}${mergeNote}`,
       );
       if (r.relevanceDropped > 0) {
@@ -1705,9 +1981,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const e = r.enrichment;
         const verdict = (e.empty || 0) === 0 ? '✅' : '⚠️';
         const failureNote = e.failed ? ' (detail pass failed; only already-description-complete rows were retained)' : '';
-        lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0} → full descriptions ${e.succeeded ?? e.enriched ?? 0} → empty ${e.empty || 0} ${verdict}${failureNote}`);
+        const targetNote = Number.isFinite(e.targeted) && e.targeted !== e.attempted
+          ? ` of ${e.targeted} deferred target(s)` : '';
+        const providerNote = Number.isFinite(e.providerRowsLoaded)
+          ? ` · provider rows loaded ${e.providerRowsLoaded}` : '';
+        const completeNote = Number.isFinite(e.completeTotal)
+          ? ` · complete source total ${e.completeTotal}` : '';
+        const unavailableNote = Number(e.unavailable) > 0
+          ? ` · **not in current provider list ${e.unavailable}**` : '';
+        const recommendationNote = Number(e.consecutiveNoMatchPasses) > 0
+          ? ` · **${e.recoveryRecommendation === 'skip' ? 'Skip' : 'Retry'} recommended after ${e.consecutiveNoMatchPasses} unchanged full-list check${e.consecutiveNoMatchPasses === 1 ? '' : 's'}**`
+          : '';
+        lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0}${targetNote} → recovered this attempt ${e.succeeded ?? e.enriched ?? 0} → still empty ${e.empty || 0} ${verdict}${providerNote}${completeNote}${unavailableNote}${recommendationNote}${failureNote}`);
+        for (const sample of Array.isArray(e.unavailableSamples) ? e.unavailableSamples : []) {
+          lines.push(`    - unavailable now: "${sample?.title || '(untitled)'}"${sample?.url ? ` · ${reportUrl(sample.url)}` : ''}`);
+        }
         for (const sample of Array.isArray(e.emptySamples) ? e.emptySamples : []) {
-          lines.push(`    - missing: "${sample?.title || '(untitled)'}"${sample?.url ? ` · ${sample.url}` : ''}`);
+          lines.push(`    - missing: "${sample?.title || '(untitled)'}"${sample?.url ? ` · ${reportUrl(sample.url)}` : ''}`);
         }
       }
       if (r.extracted > 0 && r.kept === 0) {
@@ -1735,7 +2025,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // challenge URL. These are captured by the visible resolve window
         // immediately before close (when available), and make a manual close
         // actionable instead of the ambiguous "never-extracted, textLen 0".
-        if (d.finalUrl) bits.push(`final URL: \`${String(d.finalUrl).replace(/`/g, "'").slice(0, 500)}\``);
+        if (d.finalUrl) bits.push(`final URL: \`${reportUrl(d.finalUrl, '(unrecorded)', 500)}\``);
         if (d.finalTitle) bits.push(`final title: "${String(d.finalTitle).replace(/[\r\n]+/g, ' ').replace(/"/g, "'").slice(0, 180)}"`);
         if (d.hostMismatch) bits.push(`probe skipped: ${d.probeSkippedReason || 'host-mismatch'}`);
         lines.push(`  - resolve detail: ${bits.join(' · ')}`);
@@ -1939,7 +2229,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : telemetryEmpty;
       if (hasSavedLinkedIn && snapshotLinkedInIncomplete.length !== telemetryEmpty) {
         const samples = snapshotLinkedInIncomplete.slice(0, 3).map(job =>
-          `"${String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100)}" (${String(job.snippet || '').trim().length} chars)${job?.url ? ` — ${String(job.url).slice(0, 240)}` : ''}`,
+          `"${String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100)}" (${String(job.snippet || '').trim().length} chars)${job?.url ? ` — ${reportUrl(job.url)}` : ''}`,
         ).join('; ');
         const universe = savedRecoveryJobs.length > 0 ? 'saved recovery pool' : 'legacy scoring snapshot';
         lines.push(`- ⚠️ **Completion telemetry disagrees with the ${universe}:** final pass recorded ${telemetryEmpty} below-threshold description(s), but the saved pool contains ${snapshotLinkedInIncomplete.length}${samples ? ` — ${samples}` : ''}. Do not treat this as a clean full-description finish.`);
@@ -2069,7 +2359,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .join(', ');
       lines.push(`- ⚠️ **Low-evidence scoring inputs:** ${inputQuality.empty || 0} empty description(s), ${inputQuality.short || 0} short (<400 chars). These rows received real model responses, but were NOT fully evidenced by a complete JD${bySource ? ` · by source: ${bySource}` : ''}.`);
       for (const sample of Array.isArray(inputQuality.samples) ? inputQuality.samples : []) {
-        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.url ? ` · ${sample.url}` : ''}`);
+        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.url ? ` · ${reportUrl(sample.url)}` : ''}`);
       }
     }
     if (Array.isArray(s.fallbacks) && s.fallbacks.length > 0) {
@@ -2110,8 +2400,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const b = findAuditRow(anomaly.second);
           if (!a || !b) continue;
           lines.push(`  - ⚠️ **${anomaly.delta}-point cross-batch drift** for "${anomaly.title}" — ${anomaly.company}: batch ${a.batch} scored ${a.score} (${a.location || 'location ?'}; ${a.direction || 'direction ?'}) vs batch ${b.batch} scored ${b.score} (${b.location || 'location ?'}; ${b.direction || 'direction ?'}); identical JD fingerprint \`${anomaly.descriptionFingerprint}\`.`);
-          lines.push(`    - first: ${a.url || '(no URL)'} · reason: "${a.reason || '(none)'}"`);
-          lines.push(`    - second: ${b.url || '(no URL)'} · reason: "${b.reason || '(none)'}"`);
+          lines.push(`    - first: ${reportUrl(a.url)} · reason: "${reportText(a.reason, '(none)')}"`);
+          lines.push(`    - second: ${reportUrl(b.url)} · reason: "${reportText(b.reason, '(none)')}"`);
         }
       }
       if (audit.omitted > 0) lines.push(`  - _${audit.omitted} additional scored job(s) omitted from the bounded audit._`);
@@ -2127,7 +2417,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Scoring evidence (${evidence.length}/${totalEvidence} bounded row(s)):`);
       for (const row of evidence) {
         const placeholder = row.placeholder ? ' · ⚠️ placeholder (not analyzed)' : '';
-        const url = row.placeholder && row.url ? ` · URL: ${historyReportValue(row.url, '(no URL)', 240)}` : '';
+        const url = row.placeholder && row.url ? ` · URL: ${reportUrl(row.url, '(no URL)', 240)}` : '';
         lines.push(`  - batch ${row.batch || '?'} · score ${row.score ?? '?'}${placeholder} · [${historyReportValue(row.source, '?', 40)}] "${historyReportValue(row.title, '(untitled)', 120)}" — ${historyReportValue(row.direction, '(no direction)', 100)} · input ${row.descriptionChars ?? '?'} chars · reason: "${historyReportValue(row.reason, '(none)', 240)}"${url}`);
       }
       if (totalEvidence > evidence.length) {
@@ -2204,7 +2494,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               const first = sample?.first || {};
               const duplicate = sample?.duplicate || {};
               const esc = value => String(value ?? '').replace(/`/g, '\\`').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
-              const describe = job => `\`${esc(job.source || '?')}\` "${esc(job.title || '(untitled)')}" — ${esc(job.company || '(unknown company)')} · ${esc(job.location || '(no location)')} [${esc(job.url || '(no URL)')}]`;
+              const describe = job => `\`${esc(job.source || '?')}\` "${esc(job.title || '(untitled)')}" — ${esc(job.company || '(unknown company)')} · ${esc(job.location || '(no location)')} [${esc(reportUrl(job.url || '(no URL)'))}]`;
               const verdict = sample.sameListing
                 ? '✅ likely the same listing surfaced twice (same source/title/company/location)'
                 : '🔥 conflicting listings share one history key — inspect the normalizer';
@@ -2228,11 +2518,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // renderer mutates the board; failed combines leave its prior results intact.
     lines.push(`\n### Taxonomy (hiring fit → salary → role)${ago(b.ts)}`);
     if (b.strategy === 'bounded-plan-chunks') {
-      const chunkProgress = Number(b.taxonomyChunkCount || 0) > 0
-        ? `${Number(b.taxonomyChunksCompleted || 0)}/${Number(b.taxonomyChunkCount)} chunk(s)`
-        : 'classification not started';
+      const input = Math.max(0, Number(b.input) || 0);
+      const chunkCount = Math.max(0, Number(b.taxonomyChunkCount) || 0);
+      const plannedAssignments = Math.max(0, Number(b.taxonomyPlannedAssignments) || 0);
+      const classifiedAssignments = Math.max(0, Number(b.taxonomyClassifiedAssignments) || 0);
+      const plannerOnlyComplete = b.taxonomyStage === 'complete' && !chunkCount
+        && input > 0 && plannedAssignments === input;
+      const chunkProgress = chunkCount > 0
+        ? `${Number(b.taxonomyChunksCompleted || 0)}/${chunkCount} chunk(s)`
+        : plannerOnlyComplete
+          ? `classification not needed — planner assigned ${plannedAssignments}/${input}`
+          : 'classification not started';
+      const assignmentProgress = chunkCount > 0 && (plannedAssignments || classifiedAssignments)
+        ? ` · planner assigned ${plannedAssignments}/${input || '?'}; classifier assigned ${classifiedAssignments}/${input || '?'}`
+        : '';
       const provider = b.provider ? ` · provider \`${String(b.provider).replace(/`/g, '')}\`` : '';
-      lines.push(`- Bounded taxonomy: stage ${b.taxonomyStage || 'unknown'} · ${chunkProgress} · max ${Number(b.taxonomyChunkSize || 0) || '?'} jobs/request · ${Number(b.taxonomyRepresentativeCount || 0)} planning sample(s) · ${Number(b.taxonomyVocabularySize || 0)} role label(s)${provider}.`);
+      lines.push(`- Bounded taxonomy: stage ${b.taxonomyStage || 'unknown'} · ${chunkProgress}${assignmentProgress} · max ${Number(b.taxonomyChunkSize || 0) || '?'} jobs/request · ${Number(b.taxonomyRepresentativeCount || 0)} planning sample(s) · ${Number(b.taxonomyVocabularySize || 0)} role label(s)${provider}.`);
     }
     if (b.error) {
       // Taxonomy is a transactional prerequisite. A provider failure must not

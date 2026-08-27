@@ -234,7 +234,7 @@ const SALARY_RANGES_SCHEMA = {
 /** Bounded global planning response — never receives the full job list. */
 export const JOB_TAXONOMY_PLAN_SCHEMA = {
   type: 'object',
-  required: ['salaryRanges', 'roleFamilies'],
+  required: ['salaryRanges', 'roleFamilies', 'directionRoleIndexes'],
   properties: {
     salaryRanges: SALARY_RANGES_SCHEMA,
     roleFamilies: {
@@ -243,6 +243,24 @@ export const JOB_TAXONOMY_PLAN_SCHEMA = {
       maxItems: JOB_TAXONOMY_ROLE_FAMILY_LIMIT,
       items: { type: 'string', minLength: 1, description: 'Canonical concise role-family label.' },
       description: `A compact, non-overlapping global vocabulary of at most ${JOB_TAXONOMY_ROLE_FAMILY_LIMIT} role families.`,
+    },
+    // The bounded planner already sees every frequent scorer-suggested
+    // direction. Mapping those labels while it creates the vocabulary avoids a
+    // redundant second manual paste for the normal board. Unknown/rare labels
+    // still take the classifier fallback below.
+    directionRoleIndexes: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 24,
+      description: 'One mapping for each supplied commonSuggestedDirections entry: assign its exact direction string to a zero-based roleFamilies index.',
+      items: {
+        type: 'object',
+        required: ['direction', 'roleIndex'],
+        properties: {
+          direction: { type: 'string', minLength: 1, maxLength: 100, description: 'Exact suggested direction from the supplied summary.' },
+          roleIndex: { type: 'integer', minimum: 0, description: 'Zero-based index into roleFamilies.' },
+        },
+      },
     },
   },
 };
@@ -681,42 +699,50 @@ export const JOB_SCORING_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps', 'experienceAssessment', 'confidence'],
+        // The compact assessment sample is not enough to disclose every hard
+        // gap. Keep the separate (but much smaller) complete gap list required
+        // so deterministic calibration never misses a fifth critical item.
+        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps', 'confidence'],
         properties: {
           index:           { type: 'integer', description: 'Position in input batch (0-based)' },
-          matchScore:      { type: 'integer', description: '0-100 evidence-based hiring fit score. This is a comparative, uncalibrated fit measure—not a statistically calibrated prediction of any hiring outcome.' },
-          reasoning:       { type: 'string', description: 'Concise evidence-based hiring-fit explanation. State the strongest direct evidence and the material gap(s); assess the full hiring decision rather than only early screening; do not imply support that is absent from the supplied candidate evidence.' },
-          careerDirection: { type: 'string', description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
+          matchScore:      { type: 'integer', description: '0-100 evidence-based professional fit score based only on skills, experience, education/credentials, domain knowledge, responsibilities, and transferable capability. Work authorization/citizenship/sponsorship and location/onsite/relocation logistics contribute zero penalty. This is not a statistically calibrated prediction of any hiring outcome.' },
+          reasoning:       { type: 'string', maxLength: 480, description: 'Concise evidence-based professional-fit explanation. State the strongest direct evidence and material professional gaps; do not mention or penalize work authorization or location logistics, and do not imply support absent from supplied candidate evidence.' },
+          careerDirection: { type: 'string', maxLength: 80, description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
           requirementAssessments: {
             type: 'array',
-            description: 'One assessment for every material requirement found in the job listing. Use exact job and candidate evidence; do not infer unsupported equivalence.',
-            minItems: 1,
+            description: 'Up to four decisive non-gap requirement assessments: direct or adjacent evidence only, prioritizing strongest grounded support and transferable context. Use exact job and candidate evidence; do not infer unsupported equivalence. Every required/important unresolved requirement belongs only in materialGaps.',
+            // A posting can consist entirely of unresolved hard requirements.
+            // Its complete `materialGaps` list remains enough to audit and
+            // calibrate the score, so no invented positive/context row is
+            // required merely to satisfy the response shape.
+            minItems: 0,
+            maxItems: 4,
             items: {
               type: 'object',
               required: ['requirementText', 'priority', 'jobEvidence', 'status', 'candidateEvidence', 'explanation'],
               properties: {
-                requirementText: { type: 'string', description: 'A concise statement of the requirement being assessed.' },
+                requirementText: { type: 'string', maxLength: 180, description: 'A concise statement of the requirement being assessed.' },
                 priority: { type: 'string', enum: ['required', 'important', 'preferred', 'contextual'], description: 'How the listing presents this requirement. Preferred is not automatically disqualifying.' },
-                jobEvidence: { type: 'string', description: 'Verbatim excerpt from this job listing that supports the requirement; do not paraphrase or fabricate it.' },
-                status: { type: 'string', enum: ['direct', 'adjacent', 'not_documented', 'contradicted', 'unclear'], description: 'direct = explicitly evidenced; adjacent = transferable but not equivalent; not_documented = this concise supplied career data does not establish the requirement and does not resolve unlisted experience; contradicted = verbatim candidate evidence explicitly conflicts with the requirement; unclear = supplied evidence is ambiguous. Never infer contradicted from an absence.' },
-                candidateEvidence: { type: 'string', description: 'Verbatim excerpt from supplied candidate career evidence. Required for direct, adjacent, and contradicted; empty for not_documented; for unclear, quote the ambiguity when present or leave empty.' },
-                explanation: { type: 'string', description: 'Evidence-qualified explanation of why this status follows from the excerpts, including the boundary between adjacent and direct evidence. For not_documented, say only that the supplied career data does not document the requirement; do not state a categorical conclusion about unlisted experience.' },
+                jobEvidence: { type: 'string', maxLength: 220, description: 'Short verbatim excerpt from this job listing that supports the requirement; do not paraphrase or fabricate it.' },
+                status: { type: 'string', enum: ['direct', 'adjacent'], description: 'direct = candidate evidence explicitly supports the same requirement; adjacent = evidence is genuinely transferable but not equivalent. Unresolved required/important requirements belong only in materialGaps.' },
+                candidateEvidence: { type: 'string', maxLength: 220, description: 'Short verbatim excerpt from supplied candidate career evidence. Required for both direct and adjacent assessments.' },
+                explanation: { type: 'string', maxLength: 180, description: 'Evidence-qualified explanation of why the supplied excerpts support a direct or adjacent assessment, including the boundary between transferable and equivalent evidence.' },
               },
             },
           },
           materialGaps: {
             type: 'array',
-            description: 'Every required or important requirement assessed as not_documented, contradicted, or unclear. May be empty only when no such material gap exists; do not include a preferred item merely because it is not documented.',
+            description: 'Every scored required or important PROFESSIONAL requirement that is not_documented, contradicted, or unclear. Exclude work authorization/citizenship/sponsorship and location/onsite/relocation logistics; they contribute zero score penalty. This is the complete compact professional-gap inventory used for score calibration.',
             items: {
               type: 'object',
               required: ['requirementText', 'priority', 'jobEvidence', 'status', 'candidateEvidence', 'impact'],
               properties: {
-                requirementText: { type: 'string' },
+                requirementText: { type: 'string', maxLength: 140 },
                 priority: { type: 'string', enum: ['required', 'important', 'preferred', 'contextual'] },
-                jobEvidence: { type: 'string', description: 'Verbatim job-listing excerpt.' },
+                jobEvidence: { type: 'string', maxLength: 180, description: 'Short verbatim job-listing excerpt.' },
                 status: { type: 'string', enum: ['not_documented', 'contradicted', 'unclear'] },
-                candidateEvidence: { type: 'string', description: 'Empty for not_documented; verbatim conflicting candidate evidence for contradicted; verbatim ambiguity evidence for unclear when present.' },
-                impact: { type: 'string', description: 'Evidence-qualified account of why this gap affects fit. Describe not_documented only as an evidence gap in the supplied concise career data, not a conclusion about actual experience; do not treat a preferred qualification as a hard requirement.' },
+                candidateEvidence: { type: 'string', maxLength: 180, description: 'Empty for not_documented; short verbatim conflicting candidate evidence for contradicted; short ambiguity evidence for unclear when present.' },
+                impact: { type: 'string', maxLength: 120, description: 'Brief evidence-qualified account of why this gap affects fit. Describe not_documented only as an evidence gap in the supplied concise career data, not a conclusion about actual experience; do not treat a preferred qualification as a hard requirement.' },
               },
             },
           },
@@ -728,25 +754,26 @@ export const JOB_SCORING_SCHEMA = {
                 type: 'object',
                 required: ['years', 'candidateEvidence', 'explanation'],
                 properties: {
-                  years: { type: 'string', description: 'Documented total professional years, a range, or "not established". Do not calculate unstated dates as fact.' },
-                  candidateEvidence: { type: 'string', description: 'Verbatim candidate evidence supporting the total; empty only when not established.' },
-                  explanation: { type: 'string', description: 'How the total was determined and any date uncertainty.' },
+                  years: { type: 'string', maxLength: 80, description: 'Documented total professional years, a range, or "not established". Do not calculate unstated dates as fact.' },
+                  candidateEvidence: { type: 'string', maxLength: 220, description: 'Short verbatim candidate evidence supporting the total; empty only when not established.' },
+                  explanation: { type: 'string', maxLength: 160, description: 'How the total was determined and any date uncertainty.' },
                 },
               },
               categorySpecificExperience: {
                 type: 'array',
-                description: 'Separate assessment for each material experience category or years requirement in the listing; never substitute total tenure for category-specific experience.',
+                description: 'Only include this when an explicit years requirement has a supported workHistory role mapping; never substitute total tenure for category-specific experience.',
+                maxItems: 2,
                 items: {
                   type: 'object',
                   required: ['category', 'requiredMinimumYears', 'roleIds', 'years', 'candidateEvidence', 'jobEvidence', 'explanation'],
                   properties: {
-                    category: { type: 'string' },
+                    category: { type: 'string', maxLength: 120 },
                     requiredMinimumYears: { type: 'number', description: 'The listing’s explicit numeric minimum for this category; use 0 only when the listing states no numeric minimum.' },
                     roleIds: { type: 'array', items: { type: 'string' }, description: 'Stable candidate workHistory ids whose dated tenure is relevant to this category. Empty when no supported role can be selected.' },
-                    years: { type: 'string', description: 'Documented years/range for this category, or "not established".' },
-                    candidateEvidence: { type: 'string', description: 'Verbatim supplied candidate evidence; empty only when not established.' },
-                    jobEvidence: { type: 'string', description: 'Verbatim job-listing excerpt that makes this experience category material.' },
-                    explanation: { type: 'string', description: 'Comparison of the category-specific evidence with the job requirement.' },
+                    years: { type: 'string', maxLength: 80, description: 'Documented years/range for this category, or "not established".' },
+                    candidateEvidence: { type: 'string', maxLength: 220, description: 'Short verbatim supplied candidate evidence; empty only when not established.' },
+                    jobEvidence: { type: 'string', maxLength: 220, description: 'Short verbatim job-listing excerpt that makes this experience category material.' },
+                    explanation: { type: 'string', maxLength: 180, description: 'Comparison of the category-specific evidence with the job requirement.' },
                   },
                 },
               },

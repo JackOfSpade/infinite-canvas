@@ -19,11 +19,12 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
+import { isNonApiJobTask } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
-import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
+import { buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -848,14 +849,17 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     // (the old predicate did, which is why all 739 rendered). The score/url and
     // band/salary/role breakdown are summarized in the Job Search Pipeline /
     // Taxonomy sections; only a genuine anomaly (selected/editing/resizing/
-    // edge-cursor/error) forces a row to always show.
+    // edge-cursor/error or an expanded hiring-fit disclosure) forces a row to
+    // always show.
     // Only clipboard output needs sampling; Save to file is the promised full
     // artifact and must retain every routine row as well as every anomaly.
     const ROUTINE_JOBCARD_CAP = options?.maxChars ? 15 : Infinity;
     const ROUTINE_JOBGROUP_CAP = options?.maxChars ? 25 : Infinity; // keep enough to convey the taxonomy shape
     const hasAnomaly = (n) => {
       const cs = compStateById[n.id] || {};
-      return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor || nodeDataById[n.id]?.errorMessage);
+      return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor
+        || cs.reasoningExpanded || cs.scoreAuditExpanded || cs.compensationExpanded
+        || nodeDataById[n.id]?.errorMessage);
     };
     let cardShown = 0, cardOmitted = 0, groupShown = 0, groupOmitted = 0;
     const nodesToRender = [];
@@ -877,6 +881,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         cs.isResizing ? 'resizing' : null,
         cs.hasEdgeCursor ? 'edgeCursor' : null,
         cs.reasoningExpanded ? 'reasoningExpanded' : null,
+        cs.scoreAuditExpanded ? 'scoreAuditExpanded' : null,
+        cs.compensationExpanded ? 'compensationExpanded' : null,
         n.selected ? 'selected' : null,
       ].filter(Boolean).join(', ') || '—';
       // Hub-aware preview: include hubState plus whichever payload keys this
@@ -1887,11 +1893,14 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
     // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
     const nextCapFloor = Math.round(s.truncatedAt * 1.2);
     const seedNote = s.formulaSeedAtTruncation != null ? `formula seed: ${s.formulaSeedAtTruncation}` : '';
+    const manualTask = isNonApiJobTask(task);
     const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
     const healNote = stuckAtHardCap
       ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
       : `next cap ≥${nextCapFloor} — cap since raised, self-heals`;
-    const detail = seedNote ? `${seedNote}, ${healNote}` : healNote;
+    const detail = manualTask
+      ? `${seedNote ? `${seedNote}; ` : ''}historical provider telemetry only — current manual copy/paste guidance uses the bounded task seed, not this learned floor`
+      : (seedNote ? `${seedNote}, ${healNote}` : healNote);
     tokenBudgetLines.push(
       `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
       ` · ⚠️ truncated at cap ${s.truncatedAt} (${detail})`,
@@ -1904,11 +1913,13 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 ### Learned Token Budgets
 > Only tasks that have truncated are shown — ⚠️ means a call once hit its output
 > cap and was cut off. These records are CUMULATIVE across all runs (and both
-> providers), not just this one; the cap auto-raises so it self-heals. What the
+> providers), not just this one; live API caps auto-raise so they self-heal. What the
 > truncation CAUSED depends on the provider for that call: on the Gemini path the
 > cascade steps down to a weaker fallback model; on the paid Claude path there is
 > NO model fallback — the caller retries smaller on the SAME model (job-scoring
 > splits the batch), worst case placeholder-scoring one job. ⛔ AT hard cap = stuck.
+> Job-domain Non-API handoffs deliberately ignore this historical provider telemetry:
+> their copied max-output guidance comes from the current bounded task formula.
 ${tokenBudgetLines.join('\n')}`
     : '';
 
@@ -1992,7 +2003,21 @@ ${(aiConfig.geminiWarnings || []).length > 0
   // The node ids in THIS report's canvas — lets the pipeline snapshots flag a
   // funnel whose originating node isn't here (the main-process telemetry is
   // shared across all open windows/canvases, so it may be another canvas's run).
-  const currentNodeIds = new Set((nodes || []).map(n => n?.id).filter(Boolean));
+  // Recovery manifests identify their originating hub. Include nested canvases
+  // too, so a valid hub inside a group is not falsely reported as deleted.
+  const currentNodeIds = new Set();
+  for (const nodeId of Array.isArray(payload?.filterStats?.currentNodeIds)
+    ? payload.filterStats.currentNodeIds
+    : []) {
+    if (typeof nodeId === 'string' && nodeId) currentNodeIds.add(nodeId);
+  }
+  const collectCurrentNodeIds = (items) => {
+    for (const node of Array.isArray(items) ? items : []) {
+      if (node?.id) currentNodeIds.add(node.id);
+      collectCurrentNodeIds(node?.data?.canvasData?.nodes);
+    }
+  };
+  collectCurrentNodeIds(nodes);
   // Local AI status is persisted on job cards rather than the main-process
   // telemetry singleton. Include it in HANDOFF/FULL so a validation rejection
   // after a Local AI rewrite is not mistaken for a missed file poll.
@@ -2017,6 +2042,22 @@ ${(aiConfig.geminiWarnings || []).length > 0
   let jobsPipelineMarkdown = '';
   try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications); }
   catch { /* never break the report on diagnostic failure */ }
+
+  let jobLinkMarkdown = '';
+  if (isFullReport || reportCodes.has('JOBLINK')) {
+    try { jobLinkMarkdown = buildJobLinkSnapshot(nodes); }
+    catch { jobLinkMarkdown = diagnosticRenderFailureMarkdown('Job Listing Link Diagnostics', new Error('could not inspect saved job links')); }
+  }
+
+  // In-memory job telemetry is intentionally process-local, so it is empty
+  // after the restart where crash/quit recovery is being diagnosed. FULL and
+  // RECOVERY therefore read only the compact sidecar/snapshot metadata here.
+  // This remains useful even when the live pipeline section self-gates to ''.
+  let jobRecoveryMarkdown = '';
+  if (isFullReport || reportCodes.has('RECOVERY')) {
+    try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds); }
+    catch { jobRecoveryMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Diagnostics', new Error('could not inspect recovery sidecars')); }
+  }
 
   let marketplacePipelineMarkdown = '';
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
@@ -2086,7 +2127,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

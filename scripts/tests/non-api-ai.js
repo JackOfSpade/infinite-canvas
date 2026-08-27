@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { assert, callLLMText, checkPromptFits, fs, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { assert, callLLMText, checkPromptFits, fs, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -115,6 +115,9 @@ export default [
         'both live handoff listeners are installed before the dialog asks main to replay pending prompts');
       assert(dialogSource.includes('window.electronAPI.cancelNonApiAiRequest(requestId)')
         && dialogSource.includes('Cancel task stops the owning job operation.')
+        && dialogSource.includes("request.itemCount === 1 ? 'item' : 'items'")
+        && dialogSource.includes('const count = Number.isFinite(request.itemCount)')
+        && dialogSource.includes('`Batch ${request.batch}${count}`')
         && dialogSource.includes('selectedRequestId')
         && dialogSource.includes('Pending AI handoff batches')
         && dialogSource.includes('requests.find(request => request.requestId === selectedRequestId)')
@@ -196,7 +199,7 @@ export default [
     },
   },
   {
-    name: 'non-API AI: scoring and taxonomy classify handoffs retain stable 1-based batch progress',
+    name: 'non-API AI: scoring batches stay stable and a complete taxonomy plan avoids a redundant handoff',
     run: async () => {
       const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
       const scoringStart = jobsSource.indexOf('const scoreBatch = async');
@@ -222,6 +225,7 @@ export default [
                 { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
               ],
               roleFamilies: ['Engineering', 'Other'],
+              directionRoleIndexes: [{ direction: 'Engineering', roleIndex: 0 }],
             };
           }
           hints.push(options.hints);
@@ -234,15 +238,13 @@ export default [
           return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 0) };
         },
       });
-      assert(JSON.stringify(hints.map(hint => [hint.batch, hint.batchTotal, hint.itemCount])) === JSON.stringify([[1, 2, 24], [2, 2, 1]]),
-        'taxonomy classification publishes a positive 1-based batch and fixed total for every manual prompt');
-      assert(peakClassifications === 2,
-        'taxonomy classification starts independent manual batches together so every prompt is available before the first response returns');
-      assert(JSON.stringify(taxonomyMeta.models) === JSON.stringify(['plan-model', 'classifier-1', 'classifier-2'])
-        && taxonomyMeta.model === 'classifier-2'
-        && JSON.stringify(taxonomyMeta.fallbacks?.map(fallback => fallback.stage)) === JSON.stringify(['plan', 'classifier-1', 'classifier-2'])
-        && taxonomyMeta.fallback?.stage === 'classifier-2',
-      'out-of-order classifier completions merge isolated model and fallback diagnostics into the parent in stable batch order');
+      assert(hints.length === 0 && peakClassifications === 0,
+        'a complete bounded planner mapping assigns every repeated direction without asking the user for a redundant classification paste');
+      assert(JSON.stringify(taxonomyMeta.models) === JSON.stringify(['plan-model'])
+        && taxonomyMeta.model === 'plan-model'
+        && JSON.stringify(taxonomyMeta.fallbacks?.map(fallback => fallback.stage)) === JSON.stringify(['plan'])
+        && taxonomyMeta.fallback?.stage === 'plan',
+      'planner-only completion preserves its model diagnostics without fabricating a classifier stage');
       assert(jobsSource.includes('Promise.all(scoringBatches.map(async (batch, batchIndex) =>')
         && jobsSource.includes('completedScoringJobCount')
         && jobsSource.includes('scored: signal?.aborted ? completedScoringJobCount : scoredJobs.length'),
@@ -441,6 +443,45 @@ export default [
         && fit.via === 'manual' && fit.contextWindow === Number.MAX_SAFE_INTEGER,
       'job preflight returns the local manual transport contract without resolving credentials or contacting a token-count endpoint');
       return { via: fit.via, tokens: fit.tokens };
+    },
+  },
+  {
+    name: 'non-API AI: manual scoring guidance ignores stale learned provider truncation floors',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      // Mirrors the report's historical 40K provider truncation. It must
+      // remain relevant to an actual API call, but never inflate a manual
+      // copy/paste instruction after the compact scoring contract ships.
+      recordTruncation('job-scoring', 40_000, 32_000);
+      const sent = [];
+      const sender = {
+        id: 708, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-manual-cap-test', async (_event, _args, signal) => ({
+        result: await callLLMText('RETURN COMPACT JSON.', {
+          signal,
+          task: 'job-scoring',
+          hints: { itemCount: 15 },
+          responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-manual-cap-test')({ sender }, { nodeId: 'manual-cap-node' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request?.itemCount === 15
+        && request?.prompt.includes('Maximum output tokens: 10600')
+        && request.prompt.includes('Output-cap formula seed: 10600')
+        && !request.prompt.includes('Maximum output tokens: 48000'),
+      'manual job scoring exposes its 15-item workload and uses the bounded formula, never stale API self-calibration telemetry');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      const reportSource = readFileSync(new URL('../../electron/ipc/bugReport.js', import.meta.url), 'utf8');
+      assert(reportSource.includes('historical provider telemetry only')
+        && reportSource.includes('manual copy/paste guidance uses the bounded task seed'),
+      'bug reports distinguish historical API token telemetry from active manual-handoff guidance');
+      return { manualCap: 10600, staleApiFloor: 48000 };
     },
   },
   {

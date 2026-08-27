@@ -96,6 +96,10 @@ function validateTestRegistry(groups) {
       problems.push(`${file} must default-export an array of tests`);
       continue;
     }
+    if (group.length === 0) {
+      problems.push(`${file} must declare at least one test`);
+      continue;
+    }
     for (const test of group) {
       if (!test || typeof test.name !== 'string' || !test.name || typeof test.run !== 'function') {
         problems.push(`${file} contains an invalid test declaration`);
@@ -107,25 +111,55 @@ function validateTestRegistry(groups) {
   }
 
   if (problems.length) throw new Error(`Test registry invalid: ${problems.join('; ')}`);
-  return groups.flatMap(([, group]) => group);
+  return groups;
+}
+
+function captureTestConsole() {
+  const levels = ['log', 'warn', 'error'];
+  const original = Object.fromEntries(levels.map(level => [level, console[level]]));
+  const entries = [];
+  for (const level of levels) {
+    console[level] = (...args) => entries.push({ level, args });
+  }
+  return {
+    restore() {
+      for (const level of levels) console[level] = original[level];
+    },
+    replay() {
+      for (const { level, args } of entries) original[level]('[TEST OUTPUT]', ...args);
+    },
+    count: () => entries.length,
+  };
 }
 
 async function run() {
   let passed = 0;
   let failed = 0;
-  const tests = validateTestRegistry(testGroups);
+  const groups = validateTestRegistry(testGroups);
+  const verbose = process.env.TEST_VERBOSE === '1';
 
-  console.log(`\n[TEST RUNNER] Deterministic smoke tests (${testGroups.length} groups)\n`);
+  console.log(`\n[TEST RUNNER] Deterministic smoke tests (${groups.length} groups)\n`);
 
-  for (const test of tests) {
-    try {
-      const details = await test.run();
-      console.log(`PASS ${test.name}`, details ? JSON.stringify(details) : '');
-      passed++;
-    } catch (error) {
-      console.error(`FAIL ${test.name}:`, error.stack || error.message);
-      failed++;
+  for (const [file, tests] of groups) {
+    let groupPassed = 0;
+    for (const test of tests) {
+      const capturedConsole = captureTestConsole();
+      try {
+        const details = await test.run();
+        capturedConsole.restore();
+        if (verbose) console.log(`PASS ${test.name}`, details ? JSON.stringify(details) : '');
+        passed++;
+        groupPassed++;
+      } catch (error) {
+        capturedConsole.restore();
+        console.error(`FAIL ${test.name}:`, error.stack || error.message);
+        if (capturedConsole.count() > 0) capturedConsole.replay();
+        failed++;
+      }
     }
+    const status = groupPassed === tests.length ? 'PASS' : 'FAIL';
+    const write = status === 'PASS' ? console.log : console.error;
+    write(`${status} ${file} (${groupPassed}/${tests.length} tests)`);
   }
 
   console.log(`\n[TEST RUNNER] ${passed} passed, ${failed} failed`);

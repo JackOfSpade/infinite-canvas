@@ -12,8 +12,9 @@ import { computeJobTreeView, normalizeCompensationAssessment, shouldReflowMeasur
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement } from '../utils/localAiApplicationLifecycle';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import { ApplicationLaunchPromptDialog } from '../components/ApplicationLaunchPromptDialog';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
@@ -70,60 +71,88 @@ function compactAuditLabels(rows, limit) {
   return { items: unique.slice(0, limit), overflow: Math.max(0, unique.length - limit), total: unique.length };
 }
 
-function materialGapStatus(row) {
-  const status = String(row?.status || row?.effectiveStatus || '').trim().toLowerCase().replace(/-/g, '_');
-  // Prior audited cards used "missing" to mean that the supplied career data
-  // did not establish the requirement. Preserve that evidence-based meaning;
-  // it was never proof that the candidate did not have the experience.
-  if (status === 'not_documented' || status === 'missing') return 'not_documented';
-  if (status === 'contradicted') return 'contradicted';
-  if (status === 'unclear') return 'unclear';
-  return 'review';
+function normalizedStatus(row) {
+  const status = String(row?.effectiveStatus || row?.status || '').trim().toLowerCase().replace(/-/g, '_');
+  return ['direct', 'adjacent', 'not_documented', 'contradicted', 'unclear'].includes(status) ? status : '';
 }
 
-function compactMaterialGaps(rows, limit) {
-  const groups = {
-    not_documented: [],
-    contradicted: [],
-    unclear: [],
-    review: [],
+function compactRows(rows, limit) {
+  return compactAuditLabels(rows, limit);
+}
+
+function auditCountLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function compactAuditSummary(audit) {
+  if (!audit?.isAudited) return 'Verified requirement detail unavailable';
+  const parts = [];
+  if (audit.directStrengths.total) parts.push(auditCountLabel(audit.directStrengths.total, 'direct match'));
+  if (audit.adjacentMatches.total) parts.push(auditCountLabel(audit.adjacentMatches.total, 'transferable match'));
+  if (audit.verifiedGapTotal) parts.push(auditCountLabel(audit.verifiedGapTotal, 'verified gap'));
+  if (audit.unverifiedItems.total) parts.push(auditCountLabel(audit.unverifiedItems.total, 'unverified item'));
+  return parts.join(' · ') || 'Verified audit available';
+}
+
+// Only the deterministic, normalized fitAssessment may reach this disclosure.
+// Do not fall back to legacy top-level score fields or any provider narrative:
+// neither is safe evidence for explaining an assessed score.
+function compactHiringFitAudit(assessment) {
+  if (!assessment || typeof assessment !== 'object' || Array.isArray(assessment)) return null;
+  const rows = Array.isArray(assessment.requirementRows) ? assessment.requirementRows : [];
+  // Older audited cards predate scoreImpact. Treat only an explicit
+  // informational marker as non-scoring so their verified rows remain useful.
+  const groundedScoredRows = rows.filter((row) => (
+    row?.grounding?.requirementGrounded === true && row?.scoreImpact !== 'informational'
+  ));
+  const directStrengths = compactRows(groundedScoredRows.filter((row) => (
+    normalizedStatus(row) === 'direct' && row?.grounding?.candidateClaimGrounded === true
+  )), 3);
+  const adjacentMatches = compactRows(groundedScoredRows.filter((row) => (
+    normalizedStatus(row) === 'adjacent' && row?.grounding?.candidateClaimGrounded === true
+  )), 3);
+  const verifiedGapRows = groundedScoredRows.filter((row) => (
+    row?.materialGap === true && ['not_documented', 'contradicted', 'unclear'].includes(normalizedStatus(row))
+  ));
+  const verifiedGaps = {
+    notDocumented: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'not_documented'), 3),
+    contradicted: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'contradicted'), 3),
+    unclear: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'unclear'), 3),
   };
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const requirement = String(row?.requirement || row?.requirementText || '').replace(/\s+/g, ' ').trim();
-    if (!requirement) continue;
-    const status = materialGapStatus(row);
-    const duplicate = groups[status].some(item => item.requirement.toLowerCase() === requirement.toLowerCase());
-    if (!duplicate) groups[status].push({ requirement: requirement.slice(0, 180) });
-  }
-  return Object.fromEntries(Object.entries(groups).map(([status, items]) => [status, {
-    items: items.slice(0, limit),
-    overflow: Math.max(0, items.length - limit),
-    total: items.length,
-  }]));
-}
 
-function evidenceConfirmationQuestion(requirement) {
-  const cleanRequirement = String(requirement).replace(/[?.!]+$/, '').trim();
-  return `Do you have experience with ${cleanRequirement} that is not yet included in your career data?`;
-}
-
-// Only the normalized audit is eligible for this disclosure. In particular,
-// raw model reasoning and rejected evidence never reach this presentation.
-function compactHiringFitAudit(data) {
-  const assessment = data?.fitAssessment;
-  if (!assessment || typeof assessment !== 'object' || assessment.auditStatus !== 'audited') return null;
-  const strengths = compactAuditLabels(assessment.strengths, 2);
-  const materialGaps = compactMaterialGaps(assessment.materialGaps, 3);
-  const effectiveConfidence = String(assessment.confidence?.effective || data?.confidence?.effective || '').toLowerCase();
-  const confidence = ['high', 'medium', 'low'].includes(effectiveConfidence) ? effectiveConfidence : '';
-  const rawScore = Number(assessment.rawScore ?? data?.rawScore);
-  const adjustedScore = Number(assessment.adjustedScore ?? data?.adjustedScore ?? data?.matchScore);
-  const calibrated = Number.isFinite(rawScore) && Number.isFinite(adjustedScore) && rawScore !== adjustedScore
-    ? { rawScore, adjustedScore }
+  // Rejected rows are intentionally limited to their normalized requirement
+  // labels. Never surface the rejected quotes or the model's original prose.
+  const rejectedRows = [
+    ...(Array.isArray(assessment.rejectedRequirementRows) ? assessment.rejectedRequirementRows : []),
+    ...rows.filter((row) => row?.grounding?.requirementGrounded === false
+      || (Array.isArray(row?.grounding?.rejectedJobEvidence) && row.grounding.rejectedJobEvidence.length > 0)
+      || (Array.isArray(row?.grounding?.rejectedCandidateEvidence) && row.grounding.rejectedCandidateEvidence.length > 0)),
+  ];
+  const unverifiedItems = compactRows(rejectedRows, 3);
+  const confidenceValue = String(assessment.confidence?.effective || '').trim().toLowerCase();
+  const confidence = ['high', 'medium', 'low', 'unknown'].includes(confidenceValue) ? confidenceValue : '';
+  const groundedRequirementCount = Number(assessment.confidence?.groundedRequirementCount);
+  const requirementCount = Number(assessment.confidence?.requirementCount);
+  const coverage = Number.isFinite(groundedRequirementCount) && Number.isFinite(requirementCount)
+    && groundedRequirementCount >= 0 && requirementCount >= 0
+    ? { groundedRequirementCount, requirementCount }
     : null;
-  const materialGapTotal = Object.values(materialGaps).reduce((total, group) => total + group.total, 0);
-  if (!strengths.total && !materialGapTotal && !confidence && !calibrated) return null;
-  return { strengths, materialGaps, confidence, calibrated };
+  const modelScore = Number(assessment.rawScore);
+  const calibratedScore = Number(assessment.adjustedScore);
+  const provenance = Number.isFinite(modelScore) || Number.isFinite(calibratedScore)
+    ? { modelScore: Number.isFinite(modelScore) ? modelScore : null, calibratedScore: Number.isFinite(calibratedScore) ? calibratedScore : null }
+    : null;
+  return {
+    isAudited: assessment.auditStatus === 'audited',
+    directStrengths,
+    adjacentMatches,
+    verifiedGaps,
+    verifiedGapTotal: verifiedGapRows.length,
+    unverifiedItems,
+    confidence,
+    coverage,
+    provenance,
+  };
 }
 
 // A local coding agent often makes a sequence of atomic edits while composing one
@@ -158,7 +187,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const { addToast } = useToast();
   const { acquireModuleRun, cancelQueuedRunsForNode, snapshot: moduleRunSnapshot } = useModuleRunQueue();
 
-  const [showFullReasoning, setShowFullReasoning] = useState(false);
+  const [showScoreAudit, setShowScoreAudit] = useState(false);
   const [showCompensationDetails, setShowCompensationDetails] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
   const [applicationLaunchPrompt, setApplicationLaunchPrompt] = useState('');
@@ -266,10 +295,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // mounted so a bug report can explain a measured-height/layout discrepancy.
   useEffect(() => {
     EventLogger.registerNodeState(id, {
-      reasoningExpanded: showFullReasoning,
+      scoreAuditExpanded: showScoreAudit,
       compensationExpanded: showCompensationDetails,
     });
-  }, [id, showFullReasoning, showCompensationDetails]);
+  }, [id, showScoreAudit, showCompensationDetails]);
   useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
 
   // Poll ticks and React state propagation can overlap by a frame. This latch
@@ -305,23 +334,35 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
     .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
     .filter((source) => source.safeUrl), [compensationAssessment]);
-  const hiringFitAudit = useMemo(() => compactHiringFitAudit(data), [data]);
+  const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
   const compensationBorderColor = COMPENSATION_BORDER_COLORS[compensationAssessment.status] || 'rgba(255,255,255,0.12)';
-  const hasExpandedDisclosure = showFullReasoning || showCompensationDetails;
+  const hasExpandedDisclosure = showScoreAudit || showCompensationDetails;
   // NodeHandles is React.memo'd; an inline object literal here would create a
   // new reference every render and defeat that memoization, unlike every
   // other caller of NodeHandles, which pass only a stable className.
   const handleStyle = useMemo(() => ({ backgroundColor: accentColor }), [accentColor]);
 
-  const openJobUrl = useCallback(() => {
-    const url = normalizeExternalHttpUrl(data.url);
-    if (url && window.electronAPI?.openExternal) {
-      window.electronAPI.openExternal(url);
+  const openJobUrl = useCallback(async () => {
+    const url = normalizeJobListingExternalUrl(data);
+    const diagnostic = summarizeJobListingUrl(data, url);
+    EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} raw=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} target=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
+    if (!url || !window.electronAPI?.openExternal) {
+      EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`);
+      addToast('No safe job-listing link is available for this card.', 'error');
+      return;
     }
-  }, [data.url]);
+    try {
+      await window.electronAPI.openExternal(url);
+      EventLogger.log(`[JobCard] external-link dispatched id=${id} target=${diagnostic.targetRoute}`);
+    } catch (error) {
+      const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
+      EventLogger.log(`[JobCard] external-link failed id=${id} target=${diagnostic.targetRoute} reason=${reason}`);
+      addToast('Could not open the job listing. Please try again.', 'error');
+    }
+  }, [id, data, addToast]);
 
   const openResearchSource = useCallback((rawUrl) => {
     const url = normalizeExternalHttpUrl(rawUrl);
@@ -673,7 +714,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         canvasFilePath,
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
-          location: data.location, salary: data.salary, url: data.url,
+          // New Google rows keep the direct Apply-on URL in `url`; legacy
+          // cards may only retain Google’s internal identity. Materialize the
+          // same safe, user-facing target as the card’s Open Listing action so
+          // the generated application bundle never embeds a brittle share URL.
+          location: data.location, salary: data.salary, url: normalizeJobListingExternalUrl({
+            title: data.title,
+            company: data.company,
+            location: data.location,
+            url: data.url,
+            googleCardUrl: data.googleCardUrl,
+          }),
           source: data.source, posted: data.posted, language: data.language,
         },
         careerData,
@@ -711,6 +762,33 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         const liveSettlement = queuedLocalApplicationSettlement(node, queued.localJob, expectedPriorLocalApplication);
         return liveSettlement.action === 'persist' ? { localApplication: queued.localJob } : null;
       });
+      // updateGlobal applies this guarded patch against React's live store, so
+      // the pre-write settlement above is not enough authority to retire the
+      // prior handoff. Another update can win between the two checks. Confirm
+      // that the replacement is the card's actual current pointer before
+      // deleting the old private workspace; if React has not committed within
+      // these turns, preserve it rather than risking a destructive cleanup.
+      let replacementPersisted = false;
+      for (let attempt = 0; attempt < 3 && !replacementPersisted; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        replacementPersisted = getLiveJobCard(idRef.current)?.data?.localApplication?.id === queued.localJob.id;
+      }
+      const replacedLocalApplication = replacedLocalApplicationForCleanup(
+        expectedPriorLocalApplication,
+        queued.localJob,
+        replacementPersisted,
+      );
+      if (replacedLocalApplication) {
+        try {
+          await window.electronAPI.discardLocalApplication?.({
+            jobId: replacedLocalApplication.id,
+            canvasFilePath: replacedLocalApplication.canvasFilePath || canvasFilePath,
+          });
+          EventLogger.log(`[LocalAI] cleaned replaced handoff job=${replacedLocalApplication.id} replacement=${queued.localJob.id}`);
+        } catch (cleanupError) {
+          EventLogger.error(`[LocalAI] Could not clean replaced handoff job=${replacedLocalApplication.id}:`, cleanupError);
+        }
+      }
       if (isMountedRef.current) {
         setLocalApplication(queued.localJob);
         setApplicationLaunchPrompt(queued.prompt || '');
@@ -735,7 +813,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, getLiveJobCard, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, getLiveJobCard, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
 
   return (
     <div
@@ -749,11 +827,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div
           className="shrink-0 mt-0.5 w-[52px] h-10 rounded-lg flex flex-col items-center justify-center leading-none"
           style={{ backgroundColor: accentColor + '20', color: accentColor }}
-          title={`Hiring fit: ${score}%. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
-          aria-label={`Hiring fit ${score} percent. A comparative evidence-based score, not a statistical probability or guaranteed outcome.`}
+          title={`Evidence-based hiring-fit score: ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
+          aria-label={`Evidence-based hiring-fit score ${score} out of 100. This is a comparative assessment, not a probability or guaranteed outcome.`}
         >
           <span className="text-[9px] font-medium uppercase tracking-wide">Hiring fit</span>
-          <span className="mt-0.5 text-xs font-bold">{score}%</span>
+          <span className="mt-0.5 text-xs font-bold">{score}/100</span>
         </div>
         <div className="flex-1 min-w-0 pr-6 relative">
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
@@ -795,7 +873,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           </span>
         )}
         {data.posted && <span className="text-white/20">{data.posted}</span>}
-        {data.url && (
+        {(data.url || data.googleCardUrl) && (
           <button
             onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
             className="ml-auto -my-1 p-1 text-white/30 hover:text-white/70 transition-colors"
@@ -878,85 +956,116 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         )}
       </div>
 
-      {/* AI match justification — the full text from the scorer is preserved; we
-          clamp it so every card keeps a consistent height, and let the user click
-          to expand and read it all (then click again to collapse). */}
-      {data.reasoning && (
+      {/* This is deliberately a structured audit disclosure, not model prose.
+          It remains useful for older cards: they can say that no verified audit
+          was saved without turning an old narrative into new evidence. */}
+      <div className="border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           type="button"
-          className={`nodrag block w-full px-3 py-1.5 text-left text-white/45 text-xs leading-relaxed border-t border-white/5 cursor-pointer hover:text-white/60 focus-visible:text-white/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-300/70 transition-colors ${showFullReasoning ? '' : 'line-clamp-3'}`}
-          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left text-xs text-white/60 hover:bg-white/[0.035] hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-300/70 transition-colors"
           onClick={(e) => {
             e.stopPropagation();
-            const nextExpanded = !showFullReasoning;
-            setShowFullReasoning(nextExpanded);
-            EventLogger.log(`[JobCard] reasoning ${nextExpanded ? 'expanded' : 'collapsed'} id=${id}`);
+            const nextExpanded = !showScoreAudit;
+            setShowScoreAudit(nextExpanded);
+            EventLogger.log(`[JobCard] score audit ${nextExpanded ? 'expanded' : 'collapsed'} id=${id}`);
           }}
-          aria-expanded={showFullReasoning}
-          title={showFullReasoning ? 'Show less' : 'Show full reasoning'}
+          aria-expanded={showScoreAudit}
+          aria-controls={`job-score-audit-${id}`}
         >
-          {data.reasoning}
+          <span className="min-w-0">
+            <span className="block font-medium">Why this score?</span>
+            <span className="mt-0.5 block truncate text-[10px] font-normal text-white/35">
+              {compactAuditSummary(hiringFitAudit)}
+            </span>
+          </span>
+          <ChevronDown size={14} className={`shrink-0 transition-transform ${showScoreAudit ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
-      )}
 
-      {showFullReasoning && hiringFitAudit && (
-        <div className="px-3 pb-2.5 text-[11px] leading-snug text-white/50 border-t border-white/5" aria-label="Hiring fit audit">
-          {hiringFitAudit.strengths.items.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-emerald-300/70">Grounded strengths</div>
-              <ul className="mt-1 space-y-0.5">
-                {hiringFitAudit.strengths.items.map((strength) => <li key={strength}>• {strength}</li>)}
-              </ul>
-              {hiringFitAudit.strengths.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.strengths.overflow} more</div>}
-            </div>
-          )}
-          {hiringFitAudit.materialGaps.not_documented.items.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-sky-300/75">Evidence to confirm ({hiringFitAudit.materialGaps.not_documented.total})</div>
-              <ul className="mt-1 space-y-0.5">
-                {hiringFitAudit.materialGaps.not_documented.items.map(({ requirement }) => <li key={requirement}>• {evidenceConfirmationQuestion(requirement)}</li>)}
-              </ul>
-              {hiringFitAudit.materialGaps.not_documented.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.not_documented.overflow} more to confirm</div>}
-            </div>
-          )}
-          {hiringFitAudit.materialGaps.contradicted.items.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-rose-300/75">Documented conflicts ({hiringFitAudit.materialGaps.contradicted.total})</div>
-              <ul className="mt-1 space-y-0.5">
-                {hiringFitAudit.materialGaps.contradicted.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
-              </ul>
-              {hiringFitAudit.materialGaps.contradicted.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.contradicted.overflow} more documented conflicts</div>}
-            </div>
-          )}
-          {hiringFitAudit.materialGaps.unclear.items.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-amber-300/75">Unclear evidence ({hiringFitAudit.materialGaps.unclear.total})</div>
-              <ul className="mt-1 space-y-0.5">
-                {hiringFitAudit.materialGaps.unclear.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
-              </ul>
-              {hiringFitAudit.materialGaps.unclear.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.unclear.overflow} more unclear items</div>}
-            </div>
-          )}
-          {hiringFitAudit.materialGaps.review.items.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-white/50">Evidence to review ({hiringFitAudit.materialGaps.review.total})</div>
-              <ul className="mt-1 space-y-0.5">
-                {hiringFitAudit.materialGaps.review.items.map(({ requirement }) => <li key={requirement}>• {requirement}</li>)}
-              </ul>
-              {hiringFitAudit.materialGaps.review.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.materialGaps.review.overflow} more to review</div>}
-            </div>
-          )}
-          {(hiringFitAudit.materialGaps.not_documented.total > 0 || hiringFitAudit.materialGaps.unclear.total > 0) && (
-            <div className="mt-2 text-white/40">Add any omitted relevant experience to your career data and rescore; the assessment can change.</div>
-          )}
-          {(hiringFitAudit.confidence || hiringFitAudit.calibrated) && (
-            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-white/40">
-              {hiringFitAudit.confidence && <span>Assessment confidence: {hiringFitAudit.confidence}</span>}
-              {hiringFitAudit.calibrated && <span>Score calibrated: {hiringFitAudit.calibrated.rawScore}% → {hiringFitAudit.calibrated.adjustedScore}%</span>}
-            </div>
-          )}
-        </div>
-      )}
+        {showScoreAudit && (
+          <div id={`job-score-audit-${id}`} className="px-3 pb-2.5 text-[11px] leading-snug text-white/50" aria-label="Evidence-based hiring-fit audit">
+            {!hiringFitAudit?.isAudited ? (
+              <div className="mt-1.5 text-white/45">
+                No verified requirement audit is available for this saved score. It is shown for continuity, not as a probability.
+              </div>
+            ) : (
+              <>
+                {hiringFitAudit.directStrengths.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-emerald-300/70">Direct strengths ({hiringFitAudit.directStrengths.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.directStrengths.items.map((strength) => <li key={strength}>• {strength}</li>)}
+                    </ul>
+                    {hiringFitAudit.directStrengths.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.directStrengths.overflow} more</div>}
+                  </div>
+                )}
+                {hiringFitAudit.adjacentMatches.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-sky-300/75">Adjacent / transferable matches ({hiringFitAudit.adjacentMatches.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.adjacentMatches.items.map((match) => <li key={match}>• {match}</li>)}
+                    </ul>
+                    {hiringFitAudit.adjacentMatches.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.adjacentMatches.overflow} more</div>}
+                  </div>
+                )}
+                {hiringFitAudit.verifiedGaps.notDocumented.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-sky-300/75">Not documented in career data ({hiringFitAudit.verifiedGaps.notDocumented.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.verifiedGaps.notDocumented.items.map((gap) => <li key={gap}>• {gap}</li>)}
+                    </ul>
+                    {hiringFitAudit.verifiedGaps.notDocumented.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.verifiedGaps.notDocumented.overflow} more</div>}
+                  </div>
+                )}
+                {hiringFitAudit.verifiedGaps.contradicted.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-rose-300/75">Documented conflicts ({hiringFitAudit.verifiedGaps.contradicted.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.verifiedGaps.contradicted.items.map((gap) => <li key={gap}>• {gap}</li>)}
+                    </ul>
+                    {hiringFitAudit.verifiedGaps.contradicted.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.verifiedGaps.contradicted.overflow} more</div>}
+                  </div>
+                )}
+                {hiringFitAudit.verifiedGaps.unclear.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-amber-300/75">Inconclusive evidence ({hiringFitAudit.verifiedGaps.unclear.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.verifiedGaps.unclear.items.map((gap) => <li key={gap}>• {gap}</li>)}
+                    </ul>
+                    {hiringFitAudit.verifiedGaps.unclear.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.verifiedGaps.unclear.overflow} more</div>}
+                  </div>
+                )}
+                {hiringFitAudit.unverifiedItems.items.length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-white/50">Unverified / rejected assessment items ({hiringFitAudit.unverifiedItems.total})</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {hiringFitAudit.unverifiedItems.items.map((item) => <li key={item}>• {item}</li>)}
+                    </ul>
+                    {hiringFitAudit.unverifiedItems.overflow > 0 && <div className="mt-0.5 text-white/35">+{hiringFitAudit.unverifiedItems.overflow} more</div>}
+                  </div>
+                )}
+                {!hiringFitAudit.directStrengths.total && !hiringFitAudit.adjacentMatches.total && !hiringFitAudit.verifiedGapTotal && !hiringFitAudit.unverifiedItems.total && (
+                  <div className="mt-2 text-white/45">The audit found no displayable requirement rows.</div>
+                )}
+                {(hiringFitAudit.confidence || hiringFitAudit.coverage || hiringFitAudit.provenance) && (
+                  <div className="mt-2 pt-2 border-t border-white/5 space-y-1 text-white/40">
+                    {hiringFitAudit.confidence && <div>Assessment confidence: {hiringFitAudit.confidence}</div>}
+                    {hiringFitAudit.coverage && <div>Grounded coverage: {hiringFitAudit.coverage.groundedRequirementCount} of {hiringFitAudit.coverage.requirementCount} requirement{hiringFitAudit.coverage.requirementCount === 1 ? '' : 's'}</div>}
+                    {hiringFitAudit.provenance && (
+                      <div>
+                        {hiringFitAudit.provenance.modelScore !== null && <>AI-assigned score: {hiringFitAudit.provenance.modelScore}/100</>}
+                        {hiringFitAudit.provenance.modelScore !== null && hiringFitAudit.provenance.calibratedScore !== null && ' · '}
+                        {hiringFitAudit.provenance.calibratedScore !== null && hiringFitAudit.provenance.modelScore === hiringFitAudit.provenance.calibratedScore
+                          ? <>Validation: unchanged</>
+                          : hiringFitAudit.provenance.calibratedScore !== null && <>Evidence-calibrated score: {hiringFitAudit.provenance.calibratedScore}/100</>}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Job-specific context is persisted on this card, never merged into the
           source hub's career files. It remains available if this branch is

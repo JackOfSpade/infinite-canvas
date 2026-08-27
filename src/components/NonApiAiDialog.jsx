@@ -15,11 +15,14 @@ const stringifyValidationError = (value) => {
 const requestLabel = (request) => {
   if (!request) return 'AI response';
   const task = request.task || 'AI response';
+  const itemLabel = Number.isFinite(request.itemCount)
+    ? ` · ${request.itemCount} ${request.itemCount === 1 ? 'item' : 'items'}`
+    : '';
   if (Number.isFinite(request.batch) && Number.isFinite(request.batchTotal)) {
-    return `${task} · batch ${request.batch} of ${request.batchTotal}`;
+    return `${task} · batch ${request.batch} of ${request.batchTotal}${itemLabel}`;
   }
-  if (Number.isFinite(request.batch)) return `${task} · batch ${request.batch}`;
-  return task;
+  if (Number.isFinite(request.batch)) return `${task} · batch ${request.batch}${itemLabel}`;
+  return `${task}${itemLabel}`;
 };
 
 const attachmentName = (filePath) => String(filePath || '').split(/[/\\]/).filter(Boolean).pop() || 'Attachment';
@@ -390,7 +393,8 @@ export function NonApiAiDialog() {
                   const isWorking = submittingRequestIds.has(request.requestId)
                     || cancellingRequestIds.has(request.requestId)
                     || acceptedRequestIds.has(request.requestId);
-                  const label = Number.isFinite(request.batch) ? `Batch ${request.batch}` : `Prompt ${index + 1}`;
+                  const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
+                  const label = Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
                   return (
                     <button
                       key={request.requestId}

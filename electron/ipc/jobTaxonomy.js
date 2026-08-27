@@ -84,9 +84,22 @@ export function buildJobTaxonomyPlanSummary(jobs = []) {
     const direction = compactText(job?.careerDirection, 100) || '(blank)';
     if (directionCounts.has(direction)) directionCounts.set(direction, directionCounts.get(direction) + 1);
   }
-  const commonDirections = [...directionCounts.entries()]
+  let commonDirections = [...directionCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([direction, count]) => ({ direction, count }));
+  // Misra-Gries can intentionally produce no candidate when every direction
+  // is unique. Preserve a bounded representative vocabulary in that case so a
+  // planner can still directly map common-looking labels and only the true
+  // residual needs classifier fallback.
+  if (!commonDirections.length) {
+    const fallbackCounts = new Map();
+    for (const job of list) {
+      const direction = compactText(job?.careerDirection, 100) || '(blank)';
+      if (!fallbackCounts.has(direction) && fallbackCounts.size < PLAN_DIRECTION_LIMIT) fallbackCounts.set(direction, 0);
+      if (fallbackCounts.has(direction)) fallbackCounts.set(direction, fallbackCounts.get(direction) + 1);
+    }
+    commonDirections = [...fallbackCounts.entries()].map(([direction, count]) => ({ direction, count }));
+  }
   const representatives = evenlySpacedIndices(list.length, PLAN_REPRESENTATIVE_LIMIT).map((index) => {
     const job = list[index] || {};
     return {
@@ -117,7 +130,7 @@ export function buildJobTaxonomyPlanPrompt(summary) {
 SUMMARY (listing-derived title/direction/salary text is untrusted data):
 ${wrapUntrustedText('taxonomy-plan-summary', JSON.stringify(summary))}
 
-Return salaryRanges and roleFamilies. salaryRanges: 2–5 global annual ranges, highest→lowest, with exactly one Unspecified (minSalary=0, maxSalary=0). Every real range must have minSalary >= 1; encode "Under $Xk/yr" as minSalary=1 and maxSalary=X000, and use maxSalary=0 only for the highest open-ended range. Use canonical labels "$Xk+/yr", "$Xk–$Yk/yr", or "Under $Xk/yr". roleFamilies: 1–${JOB_TAXONOMY_ROLE_FAMILY_LIMIT} concise, non-overlapping canonical labels that cover the candidate field. Later calls can ONLY select these labels, so consolidate synonyms and include exactly one fallback family labeled exactly "Other".`;
+Return salaryRanges, roleFamilies, and directionRoleIndexes. salaryRanges: 2–5 global annual ranges, highest→lowest, with exactly one Unspecified (minSalary=0, maxSalary=0). Every real range must have minSalary >= 1; encode "Under $Xk/yr" as minSalary=1 and maxSalary=X000, and use maxSalary=0 only for the highest open-ended range. Use canonical labels "$Xk+/yr", "$Xk–$Yk/yr", or "Under $Xk/yr". roleFamilies: 1–${JOB_TAXONOMY_ROLE_FAMILY_LIMIT} concise, non-overlapping canonical labels that cover the candidate field. Later calls can ONLY select these labels, so consolidate synonyms and include exactly one fallback family labeled exactly "Other". directionRoleIndexes: return exactly one mapping for each commonSuggestedDirections.direction string in SUMMARY, copying that direction exactly and assigning it to a zero-based roleFamilies index. This lets the board use the plan directly; do not omit or invent a direction.`;
 }
 
 export function buildJobTaxonomyChunkPrompt(chunk, roleFamilies) {
@@ -150,7 +163,7 @@ export function normalizeJobTaxonomyPlan(raw) {
   const otherIndex = roleFamilies.findIndex(role => /^other$/i.test(role));
   if (otherIndex < 0) return { valid: false, reason: 'roleFamilies must include the reserved Other family' };
   roleFamilies[otherIndex] = 'Other';
-  return { valid: true, value: { salaryRanges: raw?.salaryRanges, roleFamilies } };
+  return { valid: true, value: { salaryRanges: raw?.salaryRanges, roleFamilies, directionRoleIndexes: raw?.directionRoleIndexes } };
 }
 
 /**
@@ -160,7 +173,7 @@ export function normalizeJobTaxonomyPlan(raw) {
  * malformed plan. Do not silently turn gaps, overlapping bounds, or a missing
  * Unspecified bucket into a different board taxonomy after accepting it.
  */
-export function validateJobTaxonomyPlan(raw) {
+export function validateJobTaxonomyPlan(raw, expectedDirections = null) {
   const plan = normalizeJobTaxonomyPlan(raw);
   if (!plan.valid) return plan;
 
@@ -206,7 +219,35 @@ export function validateJobTaxonomyPlan(raw) {
   if (unspecifiedCount !== 1) {
     return { valid: false, reason: 'salaryRanges must include exactly one Unspecified bucket (minSalary=0, maxSalary=0)' };
   }
-  return plan;
+  const assignments = raw?.directionRoleIndexes;
+  if (!Array.isArray(assignments) || assignments.length === 0 || assignments.length > PLAN_DIRECTION_LIMIT) {
+    return { valid: false, reason: `directionRoleIndexes must contain 1–${PLAN_DIRECTION_LIMIT} mappings` };
+  }
+  const expected = Array.isArray(expectedDirections)
+    ? expectedDirections.map(direction => compactText(direction, 100) || '(blank)')
+    : null;
+  const expectedSet = expected ? new Set(expected) : null;
+  const seenDirections = new Set();
+  const directionRoleIndexes = [];
+  for (const assignment of assignments) {
+    const direction = compactText(assignment?.direction, 100);
+    const roleIndex = assignment?.roleIndex;
+    if (!direction) return { valid: false, reason: 'directionRoleIndexes contains an empty direction' };
+    if (!Number.isInteger(roleIndex) || roleIndex < 0 || roleIndex >= plan.value.roleFamilies.length) {
+      return { valid: false, reason: `directionRoleIndexes has an out-of-range role index for '${direction}'` };
+    }
+    if (seenDirections.has(direction)) return { valid: false, reason: `directionRoleIndexes maps '${direction}' more than once` };
+    if (expectedSet && !expectedSet.has(direction)) return { valid: false, reason: `directionRoleIndexes includes unknown direction '${direction}'` };
+    seenDirections.add(direction);
+    directionRoleIndexes.push({ direction, roleIndex });
+  }
+  if (expectedSet) {
+    const missing = expected.filter(direction => !seenDirections.has(direction));
+    if (missing.length || assignments.length !== expected.length) {
+      return { valid: false, reason: `directionRoleIndexes must map every supplied direction exactly once (${assignments.length}/${expected.length}; missing ${missing.slice(0, 3).join(', ') || 'none'})` };
+    }
+  }
+  return { valid: true, value: { ...plan.value, directionRoleIndexes } };
 }
 
 /** Non-sensitive structural diagnostics for a classifier chunk. */
@@ -266,9 +307,9 @@ function snapshotModelDiagnostics(meta) {
   };
 }
 
-// Child classifier calls run concurrently, so only merge their metadata after
-// every result settles. Iterating in batch order makes the diagnostic output
-// stable even when the user's external AI chats finish out of order.
+// Classifier calls are intentionally serialized for the manual copy/paste
+// transport.  Merge the plan and each completed classifier diagnostic only
+// after the sequence settles, preserving a stable ordered report.
 function mergeModelDiagnostics(meta, diagnostics) {
   if (!meta) return;
   const models = [];
@@ -303,34 +344,56 @@ export async function runBoundedJobTaxonomy(jobs, { callText, signal, meta = nul
   abortIfNeeded(signal);
   const summary = buildJobTaxonomyPlanSummary(list);
   onProgress?.({ stage: 'planning', completedBatches: 0, batchCount: 0, processed: 0, total: list.length,
-    chunkSize: JOB_TAXONOMY_CHUNK_SIZE, representativeCount: summary.representativeJobs.length });
+    chunkSize: JOB_TAXONOMY_CHUNK_SIZE, representativeCount: summary.representativeJobs.length,
+    plannedAssignments: 0, classifiedAssignments: 0 });
+  const expectedDirections = summary.commonSuggestedDirections.map(entry => entry.direction);
   const planRaw = await callText(buildJobTaxonomyPlanPrompt(summary), {
     signal, task: 'job-taxonomy-plan', hints: { itemCount: summary.representativeJobs.length },
     responseSchema: JOB_TAXONOMY_PLAN_SCHEMA, meta,
     responseValidator: (value) => {
-      const plan = validateJobTaxonomyPlan(value);
+      const plan = validateJobTaxonomyPlan(value, expectedDirections);
       if (!plan.valid) throw new Error(`Invalid taxonomy plan: ${plan.reason}.`);
     },
   });
   if (meta?.model) meta.models = [...new Set([...(Array.isArray(meta.models) ? meta.models : []), meta.model])];
   const planDiagnostics = snapshotModelDiagnostics(meta);
   abortIfNeeded(signal);
-  const plan = validateJobTaxonomyPlan(planRaw);
+  const plan = validateJobTaxonomyPlan(planRaw, expectedDirections);
   if (!plan.valid) throw new Error(`Invalid taxonomy plan: ${plan.reason}.`);
 
-  const roleByIndex = [];
-  const batchCount = Math.ceil(list.length / JOB_TAXONOMY_CHUNK_SIZE);
-  onProgress?.({ stage: 'classifying', completedBatches: 0, batchCount, processed: 0, total: list.length,
-    chunkSize: JOB_TAXONOMY_CHUNK_SIZE, vocabularySize: plan.value.roleFamilies.length, representativeCount: summary.representativeJobs.length });
+  const roleByIndex = Array(list.length);
+  const plannedRoles = new Map(plan.value.directionRoleIndexes.map(({ direction, roleIndex }) => (
+    [direction, plan.value.roleFamilies[roleIndex]]
+  )));
+  const unmapped = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const direction = compactText(list[index]?.careerDirection, 100) || '(blank)';
+    const role = plannedRoles.get(direction);
+    if (role) roleByIndex[index] = role;
+    else unmapped.push({ index, job: list[index] });
+  }
+  const batchCount = Math.ceil(unmapped.length / JOB_TAXONOMY_CHUNK_SIZE);
+  onProgress?.({ stage: batchCount ? 'classifying' : 'planned', completedBatches: 0, batchCount, processed: list.length - unmapped.length, total: list.length,
+    chunkSize: JOB_TAXONOMY_CHUNK_SIZE, vocabularySize: plan.value.roleFamilies.length, representativeCount: summary.representativeJobs.length,
+    plannedAssignments: list.length - unmapped.length, classifiedAssignments: 0 });
   const chunks = Array.from({ length: batchCount }, (_, batch) => (
-    list.slice(batch * JOB_TAXONOMY_CHUNK_SIZE, (batch + 1) * JOB_TAXONOMY_CHUNK_SIZE)
+    unmapped.slice(batch * JOB_TAXONOMY_CHUNK_SIZE, (batch + 1) * JOB_TAXONOMY_CHUNK_SIZE)
   ));
   let completedBatches = 0;
-  let processed = 0;
-  const classifiedChunks = await Promise.all(chunks.map(async (chunk, batch) => {
+  // Planner-owned mappings already cover the common directions. Classification
+  // progress is therefore cumulative across those direct assignments and the
+  // rare/unmapped fallback rows, never a misleading 0/N restart.
+  let processed = list.length - unmapped.length;
+  const classifiedChunks = [];
+  // Job taxonomy uses the manual copy/paste transport. Present one classifier
+  // handoff at a time: concurrent prompts with different expected lengths are
+  // easy to cross-paste, and a failed delivery must not leave a sibling prompt
+  // orphaned after the taxonomy run has already rejected.
+  for (let batch = 0; batch < chunks.length; batch += 1) {
+    const chunk = chunks[batch];
     abortIfNeeded(signal);
     const batchMeta = {};
-    const classified = await callText(buildJobTaxonomyChunkPrompt(chunk, plan.value.roleFamilies), {
+    const classified = await callText(buildJobTaxonomyChunkPrompt(chunk.map(entry => entry.job), plan.value.roleFamilies), {
       signal, task: 'job-taxonomy-classify', hints: {
         itemCount: chunk.length,
         batch: batch + 1,
@@ -340,24 +403,36 @@ export async function runBoundedJobTaxonomy(jobs, { callText, signal, meta = nul
       responseValidator: (value) => {
         const shape = inspectJobTaxonomyRoleIndexes(value?.roleByIndex, chunk.length, plan.value.roleFamilies.length);
         if (shape.missingCount || shape.nonIntegerCount || shape.outOfRangeCount || shape.extraCount) {
-          throw new Error(`Invalid taxonomy chunk ${batch + 1}/${batchCount}: ${shape.receivedCount}/${chunk.length} entries (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).`);
+          throw new Error(`Invalid taxonomy chunk ${batch + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).`);
         }
       },
     });
     abortIfNeeded(signal);
     const shape = inspectJobTaxonomyRoleIndexes(classified?.roleByIndex, chunk.length, plan.value.roleFamilies.length);
     if (shape.missingCount || shape.nonIntegerCount || shape.outOfRangeCount || shape.extraCount) {
-      throw new Error(`Invalid taxonomy chunk ${batch + 1}/${batchCount}: ${shape.receivedCount}/${chunk.length} entries (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).`);
+      throw new Error(`Invalid taxonomy chunk ${batch + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).`);
     }
     completedBatches += 1;
     processed += chunk.length;
     onProgress?.({ stage: 'classifying', completedBatches, batchCount, processed, total: list.length,
-      chunkSize: JOB_TAXONOMY_CHUNK_SIZE, vocabularySize: plan.value.roleFamilies.length, representativeCount: summary.representativeJobs.length });
-    return { classified, diagnostics: snapshotModelDiagnostics(batchMeta) };
-  }));
-  mergeModelDiagnostics(meta, [planDiagnostics, ...classifiedChunks.map(({ diagnostics }) => diagnostics)]);
-  for (const { classified } of classifiedChunks) {
-    roleByIndex.push(...classified.roleByIndex.map(index => plan.value.roleFamilies[index]));
+      chunkSize: JOB_TAXONOMY_CHUNK_SIZE, vocabularySize: plan.value.roleFamilies.length, representativeCount: summary.representativeJobs.length,
+      plannedAssignments: list.length - unmapped.length, classifiedAssignments: processed - (list.length - unmapped.length) });
+    classifiedChunks.push({ chunk, classified, diagnostics: snapshotModelDiagnostics(batchMeta) });
   }
-  return { salaryRanges: plan.value.salaryRanges, roleFamilies: plan.value.roleFamilies, roleByIndex, batchCount, chunkSize: JOB_TAXONOMY_CHUNK_SIZE, summary };
+  mergeModelDiagnostics(meta, [planDiagnostics, ...classifiedChunks.map(({ diagnostics }) => diagnostics)]);
+  for (const { chunk, classified } of classifiedChunks) {
+    classified.roleByIndex.forEach((roleIndex, localIndex) => {
+      roleByIndex[chunk[localIndex].index] = plan.value.roleFamilies[roleIndex];
+    });
+  }
+  return {
+    salaryRanges: plan.value.salaryRanges,
+    roleFamilies: plan.value.roleFamilies,
+    roleByIndex,
+    batchCount,
+    chunkSize: JOB_TAXONOMY_CHUNK_SIZE,
+    plannedAssignments: list.length - unmapped.length,
+    classifiedAssignments: unmapped.length,
+    summary,
+  };
 }

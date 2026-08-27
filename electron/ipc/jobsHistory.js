@@ -169,7 +169,7 @@ function appearsToBeSameListing(first, duplicate) {
  * the worst case is one extra over-show against legacy CSV rows.
  */
 export function dedupKeysFor(item) {
-  const url = normUrl(item?.url);
+  const url = normUrl(item?.url || item?.googleCardUrl);
   if (url) return [`u:${url}`];
   const keys = [];
   const title = normText(item?.title);
@@ -372,7 +372,7 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
         company: String(job.company || ''),
         title: String(job.title || ''),
         location: String(job.location || ''),
-        url: String(job.url || ''),
+        url: String(job.url || job.googleCardUrl || ''),
       });
     }
 

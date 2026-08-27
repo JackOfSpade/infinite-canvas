@@ -146,6 +146,8 @@ export default [
       assert(bucketHandler.includes('taxonomyChunksCompleted: taxonomyProgress.completedBatches')
         && bucketHandler.includes('taxonomyChunkCount: taxonomyProgress.batchCount')
         && bucketHandler.includes('taxonomyVocabularySize: taxonomyProgress.vocabularySize')
+        && bucketHandler.includes('taxonomyPlannedAssignments: taxonomyProgress.plannedAssignments')
+        && bucketHandler.includes('taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments')
         && !bucketHandler.includes('taxonomyChunksCompleted: result?.batchCount'),
       'successful bucketing telemetry retains bounded-run progress instead of reading orchestration fields stripped by taxonomy sanitization');
       return { ordering: ['bucket', 'taxonomy', 'compensation', 'build'], exactNodeProgress: true, transientCleanup: true };

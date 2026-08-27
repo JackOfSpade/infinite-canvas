@@ -29,6 +29,9 @@ export function JobSearchDoneState({
   locked = false,
   // Action props
   onRerun,
+  // Reassesses the saved listings only; it does not scrape or run the
+  // duplicate/seen-job search path again.
+  onReanalyze = null,
   // Optional: drop the hub's career files (keeping its search settings) so fresh
   // ones can be dropped on the same module. The hub rests here after every
   // successful run, so without this the action is only reachable by burning a
@@ -113,7 +116,18 @@ export function JobSearchDoneState({
       )}
 
       {!locked && (
-        <div className="flex mt-2 w-full">
+        <div className="flex flex-col mt-2 w-full gap-1">
+          {onReanalyze && (
+            <button
+              onClick={onReanalyze}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-violet-500/15 text-violet-300/90 hover:bg-violet-500/25 text-[10px] transition-colors border border-violet-500/20"
+              title="Re-score the displayed jobs with the saved career profile; does not search or scrape again"
+            >
+              <RefreshCw size={9} />
+              Re-analyze Hiring Fit
+            </button>
+          )}
           <button
             onClick={onRerun}
             onPointerDown={(e) => e.stopPropagation()}

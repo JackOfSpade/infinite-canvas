@@ -231,6 +231,7 @@ export function resolveManualSourceStopReason({
   earlyExit = false,
   aborted = false,
   sourceSkipped = false,
+  detailEnrichmentFailed = false,
   hitPerSourceCap = false,
   hitPageCap = false,
   hitEmptyPage = false,
@@ -239,6 +240,11 @@ export function resolveManualSourceStopReason({
 } = {}) {
   if (sourceSkipped) return 'blocked';
   if (aborted) return 'aborted';
+  // A detail-card failure is an internal scraper failure, not a user action.
+  // `earlyExit` remains the legacy umbrella for several exits, but reporting
+  // this one as `user-done` hid the actual cause in both the source trail and
+  // the bug report.
+  if (detailEnrichmentFailed) return 'detail-enrichment-failed';
   // `earlyExit` has historically meant a user-done / source-local stop, not
   // necessarily an AbortSignal. Keep that public result enum stable; callers
   // pass `aborted` only for an actual cancelled signal.
@@ -527,6 +533,41 @@ export function descriptionPanelRetryAllowed(sourceId) {
   return sourceId !== 'glassdoor';
 }
 
+function normalizedApplySource(value) {
+  return String(value || '')
+    .replace(/^apply on\s+/i, '')
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/gi, '')
+    .toLowerCase();
+}
+
+/**
+ * Pick the direct posting link from Google's active Jobs detail panel.
+ * Google can offer several mirrors; prefer the provider named by the list
+ * card's "via …" label, then fall back to the first safe non-Google target.
+ */
+export function selectGoogleApplyUrl(candidates, preferredSource = '') {
+  const valid = [];
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const label = String(candidate?.label || '').replace(/\s+/g, ' ').trim();
+    if (!/^apply on\b/i.test(label)) continue;
+    try {
+      const url = new URL(String(candidate?.href || ''));
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+      const host = url.hostname.toLowerCase().replace(/\.$/, '');
+      if (/(^|\.)google\.[a-z.]+$/.test(host)) continue;
+      for (const key of ['utm_campaign', 'utm_source', 'utm_medium']) url.searchParams.delete(key);
+      valid.push({
+        url: url.href,
+        source: normalizedApplySource(label),
+      });
+    } catch { /* ignore malformed provider hrefs */ }
+  }
+  if (valid.length === 0) return '';
+  const preferred = normalizedApplySource(preferredSource);
+  return (preferred && valid.find(item => item.source === preferred)?.url) || valid[0].url;
+}
+
 /**
  * Produce the stable DOM target for each card-click description attempt.
  *
@@ -538,11 +579,12 @@ export function buildDescriptionCardTargets(jobs, sourceId) {
   const cfg = DESC_CONFIGS[sourceId];
   if (!cfg) return [];
   return (Array.isArray(jobs) ? jobs : []).map((job, index) => {
+    const identityUrl = sourceId === 'google' ? (job?.googleCardUrl || job?.url) : job?.url;
     const rawKey = (cfg.keyField && job?.[cfg.keyField])
       ? job[cfg.keyField]
       : cfg.keyRegex
-        ? job?.url?.match(new RegExp(cfg.keyRegex))?.[1]
-        : job?.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
+        ? identityUrl?.match(new RegExp(cfg.keyRegex))?.[1]
+        : identityUrl?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
     let key = rawKey || '';
     if (key && cfg.keyDecode) {
       try { key = decodeURIComponent(key); } catch { key = ''; }
@@ -560,10 +602,22 @@ export function buildDescriptionCardTargets(jobs, sourceId) {
 export function buildPhysicalCardWalkPlan(extractedJobs, selectedJobs) {
   const extracted = Array.isArray(extractedJobs) ? extractedJobs : [];
   const selected = Array.isArray(selectedJobs) ? selectedJobs : [];
-  const ordinals = new Map(extracted.map((job, index) => [job, index + 1]));
+  // Resolve preparation normalizes/tag-copies rows before selecting the
+  // persisted deferred subset. Prefer stable provider identity so those copies
+  // retain their original DOM ordinal instead of clicking selected index N as
+  // physical card N after age/history/recovery filtering.
+  const ordinalsByKey = new Map();
+  extracted.forEach((job, index) => {
+    const key = sourceJobKey(job);
+    if (key && !ordinalsByKey.has(key)) ordinalsByKey.set(key, index + 1);
+  });
+  const ordinalsByReference = new Map(extracted.map((job, index) => [job, index + 1]));
   return {
     physicalTotal: extracted.length,
-    physicalIndexes: selected.map(job => ordinals.get(job) ?? null),
+    physicalIndexes: selected.map((job) => {
+      const key = sourceJobKey(job);
+      return (key ? ordinalsByKey.get(key) : null) ?? ordinalsByReference.get(job) ?? null;
+    }),
   };
 }
 
@@ -641,6 +695,23 @@ export function glassdoorPanelResponseIdentity({ sourceId = '', status = null, u
 
 export function isGlassdoorPanelRateLimitResponse(input = {}) {
   return glassdoorPanelResponseIdentity(input)?.status === 429;
+}
+
+/**
+ * Google Jobs loads selected cards through an async callback. Google redirects
+ * an exhausted session to /sorry/ with HTTP 429; that is a source throttle,
+ * not evidence that the result-card selector became stale.
+ */
+export function isGoogleDescriptionPanelRateLimitResponse({ sourceId = '', status = null, url = '' } = {}) {
+  if (sourceId !== 'google' || Number(status) !== 429) return false;
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'google.com' && !host.endsWith('.google.com')) return false;
+    return /^\/async\/callback\/?$/i.test(parsed.pathname) || /^\/sorry\//i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 /** Read a heading from Google's active detail region, never a left-list card. */
@@ -3116,6 +3187,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   // not let that external throttle masquerade as stale selectors.
   let glassdoorPanelRateLimit = null;
   let glassdoorPanelHttpFailure = null;
+  let googlePanelRateLimit = null;
   const pendingGlassdoorPanelKeys = new Set();
   const glassdoorPanelResponseDetails = new Map();
   const glassdoorPanelResponseListener = (response) => {
@@ -3154,6 +3226,47 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     } catch { /* response/frame can disappear during a teardown */ }
   };
   if (sourceId === 'glassdoor') page.on('response', glassdoorPanelResponseListener);
+  const googlePanelResponseListener = (response) => {
+    if (sourceId !== 'google' || googlePanelRateLimit) return;
+    try {
+      const status = response.status();
+      const url = response.url();
+      if (isGoogleDescriptionPanelRateLimitResponse({ sourceId, status, url })) {
+        googlePanelRateLimit = { status, url: url.slice(0, 240), observedAt: Date.now() };
+      }
+    } catch { /* response/frame can disappear during a teardown */ }
+  };
+  if (sourceId === 'google') page.on('response', googlePanelResponseListener);
+  try {
+  const stopForGooglePanelRateLimit = async (startIndex, key = '') => {
+    if (!googlePanelRateLimit) return false;
+    panelRateLimitCount++;
+    const rateLimit = googlePanelRateLimit;
+    rememberCardWalkFailure(startIndex + 1, key, 'panel-http-429');
+    recordManualScraperTelemetry({
+      phase: 'detail-panel-rate-limit', sourceId, srcName: overlayBase.srcName,
+      itemIndex: startIndex + 1, itemTotal: enhanced.length,
+      key: String(key).slice(0, 80), reason: 'http-429', status: rateLimit.status,
+      url: rateLimit.url,
+    }, { updateActive: false });
+    for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+      enhanced[unresolvedIndex] = {
+        ...enhanced[unresolvedIndex],
+        descriptionDeferredReason: 'description-rate-limited',
+      };
+    }
+    descWarning ||= {
+      code: 'description-rate-limited', severity: 'block',
+      evidence: `Google returned HTTP 429 while loading a job detail panel after ${expandedCount} of ${enhanced.length} listing(s) were expanded. The scraper stopped detail clicks to avoid extending the throttle.`,
+      suggestion: 'Wait a few minutes, then click Solve to retry the unresolved descriptions. The collected list rows were retained, and only rows with full descriptions will be scored.',
+    };
+    await updateOverlay(page, {
+      ...overlayBase,
+      count: totalSoFar,
+      status: 'Google rate-limited detail loading — keeping list results and stopping card clicks.',
+    }).catch(() => {});
+    return true;
+  };
   const takeGlassdoorPanelResponseDetail = async (key, waitMs = 900) => {
     if (sourceId !== 'glassdoor') return null;
     const deadline = Date.now() + waitMs;
@@ -3273,6 +3386,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     }
 
     const job = enhanced[i];
+    if (await stopForGooglePanelRateLimit(i, cardTargets[i]?.key)) break;
     const physicalIndex = Number.isFinite(Number(physicalIndexes[i]))
       ? Number(physicalIndexes[i])
       : i + 1;
@@ -3427,6 +3541,24 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         consecutiveClickFails++;
         consecutivePanelTimeouts = 0;
         if (consecutiveClickFails >= DESC_STALE_THRESHOLD) {
+          if (sourceId === 'google') {
+            // Google retains extracted rows after its virtualized list has
+            // unmounted their cards. Those rows are still valid search results;
+            // stop only this enrichment pass and leave a retry-later warning,
+            // rather than misreporting a source abort as user-done.
+            for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+              enhanced[unresolvedIndex] = {
+                ...enhanced[unresolvedIndex],
+                descriptionDeferredReason: 'description-card-unavailable',
+              };
+            }
+            descWarning ||= {
+              code: 'description-card-unavailable', severity: 'block',
+              evidence: `Google Jobs virtualized result cards before their detail panels could be opened. ${expandedCount} of ${enhanced.length} listing(s) received full descriptions; the remaining cards were retained but deferred.`,
+              suggestion: 'Click Solve after the Google list has settled to retry the unresolved descriptions. No selector change is indicated by this virtualized-list miss.',
+            };
+            break;
+          }
           await abortWithError(
             `${consecutiveClickFails} consecutive card-click failures for ${sourceId} — card element not found in DOM (key="${key}")`,
             `The card selector for ${sourceId} description expansion may have changed. Check DESC_CONFIGS['${sourceId}'] cardAttr/cardIdPrefix/cardHrefKey in electron/ipc/browser/manualScraper.js.`,
@@ -3479,6 +3611,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         while (Date.now() < dl) {
           await new Promise(r => setTimeout(r, DESC_CHANGE_POLL_MS));
           if (glassdoorPanelRateLimit) return null;
+          if (googlePanelRateLimit) return null;
           // A delayed prompt should not turn into a misleading panel timeout.
           const pendingModal = await dismissBlockingGlassdoorModal(i + 1, physicalIndex, 'await-panel');
           if (pendingModal?.detected && pendingModal.action === 'failed') {
@@ -3549,6 +3682,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       const glassdoorResponseDetail = sourceId === 'glassdoor'
         ? await takeGlassdoorPanelResponseDetail(key)
         : null;
+      if (await stopForGooglePanelRateLimit(i, key)) break;
       if (glassdoorPanelRateLimit) {
         pendingGlassdoorPanelKeys.delete(key);
         glassdoorPanelResponseDetails.delete(key);
@@ -3689,6 +3823,25 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         panelText = null;
       }
 
+      // Google's list-card URL is only an internal htidocid carrier. Once the
+      // verified detail panel is active, capture the real employer/aggregator
+      // destination exposed by its "Apply on …" controls. This becomes the
+      // user-facing job.url while googleCardUrl remains the click/dedup key.
+      if (sourceId === 'google' && !selectionAssessment.selectionMismatch) {
+        const applyCandidates = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]'))
+          .filter(anchor => !anchor.closest('[aria-hidden="true"]'))
+          .filter(anchor => !anchor.closest('[data-share-url]'))
+          .filter(anchor => !!(anchor.offsetWidth || anchor.offsetHeight || anchor.getClientRects().length))
+          .map(anchor => ({
+            href: anchor.href || '',
+            label: (anchor.getAttribute('title') || anchor.textContent || '').replace(/\s+/g, ' ').trim(),
+          }))
+          .filter(candidate => /^Apply on\b/i.test(candidate.label)))
+          .catch(() => []);
+        const applyUrl = selectGoogleApplyUrl(applyCandidates, job.applySource);
+        if (applyUrl) enhanced[i] = { ...enhanced[i], url: applyUrl };
+      }
+
       let gotDescription = false;
       if (sourceId === 'glassdoor') {
         const merged = mergeGlassdoorPanelDetail(job, {
@@ -3702,7 +3855,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         gotDescription = !!merged.descriptionSource;
         if (gotDescription) expandedCount++;
       } else if (panelText) {
-        enhanced[i] = { ...job, snippet: panelText };
+        enhanced[i] = { ...enhanced[i], snippet: panelText };
         prevPanelText = panelText;
         gotDescription = true;
         expandedCount++;
@@ -3801,7 +3954,6 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     strategy: 'list-card-panel',
     panelSelector: cfg.panelSelector,
   }, { updateActive: false });
-  if (sourceId === 'glassdoor') page.off('response', glassdoorPanelResponseListener);
 
   return {
     jobs: enhanced,
@@ -3815,6 +3967,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     panelHttpFailureCount,
     selectionMismatchCount,
   };
+  } finally {
+    if (sourceId === 'glassdoor') page.off('response', glassdoorPanelResponseListener);
+    if (sourceId === 'google') page.off('response', googlePanelResponseListener);
+  }
 }
 
 /**
@@ -3828,7 +3984,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
  * works directly with its Puppeteer page and therefore must not try to acquire
  * another browser or shared-profile lease.
  */
-export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal = null) {
+export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal = null, walkPlan = {}) {
   const list = Array.isArray(jobs) ? jobs : [];
   const srcName = SOURCE_LABELS[sourceId] || sourceId || 'Job source';
   const overlayBase = {
@@ -3837,7 +3993,7 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
     qLabel: 'Recovered results',
     qText: '',
   };
-  return expandDescriptions(page, list, sourceId, overlayBase, list.length, signal);
+  return expandDescriptions(page, list, sourceId, overlayBase, list.length, signal, walkPlan);
 }
 
 // ── Next-page clicker ─────────────────────────────────────────────────────────
@@ -3981,6 +4137,31 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     }
     await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
   }
+}
+
+/**
+ * Load the complete scroll-backed provider list inside an already-open Solve
+ * window. The generic captcha poll sees only Google's initially mounted ten
+ * cards; the ordinary source preloader must run before recovery decides which
+ * persisted deferred identities still need their detail panel opened.
+ */
+export async function preloadResolvedJobList(page, sourceId, extractorJS, signal = null) {
+  const srcName = SOURCE_LABELS[sourceId] || sourceId || 'Job source';
+  const overlayBase = {
+    srcLabel: 'Resolved source', srcName,
+    qLabel: 'Recovery', qText: 'Loading the full result list',
+  };
+  await preloadContent(page, sourceId, extractorJS, overlayBase, signal, {
+    maxPages: JOB_COLLECTION_PAGE_CEILING,
+    // Scroll until the provider count plateaus. The recovery pool intentionally
+    // omits age/history rows whose physical positions may be anywhere in the
+    // larger list, so its own size cannot be used as the reveal target.
+    jobsPerPlatform: Infinity,
+    existingJobs: 0,
+  });
+  if (signal?.aborted) return [];
+  const rows = await page.evaluate(extractorJS);
+  return Array.isArray(rows) ? rows : [];
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -4669,6 +4850,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
   manualScraperTelemetry.paused = false;
 
   let earlyExit = false;
+  let detailEnrichmentFailed = false;
   let platform  = null; // current per-platform browser bundle (see teardownCurrent)
   const teardownCurrent = async () => {
     if (platform) { await platform.teardown(); platform = null; }
@@ -5143,6 +5325,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
           if (descError) {
             if (!sourceSiteChangedWarning) sourceSiteChangedWarning = descError;
+            detailEnrichmentFailed = true;
             earlyExit = true;
             break;
           }
@@ -5280,6 +5463,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         earlyExit,
         aborted: !!signal?.aborted,
         sourceSkipped,
+        detailEnrichmentFailed,
         hitPerSourceCap,
         hitPageCap,
         hitEmptyPage,

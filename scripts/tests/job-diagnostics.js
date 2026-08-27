@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
@@ -10,12 +10,115 @@ import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMe
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { collapseEventBursts } from '../test-dependencies.js';
-import { buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
+import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification } from '../../electron/ipc/jobs.js';
 
 export default [
+{
+    name: 'job recovery diagnostics survive restart without in-memory pipeline telemetry',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-recovery-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'recovery-hub';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'));
+      try {
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-run.json'), JSON.stringify({
+          runId: 'interrupted-run', stage: 'gathered', lastUpdated: 1_700_000_000_000,
+          inputs: { nodeId },
+          sources: { google: { status: 'done' }, linkedin: { status: 'blocked' } },
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-staging.jsonl'),
+          `${JSON.stringify({ sourceId: 'google', job: { title: 'must never appear' } })}\n{torn`, 'utf8');
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId: 'interrupted-run', sourceHubId: nodeId, canvasFilePath: canvas,
+          createdAt: 1_700_000_000_100, jobs: [{ title: 'must never appear' }],
+          descriptionRecoveryJobs: [{}], profile: { workHistory: [{}], skills: ['x', 'y'] },
+          prompt: 'manual AI prompt must never appear', response: 'manual AI response must never appear',
+        }), 'utf8');
+        fs.writeFileSync(analysisPaths.lastSuccessJsonPath, JSON.stringify({
+          runId: 'older-run', sourceHubId: 'deleted-hub', canvasFilePath: path.join(dir, 'other.json'),
+          createdAt: 1_699_000_000_000, jobs: [{ title: 'also private' }, {}], profile: { skills: [] },
+        }), 'utf8');
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(recovery.includes('stage **gathered**')
+          && recovery.includes('`google`=done, `linkedin`=blocked')
+          && recovery.includes('1 parseable row(s) · 1 torn/unparseable row(s)')
+          && recovery.includes('1 score-ready job(s) · 1 recovery-pool job(s)')
+          && recovery.includes('hub `recovery-hub` is present in this canvas')
+          && recovery.includes('⚠️ hub `deleted-hub` is not present in this canvas')
+          && recovery.includes('⚠️ canvas differs from this report'),
+        'recovery diagnostics retain stage, source/staging counts, and hub/canvas correlation after restart');
+        assert(!recovery.includes('must never appear') && !recovery.includes('also private'),
+          'recovery diagnostics never export raw job content');
+        assert(!recovery.includes('manual AI prompt') && !recovery.includes('manual AI response'),
+          'recovery diagnostics never export prompt or response text');
+
+        const base = {
+          description: 'Interrupted manual copy/paste job scoring.', nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        };
+        const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+        const focused = generateMarkdown({
+          ...base,
+          filterCode: 'RECOVERY',
+          // Mirrors the renderer after RECOVERY intentionally strips nodes.
+          nodes: [],
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false,
+            currentNodeIds: [nodeId],
+            omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+          },
+        }).markdown;
+        assert(full.includes('## Job Recovery Diagnostics') && focused.includes('## Job Recovery Diagnostics')
+          && focused.includes('Run manifest: parseable') && focused.includes('Current saved scrape: parseable')
+          && focused.includes('hub `recovery-hub` is present in this canvas')
+          && !focused.includes('⚠️ hub `recovery-hub` is not present in this canvas'),
+        'FULL and filtered RECOVERY render durable recovery facts with the deep hub index even when this process has no jobs telemetry');
+        return { stagedRows: 1, tornRows: 1 };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
+    name: 'FULL and JOBLINK reports expose broken Google URL shapes without query values',
+    run: () => {
+      const legacyUrl = 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=SecretOpaqueId%3D%3D#fpstate=tldetail&htivrt=jobs&htiq';
+      const jobData = {
+        source: 'google', title: 'AI Platform Architect', company: 'Aalo Atomics', location: 'Austin, TX',
+        url: legacyUrl, matchScore: 70,
+      };
+      const nodes = [
+        { id: 'job-card', type: 'jobcard', data: jobData },
+        { id: 'board', type: 'jobboard', data: { results: [{ ...jobData }] } },
+      ];
+      const base = {
+        description: 'Google listing links open a broken page.', nodes, edges: [], drawings: [],
+        frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      };
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({
+        ...base,
+        filterCode: 'JOBLINK',
+        filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: nodes.map(node => node.id), omittedSections: ['edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'] },
+      }).markdown;
+      for (const report of [full, focused]) {
+        const section = report.split('## Job Listing Link Diagnostics')[1]?.split('\n## ')[0] || '';
+        assert(section.includes('Unique job rows inspected: 1')
+          && section.includes('1 internal Google route(s) exposed as public')
+          && section.includes('1 legacy `ibp=htl;jobs`')
+          && section.includes('1 blank search query')
+          && section.includes('q=empty · htidocid=present'),
+        'FULL/JOBLINK must surface the structural Google link defect and dedupe card/board copies');
+        assert(!section.includes('SecretOpaqueId'),
+          'job-link diagnostics must never export opaque query/fragment values');
+      }
+      return { unique: 1, blankQuery: 1 };
+    },
+  },
 {
     name: 'Bug report file export keeps every routine node diagnostic row',
     run: () => {
@@ -28,7 +131,15 @@ export default [
       }));
       const payload = {
         description: 'Node export fidelity fixture.', nodes, edges: [], drawings: [],
-        frontEndState: {}, nodeInternals, nodeComponentStates: [], eventLogs: [],
+        frontEndState: {}, nodeInternals,
+        // Expanded score disclosures are deliberate audit state, so clipboard
+        // sampling must retain them even after the routine-card cap.
+        nodeComponentStates: [
+          { id: 'card0017', reasoningExpanded: true },
+          { id: 'card0018', scoreAuditExpanded: true },
+          { id: 'card0019', compensationExpanded: true },
+        ],
+        eventLogs: [],
       };
       const fileReport = generateMarkdown(payload).markdown;
       assert(nodes.every(node => fileReport.includes(`| \`${node.id}\``))
@@ -38,9 +149,12 @@ export default [
       const clipboardReport = generateMarkdown(payload, null, { maxChars: 1_000_000 }).markdown;
       assert(clipboardReport.includes('| `card0014`')
         && !clipboardReport.includes('| `card0015`')
-        && clipboardReport.includes('5 routine jobcard row(s) omitted to preserve the clipboard budget'),
-      'clipboard generation still samples routine cascade rows before applying its final character cap');
-      return { fileRows: nodes.length, clipboardRows: 15 };
+        && clipboardReport.includes('reasoningExpanded')
+        && clipboardReport.includes('scoreAuditExpanded')
+        && clipboardReport.includes('compensationExpanded')
+        && clipboardReport.includes('2 routine jobcard row(s) omitted to preserve the clipboard budget'),
+      'clipboard generation samples routine cards but retains every expanded hiring-fit disclosure as a flagged anomaly');
+      return { fileRows: nodes.length, clipboardRows: 18 };
     },
   },
 {
@@ -1662,32 +1776,82 @@ export default [
       const gap = scoreProperties.materialGaps.items;
       assert([
         'CANDIDATE CAREER EVIDENCE (primary citation source)', careerData,
-        'requirementAssessments', 'materialGaps', 'total professional tenure separate',
+        'requirementAssessments', 'materialGaps must include EVERY scored required or important professional requirement', 'total professional tenure separate',
         'valid workHistory roleIds',
-        'comparative hiring fit score', 'NOT a statistically calibrated prediction',
-        'full hiring process and management decision', 'preferred qualification is not automatically',
+        'comparative professional fit score', 'NOT a statistically calibrated prediction',
+        'preferred qualification is not automatically',
+        'NON-SCORING logistics', 'contribute ZERO penalty',
         'concise recount of the candidate\'s experience',
         'not documented in the supplied career data',
         'contradicted requires verbatim candidate evidence',
         'never infer contradiction from absence',
-      ].every(fragment => grounded.cachedPrefix.includes(fragment)) && grounded.careerData === careerData,
+      ].every(fragment => grounded.cachedPrefix.includes(fragment))
+        && grounded.cachedPrefix.includes('"materialGaps": [{')
+        && !grounded.cachedPrefix.includes('"experienceAssessment": {')
+        && grounded.careerData === careerData,
       'scoring prompt treats concise career data as bounded evidence, requires evidence-qualified gap coverage, and persists it for saved-scrape re-scores');
       assert(legacy.cachedPrefix.includes('only candidate evidence available for this legacy request'),
         'legacy direct score calls retain profile-only grounding instead of failing when career data is absent');
       assert(JOB_SCORING_SCHEMA.properties.scores.items.required.includes('requirementAssessments')
         && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('materialGaps')
-        && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('experienceAssessment')
+        && !JOB_SCORING_SCHEMA.properties.scores.items.required.includes('experienceAssessment')
         && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('confidence')
         && assessment.required.join('|') === 'requirementText|priority|jobEvidence|status|candidateEvidence|explanation'
-        && assessment.properties.status.enum.join('|') === 'direct|adjacent|not_documented|contradicted|unclear'
+        && assessment.properties.status.enum.join('|') === 'direct|adjacent'
+        && scoreProperties.requirementAssessments.minItems === 0
+        && scoreProperties.requirementAssessments.maxItems === 4
+        && assessment.properties.jobEvidence.maxLength === 220
         && gap.required.join('|') === 'requirementText|priority|jobEvidence|status|candidateEvidence|impact'
         && gap.properties.status.enum.join('|') === 'not_documented|contradicted|unclear'
         && scoreProperties.experienceAssessment.properties.categorySpecificExperience.items.required
           .join('|') === 'category|requiredMinimumYears|roleIds|years|candidateEvidence|jobEvidence|explanation'
         && RESUME_PARSE_SCHEMA.required.includes('workHistory')
         && RESUME_PARSE_SCHEMA.properties.workHistory.items.required.join('|') === 'id|title|employer|startDate|endDate',
-      'schema requires auditable requirement evidence, material gaps, separate experience assessment, and confidence');
+      'schema keeps a bounded decisive-evidence inventory while requiring complete compact hard-gap coverage and optional tenure');
       return { requiredScoreFields: JOB_SCORING_SCHEMA.properties.scores.items.required.length };
+    },
+  },
+  {
+    name: 'Job scoring: an all-gap job is schema-valid and calibrated from its complete compact gap inventory',
+    run: () => {
+      const job = { title: 'Platform Engineer', snippet: 'Required: Kubernetes production operations.' };
+      const allGap = {
+        index: 0,
+        matchScore: 94,
+        reasoning: 'Kubernetes operations are not documented.',
+        careerDirection: 'Platform Engineering',
+        requirementAssessments: [],
+        materialGaps: [{
+          requirementText: 'Kubernetes production operations',
+          priority: 'required',
+          jobEvidence: 'Required: Kubernetes production operations.',
+          status: 'not_documented',
+          candidateEvidence: '',
+          impact: 'Core operating requirement is not documented in the supplied career data.',
+        }],
+        confidence: 'medium',
+      };
+      assertResponseMatchesSchema({ scores: [allGap] }, JOB_SCORING_SCHEMA, { provider: 'test', task: 'job-scoring' });
+      let unresolvedAssessmentRejected = false;
+      try {
+        assertResponseMatchesSchema({ scores: [{
+          ...allGap,
+          requirementAssessments: [{
+            requirementText: 'Kubernetes production operations', priority: 'required',
+            jobEvidence: 'Required: Kubernetes production operations.', status: 'not_documented',
+            candidateEvidence: '', explanation: 'Not documented in the supplied career data.',
+          }],
+        }] }, JOB_SCORING_SCHEMA, { provider: 'test', task: 'job-scoring' });
+      } catch {
+        unresolvedAssessmentRejected = true;
+      }
+      assert(unresolvedAssessmentRejected, 'unresolved hard requirements are schema-invalid in the compact non-gap assessment sample');
+      const calibrated = calibratedScoreForJob(allGap, job, { candidateText: 'Built React interfaces for internal tools.', candidateRoles: [] });
+      assert(calibrated?.matchScore === 79
+        && calibrated.fitAssessment.requirementRows.length === 1
+        && calibrated.fitAssessment.materialGaps.length === 1,
+      'a complete grounded hard-gap inventory remains a valid audited score without inventing a non-gap assessment row');
+      return { score: calibrated.matchScore, gaps: calibrated.fitAssessment.materialGaps.length };
     },
   },
   {
@@ -1792,6 +1956,7 @@ export default [
       const { snapshot } = buildJobAnalysisSnapshot({
         jobs: full,
         descriptionRecoveryJobs: [...full, ...deferred],
+        descriptionRecoveryState: { google: { consecutiveNoMatchPasses: 1 } },
         profile: { titles: ['Engineer'] },
         nodeId: 'linkedin-recovery-v2',
         targetRole: 'Engineer',
@@ -1800,6 +1965,7 @@ export default [
       assert(snapshot.version === 2
         && snapshot.jobs.length === 6
         && snapshot.descriptionRecoveryJobs.length === 54
+        && snapshot.descriptionRecoveryState.google.consecutiveNoMatchPasses === 1
         && snapshotDescriptionRecoveryJobs(snapshot).length === 54
         && snapshotDescriptionRecoveryJobs({ jobs: full }).length === 6,
       'snapshot v2 keeps the scoring-safe rows separate from the source recovery universe');
@@ -1931,14 +2097,56 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['glassdoor-resolve-diagnostics']), null, null);
         assert(report.includes('closed: user-closed') && report.includes('extractor: never-extracted'),
           'job pipeline report retains the manual-close/extractor outcome');
-        assert(report.includes('final URL: `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Camera%20Operator`'),
-          'job pipeline report identifies whether Solve reached the expected Glassdoor results URL');
+        assert(report.includes('final URL: `https://www.glassdoor.com/Job/jobs.htm`')
+          && !report.includes('sc.keyword=Camera%20Operator'),
+          'job pipeline report identifies the Solve destination without exporting query parameters');
         assert(report.includes('final title: "Jobs in United States | Glassdoor"'),
           'job pipeline report retains the final page title to distinguish a results page from login/challenge pages');
       } finally {
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report redacts long provider query URLs from bounded evidence samples',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = structuredClone(telemetry);
+      const opaque = 'opaque-provider-token-should-not-be-exported';
+      const longQuery = `${opaque}-${'x'.repeat(3_000)}`;
+      try {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, {
+          nodeId: 'redacted-evidence-fixture',
+          windowId: null,
+          search: {
+            ts: Date.now(), queries: 1, raw: 12, deduped: 12,
+            ageDropped: 0, historyDropped: 0, kept: 0,
+            descriptionEvidenceDropped: {
+              total: 12, deferred: 0, empty: 12, short: 0,
+              bySource: { google: { deferred: 0, empty: 12, short: 0 } },
+              samples: Array.from({ length: 12 }, (_, index) => ({
+                source: 'google', title: `Deferred ${index}`, length: 0,
+                url: `https://www.google.com/search?htidocid=${index}&token=${longQuery}`,
+              })),
+            },
+          },
+          resolves: {}, resumeAttempts: {}, scoring: null, scoringHeartbeat: null,
+          pipeline: null, bucketing: null, compensation: null, history: null,
+          linkedinEnrich: [], linkedinCooldown: null, indeedSession: null,
+        });
+        const report = buildJobsPipelineSnapshot(new Set(['redacted-evidence-fixture']), null, null);
+        assert(report.includes('https://www.google.com/search')
+          && !report.includes('?htidocid=')
+          && !report.includes(opaque)
+          && report.length < 8_000,
+        'bounded job evidence preserves source-path provenance without letting long query strings consume the clipboard budget');
+      } finally {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, saved);
+      }
+      return { samples: 12, queryTokens: 'redacted' };
     },
   },
 {
@@ -1957,7 +2165,10 @@ export default [
             relevanceRejected: ['Loss Prevention Associate', 'Armed Driver/Messenger'],
             ageDropped: 0, historyDropped: 0, kept: 4,
             enrichment: {
-              attempted: 4, enriched: 3, empty: 1,
+              attempted: 4, targeted: 6, enriched: 3, completeTotal: 7,
+              providerRowsLoaded: 20, empty: 1, unavailable: 1,
+              recoveryRecommendation: 'skip', consecutiveNoMatchPasses: 2,
+              unavailableSamples: [{ title: 'Expired Architect', url: 'https://jobs/unavailable-jd' }],
               emptySamples: [{ title: 'Security Officer', url: 'https://jobs/missing-jd' }],
             },
             diag: {
@@ -1969,9 +2180,13 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['resolved-quality-diagnostics']), null, null);
-        assert(report.includes('title-relevance-dropped 2')
+        assert(report.includes('score-safe returned 6')
+          && report.includes('title-relevance-dropped 2')
           && report.includes('Loss Prevention Associate')
-          && report.includes('Resolve detail enrichment: attempted 4 → full descriptions 3 → empty 1')
+          && report.includes('Resolve detail enrichment: attempted 4 of 6 deferred target(s) → recovered this attempt 3 → still empty 1')
+          && report.includes('provider rows loaded 20 · complete source total 7 · **not in current provider list 1**')
+          && report.includes('**Skip recommended after 2 unchanged full-list checks**')
+          && report.includes('unavailable now: "Expired Architect"')
           && report.includes('https://jobs/missing-jd')
           && report.includes('detail postprocess: completed 6'),
         'resolved-source diagnostics retain admission and detail-enrichment provenance');
@@ -2696,6 +2911,19 @@ export default [
           && !report.includes('stage complete · classification not started'),
         'job pipeline report makes successful bounded progress, salary placement, repair evidence, and taxonomy fallback cause visible');
 
+        telemetry.bucketing = {
+          ...telemetry.bucketing,
+          input: 24,
+          taxonomyChunkCount: 0,
+          taxonomyChunksCompleted: 0,
+          taxonomyPlannedAssignments: 24,
+          taxonomyClassifiedAssignments: 0,
+        };
+        report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
+        assert(report.includes('stage complete · classification not needed — planner assigned 24/24')
+          && !report.includes('stage complete · classification not started'),
+        'job pipeline report makes a complete planner-only taxonomy distinct from a taxonomy that has not reached classification');
+
         // A taxonomy provider may fail after scores are available.
         // Combine must abort transactionally: it may not create a renderer
         // fallback tree from the partial taxonomy input.
@@ -3303,46 +3531,59 @@ export default [
       const scoreCalls = search.split('window.electronAPI.scoreJobs({').slice(1);
       const snapshotWrites = search.split('saveJobAnalysisSnapshot?.({').slice(1);
       assert(card.includes('Hiring fit')
-        && card.includes('{score}%')
-        && card.includes('comparative evidence-based score, not a statistical probability or guaranteed outcome')
-        && !card.includes('{score}/100'),
-      'job cards show Hiring fit as a percentage with an honest outcome caveat');
-      assert(card.includes('function compactHiringFitAudit(data)')
-        && card.includes("assessment.auditStatus !== 'audited'")
-        && card.includes('showFullReasoning && hiringFitAudit')
-        && card.includes('Grounded strengths')
-        && card.includes('function materialGapStatus(row)')
-        && card.includes("status === 'not_documented' || status === 'missing'")
-        && card.includes('Evidence to confirm ({hiringFitAudit.materialGaps.not_documented.total})')
-        && card.includes('Do you have experience with ${cleanRequirement} that is not yet included in your career data?')
-        && card.includes('Documented conflicts ({hiringFitAudit.materialGaps.contradicted.total})')
-        && card.includes('Unclear evidence ({hiringFitAudit.materialGaps.unclear.total})')
-        && card.includes('Evidence to review ({hiringFitAudit.materialGaps.review.total})')
-        && card.includes('Add any omitted relevant experience to your career data and rescore; the assessment can change.')
+        && card.includes('{score}/100')
+        && card.includes('not a probability or guaranteed outcome')
+        && !card.includes('{score}%'),
+      'job cards show Hiring fit as an evidence score out of 100 without probability notation');
+      assert(card.includes('function compactHiringFitAudit(assessment)')
+        && card.includes('Why this score?')
+        && card.includes('compactAuditSummary(hiringFitAudit)')
+        && card.includes('showScoreAudit &&')
+        && card.includes('Direct strengths ({hiringFitAudit.directStrengths.total})')
+        && card.includes('Adjacent / transferable matches ({hiringFitAudit.adjacentMatches.total})')
+        && card.includes('Not documented in career data ({hiringFitAudit.verifiedGaps.notDocumented.total})')
+        && card.includes('Documented conflicts ({hiringFitAudit.verifiedGaps.contradicted.total})')
+        && card.includes('Inconclusive evidence ({hiringFitAudit.verifiedGaps.unclear.total})')
+        && card.includes('Unverified / rejected assessment items ({hiringFitAudit.unverifiedItems.total})')
         && card.includes('Assessment confidence: {hiringFitAudit.confidence}')
-        && card.includes('Score calibrated: {hiringFitAudit.calibrated.rawScore}')
+        && card.includes('Grounded coverage: {hiringFitAudit.coverage.groundedRequirementCount}')
+        && card.includes('AI-assigned score: {hiringFitAudit.provenance.modelScore}/100')
+        && card.includes('Validation: unchanged')
         && card.includes('assessment.confidence?.effective')
         && !card.includes('assessment.confidence?.reported')
         && !card.includes('rawModelReasoning'),
-      'expanded cards distinguish confirmable omitted evidence, documented conflicts, unclear evidence, and legacy review items; they disclose only normalized audited content, effective confidence, and score calibration');
-      assert(board.includes('Hiring fit ≥{scoreThreshold}%')
+      'expanded cards disclose normalized direct and transferable matches, distinct verified gaps, safe limitations, confidence, coverage, and score provenance');
+      assert(board.includes('Hiring fit ≥{scoreThreshold}/100')
+        && board.includes('`≥${scoreThreshold}/100`')
+        && board.includes('{scoreRangeMin}/100')
         && board.includes('Min hiring fit')
         && board.includes('aria-label="Minimum hiring fit"'),
-      'board filters use hiring-fit terminology and expose an accessible minimum-fit label');
+      'board filters use the same out-of-100 hiring-fit semantics and expose an accessible minimum-fit label');
       assert(tree.includes('Excellent hiring fit (85–100)')
         && tree.includes('Partial hiring fit (40–64)')
         && tree.includes('Limited hiring fit (0–39)')
         && !tree.includes('Excellent fit (85–100%)'),
       'tree bands express hiring-fit ranges without percentage/probability notation');
-      assert(scoreCalls.length === 2 && scoreCalls.every(call => call.includes('careerData:')),
-        'every renderer score handoff includes raw career evidence alongside the compact profile');
+      assert(scoreCalls.length === 3 && scoreCalls.every(call => call.includes('careerData:')),
+        'every renderer score handoff, including saved-job re-analysis, includes raw career evidence alongside the compact profile');
       assert(snapshotWrites.length >= 3 && snapshotWrites.every(call => call.includes('careerData: data.careerData')),
         'saved-scrape snapshots retain raw career evidence for resumed scoring');
       assert(search.includes('const careerData = snapshot?.careerData || data.careerData || \'\';')
-        && search.includes('if (!snapshot || !profile || savedJobs.length === 0)')
+        && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
         && search.includes('careerData,\n          jobs: savedJobs'),
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
+      assert(search.includes('function isSavedAnalysisForCurrentHub')
+        && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath)')
+        && search.includes('isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath)')
+        && !search.includes('if (!SKIP_AI_FOR_TESTING) return;'),
+      'saved-scrape recovery is available for production manual-AI runs only when both the source hub and canvas match');
+      assert(search.includes('jobRunId: snapshot.runId || null')
+        && search.includes('completeRun: !!snapshot.runId'),
+      'saved-scrape scoring completes only its matching staged search run and never clears a tokenless re-analysis snapshot');
+      assert(search.includes("|| !hasReusableCareerProfile")
+        && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id]"),
+      'saved-scrape recovery never reintroduces a profile deliberately cleared from this hub');
       assert(tree.includes('requirementAssessments: job.requirementAssessments')
         && tree.includes('fitAssessment: job.fitAssessment')
         && serialization.includes("'requirementAssessments'")
@@ -3351,6 +3592,80 @@ export default [
       assert(snapshot.includes('Hiring-fit bands') && snapshot.includes('not a guaranteed hiring outcome'),
         'job diagnostics use hiring-fit terminology rather than an interview forecast');
       return { scoreCalls: scoreCalls.length, snapshotWrites: snapshotWrites.length };
+    },
+  },
+{
+    name: 'Job Search: re-analyze hiring fit reuses saved jobs without searching or losing them on failure',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
+      const handlerStart = search.indexOf('const handleReanalyze = useCallback') >= 0
+        ? search.indexOf('const handleReanalyze = useCallback')
+        : search.indexOf('const handleReanalyzeHiringFit = useCallback');
+      const handlerEnd = search.indexOf('// Drop the hub\'s career identity', handlerStart);
+      assert(handlerStart >= 0 && handlerEnd > handlerStart,
+        'the search hub owns a dedicated saved-results re-analysis handler');
+      const handler = search.slice(handlerStart, handlerEnd);
+
+      // A score-only retry belongs on the completed hub. It must not be an
+      // unlocked-looking control while a module is locked, and it must remain
+      // distinct from Re-run Search (which intentionally starts a scrape).
+      assert((doneState.includes('onReanalyze') || doneState.includes('onReanalyzeHiringFit'))
+        && doneState.includes('Re-analyze Hiring Fit')
+        && /!locked\s*&&/.test(doneState),
+      'done hubs expose Re-analyze Hiring Fit only when the module is unlocked');
+      assert(search.includes('onReanalyze={handleReanalyze}')
+        || search.includes('onReanalyzeHiringFit={handleReanalyzeHiringFit}'),
+        'the completed search hub wires its re-analysis action into the done state');
+
+      // The saved cards are the scoring input. A re-analysis must never call a
+      // search endpoint or the board-owned seen-history writer; otherwise the
+      // original cards can be history-suppressed before their fit is refreshed.
+      assert((/existingScoredJobs\s*=\s*Array\.isArray\((?:data|liveData)\.scoredJobs\)/.test(handler)
+        && /jobsToReanalyze/.test(handler)
+        && /scoreJobs\(\{[\s\S]*?jobs:\s*jobsToReanalyze/.test(handler))
+        || (/previousJobs\s*=\s*Array\.isArray\(liveData\.scoredJobs\)/.test(handler)
+          && /runScoringAndSpawn\(\{[\s\S]*?jobs:\s*previousJobs\.map\(withoutHiringFitFields\)/.test(handler)),
+      're-analysis submits a prepared copy of the currently displayed scored jobs directly to scoreJobs');
+      const scoreCallAt = handler.indexOf('window.electronAPI.scoreJobs({');
+      const sanitizerStart = search.indexOf('function withoutHiringFitFields');
+      const sanitizerEnd = search.indexOf('function reanalysisRestorePatch', sanitizerStart);
+      const preparation = scoreCallAt >= 0
+        ? handler.slice(0, scoreCallAt)
+        : search.slice(sanitizerStart, sanitizerEnd);
+      assert(['matchScore', 'reasoning', 'careerDirection', 'fitAssessment', 'requirementAssessments']
+        .every(field => preparation.includes(field)),
+      're-analysis strips prior hiring-fit-derived fields before submission so a replacement placeholder cannot retain stale assessment evidence');
+      assert(!handler.includes('searchJobs(')
+        && !handler.includes('appendJobsHistory')
+        && !handler.includes('append-jobs-history')
+        && !handler.includes('startProcessing')
+        && !handler.includes('runPipeline'),
+      're-analysis neither scrapes nor appends the existing listings to seen history');
+
+      // Never blank the durable input before the replacement score result is
+      // accepted. On a request error or a user cancellation, the old cards
+      // must remain available and the hub must settle back to done instead of
+      // trapping the user in a scoring state.
+      assert(!/scoredJobs:\s*\[\s*\]/.test(handler)
+        && (/scoreResult\.scoredJobs/.test(handler) || handler.includes('runScoringAndSpawn({'))
+        && /hubState:\s*'done'/.test(handler)
+        && /catch\s*\(/.test(handler),
+      're-analysis replaces scores only after success and restores done state without clearing old cards on failure/cancel');
+
+      // Board freshness is driven by the module fingerprint. A changed score
+      // and a changed user-visible assessment must both make Re-combine
+      // available after re-analysis; these are deliberately not a score sum.
+      const before = [{
+        title: 'AI Platform Architect', company: 'Aalo Atomics', url: 'https://example.test/job',
+        matchScore: 67, reasoning: 'Old fit explanation',
+      }];
+      const after = [{
+        ...before[0], matchScore: 79, reasoning: 'Professional-fit explanation without logistics',
+      }];
+      assert(moduleFingerprint(before) !== moduleFingerprint(after),
+        'a saved-job re-analysis changes the connected board fingerprint when fit output changes');
+      return { oldFingerprint: moduleFingerprint(before), newFingerprint: moduleFingerprint(after) };
     },
   },
 {
@@ -3641,6 +3956,74 @@ export default [
       assert(semantic.scores[0] === null && semantic.placeholderCount === 1,
         'an indexed but calibration-invalid row remains a final-null recovery candidate rather than a genuine score');
       return { missing: partial.missingIndices.length, semanticInvalid: semantic.placeholderCount };
+    },
+  },
+{
+    name: 'Manual job scoring: a partial long answer reaches a strict locally reindexed recovery handoff',
+    run: () => {
+      const candidateText = 'Built React interfaces for internal tools.';
+      const jobs = Array.from({ length: 15 }, (_, index) => ({
+        // Original search indexes are deliberately non-local. Every handoff
+        // produced by slimBatch presents its own local 0..N-1 index space.
+        index: 100 + index,
+        title: `Frontend Engineer ${index}`,
+        snippet: 'Required: React experience.',
+      }));
+      const scoreRow = (index) => ({
+        index,
+        matchScore: 80,
+        reasoning: 'Grounded React fit.',
+        careerDirection: 'Frontend Engineering',
+        requirementAssessments: [{
+          requirementText: 'React experience', priority: 'required',
+          jobEvidence: 'Required: React experience.', status: 'direct',
+          candidateEvidence: candidateText, explanation: 'Direct evidence.',
+        }],
+        materialGaps: [],
+        confidence: 'high',
+      });
+      const omitted = new Set([2, 9, 12, 14]);
+      const partialRows = Array.from({ length: 15 }, (_, index) => scoreRow(index))
+        .filter(row => !omitted.has(row.index));
+      const initial = validateJobScoringSubmission(
+        { scores: partialRows },
+        jobs,
+        { candidateText, candidateRoles: [], requireComplete: false },
+      );
+      assert(initial.responsePlan.missingIndices.join(',') === '2,9,12,14'
+        && initial.invalidIndices.length === 0,
+      'the attached 11/15 response shape must be accepted for targeted recovery, not mislabeled as four ungrounded rows');
+
+      const recoveryJobs = initial.responsePlan.missingIndices.map(index => jobs[index]);
+      const recovered = validateJobScoringSubmission(
+        { scores: recoveryJobs.map((_, localIndex) => scoreRow(localIndex)) },
+        recoveryJobs,
+        { candidateText, candidateRoles: [], requireComplete: true },
+      );
+      assert(recovered.responsePlan.missingIndices.length === 0
+        && recovered.invalidIndices.length === 0
+        && recovered.responsePlan.alignedScores.map(row => row.index).join(',') === '0,1,2,3',
+      'the four-job recovery uses the prompt-local 0..3 indexes even though its source jobs came from slots 2, 9, 12, and 14');
+      const merged = mergeRecoveredScoreRows(
+        initial.responsePlan.alignedScores,
+        initial.responsePlan.missingIndices,
+        recovered.responsePlan.alignedScores,
+      );
+      assert(merged.length === 15
+        && merged.every((row, index) => row?.index === index),
+      'locally indexed recovery rows are translated back to their parent slots before scored cards are built');
+
+      let strictFailure = null;
+      try {
+        validateJobScoringSubmission(
+          { scores: recoveryJobs.slice(0, 3).map((_, localIndex) => scoreRow(localIndex)) },
+          recoveryJobs,
+          { candidateText, candidateRoles: [], requireComplete: true },
+        );
+      } catch (error) { strictFailure = error; }
+      assert(strictFailure?.message.includes('missing score rows at index 3'),
+        'an incomplete final recovery stays pending with an accurate missing-row error');
+      return { acceptedInitialRows: partialRows.length, recoveryRows: recoveryJobs.length };
     },
   },
 {

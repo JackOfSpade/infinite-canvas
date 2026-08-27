@@ -254,6 +254,36 @@ export function migrateStaleJobHubInputLock(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Restore job hubs saved by the pre-v6 processing-state sanitizer (v6).
+ *
+ * An interrupted hiring-fit re-analysis retains its already-scored jobs and
+ * career identity, but older saves rewrote its transient `scoring` state to
+ * `empty`. That hid a real, recoverable result set behind the first-drop UI.
+ * Only heal this exact impossible-for-a-fresh-hub shape; an actually empty hub
+ * or a hub with orphaned results but no career identity remains untouched.
+ */
+export function migrateInterruptedJobHubResults(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    if (n.type !== 'jobhub' || n.data?.hubState !== 'empty') return n;
+    const d = n.data;
+    const hasResults = Array.isArray(d.scoredJobs) && d.scoredJobs.length > 0;
+    const hasCareerIdentity = !!(
+      (d.resumeProfile && typeof d.resumeProfile === 'object')
+      || (typeof d.careerData === 'string' && d.careerData.trim())
+      || d.filePath
+      || (Array.isArray(d.filePaths) && d.filePaths.some(Boolean))
+      || (Array.isArray(d.careerFilePaths) && d.careerFilePaths.some(Boolean))
+    );
+    if (!hasResults || !hasCareerIdentity) return n;
+    changed = true;
+    return { ...n, data: { ...d, hubState: 'done' } };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -282,6 +312,7 @@ const MIGRATIONS = [
   { version: 3, name: 'marketplacecard+createdAt', migrate: migrateMarketplaceCardCreatedAt, selfRecursive: false },
   { version: 4, name: 'jobhub-page-ceiling→all',  migrate: migrateJobHubPageCeiling,   selfRecursive: false },
   { version: 5, name: 'jobhub-stranded-input-lock', migrate: migrateStaleJobHubInputLock, selfRecursive: false },
+  { version: 6, name: 'jobhub-interrupted-results→done', migrate: migrateInterruptedJobHubResults, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;
@@ -446,6 +477,14 @@ export function sanitizeNodesForSave(nodes) {
     const isSellHub = n.type === 'sellhub';
     const isHub = isJobSearch || isSellHub;
     const hasTransientHubState = isHub && n.data && TRANSIENT_PROCESSING_HUB_STATES.includes(n.data.hubState);
+    // A scoring/queued hub can be a re-analysis of results that are already
+    // durable on the hub. The in-process restore callback is renderer-only, so
+    // on restart the safe terminal state is the previous done card, not an
+    // empty card that hides those same results. Fresh searches still have no
+    // scoredJobs and follow the normal empty-state recovery path below.
+    const hasPersistedJobResults = isJobSearch
+      && Array.isArray(n.data?.scoredJobs)
+      && n.data.scoredJobs.length > 0;
 
     // Hub-specific transient data fields. These are diagnostic / pending-flow
     // state generated within a single session — once the app restarts the
@@ -472,7 +511,7 @@ export function sanitizeNodesForSave(nodes) {
     let result = n;
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient) {
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
-      if (hasTransientHubState) cleanData.hubState = 'empty';
+      if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : 'empty';
       if (hasJobSearchTransient) {
         for (const k of JOBSEARCH_TRANSIENT_KEYS) delete cleanData[k];
       }

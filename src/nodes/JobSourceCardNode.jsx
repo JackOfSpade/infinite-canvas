@@ -214,6 +214,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
+          jobRunId,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
         });
       }

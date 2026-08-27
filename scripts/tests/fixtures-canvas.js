@@ -1,7 +1,9 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
+import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
+import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
 
-import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt } from '../test-dependencies.js';
+import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
 
 export default [
 {
@@ -168,9 +170,11 @@ export default [
         `Google card walk must emit every physical card exactly once, got ${jobs.length}/${cards.length}`);
       assert(jobs.map(job => job.title).join('|') === cards.map(([, title]) => title).join('|'),
         'Google card walk must preserve DOM order; never sample every Nth card');
-      const extractedCardIds = jobs.map(job => new URL(job.url).searchParams.get('htidocid'));
+      const extractedCardIds = jobs.map(job => new URL(job.googleCardUrl).searchParams.get('htidocid'));
       assert(extractedCardIds.join('|') === cards.map(([id]) => id).join('|'),
         'each extracted Google row must retain its card htidocid, including URL-encoded opaque IDs');
+      assert(jobs.every(job => job.url === '' && job.googleCardUrl && job.applySource.startsWith('Acme')),
+        'Google internal share routes must stay in googleCardUrl until the verified detail panel supplies a direct Apply-on URL');
       assert(extractedCardIds.every(id => dom.window.document.getElementById(id)),
         'each retained htidocid must resolve to the corresponding clickable list-card element');
       assert(new Set(jobs.map(sourceJobKey)).size === cards.length,
@@ -196,7 +200,26 @@ export default [
       assert(physicalPlan.physicalTotal === 6
         && physicalPlan.physicalIndexes.join(',') === '1,4,6',
       'a bounded card walk retains each selected job\'s physical DOM ordinal');
+      const copiedPlan = buildPhysicalCardWalkPlan(jobs, [{ ...jobs[0] }, { ...jobs[3] }, { ...jobs[5] }]);
+      assert(copiedPlan.physicalIndexes.join(',') === '1,4,6',
+        'a normalized/copied recovery row retains its provider-list ordinal by stable identity');
       return { cards: jobs.length, identities: extractedCardIds, virtualizedMisses: virtualized.missing.length };
+    },
+  },
+{
+    name: 'Google Jobs apply links: prefers the list-card provider and removes Google tracking',
+    run: () => {
+      const selected = selectGoogleApplyUrl([
+        { label: 'Apply on Indeed', href: 'https://example.indeed.test/viewjob?jk=1&utm_source=google_jobs_apply' },
+        { label: 'Apply on Canada Life Careers', href: 'https://jobs.example.test/roles/42?utm_campaign=google_jobs_apply&utm_medium=organic&keep=yes' },
+        { label: 'Apply on Google', href: 'https://www.google.com/search?udm=8' },
+        { label: 'Review employer', href: 'https://unsafe.example.test/not-an-apply-link' },
+      ], 'Canada Life Careers');
+      assert(selected === 'https://jobs.example.test/roles/42?keep=yes',
+        `Google Apply-on selection must prefer the card's via-provider and remove only Google tracking params (got ${selected})`);
+      assert(selectGoogleApplyUrl([{ label: 'Apply on Google', href: 'https://google.com/search?udm=8' }]) === '',
+        'Google internal routes must never be promoted to the public apply URL');
+      return { selected };
     },
   },
 {
@@ -218,7 +241,115 @@ export default [
       assert(activeTitle === '', 'a panel with no heading should stay unverified rather than falsely mismatching');
       return { text };
     },
-  },
+},
+{
+    name: 'Google Solve retains the persisted unresolved recovery pool when the visible slice is a duplicate',
+    run: () => {
+      const rawGoogleRows = 119;
+      const ageDropped = 12;
+      const complete = Array.from({ length: 24 }, (_, index) => ({
+        source: 'google', title: `Complete ${index}`, company: 'Acme', location: 'US',
+        url: `https://www.google.com/search?htidocid=complete-${index}`,
+        snippet: 'D'.repeat(500),
+      }));
+      const deferred = Array.from({ length: 83 }, (_, index) => ({
+        source: 'google', title: `Deferred ${index}`, company: 'Acme', location: 'US',
+        url: `https://www.google.com/search?htidocid=deferred-${index}`,
+        snippet: '', descriptionDeferredReason: 'description-rate-limited',
+      }));
+      // The visible resolve window returned only 10 rows that were already
+      // complete in the original 119-row source universe.
+      const resolved = reconcileResolvedDescriptionRecovery(
+        [...complete, ...deferred], 'google', complete.slice(0, 10),
+      );
+      const warning = buildResolvedDescriptionWarning('google', null, resolved.completeRows, resolved.emptyRows);
+      const initialMountedSlice = complete.slice(0, 10).map(job => ({ ...job, snippet: '' }));
+      const fullyRevealedProviderList = [...complete, ...deferred].map(job => ({
+        ...job, snippet: '', descriptionDeferredReason: undefined,
+      }));
+      const initialTargets = selectResolvedDescriptionRecoveryCandidates(
+        [...complete, ...deferred], 'google', initialMountedSlice,
+      );
+      const fullTargets = selectResolvedDescriptionRecoveryCandidates(
+        [...complete, ...deferred], 'google', fullyRevealedProviderList,
+      );
+      const partialPartition = partitionResolvedDescriptionRecoveryCandidates(
+        [...complete, ...deferred], 'google', [...complete, ...deferred.slice(0, 82)].map(job => ({
+          ...job, snippet: '', descriptionDeferredReason: undefined,
+        })),
+      );
+      const firstNoMatch = nextDescriptionRecoveryGuidance(null, {
+        unavailableRows: partialPartition.unavailable,
+        providerRowsLoaded: 119,
+        attempted: 0,
+        recovered: 0,
+        empty: 1,
+        completeTotal: 71,
+      });
+      const retryWarning = buildResolvedDescriptionWarning(
+        'google',
+        {
+          code: 'description-listing-unavailable',
+          evidence: 'One unresolved listing is absent from the fully loaded provider list.',
+          suggestion: 'The listing may have expired.',
+          recoveryGuidance: firstNoMatch.guidance,
+        },
+        complete,
+        deferred.slice(-1),
+      );
+      const secondNoMatch = nextDescriptionRecoveryGuidance(firstNoMatch.state, {
+        unavailableRows: partialPartition.unavailable,
+        providerRowsLoaded: 121,
+        attempted: 0,
+        recovered: 0,
+        empty: 1,
+        completeTotal: 71,
+      });
+      const skipWarning = buildResolvedDescriptionWarning(
+        'google',
+        {
+          code: 'description-listing-unavailable',
+          evidence: 'One unresolved listing is absent from the fully loaded provider list.',
+          suggestion: 'The listing may have expired.',
+          recoveryGuidance: secondNoMatch.guidance,
+        },
+        complete,
+        deferred.slice(-1),
+      );
+      const resetAfterRealAttempt = nextDescriptionRecoveryGuidance(secondNoMatch.state, {
+        unavailableRows: partialPartition.unavailable,
+        providerRowsLoaded: 121,
+        attempted: 1,
+        recovered: 0,
+        empty: 1,
+        completeTotal: 71,
+      });
+      assert(rawGoogleRows === complete.length + deferred.length + ageDropped
+        && resolved.recoveryJobs.length === 107
+        && resolved.completeRows.length === 24
+        && resolved.emptyRows.length === 83
+        && initialTargets.length === 0
+        && fullTargets.length === 83
+        && partialPartition.candidates.length === 82
+        && partialPartition.unavailable.length === 1
+        && partialPartition.unavailable[0].title === 'Deferred 82'
+        && retryWarning?.code === 'description-listing-unavailable'
+        && retryWarning?.shortLabel === 'Retry recommended'
+        && retryWarning?.actionLabel === 'Retry'
+        && retryWarning?.evidence === '"Deferred 82" was not found in the current Google results. Retry once more; if it is still missing, Skip will be recommended.'
+        && retryWarning?.suggestion === null
+        && secondNoMatch.guidance.recommendation === 'skip'
+        && skipWarning?.shortLabel === 'Skip recommended'
+        && skipWarning?.actionLabel === 'Check anyway'
+        && skipWarning?.evidence === '"Deferred 82" was not found in 2 consecutive checks. Skip is recommended, or choose Check anyway to retry.'
+        && skipWarning?.suggestion === null
+        && resetAfterRealAttempt.state.consecutiveNoMatchPasses === 0
+        && resetAfterRealAttempt.guidance.recommendation === 'retry'
+        && warning?.severity === 'block',
+      'a 119-raw / 24-complete / 83-unresolved Google run must retain its pool, ignore the duplicate mounted slice, and target all deferred identities after full reveal');
+      return { raw: rawGoogleRows, postAge: resolved.recoveryJobs.length, complete: resolved.completeRows.length, unresolved: resolved.emptyRows.length };
+    },
+},
 {
     name: 'Glassdoor descriptions stay on the list-card panel with exact job identity',
     run: () => {
@@ -313,6 +444,14 @@ export default [
         sourceId: 'glassdoor', status: 429,
         url: 'https://www.glassdoor.ca/api/search?query=architect',
       });
+      const googleCallback429 = isGoogleDescriptionPanelRateLimitResponse({
+        sourceId: 'google', status: 429,
+        url: 'https://www.google.com/sorry/index?continue=https://www.google.com/async/callback:8166',
+      });
+      const unrelatedGoogle429 = isGoogleDescriptionPanelRateLimitResponse({
+        sourceId: 'google', status: 429,
+        url: 'https://www.google.com/search?q=architect',
+      });
       const glassdoorInitialPacing = descriptionPanelPacing('glassdoor', 0);
       const glassdoorCheckpointPacing = descriptionPanelPacing('glassdoor', 8);
       const ordinaryPacing = descriptionPanelPacing('google', 8);
@@ -320,8 +459,8 @@ export default [
         'identical Glassdoor detail text may be accepted only after the active panel independently confirms the clicked title');
       assert(!staleRepeat.accepted && staleRepeat.reason === 'text-unchanged-unverified',
         'an unchanged stale Glassdoor panel must remain rejectable when its visible title is different');
-      assert(glassdoor429 && !unrelated429,
-        'only Glassdoor’s right-panel job-details HTTP 429 is a panel throttle; unrelated API failures must not halt the card walk');
+      assert(glassdoor429 && !unrelated429 && googleCallback429 && !unrelatedGoogle429,
+        'only known Glassdoor and Google detail-panel HTTP 429 responses are throttles; unrelated API failures must not halt the card walk');
       assert(glassdoorInitialPacing.requestDelayMs === 4500 && !glassdoorInitialPacing.checkpointDue
         && glassdoorInitialPacing.checkpointCooldownMs === 12000
         && glassdoorCheckpointPacing.checkpointDue && glassdoorCheckpointPacing.checkpointCooldownMs === 12000
@@ -647,6 +786,7 @@ export default [
     run: () => {
       const nodes = [
         { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old', rerunOutcome: 'no-new-results', rerunNotice: 'old notice' } },
+        { id: 'reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 3 }, data: { hubState: 'scoring', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], scoredJobs: [{ title: 'Saved result' }], resultCount: 1 } },
         { id: 'job', type: 'jobcard', position: { x: 1, y: 1 }, style: { opacity: 0.3, width: 180 }, data: { title: 'A', isDropTarget: true } },
         { id: 'paused-hub', type: 'jobhub', position: { x: 9, y: 9 }, data: { hubState: 'sources-ready', pendingJobs: [1], scrapeWarnings: [{ sourceId: 'indeed' }] } },
         { id: 'clean-source', type: 'jobsourcecard', position: { x: 2, y: 2 }, data: { persistedProgress: { status: 'done' } } },
@@ -660,13 +800,18 @@ export default [
         { id: 'marketplace-note', type: 'marketplacecard', position: { x: 8, y: 8 }, data: { platformId: 'ebay', notes: 'Lower price on Monday' } },
         { id: 'group', type: 'group', position: { x: 4, y: 4 }, data: { isDropTarget: true, canvasData: { nodes: [
           { id: 'inner-job', type: 'jobcard', position: { x: 0, y: 0 }, style: { opacity: 0.1 }, data: { title: 'Inner' } },
+          { id: 'inner-reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 2 }, data: { hubState: 'scoring', pendingJobs: [1], scoredJobs: [{ title: 'Nested saved result' }] } },
         ], edges: [], drawings: [] } } },
       ];
       const sanitized = sanitizeNodesForSave(nodes);
       const hub = sanitized.find(n => n.id === 'hub');
+      const reanalyzingHub = sanitized.find(n => n.id === 'reanalyzing-hub');
       const job = sanitized.find(n => n.id === 'job');
       assert(hub.data.hubState === 'empty', 'Serialization sanitizes transient state: active jobhub should reset to empty');
       assert(!('pendingJobs' in hub.data) && !('scrapeWarnings' in hub.data) && !('queuedModuleRun' in hub.data) && !('rerunOutcome' in hub.data) && !('rerunNotice' in hub.data), 'Serialization sanitizes transient state: jobhub transient buffers/notices should be stripped');
+      assert(reanalyzingHub.data.hubState === 'done' && reanalyzingHub.data.scoredJobs.length === 1
+        && !('pendingJobs' in reanalyzingHub.data) && !('scrapeWarnings' in reanalyzingHub.data) && !('queuedModuleRun' in reanalyzingHub.data),
+      'Serialization restores interrupted re-analysis to done while stripping its transient buffers');
       assert(!('isDropTarget' in job.data) && job.style.opacity === undefined && job.style.width === 180, 'Serialization sanitizes transient state: node transient UI state should be stripped');
       assert(!sanitized.some(n => n.id === 'clean-source'), 'Serialization sanitizes transient state: clean source card should be dropped');
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
@@ -677,6 +822,9 @@ export default [
       assert(pausedHub.data.hubState === 'sources-ready' && Array.isArray(pausedHub.data.pendingJobs), 'Serialization: sources-ready hub keeps its paused run context');
       assert(sanitized.find(n => n.id === 'marketplace-note').data.notes === 'Lower price on Monday', 'Serialization: marketplace listing notes should persist');
       assert(sanitized.find(n => n.id === 'group').data.canvasData.nodes[0].style === undefined, 'Serialization sanitizes transient state: nested nodes should be sanitized');
+      const nestedReanalyzingHub = sanitized.find(n => n.id === 'group').data.canvasData.nodes.find(n => n.id === 'inner-reanalyzing-hub');
+      assert(nestedReanalyzingHub.data.hubState === 'done' && nestedReanalyzingHub.data.scoredJobs.length === 1 && !('pendingJobs' in nestedReanalyzingHub.data),
+        'Serialization restores interrupted re-analysis in nested canvases too');
       const edges = sanitizeEdgesForSave([
         { id: 'keep', source: 'hub', target: 'job' },
         { id: 'drop', source: 'hub', target: 'missing' },
@@ -1288,6 +1436,29 @@ export default [
       assert(canHubAcceptInitialDrop({ type: 'jobhub', data: healed.data }),
         'migration: after healing, the hub accepts a fresh career-file drop instead of dead-ending');
       return { strandedCleared: true, genuineLocksKept: true };
+    },
+  },
+  {
+    name: 'migrateInterruptedJobHubResults (v6): a pre-v6 re-analysis saved as empty restores its done card',
+    run: () => {
+      const interrupted = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', resumeProfile: { skills: ['React'] }, scoredJobs: [{ title: 'Saved role' }] } };
+      const noCareerIdentity = { id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', scoredJobs: [{ title: 'Orphaned role' }] } };
+      const noResults = { id: 'h3', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', resumeProfile: { skills: ['React'] }, scoredJobs: [] } };
+      const nested = { id: 'group', type: 'group', position: { x: 0, y: 0 }, data: { canvasData: { nodes: [
+        { id: 'inner', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'empty', careerData: 'Career evidence', scoredJobs: [{ title: 'Nested saved role' }] } },
+      ], edges: [], drawings: [] } } };
+      const direct = migrateInterruptedJobHubResults([interrupted, noCareerIdentity, noResults]);
+      assert(direct.find(n => n.id === 'h1').data.hubState === 'done',
+        'migration restores the exact empty + scored results + career identity shape');
+      assert(direct.find(n => n.id === 'h2') === noCareerIdentity && direct.find(n => n.id === 'h3') === noResults,
+        'migration does not promote orphaned results or genuinely empty hubs');
+      const viaRunner = runNodeMigrations([nested], 5);
+      assert(viaRunner[0].data.canvasData.nodes[0].data.hubState === 'done',
+        'v6 runner applies the recovery recursively to group sub-canvases');
+      assert(CURRENT_SCHEMA_VERSION >= 6
+        && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
+      'migration advances the schema and is a no-op for an already-current workspace');
+      return { schema: CURRENT_SCHEMA_VERSION, restored: 2 };
     },
   },
   {
@@ -1905,8 +2076,15 @@ export default [
       // to degrade — and handleResumeRun DESTROYS the staged run when either the
       // profile or the run's queries are missing, so the button must not be
       // offered without both.
-      assert(source.includes('const resumeRunActionable = canResumeOffer && hasReusableCareerProfile && ((resumeOffer?.queries?.length ?? 0) > 0)'),
-        'the Resume button is gated on location alone, so a run with no profile or no staged queries still offers Resume — and clicking it silently discards the very run it offered to recover');
+      assert(source.includes('const resumeRunActionable = canResumeOffer')
+        && source.includes('resumeOffer?.nodeId === id')
+        && source.includes('info?.found && info?.resumable && info?.nodeId === id ? info : null')
+        && source.includes('if (resumeOffer?.nodeId !== id) return;')
+        && source.includes('hasReusableCareerProfile')
+        && source.includes('((resumeOffer?.queries?.length ?? 0) > 0)'),
+      'only the matching hub exposes or can discard a recovery, and its Resume button still requires a career profile and staged queries');
+      assert(source.includes('resumeRunId: offer.runId || null'),
+        'the crash-resume IPC request carries the offered run token for backend ownership validation');
       assert(source.includes('{resumeRunActionable && <button'),
         'the Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer');
       assert(source.includes(' Start fresh — this run cannot be resumed from this module.')
@@ -2494,12 +2672,18 @@ export default [
       assert(resolveManualSourceStopReason({ earlyExit: true }) === 'user-done'
         && resolveManualSourceStopReason({ earlyExit: true, sourceSkipped: true }) === 'blocked',
       'manual scraper must preserve user-done semantics while prioritizing a concrete block');
+      assert(resolveManualSourceStopReason({ earlyExit: true, detailEnrichmentFailed: true }) === 'detail-enrichment-failed',
+        'a failed card-detail pass must not be reported as user-done');
       assert(resolveManualSourceStopReason({}) === 'completed',
         'manual scraper must reserve completed for a normal non-capped finish');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
         && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);"),
       'ZipRecruiter must use its verified Next Page anchor instead of stopping after the first scroll-loaded page');
+      assert(manualScraperSource.includes("description-card-unavailable")
+        && manualScraperSource.includes("googlePanelRateLimit")
+        && manualScraperSource.includes("page.off('response', googlePanelResponseListener)"),
+      'Google virtual-card misses and callback throttles must stop only description enrichment, not masquerade as user completion or leak a response listener');
       // Data-driven stops outrank the page ceiling: now that pages defaults to
       // "All", a walk that ends because the DATA said stop must never be
       // reported as `page-cap` — bug reports flag that reason as "this source
@@ -3023,6 +3207,17 @@ export default [
         && cardWalk.matchedCodes.includes('CARDWALK')
         && cardWalk.sectionExclusions.has('nodeInternals'),
       'Bug report code filtering: CARDWALK retains browser-card traversal context while omitting heavy canvas dumps');
+      const jobLink = applyBugReportCode([
+        ...logs,
+        '[JobCard] external-link requested id=job-1 source=google raw=www.google.com/search q=empty htidocid=present target=www.google.com/search repaired=yes',
+        '[JobCard] external-link dispatched id=job-1 target=www.google.com/search',
+      ], {}, 'JOBLINK');
+      assert(jobLink.filteredLogs.some(line => line.includes('external-link requested'))
+        && jobLink.filteredLogs.some(line => line.includes('external-link dispatched'))
+        && jobLink.matchedCodes.includes('JOBLINK')
+        && !jobLink.sectionExclusions.has('nodes')
+        && jobLink.sectionExclusions.has('nodeInternals'),
+      'Bug report code filtering: JOBLINK retains dispatch outcomes and lightweight card data while omitting heavy diagnostics');
       const sell = applyBugReportCode([...logs, '[SellHub][8e27f3ce] Price-drop plan updated: target=$0'], {}, 'SELL');
       assert(sell.filteredLogs.some(line => line.includes('target=$0')) && sell.matchedCodes.includes('SELL'),
         'Bug report code filtering: SELL should retain SellHub price-drop commits');
@@ -3044,6 +3239,16 @@ export default [
       'Bug report code filtering: PERSIST retains cross-restart auth durability evidence');
       assert(persist.sectionExclusions.has('nodes') && persist.sectionExclusions.has('mediaState'),
         'Bug report code filtering: PERSIST omits heavy canvas/media payloads');
+      const recovery = applyBugReportCode([
+        ...logs,
+        '[Jobs][hub] Saved AI prompt snapshot to /tmp/job-search-last-scrape.json',
+        '[JobSearch][hub] Resuming from saved scrape (12 job(s))',
+      ], {}, 'RECOVERY');
+      assert(recovery.matchedCodes.includes('RECOVERY')
+        && recovery.filteredLogs.some(line => line.includes('Saved AI prompt snapshot'))
+        && recovery.filteredLogs.some(line => line.includes('Resuming from saved scrape'))
+        && recovery.sectionExclusions.has('nodes') && recovery.sectionExclusions.has('mediaState'),
+      'Bug report code filtering: RECOVERY retains interrupted-job handoff/recovery evidence while omitting heavy canvas payloads');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 

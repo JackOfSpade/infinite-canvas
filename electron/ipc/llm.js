@@ -198,20 +198,20 @@ const TASK_MAX_TOKENS = {
   // the JSON mid-output. 4096 matches resume-parse and gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
-  // Job scoring now emits a requirement-by-requirement evidence inventory,
-  // material gaps, and separate tenure assessments in addition to the concise
-  // fit explanation. On thinking-capable models, the former 420/item reserve
-  // could truncate that structured evidence before the final rows. Formula:
-  // 2800 base + 1000/item gives 15→17800, capped at 32000 so a
-  // pathological batch cannot request runaway billing. Output is billed on
-  // actual tokens; the reserve is headroom for complete, auditable JSON.
+  // Manual scoring returns a bounded decisive-evidence audit (not a complete,
+  // duplicated JD transcription). The former 32K cap invited external chats
+  // to produce 140K-character pastes for a 15-job batch. This still leaves
+  // ample room for four grounded requirements/job while keeping the handoff
+  // practical to review and paste.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
-    Math.min(32000, 2800 + itemCount * 1000),
-  // Taxonomy planning is fed only bounded aggregate statistics and examples.
-  'job-taxonomy-plan':         4096,
-  // Classification is fixed at 24 jobs and emits compact vocabulary indexes.
-  'job-taxonomy-classify':     ({ itemCount = 24 } = {}) =>
-    Math.min(8192, 2048 + itemCount * 160),
+    Math.min(12000, 1600 + itemCount * 600),
+  // Taxonomy planning is fed only bounded aggregate statistics and returns a
+  // tiny role/range/mapping object. Large manual caps made this otherwise
+  // mechanical step look like it was hanging.
+  'job-taxonomy-plan':         2048,
+  // Fallback classification emits only integer role indexes. The planner now
+  // handles common directions directly, so this is both rare and compact.
+  'job-taxonomy-classify':     () => 1024,
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
   // Location-based cohort consolidation makes this per-job structured output
@@ -346,7 +346,14 @@ function manualRequestConfig(task, hints = {}, {
   grounding = false,
   requestKind = 'text',
 } = {}) {
-  const { cap, seed } = pickMaxTokens(task, hints);
+  // A manual handoff has no provider-enforced output budget and cannot report
+  // comparable visible/thinking token usage. In particular, stale API
+  // truncation telemetry must not turn a newly compact 10.6K scoring prompt
+  // back into a misleading 48K instruction. API calls continue through
+  // pickMaxTokens/effectiveCap above; manual guidance is intentionally the
+  // current bounded task formula only.
+  const seed = taskMaxTokensFor(resolveTask(task), hints);
+  const maxTokens = seed;
   const handoffSettings = {
     requestKind,
     transport: NON_API_AI_TRANSPORT,
@@ -358,7 +365,7 @@ function manualRequestConfig(task, hints = {}, {
       : null,
     generationParameters: 'controlled by the chosen chat application',
   };
-  return { maxTokens: cap, formulaSeed: seed, handoffSettings };
+  return { maxTokens, formulaSeed: seed, handoffSettings };
 }
 
 /**
@@ -577,7 +584,7 @@ export async function callLLMText(prompt, opts = {}) {
     });
     const result = await requestNonApiAi({
       prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
-      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -686,7 +693,7 @@ export async function callLLMRaw(prompt, opts = {}) {
     });
     const result = await requestNonApiAi({
       prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
-      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       requestKind: 'raw-text', signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -743,7 +750,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     });
     const result = await requestNonApiAi({
       prompt, task, responseSchema, maxOutputTokens: maxTokens, formulaSeed,
-      handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator, signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -809,7 +816,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
     });
     return requestNonApiAi({
       prompt, task, responseSchema, maxOutputTokens: maxTokens,
-      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal,
+      formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator, signal,
     });
   }

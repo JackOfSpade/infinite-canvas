@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { callLLMDocument, callLLMText, callLLMRaw, checkPromptFits, modelForTask, providerForTask } from './llm.js';
 import { isNonApiJobTask } from './nonApiAi.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
-import { validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
+import { nonScoringJobConstraintKind, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
 import { buildJobScoringRequestParts } from './jobScoringCache.js';
 import { JOB_SCORING_SCHEMA, JOB_COMPENSATION_EVIDENCE_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, JOB_LOCATION_RESOLUTION_SCHEMA } from './aiSchemas.js';
@@ -18,7 +18,7 @@ import { runBoundedJobTaxonomy } from './jobTaxonomy.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession, getBrowserSessionResetBlocker, resetPlatformSession } from './stealthBrowser.js';
-import { scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions } from './browser/manualScraper.js';
+import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, markManualSolveRequired, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow, openNativeIndeedChallengeWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, COMPENSATION_MIN_FIT_SCORE } from './resultCaps.js';
@@ -55,7 +55,8 @@ import {
 import { wrapUntrustedText } from './promptSafety.js';
 import { clearAllSessionStatusCache, getActiveLoginFlowInfo, invalidatePlatformSessionStatus, readStatusCache, runPlatformLoginFlow, writeStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
-import { jobTitleCompanyKey, sourceJobKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
+import { getJobAnalysisPaths, snapshotOwnedByCanvas } from './jobAnalysisPaths.js';
+import { sourceJobKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, salaryRangeMetadata, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence, describeLocationTreatment } from '../../src/utils/jobLocation.js';
 import { getJobSourceCountryPolicy, summarizeJobSourceCountryPolicies } from '../../src/utils/jobSourceCountryScope.js';
@@ -84,9 +85,6 @@ export const JOB_DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
 // large upload consume the scorer's shared prompt window for every job batch.
 const MAX_SCORING_CAREER_DATA_CHARS = 80_000;
 const JOB_ANALYSIS_DIR = 'job-search';
-const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
-const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
-const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
 // Every score batch is independently bounded: a lost streaming connection must
 // degrade to smaller batches/placeholders, never leave the whole hub at 0/M.
 // This is intentionally per ATTEMPT, not a whole-run timeout; a large search
@@ -318,25 +316,17 @@ async function computeFileSha256(filePath) {
   return hash.digest('hex');
 }
 
-function getJobAnalysisPaths(canvasFilePath) {
-  const dir = canvasFilePath
-    ? path.dirname(canvasFilePath)
-    : path.join(app.getPath('userData'), JOB_ANALYSIS_DIR);
-  return {
-    dir,
-    jsonPath: path.join(dir, JOB_ANALYSIS_JSON),
-    lastSuccessJsonPath: path.join(dir, JOB_ANALYSIS_LAST_SUCCESS_JSON),
-    promptPath: path.join(dir, JOB_ANALYSIS_PROMPT),
-  };
+function analysisPathsForCanvas(canvasFilePath) {
+  return getJobAnalysisPaths(canvasFilePath, path.join(app.getPath('userData'), JOB_ANALYSIS_DIR));
 }
 
 // Writes the exact text sent to the AI: the cached prefix followed by each
 // batch payload. Uses previewBatches (all gathered jobs, ignoring score cap)
 // so the file is populated even when AI scoring is skipped in test mode.
 function formatPromptFile(snapshot) {
-  const { createdAt, gatheredJobCount, cachedPrefix, previewBatches } = snapshot;
+  const { createdAt, gatheredJobCount, cachedPrefix, previewBatches } = snapshot || {};
   const ts = createdAt ? new Date(createdAt).toLocaleString() : '';
-  const batches = previewBatches ?? [];
+  const batches = Array.isArray(previewBatches) ? previewBatches : [];
   const sep = '='.repeat(72);
 
   const lines = [
@@ -354,11 +344,29 @@ function formatPromptFile(snapshot) {
     lines.push('', '(no jobs — scoring was skipped or no jobs were gathered)');
   } else {
     for (const batch of batches) {
-      lines.push('', sep, `BATCH ${batch.batchNumber} of ${batches.length}  (${batch.jobCount} jobs)`, sep, '', batch.prompt);
+      lines.push('', sep, `BATCH ${batch?.batchNumber ?? ''} of ${batches.length}  (${batch?.jobCount ?? 0} jobs)`, sep, '', batch?.prompt ?? '');
     }
   }
 
   return lines.join('\n');
+}
+
+// The prompt is written after the JSON snapshot. A process crash in that
+// interval leaves the new recovery JSON next to a missing or previous-run
+// prompt. Never expose the companion path until its complete contents bind it
+// to the exact snapshot we just loaded. Prompt availability is auxiliary; any
+// I/O/shape failure must not make durable scrape recovery fail.
+async function verifiedPromptPathForSnapshot(promptPath, snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  try {
+    const [actual, expected] = await Promise.all([
+      fs.promises.readFile(promptPath, 'utf8'),
+      Promise.resolve(formatPromptFile(snapshot)),
+    ]);
+    return actual === expected ? promptPath : null;
+  } catch {
+    return null;
+  }
 }
 
 async function writeJobAnalysisFileAtomically(filePath, content) {
@@ -391,7 +399,7 @@ function withJobAnalysisSnapshotLock(filePath, fn) {
 }
 
 async function saveJobAnalysisSnapshot(snapshot) {
-  const { dir, jsonPath, lastSuccessJsonPath, promptPath } = getJobAnalysisPaths(snapshot.canvasFilePath);
+  const { dir, jsonPath, lastSuccessJsonPath, promptPath } = analysisPathsForCanvas(snapshot.canvasFilePath);
   return withJobAnalysisSnapshotLock(jsonPath, async () => {
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
     const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
@@ -485,13 +493,109 @@ async function deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId =
 }
 
 async function loadJobAnalysisSnapshot(canvasFilePath) {
-  const { jsonPath, promptPath } = getJobAnalysisPaths(canvasFilePath);
-  const raw = await fs.promises.readFile(jsonPath, 'utf8');
-  const parsed = JSON.parse(raw);
-  return {
-    snapshot: parsed,
-    paths: { jsonPath, promptPath },
+  const paths = analysisPathsForCanvas(canvasFilePath);
+  // `jsonPath` and `promptPath` leave the main process through the recovery
+  // IPC metadata. They must identify the exact artifact we loaded, rather
+  // than the normal write destination. In particular, a legacy JSON may be
+  // ownership-verified while its directory-scoped prompt was overwritten by a
+  // sibling canvas, so it deliberately has no prompt companion.
+  const resultPaths = ({ jsonPath, lastSuccessJsonPath = null, promptPath = null }) => ({
+    jsonPath,
+    lastSuccessJsonPath,
+    promptPath,
+  });
+  const readJson = async (filePath) => {
+    try {
+      return { kind: 'ok', snapshot: JSON.parse(await fs.promises.readFile(filePath, 'utf8')) };
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { kind: 'missing', error };
+      if (error instanceof SyntaxError) return { kind: 'malformed', error };
+      return { kind: 'error', error };
+    }
   };
+  const readCurrent = await readJson(paths.jsonPath);
+  // A valid empty current snapshot is meaningful: it says the latest run had
+  // no eligible jobs, and must never be silently replaced with older results.
+  if (readCurrent.kind === 'ok') {
+    return {
+      snapshot: readCurrent.snapshot,
+      paths: resultPaths({
+        jsonPath: paths.jsonPath,
+        lastSuccessJsonPath: paths.lastSuccessJsonPath,
+        promptPath: await verifiedPromptPathForSnapshot(paths.promptPath, readCurrent.snapshot),
+      }),
+      origin: 'current',
+    };
+  }
+  if (readCurrent.kind === 'error') throw readCurrent.error;
+
+  // A missing/malformed current namespaced record may fall back to this
+  // canvas's durable populated copy. This is still isolated from sibling
+  // canvases in the same folder.
+  const readLastSuccess = await readJson(paths.lastSuccessJsonPath);
+  if (readLastSuccess.kind === 'ok') {
+    return {
+      snapshot: readLastSuccess.snapshot,
+      // The current prompt can belong to a newer failed/empty run. There is
+      // no independently-bound last-success prompt, so do not offer a file
+      // whose contents could disagree with the recovered JSON.
+      paths: resultPaths({
+        jsonPath: paths.lastSuccessJsonPath,
+        lastSuccessJsonPath: paths.lastSuccessJsonPath,
+      }),
+      origin: 'last-success',
+    };
+  }
+  if (readLastSuccess.kind === 'error') throw readLastSuccess.error;
+
+  // One-time compatibility: pre-namespace artifacts were directory-scoped.
+  // They are useful only when their embedded path proves they belong to this
+  // exact canvas; an unowned/mismatched artifact is intentionally ignored.
+  for (const [legacyPath, origin] of [
+    [paths.legacyJsonPath, 'legacy-current'],
+    [paths.legacyLastSuccessJsonPath, 'legacy-last-success'],
+  ]) {
+    if (!legacyPath) continue;
+    const legacy = await readJson(legacyPath);
+    if (legacy.kind === 'ok' && snapshotOwnedByCanvas(legacy.snapshot, canvasFilePath)) {
+      return {
+        snapshot: legacy.snapshot,
+        // Plain legacy prompt files carry no canvas identity, unlike their
+        // paired JSON snapshot. Returning one could reveal a sibling canvas's
+        // AI prompt, so legacy recovery is intentionally JSON-only.
+        paths: resultPaths({ jsonPath: legacyPath }),
+        origin,
+      };
+    }
+    if (legacy.kind === 'error') throw legacy.error;
+  }
+
+  // Preserve the public no-snapshot contract. Prefer the current error so a
+  // caller receives ENOENT for an absent record rather than an implementation
+  // detail about the optional recovery copy.
+  throw readCurrent.error || readLastSuccess.error || Object.assign(new Error('No saved job analysis snapshot.'), { code: 'ENOENT' });
+}
+
+// Test seam for the current-vs-last-success recovery contract. Kept separate
+// from the renderer's hub/canvas ownership checks, which intentionally belong
+// at the IPC caller.
+export async function __loadJobAnalysisSnapshotForTests(canvasFilePath) {
+  return loadJobAnalysisSnapshot(canvasFilePath);
+}
+
+/** Test seam for the deterministic prompt/snapshot binding contract. */
+export function __formatJobAnalysisPromptForTests(snapshot) {
+  return formatPromptFile(snapshot);
+}
+
+export function canRecoverGatheredRunDirectly(manifest, queries) {
+  const sources = manifest?.sources;
+  return manifest?.stage === 'gathered'
+    && Array.isArray(manifest?.inputs?.queries)
+    && JSON.stringify(manifest.inputs.queries) === JSON.stringify(Array.isArray(queries) ? queries : [])
+    && !!sources
+    && Object.keys(sources).length > 0
+    && Object.values(sources).every(source => source?.status === 'done');
 }
 
 // Group jobs into scoring batches by ITEM COUNT, keeping effectively identical
@@ -567,6 +671,15 @@ function jobEvidenceTextForFit(job = {}) {
  */
 export function calibratedScoreForJob(score, job, { candidateText, candidateRoles } = {}) {
   if (!score || typeof score !== 'object') return null;
+  // A raw score that lists logistics as material gaps may already have lowered
+  // its numeric score for them. Silently dropping those rows would clean the
+  // explanation but leave the prohibited penalty embedded in the number. Make
+  // the live handoff retry instead; only a response authored under the
+  // professional-fit rubric may reach a card.
+  if ((Array.isArray(score.materialGaps) ? score.materialGaps : [])
+    .some(gap => nonScoringJobConstraintKind(gap))) {
+    return null;
+  }
   const fitAssessment = validateAndNormalizeFitAssessment(score, {
     jobText: jobEvidenceTextForFit(job),
     candidateText: candidateText || '',
@@ -658,6 +771,105 @@ export function planPartialScoreRecovery(scores, requestedCount) {
   return { usable: true, alignedScores, missingIndices };
 }
 
+/** Restore a locally indexed recovery response to its parent batch slots. */
+export function mergeRecoveredScoreRows(alignedScores, recoveryIndices, recoveredScores) {
+  const merged = Array.isArray(alignedScores) ? [...alignedScores] : [];
+  const indexes = Array.isArray(recoveryIndices) ? recoveryIndices : [];
+  const recovered = Array.isArray(recoveredScores) ? recoveredScores : [];
+  indexes.forEach((originalIndex, recoveredIndex) => {
+    const row = recovered[recoveredIndex];
+    merged[originalIndex] = row && typeof row === 'object'
+      ? { ...row, index: originalIndex }
+      : null;
+  });
+  return merged;
+}
+
+/**
+ * Validate one manual job-scoring submission against the locally reindexed
+ * batch shown in its handoff prompt. The first handoff may be partial so the
+ * caller can immediately open the existing targeted recovery for only missing
+ * or evidence-invalid rows. The targeted recovery itself is strict: keeping
+ * that smaller request pending gives the person a precise correction loop
+ * instead of silently persisting placeholders.
+ */
+export function validateJobScoringSubmission(value, batch, {
+  candidateText = '',
+  candidateRoles = [],
+  requireComplete = false,
+} = {}) {
+  const submittedScores = Array.isArray(value?.scores)
+    ? value.scores
+    : Array.isArray(value)
+      ? value
+      : null;
+  const jobs = Array.isArray(batch) ? batch : [];
+  if (!Array.isArray(submittedScores)) {
+    throw new Error(`Invalid job-scoring response: expected a scores array with at least one indexed score row for ${jobs.length} job(s).`);
+  }
+
+  // slimBatch() always presents indexes local to the current handoff. This is
+  // especially important for a recovery batch assembled from original slots
+  // such as 2, 9, 12, and 14: its response indexes are 0, 1, 2, and 3.
+  const expectedIndexSet = new Set(jobs.map((_, index) => index));
+  const seenIndexes = new Set();
+  const duplicateIndexes = [];
+  const outOfRangeIndexes = [];
+  for (const row of submittedScores) {
+    const index = row?.index;
+    if (!Number.isInteger(index) || !expectedIndexSet.has(index)) {
+      outOfRangeIndexes.push(index);
+    } else if (seenIndexes.has(index)) {
+      duplicateIndexes.push(index);
+    } else {
+      seenIndexes.add(index);
+    }
+  }
+  if (duplicateIndexes.length || outOfRangeIndexes.length) {
+    const details = [
+      duplicateIndexes.length ? `duplicate indexes: ${[...new Set(duplicateIndexes)].join(', ')}` : null,
+      outOfRangeIndexes.length ? `invalid indexes: ${[...new Set(outOfRangeIndexes)].join(', ')}` : null,
+    ].filter(Boolean).join('; ');
+    throw new Error(`Invalid job-scoring response: ${details}.`);
+  }
+
+  const responsePlan = planPartialScoreRecovery(submittedScores, jobs.length);
+  if (!responsePlan.usable) {
+    throw new Error(`Invalid job-scoring response: expected at least one indexed score row for ${jobs.length} job(s).`);
+  }
+  const prepared = prepareLiveScoringResults(
+    responsePlan.alignedScores,
+    jobs,
+    { candidateText, candidateRoles },
+  );
+  const invalidIndices = prepared.scores.reduce((indices, score, index) => {
+    if (!score && responsePlan.alignedScores[index]) indices.push(index);
+    return indices;
+  }, []);
+
+  if (requireComplete) {
+    const logisticsIndices = submittedScores.flatMap((row) => (
+      (Array.isArray(row?.materialGaps) ? row.materialGaps : [])
+        .some(gap => nonScoringJobConstraintKind(gap)) ? [row.index] : []
+    ));
+    if (logisticsIndices.length) {
+      const indexes = [...new Set(logisticsIndices)].join(', ');
+      throw new Error(`Invalid job-scoring rows at index ${indexes}: work authorization, citizenship/sponsorship, and location/onsite/relocation constraints are informational logistics, not material professional gaps, and must contribute zero penalty to matchScore.`);
+    }
+    const problems = [
+      responsePlan.missingIndices.length
+        ? `missing score rows at index ${responsePlan.missingIndices.join(', ')}`
+        : null,
+      invalidIndices.length
+        ? `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text`
+        : null,
+    ].filter(Boolean).join('; ');
+    if (problems) throw new Error(`Invalid job-scoring response: ${problems}.`);
+  }
+
+  return { submittedScores, responsePlan, invalidIndices };
+}
+
 /** Compact, durable conservation check for the search admission funnel. */
 export function reconcileSearchFunnel(search) {
   if (!search || typeof search !== 'object') return null;
@@ -687,7 +899,7 @@ export function reconcileSearchFunnel(search) {
   };
 }
 
-export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, profile, careerData, nodeId, targetRole, snapshotContext }) {
+export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, snapshotContext }) {
   const role = (targetRole || '').trim();
   const gathered = Array.isArray(jobs) ? jobs : [];
   const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
@@ -723,9 +935,8 @@ Return JSON of the form { "scores": [ ... one object per job in the array I send
       "matchScore": 0,
       "reasoning": "",
       "careerDirection": "",
-      "requirementAssessments": [{ "requirementText": "", "priority": "required|important|preferred|contextual", "jobEvidence": "", "status": "direct|adjacent|not_documented|contradicted|unclear", "candidateEvidence": "", "explanation": "" }],
-      "materialGaps": [{ "requirementText": "", "priority": "required|important|preferred|contextual", "jobEvidence": "", "status": "not_documented|contradicted|unclear", "candidateEvidence": "", "impact": "" }],
-      "experienceAssessment": { "totalProfessionalExperience": { "years": "", "candidateEvidence": "", "explanation": "" }, "categorySpecificExperience": [{ "category": "", "requiredMinimumYears": 0, "roleIds": [], "years": "", "candidateEvidence": "", "jobEvidence": "", "explanation": "" }] },
+      "requirementAssessments": [{ "requirementText": "", "priority": "required|important|preferred|contextual", "jobEvidence": "", "status": "direct|adjacent", "candidateEvidence": "", "explanation": "" }],
+      "materialGaps": [{ "requirementText": "", "priority": "required|important", "jobEvidence": "", "status": "not_documented|contradicted|unclear", "candidateEvidence": "", "impact": "" }],
       "confidence": "high|medium|low",
       "compensationContext": { "roleFamily": "", "seniority": "entry|mid|senior|lead|manager|director|executive|unspecified", "requiredYears": "", "employmentType": "employee|contract|temporary|internship|unspecified", "workMode": "onsite|hybrid|remote|unknown", "remoteRegion": "usa|canada|other|unknown", "remoteCountry": "" }
     }
@@ -733,15 +944,16 @@ Return JSON of the form { "scores": [ ... one object per job in the array I send
 }
 
 IMPORTANT SCORING RULES:
-- First identify the material job requirements, then return one requirementAssessments row for EACH of them. Material requirements include explicit must-haves, years/experience categories, core responsibilities, credentials, work authorization or location limits when stated, and central technologies or domains. Do not inflate boilerplate or minor wording into a material requirement.
-- Copy jobEvidence verbatim from the matching job listing. Copy candidateEvidence verbatim from the supplied candidate evidence whenever you cite support, ambiguity, or an explicit conflict. This career data is concise rather than comprehensive: if it does not establish a requirement, use not_documented with empty candidateEvidence and say only "not documented in the supplied career data"; do not turn that documentation status into a conclusion about actual experience. Never fill gaps with plausible assumptions, title similarity, inferred frequency, or a broader technology category.
-- direct means the candidate evidence explicitly supports the same requirement. adjacent means the evidence is genuinely transferable but does not establish equivalence; name the boundary. not_documented means this supplied career data has no evidence establishing the requirement and does not resolve unlisted experience. contradicted requires verbatim candidate evidence that explicitly conflicts with the requirement; never infer contradiction from absence. unclear means supplied evidence is too ambiguous to assess; quote the ambiguity when possible. Do not call an adjacent skill direct merely because both are technical or related.
+- First identify all material PROFESSIONAL requirements. Return up to FOUR decisive, non-gap requirementAssessments: direct or adjacent evidence only, prioritizing strongest grounded support and transferable context; return [] when every decisive item is an unresolved hard gap. Scored requirements include explicit capability must-haves, years/experience categories, core responsibilities, education/credentials, and central technologies or domains. The score must account for every scored professional requirement, but the output is a compact audit rather than a full listing rewrite. Do not inflate a title, boilerplate, or minor wording into a requirement.
+- Copy only the shortest useful verbatim evidence spans (maximum 220 characters each) from the matching job listing and supplied candidate evidence. This career data is concise rather than comprehensive: if it does not establish a required or important requirement, put that unresolved item only in materialGaps as not_documented with empty candidateEvidence and say only "not documented in the supplied career data"; do not turn that documentation status into a conclusion about actual experience. Never fill gaps with plausible assumptions, title similarity, inferred frequency, or a broader technology category.
+- direct means the candidate evidence explicitly supports the same requirement. adjacent means the evidence is genuinely transferable but does not establish equivalence; name the boundary. Do not call an adjacent skill direct merely because both are technical or related. Use not_documented, contradicted, or unclear only in materialGaps: not_documented means this concise supplied career data has no evidence establishing the requirement and does not resolve unlisted experience; contradicted requires verbatim candidate evidence that explicitly conflicts with the requirement; unclear means supplied evidence is too ambiguous to assess. never infer contradiction from absence.
 - Classify requirements according to the listing's language: required for explicit must-have/minimum conditions, important for central but not explicitly mandatory criteria, preferred for stated nice-to-have language, and contextual for relevant role conditions. A preferred qualification is not automatically a hard gap or disqualifier.
-- materialGaps must include every required or important assessment that is not_documented, contradicted, or unclear. Do not hide a central evidence gap or contradiction in prose. It may be empty only when none exists. A preferred item may be discussed as not_documented but does not belong in materialGaps solely because it is preferred. Each materialGap must repeat candidateEvidence: empty for not_documented; a verbatim conflicting quote for contradicted; and a verbatim ambiguity quote for unclear when available.
-- Keep total professional tenure separate from each category-specific experience requirement. Every categorySpecificExperience row must name only valid workHistory roleIds whose dates are relevant to that category, along with verbatim job/candidate evidence. Set requiredMinimumYears to the listing's explicit numeric minimum, or 0 only when no numeric minimum is stated. Never use total tenure to satisfy a requested category unless the candidate evidence establishes that category. Report only documented calculations; use "not established" rather than inventing dates or years.
-- matchScore is an evidence-based comparative hiring fit score, NOT a statistically calibrated prediction of any hiring outcome. Assess the candidate's ability to clear the full hiring process and management decision, so include material gaps that might not block early screening but likely block a hire. A score of 85 or above requires direct evidence for nearly all high-priority requirements and no unaddressed central not_documented/contradicted/unclear requirement. Material gaps, especially explicit requirements, should lower the score substantially. Treat a title difference as context, not automatic disqualification.
-- reasoning must be concise and evidence-led: state the strongest support and the most consequential evidence gap(s) or contradictions. Use evidence-qualified language: say "not documented in the supplied career data" for documentation gaps; for contradictions, say that the supplied evidence conflicts with the requirement. Do not use categorical deficit language. The structured assessment contains the detailed inventory.
-- Score effectively identical postings consistently. Location changes the score only when it materially affects documented eligibility or fit; explain that effect.
+- Work authorization, citizenship, visa/sponsorship, current residence, permitted remote region, commute, relocation, and willingness to work in a specific location are NON-SCORING logistics. They must contribute ZERO penalty to matchScore, regardless of how mandatory the posting says they are. If useful to retain one for audit, label its priority contextual; never present it as a material professional gap or mention it in scoring reasoning. Security clearances and job-specific professional licenses remain scored unless they are merely another statement of citizenship/work authorization.
+- materialGaps must include EVERY scored required or important professional requirement that is not_documented, contradicted, or unclear, even if there are more than four. This complete compact list drives deterministic score calibration, so never omit a scored hard requirement. These unresolved requirements belong ONLY in materialGaps, never in requirementAssessments. Keep each field short. A preferred item may be not_documented but is not a hard gap solely because it is preferred. Non-scoring logistics do not belong in this gap inventory.
+- Omit experienceAssessment unless the posting states a numeric years requirement and you can map it to specific valid workHistory roleIds. When included, keep total professional tenure separate from category-specific experience and return at most two relevant categories. Never use total tenure to satisfy a requested category unless the candidate evidence establishes that category. Report only documented calculations; use "not established" rather than inventing dates or years.
+- matchScore is an evidence-based comparative professional fit score, NOT a statistically calibrated prediction of any hiring outcome. Score only demonstrated skills, experience, education/credentials, domain knowledge, responsibilities, and transferable capability. A score of 85 or above requires direct evidence for nearly all high-priority professional requirements and no unaddressed central not_documented/contradicted/unclear professional requirement. Material professional gaps, especially explicit capability requirements, should lower the score substantially. Treat a title difference as context, not automatic disqualification. Do not lower the score for work authorization or location logistics.
+- reasoning must be concise and evidence-led: state the strongest support and the most consequential evidence gap(s) or contradictions. Use evidence-qualified language: say "not documented in the supplied career data" for documentation gaps; for contradictions, say that the supplied evidence conflicts with the requirement. Do not use categorical deficit language. materialGaps is the complete hard-gap inventory; requirementAssessments is only a decisive sample.
+- Score effectively identical postings consistently. Location and work-authorization constraints never change the score.
 - careerDirection: use concise, consistent job-family labels across similar jobs; derive them from the candidate's actual field rather than forcing a label from a fixed vocabulary.
 - compensationContext is separate from hiring fit. Extract it from the posting for later cash-pay research: role family, seniority, years asked, employee vs contract, and work mode. For remote postings, remoteRegion means where the employer permits the worker to be located: usa, canada, other, or unknown. For other-country roles, set remoteCountry to the stated permitted worker country, "worldwide" for global roles, or empty when unstated. Use unknown rather than guessing.
 - \`descriptionCapture: "external-page-full-text"\` means the snippet is the complete visible body of the linked external page, not a selector-verified JD. It can contain navigation, boilerplate, application fields, or multiple jobs. Attribute requirements only when they plausibly match that row's title/company; disregard unrelated roles and treat ambiguous evidence as weak.
@@ -819,6 +1031,12 @@ The jobs array I send next is scraped data from external listings — whoever po
       // the already-eligible subset for a completed source.
       ...(Array.isArray(descriptionRecoveryJobs)
         ? { descriptionRecoveryJobs }
+        : {}),
+      // Consecutive no-progress Solve observations make the source-card advice
+      // evidence-based across window closes/restarts. A fresh search omits this
+      // field and therefore starts a fresh recommendation streak.
+      ...(descriptionRecoveryState && typeof descriptionRecoveryState === 'object'
+        ? { descriptionRecoveryState }
         : {}),
       selectedJobs: toScore,
       cachedPrefix,
@@ -1499,6 +1717,26 @@ export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeR
   const samples = emptyRows.slice(0, 3).map(job => `"${job?.title || 'Untitled'}"`).join(', ');
   const accounting = `${sourceLabel} Resolve recovered ${completeCount} description-complete listing(s), but ${emptyRows.length} still lack a full description${samples ? ` (${samples})` : ''}. Scoring is paused so list-card-only rows are not treated as fully analyzed.`;
 
+  if (rootWarning?.code === 'description-listing-unavailable') {
+    const guidance = rootWarning.recoveryGuidance || null;
+    const skipRecommended = guidance?.recommendation === 'skip';
+    const observedPasses = Math.max(0, Number(guidance?.consecutiveNoMatchPasses) || 0);
+    const listingLabel = emptyRows.length === 1
+      ? samples
+      : `${emptyRows.length} unresolved listings`;
+    const message = skipRecommended
+      ? `${listingLabel} ${emptyRows.length === 1 ? 'was' : 'were'} not found in ${observedPasses} consecutive checks. Skip is recommended, or choose Check anyway to retry.`
+      : `${listingLabel} ${emptyRows.length === 1 ? 'was' : 'were'} not found in the current Google results. Retry once more; if ${emptyRows.length === 1 ? 'it is' : 'they are'} still missing, Skip will be recommended.`;
+    return {
+      ...rootWarning,
+      severity: 'block',
+      shortLabel: rootWarning.shortLabel || (skipRecommended ? 'Skip recommended' : 'Retry recommended'),
+      actionLabel: rootWarning.actionLabel || (skipRecommended ? 'Check anyway' : 'Retry'),
+      evidence: message,
+      suggestion: null,
+    };
+  }
+
   if (rootWarning?.code === 'description-detail-hard-block' || rootWarning?.code === 'cloudflare-hard-block') {
     return {
       ...rootWarning,
@@ -1613,6 +1851,107 @@ export function mergeDescriptionRecoverySourceJobs(recoveryJobs, sourceId, updat
     .map(job => [sourceJobKey(job), job]));
   return (Array.isArray(recoveryJobs) ? recoveryJobs : []).map(job =>
     job?.source === sourceId ? (updates.get(sourceJobKey(job)) || job) : job);
+}
+
+/**
+ * A resolve window often mounts only the first visible slice of a source. Merge
+ * that slice into the persisted recovery universe before judging completion:
+ * otherwise Google can return the same 10 already-complete rows and incorrectly
+ * clear a warning while dozens of deferred rows still exist off-screen.
+ */
+export function reconcileResolvedDescriptionRecovery(recoveryJobs, sourceId, resolvedSourceJobs) {
+  const original = Array.isArray(recoveryJobs) ? recoveryJobs : [];
+  const updated = Array.isArray(resolvedSourceJobs) ? resolvedSourceJobs : [];
+  const universe = original.some(job => job?.source === sourceId)
+    ? mergeDescriptionRecoverySourceJobs(original, sourceId, updated)
+    : updated;
+  const evidence = filterJobsByDescriptionEvidence(universe);
+  return {
+    recoveryJobs: universe,
+    completeRows: evidence.jobs.filter(job => job?.source === sourceId),
+    emptyRows: evidence.dropped.filter(job => job?.source === sourceId),
+  };
+}
+
+/**
+ * Select only current-run deferred rows that are actually present in the fully
+ * revealed provider list. History filtering has already happened before the
+ * recovery snapshot was written; applying it again here would discard the very
+ * unresolved identities Solve exists to enrich.
+ */
+export function selectResolvedDescriptionRecoveryCandidates(recoveryJobs, sourceId, providerRows) {
+  return partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sourceId, providerRows).candidates;
+}
+
+/**
+ * Partition deferred recovery identities by whether the fully revealed provider
+ * list still contains them. Absence is distinct from a detail-panel miss: there
+ * is no card to click, and repeatedly opening Solve cannot recover it unless the
+ * provider returns that listing again on a later pass.
+ */
+export function partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sourceId, providerRows) {
+  const sourceRecovery = (Array.isArray(recoveryJobs) ? recoveryJobs : [])
+    .filter(job => job?.source === sourceId);
+  const deferred = filterJobsByDescriptionEvidence(sourceRecovery).dropped;
+  const deferredKeys = new Set(deferred.map(sourceJobKey).filter(Boolean));
+  if (deferredKeys.size === 0) return { candidates: [], unavailable: [] };
+  const candidates = (Array.isArray(providerRows) ? providerRows : [])
+    .filter(job => job?.source === sourceId && deferredKeys.has(sourceJobKey(job)));
+  const providerKeys = new Set(candidates.map(sourceJobKey).filter(Boolean));
+  const unavailable = deferred.filter(job => {
+    const key = sourceJobKey(job);
+    return key && !providerKeys.has(key);
+  });
+  return { candidates, unavailable };
+}
+
+/**
+ * Advance the durable recommendation shown for an unresolved provider row.
+ * Only an exact no-card observation counts toward Skip: a full list loaded,
+ * nothing was attempted/recovered, and the same residual identities and totals
+ * remained. Any real card attempt or progress resets the consecutive streak so
+ * an extractor/detail failure is never mislabeled as an external disappearance.
+ */
+export function nextDescriptionRecoveryGuidance(previousState, observation, skipAfter = 2) {
+  const rows = Array.isArray(observation?.unavailableRows) ? observation.unavailableRows : [];
+  const unavailableKeys = [...new Set(rows.map(sourceJobKey).filter(Boolean))].sort();
+  const unavailableSignature = unavailableKeys.join('|');
+  const providerRowsLoaded = Math.max(0, Number(observation?.providerRowsLoaded) || 0);
+  const attempted = Math.max(0, Number(observation?.attempted) || 0);
+  const recovered = Math.max(0, Number(observation?.recovered) || 0);
+  const empty = Math.max(0, Number(observation?.empty) || 0);
+  const completeTotal = Math.max(0, Number(observation?.completeTotal) || 0);
+  const qualifies = providerRowsLoaded > 0
+    && unavailableKeys.length > 0
+    && attempted === 0
+    && recovered === 0;
+  const sameResidual = qualifies
+    && previousState?.unavailableSignature === unavailableSignature
+    && Number(previousState?.empty) === empty
+    && Number(previousState?.completeTotal) === completeTotal;
+  const consecutiveNoMatchPasses = qualifies
+    ? (sameResidual ? Math.max(0, Number(previousState?.consecutiveNoMatchPasses) || 0) + 1 : 1)
+    : 0;
+  const threshold = Math.max(2, Math.floor(Number(skipAfter) || 2));
+  const state = {
+    consecutiveNoMatchPasses,
+    unavailableSignature,
+    unavailableCount: unavailableKeys.length,
+    empty,
+    completeTotal,
+    providerRowsLoaded,
+    attempted,
+    recovered,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    state,
+    guidance: {
+      recommendation: consecutiveNoMatchPasses >= threshold ? 'skip' : 'retry',
+      consecutiveNoMatchPasses,
+      threshold,
+    },
+  };
 }
 
 // Cumulative descriptions enriched on the CURRENT stealth-browser generation,
@@ -3125,7 +3464,7 @@ Return a JSON object with four arrays of search query strings:
 
   handleSafe('get-last-job-analysis-snapshot', async (event, { canvasFilePath } = {}) => {
     try {
-      const { snapshot, paths } = await loadJobAnalysisSnapshot(canvasFilePath);
+      const { snapshot, paths, origin } = await loadJobAnalysisSnapshot(canvasFilePath);
       const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
       const profile = snapshot?.profile && typeof snapshot.profile === 'object' ? snapshot.profile : null;
       return {
@@ -3147,6 +3486,7 @@ Return a JSON object with four arrays of search query strings:
           resumeSummary: snapshot?.resumeSummary ?? '',
           promptPath: paths.promptPath,
           jsonPath: paths.jsonPath,
+          snapshotOrigin: origin,
         },
       };
     } catch (err) {
@@ -3175,7 +3515,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, resume = false, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, resume = false, resumeRunId = null, runOrigin, profileInputMode }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -3264,19 +3604,38 @@ Return a JSON object with four arrays of search query strings:
     // ── Resume mode ─────────────────────────────────────────────────────────
     // Re-scrape ONLY the sources that didn't finish, each from its last completed
     // page, and seed the gathered set with the staged jobs from already-'done'
-    // sources (so finished work isn't re-scraped). This replaces the old
-    // "recover staged → score directly" shortcut: resume now CONTINUES THE SCRAPE
-    // from the per-page ledger. Falls back to a normal fresh search if there's no
-    // incomplete prior run.
+    // sources (so finished work isn't re-scraped). A fully gathered run is the
+    // one exception: it has no remaining scrape work, so it resumes directly
+    // from staging into the normal finalization/scoring path. Falls back to a
+    // normal fresh search if there's no incomplete prior run.
     let resumeScope = null;       // Set<sourceId> to re-scrape (null = all = fresh run)
     let resumeStartPages = null;  // { [sourceId]: 1-based next page }
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
     let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
     let activeRunId = null;       // compare-and-clear token returned to the renderer
+    let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
+    // A crash after gathering but before/during renderer-driven manual scoring
+    // has no remaining scrape work. Do not make already-staged jobs depend on
+    // a fresh browser/login preflight at restart: that can fail even though the
+    // gather is complete and a network retry would only re-find seen listings.
+    // This is deliberately narrower than general resume: any incomplete or
+    // blocked source stays on the ordinary re-scrape recovery path below.
+    let resumeGatheredOnly = false;
     if (resume) {
       const prior = await preflight('read prior run state', () => readRunState(canvasFilePath, Date.now()));
       if (prior?.incomplete) {
         const priorInputs = prior.manifest?.inputs || {};
+        const priorRunId = prior.manifest?.runId || null;
+        if (resumeRunId && resumeRunId !== priorRunId) {
+          const error = 'This recovery request belongs to an older job run. Reload the recovery banner before continuing.';
+          retirePipeline('preflight-rejected', error);
+          return { success: false, resumeRunMismatch: true, error };
+        }
+        if (!priorInputs.nodeId || priorInputs.nodeId !== nodeId) {
+          const error = 'This unfinished search belongs to a different Job Search card. Open that card to recover it, or start a fresh search here.';
+          retirePipeline('preflight-rejected', error);
+          return { success: false, resumeNodeMismatch: true, error };
+        }
         const hasRecordedLocation = Object.hasOwn(priorInputs, 'canonicalLocation');
         const priorLocation = normalizeLocationInput(priorInputs.canonicalLocation).boardReady;
         const currentLocation = normalizeLocationInput(location).boardReady;
@@ -3287,20 +3646,29 @@ Return a JSON object with four arrays of search query strings:
           retirePipeline('preflight-rejected', error);
           return { success: false, resumeLocationMismatch: true, error };
         }
-        // A resume must repeat the breadth the interrupted run used. Current
-        // renderers always send it, while this manifest fallback preserves that
-        // invariant for an in-flight run after an app update/reload.
-        if (collectionLimits == null && prior.manifest?.inputs?.collectionLimits) {
+        if (JSON.stringify(priorInputs.queries || []) !== JSON.stringify(queries)) {
+          const error = 'This unfinished search used different queries. Start fresh so staged jobs cannot be mixed with a changed search.';
+          retirePipeline('preflight-rejected', error);
+          return { success: false, resumeQueryMismatch: true, error };
+        }
+        // The interrupted run owns both breadth and collection limits. Current
+        // platform toggles must never add/remove sources from a recovery, and a
+        // saved null is meaningful (unlimited under the then-current policy).
+        if (Object.hasOwn(priorInputs, 'collectionLimits')) {
           normalizedCollectionLimits = normalizeJobCollectionLimits(prior.manifest.inputs.collectionLimits);
         }
-        // The saved limits are authoritative for a resume. Re-evaluate the
-        // source safety gate after adopting them so a finite-only source isn't
-        // mistakenly excluded based on this call's missing/"All" limits.
-        activeSourceIds = getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
-        recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
-        activeRunId = prior.manifest.runId || null;
-        priorRunStartedAt = prior.manifest.startedAt ?? null;
         const priorSources = prior.manifest.sources || {};
+        resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
+        if (resumeSourceIds.length === 0) {
+          const error = 'None of this unfinished search’s original job platforms are available in this app version. Start fresh to use the current platform selection.';
+          retirePipeline('preflight-rejected', error);
+          return { success: false, noResumablePlatforms: true, error };
+        }
+        activeSourceIds = resumeSourceIds;
+        recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        activeRunId = priorRunId;
+        priorRunStartedAt = prior.manifest.startedAt ?? null;
+        resumeGatheredOnly = canRecoverGatheredRunDirectly(prior.manifest, queries);
         resumeScope = new Set();
         resumeStartPages = {};
         for (const sid of activeSourceIds) {
@@ -3313,7 +3681,7 @@ Return a JSON object with four arrays of search query strings:
           // Unrecorded queries ⇒ restart at 1; the cross-source dedup absorbs overlap.
           resumeStartPages[sid] = computeResumeStartPage(priorSources[sid], queries.length);
         }
-        logger.info(`[Jobs][${nodeId}] Resume: re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}; recovered ${recoveredStaged.length} staged job(s)`);
+        logger.info(`[Jobs][${nodeId}] Resume: ${resumeGatheredOnly ? 'recover gathered jobs without network' : `re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}`}; recovered ${recoveredStaged.length} staged job(s)`);
       } else {
         logger.info(`[Jobs][${nodeId}] Resume requested but no incomplete prior run — running a fresh search.`);
       }
@@ -3321,7 +3689,7 @@ Return a JSON object with four arrays of search query strings:
 
     // Evaluate platform safety only after resume has restored its saved breadth.
     // This is also the main-process enforcement boundary for renderer bypasses.
-    activeSourceIds = getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
+    activeSourceIds = resumeSourceIds || getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
     if (activeSourceIds.length === 0) {
       const error = 'Select at least one enabled job platform before running the search.';
       retirePipeline('preflight-rejected', error);
@@ -3370,14 +3738,17 @@ Return a JSON object with four arrays of search query strings:
     const browserJobPlatforms = activeSourceIds
       .filter(sourceId => ['indeed', 'glassdoor', 'ziprecruiter'].includes(sourceId))
       .filter(sourceId => countryApplicableSourceIds.has(sourceId));
-    const cache = await preflight('read session status cache', () => readStatusCache());
+    // A gathered-only recovery has no browser/API work left. In particular, do
+    // not turn a stale startup verifier result into an auth gate for data that
+    // is already durably staged and about to be scored locally/manual-AI.
+    const cache = resumeGatheredOnly ? {} : await preflight('read session status cache', () => readStatusCache());
     // LinkedIn's public listing feed is still guest-accessible, but description
     // enrichment can use a positively verified profile session. Pass this as a
     // preference rather than an assumption: the extractor falls back to the
     // guest SEO representation if the cached session no longer renders a JD.
     const preferLinkedInAuthenticated = cache.linkedin?.connected === true;
     const notLoggedIn = browserJobPlatforms.filter(sourceId => !cache[sourceId]?.connected);
-    if (notLoggedIn.length > 0) {
+    if (!resumeGatheredOnly && notLoggedIn.length > 0) {
       const error = `Not logged in to: ${notLoggedIn.join(', ')}. Open Settings → Job Platforms to connect.`;
       retirePipeline('preflight-rejected', error);
       return { success: false, notLoggedIn, error };
@@ -3453,7 +3824,12 @@ Return a JSON object with four arrays of search query strings:
     const recoveredByKey = new Map();
     for (const j of recoveredStaged) {
       if (!countryApplicableSourceIds.has(j.source)) continue;
-      recoveredByKey.set(`${j.source || '?'}|${j.url || jobTitleCompanyKey(j)}`, j);
+      // Google now replaces its brittle internal card route with the chosen
+      // Apply-on URL after enrichment.  That public URL is intentionally free
+      // to change between provider mirrors; sourceJobKey retains Google’s
+      // htidocid so a resumed run still replaces the older staged copy instead
+      // of reintroducing the same listing as a second job.
+      recoveredByKey.set(`${j.source || '?'}|${sourceJobKey(j)}`, j);
     }
     for (const j of recoveredByKey.values()) {
       const sid = j.source || '?';
@@ -3472,7 +3848,12 @@ Return a JSON object with four arrays of search query strings:
     // HTTP sources are flushed per-source after they finish (below).
     const runStartedAt = Date.now();
     if (resumeScope) {
-      await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId });
+      // Keep the recovered manifest/staging and its original run token intact.
+      // A gathered-only recovery has no page work to record; changing its stage
+      // or starting a fresh run here would truncate the very rows it must score.
+      if (!resumeGatheredOnly) {
+        await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId });
+      }
     } else {
       activeRunId = `${nodeId || 'job'}-${runStartedAt}`;
       await startJobRun(canvasFilePath, {
@@ -3672,10 +4053,12 @@ Return a JSON object with four arrays of search query strings:
     let browserOut;
     let httpResults;
     try {
-      [browserOut, httpResults] = await Promise.all([
-        withSharedProfileLock(runBrowserSourcesInOrder),
-        fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits),
-      ]);
+      [browserOut, httpResults] = resumeGatheredOnly
+        ? [{ manualResults: [], indeedResult: null }, []]
+        : await Promise.all([
+          withSharedProfileLock(runBrowserSourcesInOrder),
+          fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits),
+        ]);
       await throwIfSearchAborted();
     } catch (error) {
       jobsTelemetry.pipeline = {
@@ -3983,7 +4366,7 @@ Return a JSON object with four arrays of search query strings:
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
     // only fetch detail pages for jobs that will actually be scored/shown.
     const diceKept = kept.filter(j => j.source === 'dice');
-    if (diceKept.length > 0) {
+    if (!resumeGatheredOnly && diceKept.length > 0) {
       jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-dice', ts: Date.now(), active: true, pendingSources: ['dice'] };
       const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -3995,7 +4378,7 @@ Return a JSON object with four arrays of search query strings:
     // One tab is opened on the already-running browser, navigated through each
     // job URL sequentially, then closed. Stops early on a login wall.
     const linkedinKept = kept.filter(j => j.source === 'linkedin');
-    if (linkedinKept.length > 0) {
+    if (!resumeGatheredOnly && linkedinKept.length > 0) {
       jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-linkedin', ts: Date.now(), active: true, pendingSources: ['linkedin'] };
       // Re-enter 'searching' before browser enrichment so the source card stays
       // visible and its dismiss timer is cancelled. Without this, the card gets
@@ -4489,7 +4872,63 @@ Return a JSON object with four arrays of search query strings:
     // RENDERER-driven scoring/bucketing that follows resumes from scoring (the
     // gathered jobs are recovered from staging) rather than re-scraping.
     await throwIfSearchAborted();
+    // Per-source terminal states were first recorded immediately after the
+    // scrape. Description enrichment runs later and can introduce a renderer
+    // gating warning (notably LinkedIn's throttle), so repair the manifest
+    // before allowing gathered-only recovery to trust its all-done predicate.
+    // Keep this aligned with isJobSourceWarningGating without importing a
+    // renderer utility into the main process.
+    const finalGatingSourceIds = new Set(
+      scrapeWarnings
+        .filter(warning => activeSourceIds.includes(warning?.sourceId)
+          && (warning?.severity === 'block'
+            || warning?.severity === 'paste'
+            || warning?.code === 'linkedin-rate-limited'))
+        .map(warning => warning.sourceId),
+    );
+    for (const sourceId of finalGatingSourceIds) {
+      await markSourceStatus(canvasFilePath, sourceId, 'blocked', Date.now(), { expectedRunId: activeRunId });
+    }
+    // The page-level ledger is raw collection data. Before declaring the gather
+    // complete, append the final score-safe universe too: Dice detail
+    // enrichment, text repair, markup normalization, salary reconciliation, and
+    // the evidence gate all happen after the original page flushes. Recovery is
+    // last-wins per source/job, so these rows make a gathered-only restart
+    // reproduce the same eligible inputs without re-opening any network path.
+    // A gathered-only recovery already reads those final copies; writing again
+    // would only grow the append-only ledger and obscure its crash checkpoint.
+    if (!resumeGatheredOnly) {
+      const finalScoreSafeBySource = new Map();
+      for (const job of kept) {
+        const sourceId = String(job?.source || '').trim();
+        if (!sourceId) continue;
+        const rows = finalScoreSafeBySource.get(sourceId) || [];
+        rows.push(job);
+        finalScoreSafeBySource.set(sourceId, rows);
+      }
+      for (const [sourceId, jobs] of finalScoreSafeBySource) {
+        await recordSourcePage(canvasFilePath, {
+          sourceId, query: '', page: 0, jobs,
+          now: Date.now(), expectedRunId: activeRunId,
+        });
+      }
+    }
+    // The final checkpoint above is asynchronous. Check again immediately
+    // before advancing the manifest so a Reset cannot label an abandoned run
+    // as gathered after it has cleared its token-scoped sidecars.
+    await throwIfSearchAborted();
     await setJobRunStage(canvasFilePath, 'gathered', Date.now(), { expectedRunId: activeRunId });
+    // The user may have started a fresh run while this recovered result was
+    // being finalized. Re-check the manifest token immediately before returning
+    // so old staged jobs can never be painted onto its successor.
+    if (resumeGatheredOnly) {
+      const currentRun = await readRunState(canvasFilePath, Date.now());
+      if (!currentRun?.incomplete || currentRun.manifest?.runId !== activeRunId) {
+        const error = 'This recovery was superseded by a newer job run. Reload the card before continuing.';
+        retirePipeline('recovery-superseded', error);
+        return { success: false, resumeRunMismatch: true, error };
+      }
+    }
     const completedAt = Date.now();
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
@@ -4534,6 +4973,7 @@ Return a JSON object with four arrays of search query strings:
       totalSources: sourceSummary.length,
       doneSources: sourceSummary.filter(s => s.status === 'done').length,
       sourceSummary,
+      nodeId: state.manifest.inputs?.nodeId || null,
       queries: state.manifest.inputs?.queries || [],
       targetRole: state.manifest.inputs?.targetRole || null,
       canonicalLocation: state.manifest.inputs?.canonicalLocation || '',
@@ -4909,64 +5349,16 @@ Return a JSON object with four arrays of search query strings:
             responseSchema: JOB_SCORING_SCHEMA,
             cachedPrefix: requestParts.cachedPrefix,
             meta: batchMeta,
-            // The manual transport invokes this AFTER JSON Schema validation
-            // but BEFORE accepting a pasted response. A structurally valid row
-            // without deterministic evidence grounding must be corrected in
-            // the user's chat, not silently converted to a 50-point card.
-            responseValidator: (value) => {
-              const submittedScores = Array.isArray(value?.scores)
-                ? value.scores
-                : Array.isArray(value)
-                  ? value
-                  : null;
-              if (!Array.isArray(submittedScores)) {
-                throw new Error(`Invalid job-scoring response: expected a scores array with at least one indexed score row for ${batch.length} job(s).`);
-              }
-              const expectedIndexes = (Array.isArray(batch) ? batch : []).map((job, fallbackIndex) => {
-                return Number.isInteger(job?.index) ? job.index : fallbackIndex;
-              });
-              const expectedIndexSet = new Set(expectedIndexes);
-              const expectedCount = expectedIndexSet.size;
-              const seenIndexes = new Set();
-              const duplicateIndexes = [];
-              const outOfRangeIndexes = [];
-              for (const row of submittedScores) {
-                const index = row?.index;
-                if (!Number.isInteger(index) || !expectedIndexSet.has(index)) {
-                  outOfRangeIndexes.push(index);
-                } else if (seenIndexes.has(index)) {
-                  duplicateIndexes.push(index);
-                } else {
-                  seenIndexes.add(index);
-                }
-              }
-              const missingIndexes = expectedIndexes.filter(index => !seenIndexes.has(index));
-              if (submittedScores.length !== expectedCount || duplicateIndexes.length || outOfRangeIndexes.length || missingIndexes.length) {
-                const details = [
-                  `received ${submittedScores.length}/${expectedCount} rows`,
-                  duplicateIndexes.length ? `duplicate indexes: ${[...new Set(duplicateIndexes)].join(', ')}` : null,
-                  outOfRangeIndexes.length ? `invalid indexes: ${[...new Set(outOfRangeIndexes)].join(', ')}` : null,
-                  missingIndexes.length ? `missing indexes: ${[...new Set(missingIndexes)].join(', ')}` : null,
-                ].filter(Boolean).join('; ');
-                throw new Error(`Invalid job-scoring response: ${details}.`);
-              }
-              const responsePlan = planPartialScoreRecovery(submittedScores, batch.length);
-              if (!responsePlan.usable) {
-                throw new Error(`Invalid job-scoring response: expected at least one indexed score row for ${batch.length} job(s).`);
-              }
-              const prepared = prepareLiveScoringResults(
-                responsePlan.alignedScores,
-                batch,
-                { candidateText: candidateFitText, candidateRoles },
-              );
-              const invalidIndices = prepared.scores.reduce((indices, score, index) => {
-                if (!score) indices.push(index);
-                return indices;
-              }, []);
-              if (invalidIndices.length) {
-                throw new Error(`Invalid job-scoring rows at index ${invalidIndices.join(', ')}: each must contain grounded requirement evidence supported by the supplied candidate and job text.`);
-              }
-            },
+            // The first manual handoff may be incomplete: accepting its valid
+            // subset lets scoreBatch open one small, targeted recovery prompt.
+            // That recovery handoff is strict and remains pending until every
+            // requested row is grounded, so raw invalid scores never reach a
+            // card and a long 15-row answer never has to be regenerated.
+            responseValidator: (value) => validateJobScoringSubmission(value, batch, {
+              candidateText: candidateFitText,
+              candidateRoles,
+              requireComplete: !!context.partialRecovery,
+            }),
             // This caller can divide work safely. Surface MAX_TOKENS to the
             // recursive split below instead of re-sending the same batch at a
             // larger cap and leaving every later job at 0/M.
@@ -5036,11 +5428,11 @@ Return a JSON object with four arrays of search query strings:
               detail: 'partial-response',
             });
             const recovered = await scoreBatch(missingJobs, { ...context, partialRecovery: true });
-            const merged = [...responsePlan.alignedScores];
-            recoveryIndices.forEach((originalIndex, recoveredIndex) => {
-              merged[originalIndex] = recovered[recoveredIndex] || null;
-            });
-            return merged;
+            return mergeRecoveredScoreRows(
+              responsePlan.alignedScores,
+              recoveryIndices,
+              recovered,
+            );
           }
           return responsePlan.alignedScores;
         }
@@ -5260,7 +5652,7 @@ Return a JSON object with four arrays of search query strings:
     recordJobsBoardScope(nodeId, event.sender?.id ?? null);
     const provider = isNonApiJobTask('job-taxonomy-plan') ? 'non-api-ai' : providerForTask('job-taxonomy-plan');
     const bucketMeta = {}; // populated with the model that actually served a taxonomy stage
-    let taxonomyProgress = { stage: 'planning', completedBatches: 0, batchCount: 0, chunkSize: 0, vocabularySize: 0, representativeCount: 0 };
+    let taxonomyProgress = { stage: 'planning', completedBatches: 0, batchCount: 0, chunkSize: 0, vocabularySize: 0, representativeCount: 0, plannedAssignments: 0, classifiedAssignments: 0 };
     let result;
     try {
       result = await runBoundedJobTaxonomy(jobs, {
@@ -5277,8 +5669,14 @@ Return a JSON object with four arrays of search query strings:
             chunkSize: progress.chunkSize || 0,
             vocabularySize: progress.vocabularySize || 0,
             representativeCount: progress.representativeCount || 0,
+            plannedAssignments: progress.plannedAssignments || 0,
+            classifiedAssignments: progress.classifiedAssignments || 0,
           };
-          logger.info(`[Jobs][${nodeId}] Taxonomy ${progress.stage}: ${progress.completedBatches}/${progress.batchCount || '?'} chunk(s), ${progress.processed}/${progress.total} job(s)`);
+          const chunks = `${progress.completedBatches}/${progress.batchCount ?? '?'} chunk(s)`;
+          const direct = progress.stage === 'planned'
+            ? `; all ${progress.processed}/${progress.total} job(s) assigned by the bounded plan — no classifier handoff needed`
+            : '';
+          logger.info(`[Jobs][${nodeId}] Taxonomy ${progress.stage}: ${chunks}, ${progress.processed}/${progress.total} job(s)${direct}`);
         },
       });
     } catch (err) {
@@ -5305,6 +5703,8 @@ Return a JSON object with four arrays of search query strings:
           taxonomyChunkSize: taxonomyProgress.chunkSize,
           taxonomyVocabularySize: taxonomyProgress.vocabularySize,
           taxonomyRepresentativeCount: taxonomyProgress.representativeCount,
+          taxonomyPlannedAssignments: taxonomyProgress.plannedAssignments,
+          taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments,
           blocked: false,
           provider,
           capability: JOB_BOARD_GENERATION_CAPABILITY,
@@ -5379,6 +5779,8 @@ Return a JSON object with four arrays of search query strings:
         taxonomyChunkSize: taxonomyProgress.chunkSize,
         taxonomyVocabularySize: taxonomyProgress.vocabularySize,
         taxonomyRepresentativeCount: taxonomyProgress.representativeCount,
+        taxonomyPlannedAssignments: taxonomyProgress.plannedAssignments,
+        taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments,
         blocked: false,
         provider,
         capability: JOB_BOARD_GENERATION_CAPABILITY,
@@ -5527,6 +5929,8 @@ Return a JSON object with four arrays of search query strings:
       taxonomyChunkSize: taxonomyProgress.chunkSize,
       taxonomyVocabularySize: taxonomyProgress.vocabularySize,
       taxonomyRepresentativeCount: taxonomyProgress.representativeCount,
+      taxonomyPlannedAssignments: taxonomyProgress.plannedAssignments,
+      taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments,
       blocked: false,
       provider,
       capability: JOB_BOARD_GENERATION_CAPABILITY,
@@ -5555,7 +5959,7 @@ Return a JSON object with four arrays of search query strings:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     if (!getRunnableJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
@@ -5597,10 +6001,33 @@ Return a JSON object with four arrays of search query strings:
         // Guard against a snapshot from a different hub (e.g. user ran hub B
         // after hub A's rate-limit card was left open).
         const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
+        const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
+        if (!snapshotIsThisHub || !snapshotIsThisRun) {
+          return {
+            resolved: false,
+            items: [],
+            warning: {
+              code: 'description-recovery-snapshot-stale', severity: 'block',
+              evidence: `The saved LinkedIn recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
+              suggestion: 'Run the search again, then retry Solve from its current source card.',
+            },
+            nextBlockedUrl: null,
+          };
+        }
         const snapshotRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot);
-        const allLinkedInRaw = snapshotIsThisHub
-          ? snapshotRecoveryJobs.filter(j => j.source === 'linkedin')
-          : [];
+        const allLinkedInRaw = snapshotRecoveryJobs.filter(j => j.source === 'linkedin');
+        if (allLinkedInRaw.length === 0) {
+          return {
+            resolved: false,
+            items: [],
+            warning: {
+              code: 'description-recovery-snapshot-unavailable', severity: 'block',
+              evidence: 'The current LinkedIn recovery snapshot has no source rows, so the resolver did not clear this source.',
+              suggestion: 'Run the search again, then retry Solve from its current source card.',
+            },
+            nextBlockedUrl: null,
+          };
+        }
         const allLinkedIn = normalizedCollectionLimits.jobsPerPlatform == null
           ? allLinkedInRaw
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
@@ -5616,6 +6043,7 @@ Return a JSON object with four arrays of search query strings:
           const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
             jobs: scoringJobs,
             descriptionRecoveryJobs,
+            descriptionRecoveryState: snapshot.descriptionRecoveryState,
             profile: snapshot.profile,
             careerData: snapshot.careerData,
             nodeId: snapshot.nodeId || nodeId,
@@ -5797,8 +6225,17 @@ Return a JSON object with four arrays of search query strings:
           logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: snapshot has no LinkedIn jobs for this hub (sourceHubId=${snapshot.sourceHubId}) — returning empty items`);
         }
       } catch (err) {
-        // Snapshot unreadable or malformed — fall through with items: [].
         logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — snapshot unavailable: ${err.message}`);
+        return {
+          resolved: false,
+          items: [],
+          warning: {
+            code: 'description-recovery-snapshot-unavailable', severity: 'block',
+            evidence: 'The current LinkedIn description recovery snapshot could not be read, so no stale rows were merged.',
+            suggestion: 'Run the search again, then retry Solve from its current source card.',
+          },
+          nextBlockedUrl: null,
+        };
       }
 
       return { resolved: false, items: [], nextBlockedUrl: null };
@@ -5811,6 +6248,98 @@ Return a JSON object with four arrays of search query strings:
     const resolveConfig = getJobSourceResolveConfig(sourceId);
     const inlineExtractorJS = resolveConfig?.extractorJS || null;
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    // Google’s visible Solve window can settle on only its first ten mounted
+    // cards. Keep the original post-age/history recovery universe alongside
+    // that visible slice, so a 10/10 duplicate extraction cannot erase the
+    // initial run’s unresolved rows or falsely unlock scoring.
+    let sourceRecoverySnapshot = null;
+    let sourceRecoveryJobs = [];
+    if (sourceId === 'google' && canvasFilePath) {
+      try {
+        const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
+        const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
+        const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
+        if (!snapshotIsThisHub || !snapshotIsThisRun) {
+          return {
+            resolved: false,
+            items: [],
+            warning: {
+              code: 'description-recovery-snapshot-stale', severity: 'block',
+              evidence: `The saved Google recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
+              suggestion: 'Run the search again, then retry Solve from its current source card.',
+            },
+            nextBlockedUrl: null,
+          };
+        }
+        sourceRecoverySnapshot = snapshot;
+        sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot)
+          .filter(job => job?.source === sourceId);
+        if (sourceRecoveryJobs.length === 0) {
+          return {
+            resolved: false,
+            items: [],
+            warning: {
+              code: 'description-recovery-snapshot-unavailable', severity: 'block',
+              evidence: 'The current Google recovery snapshot has no source rows, so the resolver did not clear this source.',
+              suggestion: 'Run the search again, then retry Solve from its current source card.',
+            },
+            nextBlockedUrl: null,
+          };
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] Google resolve could not read the description recovery pool: ${error?.message || error}`);
+        return {
+          resolved: false,
+          items: [],
+          warning: {
+            code: 'description-recovery-snapshot-unavailable', severity: 'block',
+            evidence: 'Google’s current-run description recovery snapshot could not be read, so no stale rows were merged.',
+            suggestion: 'Run the search again, then retry Solve from its current source card.',
+          },
+          nextBlockedUrl: null,
+        };
+      }
+    } else if (sourceId === 'google') {
+      return {
+        resolved: false,
+        items: [],
+        warning: {
+          code: 'description-recovery-snapshot-unavailable', severity: 'block',
+          evidence: 'Google description recovery needs the current saved search snapshot, but this canvas has no saved path.',
+          suggestion: 'Save the canvas, run the search again, then retry Solve.',
+        },
+        nextBlockedUrl: null,
+      };
+    }
+    const persistSourceRecoveryJobs = async (
+      recoveryJobs,
+      descriptionRecoveryState = sourceRecoverySnapshot?.descriptionRecoveryState,
+    ) => {
+      if (!sourceRecoverySnapshot || sourceId !== 'google') return;
+      const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
+        snapshotDescriptionRecoveryJobs(sourceRecoverySnapshot), sourceId, recoveryJobs,
+      );
+      const scoringJobs = filterJobsByDescriptionEvidence(descriptionRecoveryJobs).jobs;
+      const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
+        jobs: scoringJobs,
+        descriptionRecoveryJobs,
+        descriptionRecoveryState,
+        profile: sourceRecoverySnapshot.profile,
+        careerData: sourceRecoverySnapshot.careerData,
+        nodeId: sourceRecoverySnapshot.nodeId || nodeId,
+        targetRole: sourceRecoverySnapshot.targetRole || '',
+        snapshotContext: {
+          sourceHubId: sourceRecoverySnapshot.sourceHubId || nodeId,
+          runId: sourceRecoverySnapshot.runId || null,
+          canvasFilePath,
+          resumeSummary: sourceRecoverySnapshot.resumeSummary || '',
+          locationSnapshot: sourceRecoverySnapshot.locationSnapshot || null,
+        },
+      });
+      await saveJobAnalysisSnapshot(nextSnapshot);
+      sourceRecoverySnapshot = nextSnapshot;
+      sourceRecoveryJobs = descriptionRecoveryJobs.filter(job => job?.source === sourceId);
+    };
     // The normal manual-scrape path expands Glassdoor list rows into full detail
     // descriptions before returning them. A captcha/review-gate resolve used to
     // skip that step, so the DOM fallback's intentionally-empty `snippet` fields
@@ -5824,35 +6353,104 @@ Return a JSON object with four arrays of search query strings:
     // normal search's description-first pipeline.
     const inlineItemsPostprocessor = resolveConfig?.requiresDescriptionEnrichment
       ? async ({ page, items: rawItems }) => {
-          const tagged = (Array.isArray(rawItems) ? rawItems : []).map(j => ({ ...j, source: sourceId }));
+          // Google initially mounts only ten cards in a fresh visible session.
+          // Reveal and re-extract its full provider list before choosing recovery
+          // targets; otherwise every Solve repeats the same first slice forever.
+          const providerRawItems = sourceId === 'google' && sourceRecoveryJobs.length > 0
+            ? await preloadResolvedJobList(page, sourceId, inlineExtractorJS, signal)
+            : rawItems;
+          const tagged = (Array.isArray(providerRawItems) ? providerRawItems : []).map(j => ({ ...j, source: sourceId }));
           // Repair recovered provider text before limiting and enrichment.
           repairJobsMojibake(tagged);
           normalizeJobsMarkup(tagged);
-          let candidates = acceptProviderSearchResults(tagged);
+          let providerRows = acceptProviderSearchResults(tagged);
           if (normalizedCollectionLimits.jobsPerPlatform != null) {
-            candidates = candidates.slice(0, normalizedCollectionLimits.jobsPerPlatform);
+            providerRows = providerRows.slice(0, normalizedCollectionLimits.jobsPerPlatform);
           }
           const relevanceDropped = 0;
-          candidates = filterJobsByAge(candidates, ageDays);
-          if (canvasFilePath && candidates.length > 0) {
-            const history = await loadJobsHistory(canvasFilePath);
-            candidates = dedupAgainstHistory(candidates, history).kept;
+          let candidates;
+          let unavailableRecoveryRows = [];
+          if (sourceId === 'google' && sourceRecoveryJobs.length > 0) {
+            // The recovery snapshot is already the current run's post-age,
+            // post-history universe. Target its unresolved identities directly;
+            // reapplying history here discards exactly the rows Solve must fix.
+            const recoverySelection = partitionResolvedDescriptionRecoveryCandidates(
+              sourceRecoveryJobs, sourceId, providerRows,
+            );
+            candidates = recoverySelection.candidates;
+            unavailableRecoveryRows = recoverySelection.unavailable;
+          } else {
+            candidates = filterJobsByAge(providerRows, ageDays);
+            if (canvasFilePath && candidates.length > 0) {
+              const history = await loadJobsHistory(canvasFilePath);
+              candidates = dedupAgainstHistory(candidates, history).kept;
+            }
           }
           if (candidates.length === 0) {
+            const recovery = reconcileResolvedDescriptionRecovery(sourceRecoveryJobs, sourceId, []);
+            const guidanceOutcome = nextDescriptionRecoveryGuidance(
+              sourceRecoverySnapshot?.descriptionRecoveryState?.[sourceId],
+              {
+                unavailableRows: unavailableRecoveryRows,
+                providerRowsLoaded: providerRows.length,
+                attempted: 0,
+                recovered: 0,
+                empty: recovery.emptyRows.length,
+                completeTotal: recovery.completeRows.length,
+              },
+            );
+            let persistenceWarning = null;
+            if (sourceId === 'google' && unavailableRecoveryRows.length > 0) {
+              try {
+                await persistSourceRecoveryJobs(recovery.recoveryJobs, {
+                  ...(sourceRecoverySnapshot?.descriptionRecoveryState || {}),
+                  [sourceId]: guidanceOutcome.state,
+                });
+              } catch (error) {
+                logger.warn(`[Jobs][${nodeId}] Google resolve could not persist its retry recommendation: ${error?.message || error}`);
+                persistenceWarning = {
+                  code: 'description-recovery-persist-failed', severity: 'block',
+                  evidence: 'Google’s latest no-progress check could not be checkpointed, so the retry/skip recommendation was not advanced.',
+                  suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
+                };
+              }
+            }
+            const unavailableWarning = unavailableRecoveryRows.length > 0 && providerRows.length > 0
+              ? {
+                  code: 'description-listing-unavailable', severity: 'block',
+                  evidence: `${unavailableRecoveryRows.length} unresolved Google listing(s) were not present in the fully loaded current provider results, so this Solve pass had no matching card to open.`,
+                  suggestion: 'The listing may have expired or temporarily fallen out of Google Jobs results.',
+                  recoveryGuidance: guidanceOutcome.guidance,
+                }
+              : null;
+            const warning = persistenceWarning || buildResolvedDescriptionWarning(
+              sourceId, unavailableWarning, recovery.completeRows, recovery.emptyRows,
+            );
             return {
-              // Never hand already-seen raw cards back to the generic resolver,
-              // which would otherwise merge a stale row.
-              items: [],
+              // A visible duplicate slice must never clear an older unresolved
+              // source pool just because history/filtering left nothing new to
+              // click in this window.
+              items: recovery.completeRows,
+              warning,
               meta: {
-                attempted: 0, enriched: 0, succeeded: 0, empty: 0, relevanceDropped,
+                attempted: 0, targeted: 0, enriched: 0, succeeded: 0,
+                completeTotal: recovery.completeRows.length,
+                empty: recovery.emptyRows.length, relevanceDropped,
+                providerRowsLoaded: providerRows.length,
+                unavailable: unavailableRecoveryRows.length,
+                recoveryRecommendation: guidanceOutcome.guidance.recommendation,
+                consecutiveNoMatchPasses: guidanceOutcome.guidance.consecutiveNoMatchPasses,
+                unavailableSamples: unavailableRecoveryRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
+                emptySamples: recovery.emptyRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
                 relevanceRejected: [],
               },
             };
           }
 
-          const expanded = await enrichResolvedJobDescriptions(page, candidates, sourceId, signal);
+          const walkPlan = buildPhysicalCardWalkPlan(providerRows, candidates);
+          const expanded = await enrichResolvedJobDescriptions(page, candidates, sourceId, signal, walkPlan);
           const enhanced = Array.isArray(expanded?.jobs) ? expanded.jobs : [];
-          const byKey = new Map(enhanced.map(job => [job.url || jobTitleCompanyKey(job), job]));
+          const byKey = new Map(enhanced.map(job => [sourceJobKey(job), job]));
           // Account against the candidate list, rather than only `enhanced`:
           // the expander may omit an expired/null row altogether, and that must
           // be visible as an incomplete description rather than disappearing
@@ -5860,16 +6458,62 @@ Return a JSON object with four arrays of search query strings:
           const completeRows = [];
           const emptyRows = [];
           for (const candidate of candidates) {
-            const row = byKey.get(candidate.url || jobTitleCompanyKey(candidate));
+            const row = byKey.get(sourceJobKey(candidate));
             if (hasResolvedJobDescription(row)) completeRows.push({ ...candidate, ...row, source: sourceId });
             else emptyRows.push(candidate);
           }
 
-          const warning = buildResolvedDescriptionWarning(
+          const recovery = reconcileResolvedDescriptionRecovery(
+            sourceRecoveryJobs,
             sourceId,
-            expanded?.descError || expanded?.descWarning || null,
-            completeRows,
-            emptyRows,
+            [...completeRows, ...emptyRows],
+          );
+          const resolvedCompleteRows = sourceRecoveryJobs.length > 0 ? recovery.completeRows : completeRows;
+          const resolvedEmptyRows = sourceRecoveryJobs.length > 0 ? recovery.emptyRows : emptyRows;
+          const guidanceOutcome = nextDescriptionRecoveryGuidance(
+            sourceRecoverySnapshot?.descriptionRecoveryState?.[sourceId],
+            {
+              unavailableRows: unavailableRecoveryRows,
+              providerRowsLoaded: providerRows.length,
+              attempted: expanded?.attemptedCount ?? candidates.length,
+              recovered: completeRows.length,
+              empty: resolvedEmptyRows.length,
+              completeTotal: resolvedCompleteRows.length,
+            },
+          );
+          let persistenceWarning = null;
+          if (sourceRecoveryJobs.length > 0) {
+            try {
+              await persistSourceRecoveryJobs(recovery.recoveryJobs, {
+                ...(sourceRecoverySnapshot?.descriptionRecoveryState || {}),
+                [sourceId]: guidanceOutcome.state,
+              });
+            } catch (error) {
+              logger.warn(`[Jobs][${nodeId}] Google resolve could not persist the description recovery pool: ${error?.message || error}`);
+              persistenceWarning = {
+                code: 'description-recovery-persist-failed', severity: 'block',
+                evidence: 'Recovered Google descriptions could not be checkpointed, so this source was not marked complete.',
+                suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
+              };
+            }
+          }
+
+          const expansionWarning = expanded?.descError || expanded?.descWarning || null;
+          const unavailableWarning = unavailableRecoveryRows.length > 0 && providerRows.length > 0
+            ? {
+                ...(expansionWarning || {}),
+                code: expansionWarning?.code || 'description-listing-unavailable',
+                severity: 'block',
+                evidence: `${expansionWarning?.evidence ? `${expansionWarning.evidence} ` : ''}${unavailableRecoveryRows.length} unresolved Google listing(s) were not present in the fully loaded current provider results and had no matching card to open.`,
+                suggestion: expansionWarning?.suggestion || 'The missing listing may have expired or temporarily fallen out of Google Jobs results.',
+                recoveryGuidance: guidanceOutcome.guidance,
+              }
+            : expansionWarning;
+          const warning = persistenceWarning || buildResolvedDescriptionWarning(
+            sourceId,
+            unavailableWarning,
+            resolvedCompleteRows,
+            resolvedEmptyRows,
           );
 
           return {
@@ -5877,16 +6521,23 @@ Return a JSON object with four arrays of search query strings:
             // failed. The warning keeps the source actionable (retryable when the
             // failure can be retried, Skip-only for a terminal hard block); only
             // full JD rows may cross the resolver boundary into pendingJobs/scoring.
-            items: completeRows,
+            items: resolvedCompleteRows,
             warning,
             meta: {
-              attempted: candidates.length,
+              attempted: expanded?.attemptedCount ?? candidates.length,
+              targeted: candidates.length,
               enriched: completeRows.length,
               succeeded: completeRows.length,
-              empty: emptyRows.length,
+              completeTotal: resolvedCompleteRows.length,
+              empty: resolvedEmptyRows.length,
               relevanceDropped,
+              providerRowsLoaded: providerRows.length,
+              unavailable: unavailableRecoveryRows.length,
+              recoveryRecommendation: guidanceOutcome.guidance.recommendation,
+              consecutiveNoMatchPasses: guidanceOutcome.guidance.consecutiveNoMatchPasses,
+              unavailableSamples: unavailableRecoveryRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
               relevanceRejected: [],
-              emptySamples: emptyRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
+              emptySamples: resolvedEmptyRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
             },
           };
         }
@@ -5961,7 +6612,7 @@ Return a JSON object with four arrays of search query strings:
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
-      `inline-extracted=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}` +
+      `${enrichmentMeta ? 'score-safe-returned' : 'inline-extracted'}=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}` +
       `${enrichmentMeta ? `, detail attempted=${enrichmentMeta.attempted || 0}, enriched=${enrichmentMeta.enriched || 0}, empty=${enrichmentMeta.empty || 0}` : ''}`
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
@@ -5994,17 +6645,17 @@ Return a JSON object with four arrays of search query strings:
       enrichment: enrichmentMeta,
       warning: resolveWarning ? { code: resolveWarning.code, severity: resolveWarning.severity } : null,
     };
-    // Keep the original per-source funnel from remaining a permanent 0/error
-    // after an inline Solve succeeds. Preserve provider volume separately from
-    // the evidence-safe rows that actually re-enter the scoring pipeline.
+    // Preserve the original search funnel. A Solve reopens a page that the
+    // initial scrape already counted; adding its raw/retained rows here made a
+    // 119-row Google result look like 129 provider rows even when the renderer
+    // accepted zero new jobs. The resolve funnel below records the recovery
+    // attempt; only the renderer has the cross-source dedup evidence needed to
+    // describe a real queue contribution.
     if (jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
       const bySource = jobsTelemetry.search.bySource || (jobsTelemetry.search.bySource = {});
       const prior = bySource[sourceId] || {};
       bySource[sourceId] = {
         ...prior,
-        providerGathered: Math.max(0, Number(prior.providerGathered ?? prior.gathered ?? prior.count) || 0) + extractedRaw.length,
-        count: Math.max(0, Number(prior.count) || 0) + items.length,
-        unique: Math.max(0, Number(prior.unique) || 0) + ageFiltered.length,
         warning: resolveWarning ? {
           code: resolveWarning.code,
           severity: resolveWarning.severity,
@@ -6053,6 +6704,11 @@ Return a JSON object with four arrays of search query strings:
       items,
       warning: resolveWarning,
       nextBlockedUrl,
+      // Google recovery returns the complete score-safe source subset from its
+      // checkpoint, not an incremental provider page. Replacement semantics
+      // keep repeated Solve attempts from inflating source/gathered counts when
+      // the returned complete rows were already pending.
+      replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,
       removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
     };
   });

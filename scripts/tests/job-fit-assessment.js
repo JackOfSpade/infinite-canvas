@@ -1,4 +1,4 @@
-import { assert, calculateDatedTenure, validateAndNormalizeFitAssessment } from '../test-dependencies.js';
+import { assert, calculateDatedTenure, calibratedScoreForJob, validateAndNormalizeFitAssessment } from '../test-dependencies.js';
 
 const jobText = `
 We need an engineer to lead cloud platform architecture. Candidates must have
@@ -75,6 +75,62 @@ export default [
     },
   },
   {
+    name: 'Job fit assessment: public reasoning explains an unchanged AI score with adjacent matches and safe audit limitations',
+    run: () => {
+      const assessedJob = [
+        'Candidates use AI coding agents as part of daily engineering.',
+        'Maintain a shared internal platform with internal APIs and reusable services.',
+        'Design clear APIs with deliberate service boundaries and data models.',
+        'Implement CI/CD workflows with cloud infrastructure and infrastructure as code.',
+        'Build observability and evaluation systems with security controls and auditability.',
+      ].join(' ');
+      const assessedCandidate = [
+        'Regular AI-assisted/agentic coding.',
+        'Built a web app used as a hub for all our internal tools.',
+        'Maintained REST APIs for controlled access.',
+      ].join(' ');
+      const result = validateAndNormalizeFitAssessment({
+        score: 70,
+        confidence: 'high',
+        reasoning: 'Provider prose must never be used in the public explanation.',
+        requirementAssessments: [
+          requirement({ requirement: 'Agentic engineering workflow', priority: 'required', status: 'adjacent', jobEvidence: 'use AI coding agents', candidateEvidence: 'AI-assisted/agentic coding' }),
+          requirement({ requirement: 'Shared internal platform', priority: 'important', status: 'adjacent', jobEvidence: 'shared internal platform', candidateEvidence: 'web app used as a hub for all our internal tools' }),
+          requirement({ requirement: 'APIs and integrations', priority: 'important', status: 'adjacent', jobEvidence: 'internal APIs and reusable services', candidateEvidence: 'REST APIs for controlled access' }),
+        ],
+        materialGaps: [
+          requirement({ requirement: 'AI platform architecture and gateways', priority: 'important', status: 'not_documented', jobEvidence: 'clear APIs\nservice boundaries and data models', candidateEvidence: '' }),
+          requirement({ requirement: 'CI/CD, cloud, and infrastructure as code', priority: 'important', status: 'not_documented', jobEvidence: 'CI/CD workflows', candidateEvidence: '' }),
+          requirement({ requirement: 'AI observability, evaluation, security, and auditability', priority: 'important', status: 'not_documented', jobEvidence: 'observability and evaluation systems\nsecurity controls and auditability', candidateEvidence: '' }),
+        ],
+      }, { jobText: assessedJob, candidateText: assessedCandidate });
+
+      assert(result.rawScore === 70 && result.adjustedScore === 70 && result.adjustments.length === 0,
+        'an AI score already below the verified-gap ceiling must remain unchanged');
+      assert(result.adjacentMatches.length === 3 && result.strengths.length === 0 && result.materialGaps.length === 1,
+        'the audit must retain transferable matches separately from direct strengths and verified gaps');
+      assert(result.rejectedRequirementRows.length === 2
+        && result.confidence.effective === 'medium'
+        && result.confidence.groundedRequirementCount === 4
+        && result.confidence.requirementCount === 6,
+      'unverifiable posting citations must remain visible as limitations and reduce evidence confidence');
+      assert(result.reasoning.includes('Adjacent, transferable support—not equivalent evidence')
+        && result.reasoning.includes('Agentic engineering workflow')
+        && result.reasoning.includes('CI/CD, cloud, and infrastructure as code')
+        && result.reasoning.includes('Assessment limitation')
+        && result.reasoning.includes('AI platform architecture and gateways')
+        && result.reasoning.includes('AI observability, evaluation, security, and auditability')
+        && result.reasoning.includes('Effective confidence is medium')
+        && result.reasoning.includes('evidence coverage is 4/6'),
+      'public reasoning must explain the score using matches, verified gaps, safe limitation labels, confidence, and coverage');
+      assert(!result.reasoning.includes('Provider prose')
+        && !result.reasoning.includes('clear APIs\nservice boundaries')
+        && !result.reasoning.toLowerCase().includes('candidate lacks'),
+      'public reasoning must never expose raw model prose, rejected evidence quotes, or categorical deficit language');
+      return { score: result.adjustedScore, adjacent: result.adjacentMatches.length, coverage: '4/6' };
+    },
+  },
+  {
     name: 'Job fit assessment: fabricated requirements are flagged but cannot penalize the candidate',
     run: () => {
       const result = validateAndNormalizeFitAssessment({
@@ -101,6 +157,48 @@ export default [
       const contextual = result.requirementRows.find(row => row.reportedPriority === 'contextual');
       assert(contextual.priority === 'preferred' && !contextual.materialGap, 'contextual priority must remain visible but non-penalizing');
       return { rejected: result.rejectedRequirementRows.length };
+    },
+  },
+  {
+    name: 'Job fit assessment: work authorization and location constraints are informational and never penalize fit',
+    run: () => {
+      const logisticsJob = 'Based in the United States. Willing to work on-site in Austin, TX. You must be authorized to work for any employer in the US. Requires production API design.';
+      const result = validateAndNormalizeFitAssessment({
+        score: 92,
+        confidence: 'high',
+        requirementAssessments: [
+          requirement({ requirement: 'Production API design', priority: 'required', status: 'direct', jobEvidence: 'production API design', candidateEvidence: 'maintained REST APIs' }),
+        ],
+        materialGaps: [
+          requirement({ requirement: 'Current U.S. base', priority: 'required', status: 'not_documented', jobEvidence: 'Based in the United States', candidateEvidence: '' }),
+          requirement({ requirement: 'On-site availability in Austin', priority: 'required', status: 'not_documented', jobEvidence: 'Willing to work on-site in Austin, TX', candidateEvidence: '' }),
+          requirement({ requirement: 'US work authorization', priority: 'required', status: 'not_documented', jobEvidence: 'authorized to work for any employer in the US', candidateEvidence: '' }),
+        ],
+      }, { jobText: logisticsJob, candidateText });
+      const informational = result.requirementRows.filter(row => row.scoreImpact === 'informational');
+      assert(result.adjustedScore === 92 && result.materialGaps.length === 0 && result.adjustments.length === 0,
+        'non-scoring logistics must not cap or otherwise lower the model professional-fit score');
+      assert(informational.length === 3
+        && informational.some(row => row.scoreExclusionReason === 'work-authorization')
+        && informational.filter(row => row.scoreExclusionReason === 'location').length === 2,
+      'the audit must retain a transparent reason for excluding each logistical constraint');
+      assert(!/United States|Austin|authori[sz]ed to work/i.test(result.reasoning),
+        'user-facing score reasoning must not present logistics as professional fit gaps');
+      assert(result.confidence.effective === 'high',
+        'unknown logistics must not reduce confidence in the professional-fit assessment');
+      const rejectedLiveScore = calibratedScoreForJob({
+        matchScore: 67,
+        confidence: 'high',
+        requirementAssessments: [
+          requirement({ requirement: 'Production API design', priority: 'required', status: 'direct', jobEvidence: 'production API design', candidateEvidence: 'maintained REST APIs' }),
+        ],
+        materialGaps: [
+          requirement({ requirement: 'On-site availability in Austin', priority: 'required', status: 'not_documented', jobEvidence: 'Willing to work on-site in Austin, TX', candidateEvidence: '' }),
+        ],
+      }, { title: 'AI Platform Architect', snippet: logisticsJob }, { candidateText });
+      assert(rejectedLiveScore === null,
+        'a fresh response that may have embedded a logistics penalty in its raw number must be retried, not silently accepted');
+      return { score: result.adjustedScore, informational: informational.length };
     },
   },
   {

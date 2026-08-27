@@ -222,7 +222,11 @@ export const GOOGLE_JOBS_EXTRACTOR = `
 
   cards.forEach(card => {
     try {
-      const url = card.getAttribute('data-share-url') || '';
+      // This is an internal Google result-card identity, not an employer job
+      // page. Keep it separate so description expansion/dedup can retain the
+      // opaque htidocid without exposing Google's brittle share route as the
+      // user-facing "open listing" URL.
+      const googleCardUrl = card.getAttribute('data-share-url') || '';
 
       const titleEl = card.querySelector('.tNxQIb, [role="heading"], h3');
       const title = titleEl?.innerText?.trim() || '';
@@ -233,7 +237,10 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       const contentGroup = card.querySelector('.GoEOPd') || titleEl?.parentElement;
       const contentDivs = contentGroup ? Array.from(contentGroup.querySelectorAll(':scope > div')) : [];
       const company = contentDivs[1]?.innerText?.trim() || '';
-      const location = (contentDivs[2]?.innerText?.trim() || '').split(/[•·]/)[0].trim();
+      const locationLine = contentDivs[2]?.innerText?.trim() || '';
+      const location = locationLine.split(/[•·]/)[0].trim();
+      const viaIndex = locationLine.toLowerCase().lastIndexOf(' via ');
+      const applySource = viaIndex >= 0 ? locationLine.slice(viaIndex + 5).trim() : '';
 
       // Posted date + employment type from bare <span> elements (no class attr).
       const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
@@ -257,7 +264,10 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       // Keeping it out of the snippet field lets the description-expansion walk report
       // (and downstream scoring receive) the truthful empty state until the
       // card panel was actually read.
-      jobs.push({ title, company, location, salary, employmentType: empType, snippet: '', url, posted, source: 'google' });
+      jobs.push({
+        title, company, location, salary, employmentType: empType, snippet: '',
+        url: '', googleCardUrl, applySource, posted, source: 'google',
+      });
     } catch {}
   });
 

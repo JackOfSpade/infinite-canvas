@@ -87,7 +87,7 @@ export function unionScoredJobs(jobArrays, stats) {
  * Map key intentionally makes unlinked legacy rows with no origin unique.
  */
 function boardListingKey(job) {
-  if (String(job?.url || '').trim()) return jobTitleCompanyUrlKey(job);
+  if (String(job?.url || job?.googleCardUrl || '').trim()) return jobTitleCompanyUrlKey(job);
   const originHubId = String(job?.originHubId || '').trim();
   return originHubId ? `unlinked:${originHubId}|${jobTitleCompanyLocationKey(job)}` : job;
 }

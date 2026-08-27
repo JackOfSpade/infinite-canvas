@@ -17,6 +17,17 @@ export function canRegenerateLocalApplication(localApplication) {
   return REPLACEABLE_LOCAL_APPLICATION_STATUSES.has(localApplication?.status);
 }
 
+/**
+ * Regeneration is the only renderer action that may retire a prior Local AI
+ * handoff. It may happen only after a newly queued replacement was accepted by
+ * the live card, and it may target only the exact terminal handoff the user
+ * chose to replace.
+ */
+export function replacedLocalApplicationForCleanup(prior, replacement, replacementAccepted) {
+  if (!replacementAccepted || !replacement?.id || !prior?.id || prior.id === replacement.id) return null;
+  return canRegenerateLocalApplication(prior) ? prior : null;
+}
+
 export function queuedLocalApplicationSettlement(node, localJob, expectedPriorLocalApplication = null) {
   if (!localJob?.id || node?.type !== 'jobcard') {
     return { action: 'discard', reason: node ? 'invalid-card' : 'card-missing' };

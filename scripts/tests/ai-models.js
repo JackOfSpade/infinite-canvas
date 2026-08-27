@@ -10,8 +10,9 @@ export default [
 {
     name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
     run: () => {
-      assert(taskMaxTokensFor('job-scoring', { itemCount: 100 }) === 32000,
-        'job-scoring has the redesigned 32,000-token formula ceiling');
+      assert(taskMaxTokensFor('job-scoring', { itemCount: 100 }) === 12000
+        && taskMaxTokensFor('job-scoring', { itemCount: 15 }) === 10600,
+        'job-scoring caps the compact manual evidence audit instead of inviting impractical 32,000-token pastes');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) === 12288,
         'per-cohort compensation assessment has the larger 12,288-token ceiling');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
@@ -234,20 +235,20 @@ export default [
         callText: async (prompt, options) => {
           prompts.push({ prompt, options });
           if (options.task === 'job-taxonomy-plan') {
-            return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+            return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'], directionRoleIndexes: [{ direction: 'Engineering', roleIndex: 0 }, { direction: '(blank)', roleIndex: 1 }, { direction: 'Y'.repeat(100), roleIndex: 1 }] };
           }
           classifications += 1;
           const count = Number(prompt.match(/exactly (\d+) integers/)?.[1]);
           return { roleByIndex: Array.from({ length: count }, (_, index) => index % 2) };
         },
       });
-      assert(classifications === Math.ceil(124 / JOB_TAXONOMY_CHUNK_SIZE)
+      assert(classifications === 0
         && complete.roleByIndex.length === 124
         && complete.roleByIndex.every(role => role === 'Engineering' || role === 'Other'),
-      'planner plus fixed-size classifier chunks covers all 124 positions with frozen canonical labels');
+      'planner directly maps every bounded direction without a redundant classifier handoff');
       assert(Math.max(...prompts.map(({ prompt }) => prompt.length)) < 20_000
         && !prompts[0].prompt.includes('X'.repeat(1000))
-        && !prompts[1].prompt.includes('Y'.repeat(1000)),
+        && !prompts.some(({ prompt }) => prompt.includes('Y'.repeat(1000))),
       'one-megabyte listing fields are hard-clamped before every provider prompt');
       assert(prompts[0].prompt.includes('encode "Under $Xk/yr" as minSalary=1')
         && prompts[0].prompt.includes('minSalary=0, maxSalary=0'),
@@ -255,41 +256,107 @@ export default [
       const progressSequence = progressReceipts
         .map(progress => `${progress.stage}:${progress.completedBatches}:${progress.processed}`);
       assert(JSON.stringify(progressSequence) === JSON.stringify([
-        'planning:0:0', 'classifying:0:0',
-        'classifying:1:24', 'classifying:2:48', 'classifying:3:72',
-        'classifying:4:96', 'classifying:5:120', 'classifying:6:124',
+        'planning:0:0', 'planned:0:124',
       ]),
       `taxonomy progress emits one receipt per real transition, without duplicate chunk boundaries (${progressSequence.join(', ')})`);
+      // A high-cardinality board deliberately maps only its bounded planning
+      // vocabulary. The residual direction must retain its original position
+      // and flow through the tiny classifier fallback rather than being
+      // silently assigned to Other.
+      const diverseJobs = Array.from({ length: 25 }, (_, index) => ({
+        title: `Distinct Role ${index}`,
+        careerDirection: `Direction ${index}`,
+        salary: '$100k/yr',
+      }));
+      const diversePlan = {
+        salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }],
+        roleFamilies: ['Mapped', 'Classified', 'Other'],
+        directionRoleIndexes: Array.from({ length: 24 }, (_, index) => ({ direction: `Direction ${index}`, roleIndex: 0 })),
+      };
+      const fallbackHints = [];
+      const fallback = await runBoundedJobTaxonomy(diverseJobs, {
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return diversePlan;
+          fallbackHints.push(options.hints);
+          return { roleByIndex: [1] };
+        },
+      });
+      assert(JSON.stringify(fallbackHints.map(hint => [hint.batch, hint.batchTotal, hint.itemCount])) === JSON.stringify([[1, 1, 1]])
+        && fallback.roleByIndex.slice(0, 24).every(role => role === 'Mapped')
+        && fallback.roleByIndex[24] === 'Classified',
+      'only the unmapped residual is classified in a bounded 1-based chunk and written back to its original index');
+
+      const sequentialJobs = Array.from({ length: 50 }, (_, index) => ({
+        title: `Sequential Role ${index}`,
+        careerDirection: `Sequential Direction ${index}`,
+        salary: '$100k/yr',
+      }));
+      const sequentialPlan = {
+        ...diversePlan,
+        directionRoleIndexes: Array.from({ length: 24 }, (_, index) => ({ direction: `Sequential Direction ${index}`, roleIndex: 0 })),
+      };
+      const sequentialHints = [];
+      let activeClassifiers = 0;
+      let peakClassifiers = 0;
+      await runBoundedJobTaxonomy(sequentialJobs, {
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return sequentialPlan;
+          sequentialHints.push(options.hints);
+          activeClassifiers += 1;
+          peakClassifiers = Math.max(peakClassifiers, activeClassifiers);
+          await new Promise(resolve => setTimeout(resolve, options.hints.batch === 1 ? 5 : 0));
+          activeClassifiers -= 1;
+          return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
+        },
+      });
+      assert(peakClassifiers === 1
+        && JSON.stringify(sequentialHints.map(hint => [hint.batch, hint.batchTotal, hint.itemCount])) === JSON.stringify([[1, 2, 24], [2, 2, 2]]),
+      'manual taxonomy classifier handoffs are issued one at a time in stable batch order so different-length replies cannot be cross-pasted');
+
       const shortCalls = [];
       let failed = false;
       try {
-        await runBoundedJobTaxonomy(jobs, {
+        await runBoundedJobTaxonomy(diverseJobs, {
           callText: async (_prompt, options) => {
             shortCalls.push(options.task);
-            if (options.task === 'job-taxonomy-plan') return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+            if (options.task === 'job-taxonomy-plan') return diversePlan;
             return { roleByIndex: [0] };
           },
         });
       } catch { failed = true; }
-      assert(failed && shortCalls.filter(task => task === 'job-taxonomy-classify').length === Math.ceil(124 / JOB_TAXONOMY_CHUNK_SIZE),
-        'a short classifier result rejects the full parallel handoff without exposing a partial taxonomy');
+      assert(!failed && shortCalls.filter(task => task === 'job-taxonomy-classify').length === 1,
+        'a one-row residual accepts an exact one-index classifier result');
+      let shortFailure = '';
+      try {
+        await runBoundedJobTaxonomy(diverseJobs, {
+          callText: async (_prompt, options) => (
+            options.task === 'job-taxonomy-plan' ? diversePlan : { roleByIndex: [] }
+          ),
+        });
+      } catch (error) { shortFailure = error?.message || String(error); }
+      assert(shortFailure.includes('received 0 entries; exactly 1 required'),
+        'a short residual classifier result rejects atomically and reports the raw received count plus exact requirement');
       const controller = new AbortController();
       let abortCalls = 0;
       try {
-        await runBoundedJobTaxonomy(jobs, {
+        await runBoundedJobTaxonomy(diverseJobs, {
           signal: controller.signal,
           callText: async (_prompt, options) => {
-            if (options.task === 'job-taxonomy-plan') return { salaryRanges: [{ label: '$100k+/yr', minSalary: 100000, maxSalary: 0 }, { label: 'Unspecified', minSalary: 0, maxSalary: 0 }], roleFamilies: ['Engineering', 'Other'] };
+            if (options.task === 'job-taxonomy-plan') return diversePlan;
             abortCalls += 1;
             controller.abort();
-            return { roleByIndex: Array(JOB_TAXONOMY_CHUNK_SIZE).fill(0) };
+            return { roleByIndex: [1] };
           },
         });
       } catch { /* cancellation is the expected terminal outcome */ }
-      assert(abortCalls === 1, 'cancellation after a classifier response prevents every later chunk call');
+      assert(abortCalls === 1, 'cancellation after a residual classifier response prevents taxonomy publication');
       const shape = inspectJobTaxonomyRoleIndexes([0, 2, 1], 3, 2);
-      assert(shape.outOfRangeCount === 1 && inspectJobTaxonomyRoleIndexes([0, 1], 3, 2).missingCount === 1,
-        'classifier diagnostics reject unknown vocabulary indexes and exact-length shortages');
+      const oversizedShape = inspectJobTaxonomyRoleIndexes(Array(24).fill(0), 14, 2);
+      assert(shape.outOfRangeCount === 1
+        && inspectJobTaxonomyRoleIndexes([0, 1], 3, 2).missingCount === 1
+        && oversizedShape.rawEntryCount === 24
+        && oversizedShape.extraCount === 10,
+      'classifier diagnostics reject unknown indexes and distinguish raw response length from expected-position coverage');
       const noOther = normalizeJobTaxonomyPlan({ roleFamilies: ['Engineering'], salaryRanges: [] });
       assert(!noOther.valid, 'a plan without the reserved Other role is rejected before any classification call');
       const malformedSalaryPlan = validateJobTaxonomyPlan({

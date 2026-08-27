@@ -1,42 +1,20 @@
 import { assert, fs, path } from '../test-dependencies.js';
-import { discardLocalAiJobsRecursively } from '../../src/utils/canvasInteractions.js';
 
 export default [
   {
-    name: 'Local AI deletion cleanup recursively withdraws removed job cards without touching retained locked branches',
+    name: 'Local AI handoffs survive result-card, Job Board, and canvas display deletion',
     run: () => {
-      const calls = [];
-      const removed = [
-        { id: 'root-card', type: 'jobcard', data: { localApplication: { id: 'root-job', canvasFilePath: '/tmp/root.json' } } },
-        { id: 'legacy-card', type: 'jobcard', data: { localApplication: { id: 'legacy-job' } } },
-        { id: 'locked-card', type: 'jobcard', data: { localApplication: { id: 'locked-job', canvasFilePath: '/tmp/locked.json' } } },
-        {
-          id: 'nested-group', type: 'group', data: {
-            canvasData: { nodes: [
-              { id: 'nested-card', type: 'jobcard', data: { localApplication: { id: 'nested-job', canvasFilePath: '/tmp/nested.json' } } },
-            ] },
-          },
-        },
-      ];
-      const requested = discardLocalAiJobsRecursively(
-        removed,
-        new Set(['locked-card']),
-        (args) => { calls.push(args); return { success: true }; },
-      );
-      assert(requested === 2,
-        'only deleted Local AI cards with an owned saved-canvas job request cleanup');
-      assert(JSON.stringify(calls) === JSON.stringify([
-        { nodeId: 'root-card', jobId: 'root-job', canvasFilePath: '/tmp/root.json' },
-        { nodeId: 'nested-card', jobId: 'nested-job', canvasFilePath: '/tmp/nested.json' },
-      ]), 'cleanup covers nested canvases, preserves locked branches, and never invents a path for legacy state');
-
       const clearSource = fs.readFileSync(path.resolve('src/hooks/useCanvasActions.js'), 'utf8');
       const deleteSource = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
-      assert(clearSource.includes('discardLocalAiJobsRecursively(allNodes, lockedIds)'),
-        'Clear explicitly cleans Local AI handoffs because it bypasses React Flow onNodesDelete');
-      assert(deleteSource.includes('discardLocalAiJobsRecursively(deletedNodes)'),
-        'normal React Flow deletion routes use the same cleanup helper');
-      return { requested, jobIds: calls.map(({ jobId }) => jobId) };
+      const interactionSource = fs.readFileSync(path.resolve('src/utils/canvasInteractions.js'), 'utf8');
+      const boardSource = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
+      assert(!clearSource.includes('discardLocalApplication') && !deleteSource.includes('discardLocalApplication'),
+        'display deletion never invokes the destructive Local AI discard IPC');
+      assert(!interactionSource.includes('discardLocalAiJobsRecursively'),
+        'there is no generic helper that can turn a result-node cascade into handoff deletion');
+      assert(boardSource.includes('clearBoardChildren') && boardSource.includes('deleteChildrenByHubId'),
+        'the regression covers the shared result-cascade path used by board clear, delete, and replacement');
+      return { displayDeletionPreservesHandoffs: true };
     },
   },
 ];

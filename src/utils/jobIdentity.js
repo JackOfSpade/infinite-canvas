@@ -37,6 +37,8 @@
  *     same-title/same-company reqs in different cities stay separate when no
  *     native id is present.
  */
+import { googleJobsDocumentId } from './jobListingUrl.js';
+
 function keyPart(value) {
   return String(value || '').toLowerCase().trim();
 }
@@ -46,7 +48,7 @@ export function jobTitleCompanyKey(job) {
 }
 
 export function jobTitleCompanyUrlKey(job) {
-  return `${jobTitleCompanyKey(job)}|${keyPart(job?.url)}`;
+  return `${jobTitleCompanyKey(job)}|${keyPart(job?.url || job?.googleCardUrl)}`;
 }
 
 export function jobTitleCompanyLocationKey(job) {
@@ -62,26 +64,20 @@ export function jobTitleCompanyLocationKey(job) {
 function sourceStableUrlKey(url) {
   const raw = String(url || '').trim();
   if (!raw) return '';
-  try {
-    const parsed = new URL(raw);
-    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    // Google For Jobs' cards all use the shared `/search` path. Their opaque
-    // htidocid is the per-listing identity, while q/shmd/hash are specific to
-    // the query that happened to surface the card. Keep the opaque id's case:
-    // it is not ordinary display text and lowercasing it could merge two ids.
-    if ((host === 'google.com' || host.endsWith('.google.com'))) {
-      const htidocid = parsed.searchParams.get('htidocid');
-      if (htidocid) return `google-htidocid:${htidocid}`;
-    }
-  } catch {
-    // The raw URL is still a useful exact-match key below.
-  }
+  // Google For Jobs' cards all use the shared `/search` path. Their opaque
+  // htidocid is the per-listing identity, while q/shmd/hash are specific to
+  // the query that happened to surface the card. The shared parser also reads
+  // ids from legacy fragments and rejects Google-shaped lookalike hosts.
+  // Keep the opaque id's case: it is not ordinary display text and
+  // lowercasing it could merge two ids.
+  const htidocid = googleJobsDocumentId(raw);
+  if (htidocid) return `google-htidocid:${htidocid}`;
   return raw;
 }
 
 export function sourceJobKey(job) {
   return job?.jobkey
-    || sourceStableUrlKey(job?.url)
+    || sourceStableUrlKey(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url)
     || jobTitleCompanyLocationKey(job);
 }
 
@@ -115,7 +111,7 @@ function normalizedLocationOrNull(job) {
 }
 
 function normalizedUrlOrNull(job) {
-  const url = keyPart(job?.url);
+  const url = keyPart(job?.url || job?.googleCardUrl);
   return url || null;
 }
 

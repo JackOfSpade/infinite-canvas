@@ -96,6 +96,30 @@ function buildResumeSummary(profile) {
   return `${skills}${profile.experience_years ? `${skills ? ' · ' : ''}${profile.experience_years}y exp` : ''}`.trim();
 }
 
+// Capture the whole done-state score summary before a re-analysis changes the
+// visible state to queued/scoring. A failed or cancelled re-analysis restores
+// this exact snapshot; success is the only path allowed to replace results.
+function reanalysisRestorePatch(data) {
+  return {
+    scoredJobs: Array.isArray(data?.scoredJobs) ? data.scoredJobs : [],
+    resultCount: data?.resultCount,
+    totalScoredCount: data?.totalScoredCount,
+    scrapedCount: data?.scrapedCount,
+    gatheredCount: data?.gatheredCount,
+    finalSourceCounts: data?.finalSourceCounts,
+    scoreRangeMin: data?.scoreRangeMin,
+    scoreRangeMax: data?.scoreRangeMax,
+    scoreThreshold: data?.scoreThreshold,
+    aiSkipped: data?.aiSkipped,
+    collectionOnly: data?.collectionOnly,
+    testMode: data?.testMode,
+    scrapeWarnings: data?.scrapeWarnings,
+    rerunOutcome: data?.rerunOutcome,
+    rerunNotice: data?.rerunNotice,
+    jobCount: data?.jobCount,
+  };
+}
+
 function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation }) {
   return JSON.stringify({
     // v4: remote salary-comparison residences do not influence generated
@@ -116,6 +140,12 @@ function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
     return 'Saved from a different job search hub.';
   }
   return '';
+}
+
+function isSavedAnalysisForCurrentHub(snapshot, meta, currentHubId, currentCanvasFilePath) {
+  const sourceHubId = meta?.sourceHubId ?? snapshot?.sourceHubId ?? snapshot?.nodeId ?? null;
+  const snapshotCanvasFilePath = meta?.canvasFilePath ?? snapshot?.canvasFilePath ?? null;
+  return sourceHubId === currentHubId && snapshotCanvasFilePath === currentCanvasFilePath;
 }
 
 /**
@@ -148,6 +178,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const canvasFilePath = nav?.currentFile || null;
   const moduleRunQueue = useModuleRunQueue();
   const processingRunsRef = useRef(createRunOwnershipGuard());
+  // Present only while the done-state re-analysis owns the run guard. It lets
+  // either cancel route (the in-card X or Non-API AI dialog) restore the prior
+  // scored results instead of treating this as a full search reset.
+  const reanalysisRestoreRef = useRef(null);
   const initialDropAcceptedRef = useRef(false);
   const pendingUSAJobsRefreshRef = useRef(false);
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
@@ -858,7 +892,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
     aiSkipped = false, collectionOnly = false, testMode = false,
-    jobRunId = null, cancelled = () => false,
+    jobRunId = null, cancelled = () => false, completeRun = true,
   }) => {
     if (cancelled()) return;
     const displayed = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -899,12 +933,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       rerunNotice: null,
     });
 
-    window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: jobRunId }).catch(() => {});
+    // Re-analysis deliberately has no search-run lifecycle or history sidecar
+    // to complete. It only replaces the saved hiring-fit assessments.
+    if (completeRun) {
+      window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: jobRunId }).catch(() => {});
+    }
   }, [id, updateGlobal, canvasFilePath]);
 
   const runScoringAndSpawn = useCallback(async ({
-    profile, careerData = data.careerData, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos,
-    jobRunId = null, cancelled, locationSnapshot = null,
+    profile, careerData = data.careerData, jobs, gatheredCount,
+    scrapedCount = Array.isArray(jobs) ? jobs.length : 0,
+    scrapeWarnings, activeTargetRole, originalPos,
+    jobRunId = null, cancelled, locationSnapshot = null, completeRun = true,
   }) => {
     const currentId = id;
 
@@ -947,6 +987,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // retain this defensive recovery branch so an in-flight legacy request is
     // not discarded if a backend returns its already-persisted state.
     if (scoreResult.batchPending) {
+      if (!completeRun) {
+        // A saved-result re-analysis owns no job-run sidecar to poll. Keeping
+        // the previous done state is safer than stranding it in a legacy batch
+        // recovery state that cannot atomically replace those scores.
+        throw new Error('Saved-job re-analysis returned an unsupported deferred scoring task. Your existing hiring-fit results were kept.');
+      }
       updateGlobal(currentId, {
         hubState: 'scoring-batch',
         jobCount: jobs.length,
@@ -965,7 +1011,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scoredJobs: scoreResult.scoredJobs,
       profile,
       gatheredCount,
-      scrapedCount: jobs.length,
+      scrapedCount,
       scrapeWarnings,
       activeTargetRole,
       originalPos,
@@ -974,6 +1020,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       testMode: !!scoreResult.testMode,
       jobRunId,
       cancelled,
+      completeRun,
     });
   }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, data.careerData]);
 
@@ -1125,10 +1172,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Guarantee a Solve/Skip card for every blocked source — a card can be lost
       // during the long run, stranding the user with "blocked but nothing to resolve".
       ensureBlockedSourceCards(blockingWarnings);
-      // A LinkedIn "Solve" re-enriches from the saved analysis snapshot (normally
-      // written by score-jobs, which hasn't run yet) — persist it now so Solve has
-      // jobs to work with instead of no-opping.
-      if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
+      // Description-recovery Solve actions run before score-jobs writes its usual
+      // snapshot. Persist the current run's full recovery universe now; otherwise
+      // a Google/LinkedIn Solve can load a prior same-hub snapshot or mistake the
+      // score-safe subset for a completed source.
+      const needsDescriptionRecoverySnapshot = blockingWarnings.some(w =>
+        ['google', 'linkedin'].includes(w?.sourceId),
+      );
+      if (needsDescriptionRecoverySnapshot) {
         try {
           await window.electronAPI?.saveJobAnalysisSnapshot?.({
             jobs: foundJobs,
@@ -1148,7 +1199,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             },
           });
         } catch (err) {
-          EventLogger.error(`[JobSearch][${currentId}] Failed to save LinkedIn recovery snapshot:`, err);
+          EventLogger.error(`[JobSearch][${currentId}] Failed to save pre-score description recovery snapshot:`, err);
         }
       }
       return false;
@@ -1814,29 +1865,34 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // profile and the run's staged queries — handleResumeRun's `!profile ||
   // queries.length === 0` branch silently discards the staged run, so a button
   // offered without both is a trap that destroys what it promises to recover.
-  const resumeRunActionable = canResumeOffer && hasReusableCareerProfile && ((resumeOffer?.queries?.length ?? 0) > 0);
+  const resumeRunActionable = canResumeOffer
+    && resumeOffer?.nodeId === id
+    && hasReusableCareerProfile
+    && ((resumeOffer?.queries?.length ?? 0) > 0);
   useEffect(() => {
     if (!canvasFilePath || !window.electronAPI?.peekJobRun) return undefined;
     let cancelled = false;
     (async () => {
       try {
         const info = await window.electronAPI.peekJobRun({ canvasFilePath });
-        if (!cancelled) setResumeOffer(info?.found && info?.resumable ? info : null);
+        // The run sidecar is canvas-scoped but recovery must be hub-scoped.
+        // Do not render a dismissible offer for another hub (or a legacy
+        // node-less manifest): that button could otherwise trash its run.
+        if (!cancelled) setResumeOffer(
+          info?.found && info?.resumable && info?.nodeId === id ? info : null,
+        );
       } catch { /* best-effort */ }
     })();
     return () => { cancelled = true; };
-  }, [canvasFilePath]);
+  }, [canvasFilePath, id]);
 
   const handleResumeRun = useCallback(async () => {
     const cfp = canvasFilePath;
     const offer = resumeOffer;
     if (processingRunsRef.current.active || !offer) return;
-    if (activeEnabledSourceIds.length === 0) {
-      const message = 'Select at least one job platform before resuming the search.';
-      updateGlobal(id, { errorMessage: message, rerunOutcome: null, rerunNotice: null });
-      addToast({ title: 'Choose a Job Platform', description: message, type: 'error' });
-      return;
-    }
+    // Resume is bound to the manifest's original source breadth, not today’s
+    // platform toggles. In particular, a fully gathered recovery can score its
+    // staged rows with every current platform disabled.
     if (!canResumeOffer) {
       updateGlobal(id, {
         errorMessage: offer.locationRecorded
@@ -1903,6 +1959,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         rawLocation: data.preferredLocation || '',
         profileLocations: profile?.locations || [],
         resume: true,
+        // The offer is canvas-scoped and can become stale if another run starts
+        // before this click reaches the main process. Bind recovery to the exact
+        // manifest token so staged results can never cross into that newer run.
+        resumeRunId: offer.runId || null,
         runOrigin: 'crash-resume',
         profileInputMode: 'stored-profile',
       });
@@ -1982,13 +2042,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
     }
-  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.locationSnapshot, data.searchLocation, data.remoteResidences, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, addToast]);
+  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.locationSnapshot, data.searchLocation, data.remoteResidences, collectionLimits, enabledSourceIds, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
 
   const handleDiscardResume = useCallback(async () => {
+    // Defense in depth for a stale async offer: only its owning hub may clear
+    // the token-scoped sidecar. Unknown legacy ownership stays recoverable.
+    if (resumeOffer?.nodeId !== id) return;
     const runId = resumeOffer?.runId || null;
     setResumeOffer(null);
     try { await window.electronAPI?.discardJobRun?.({ canvasFilePath, runId }); } catch { /* best-effort */ }
-  }, [canvasFilePath, resumeOffer]);
+  }, [canvasFilePath, resumeOffer, id]);
 
   // Listen for individual job-source skips dispatched from JobSourceCardNode.
   // Each event drops the matching warning from data.scrapeWarnings; once the
@@ -2283,6 +2346,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     e?.stopPropagation();
     if (data.locked) return;
 
+    const reanalysisRestore = reanalysisRestoreRef.current;
+    if (reanalysisRestore) {
+      // The processing card uses this same cancel control for a full search
+      // and for saved-result re-analysis. The latter must return to its prior
+      // done state, not clear the listing set or its summary counters.
+      EventLogger.log(`[JobSearch][${id}] Re-analysis cancelled; restoring prior hiring-fit results`);
+      epoch.bump();
+      moduleRunQueue.cancelQueuedRunsForNode(id);
+      window.electronAPI?.cancelNodeTask?.(id);
+      updateGlobal(id, {
+        hubState: 'done',
+        queuedModuleRun: null,
+        errorMessage: null,
+        isRateLimit: false,
+        ...reanalysisRestore.patch,
+      });
+      reanalysisRestoreRef.current = null;
+      processingRunsRef.current.cancel();
+      return;
+    }
+
     EventLogger.log(`[JobSearch][${id}] User clicked Reset`);
 
     // Bump the epoch so any in-flight runPipeline step that settles after
@@ -2415,6 +2499,162 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
   }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss, activeEnabledSourceIds]);
 
+  // Re-score the currently displayed listings without invoking any search,
+  // scrape, seen-history, or job-run lifecycle work. This is deliberately
+  // separate from Re-run Search: existing listings are often history-filtered
+  // on a fresh scrape and therefore cannot be safely revisited that way.
+  const handleReanalyze = useCallback(async () => {
+    if (data.locked || processingRunsRef.current.active) return;
+
+    const existingScoredJobs = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
+    if (existingScoredJobs.length === 0) {
+      addToast({
+        title: 'No Saved Jobs to Re-analyze',
+        description: 'Run a job search first, then this action can update its hiring-fit assessments.',
+        type: 'info',
+      });
+      return;
+    }
+    if (!data.resumeProfile) {
+      addToast({
+        title: 'Career Profile Needed',
+        description: 'The saved career profile is unavailable, so these jobs cannot be re-analyzed.',
+        type: 'error',
+      });
+      return;
+    }
+
+    // A saved result is both a listing and the last scoring pass over it. Send
+    // only the former back: a per-job scorer fallback spreads its input into a
+    // placeholder, so retaining matchScore, reasoning, careerDirection,
+    // requirementAssessments, materialGaps, strengths, experienceAssessment,
+    // confidence, fitAssessment, rawScore, adjustedScore, adjustments, or
+    // calibration would make that placeholder look like the old assessment.
+    // Listing and compensation evidence intentionally remain intact.
+    const jobsToReanalyze = existingScoredJobs.map(job => {
+      const listing = { ...(job || {}) };
+      [
+        'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
+        'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
+        'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
+      ].forEach(field => delete listing[field]);
+      return listing;
+    });
+    const processingToken = processingRunsRef.current.start();
+    if (!processingToken) return;
+    const currentId = id;
+    const cancelled = epoch.start();
+    const restorePatch = reanalysisRestorePatch(data);
+    reanalysisRestoreRef.current = { token: processingToken, patch: restorePatch };
+    let lease = null;
+
+    try {
+      lease = await moduleRunQueue.acquireModuleRun({
+        nodeId: currentId,
+        kind: 'jobsearch',
+        label: 'Re-analyze hiring fit',
+        onQueued: ({ position }) => {
+          updateGlobal(currentId, {
+            hubState: 'queued',
+            queuedModuleRun: { label: 'Re-analyzing hiring fit', position },
+            errorMessage: null,
+            isRateLimit: false,
+          });
+        },
+        onQueueUpdate: ({ position }) => {
+          updateGlobal(currentId, { queuedModuleRun: { label: 'Re-analyzing hiring fit', position } });
+        },
+        onStart: () => {
+          if (cancelled()) throw new Error('Node deleted');
+          updateGlobal(currentId, { queuedModuleRun: null });
+        },
+      });
+
+      const locationSnapshot = data.locationSnapshot || {
+        searchLocation: getSearchLocation({
+          searchLocation: data.searchLocation,
+          preferredLocation: data.preferredLocation,
+          canonicalLocation: data.canonicalLocation,
+        }),
+        remoteResidences: normalizeRemoteResidences(data.remoteResidences),
+      };
+      setScoringProgress(null);
+      updateGlobal(currentId, { hubState: 'scoring', jobCount: jobsToReanalyze.length });
+      const scoreResult = await window.electronAPI.scoreJobs({
+        jobs: jobsToReanalyze,
+        profile: data.resumeProfile,
+        careerData: data.careerData,
+        nodeId: currentId,
+        targetRole: (data.targetRole || '').trim(),
+        searchLocation: locationSnapshot.searchLocation,
+        remoteResidences: locationSnapshot.remoteResidences,
+        snapshotContext: {
+          sourceHubId: currentId,
+          canvasFilePath,
+          resumeSummary: buildResumeSummary(data.resumeProfile),
+          searchLocation: locationSnapshot.searchLocation,
+          remoteResidences: locationSnapshot.remoteResidences,
+        },
+      });
+      if (cancelled()) return;
+      if (!scoreResult.success) {
+        const err = new Error(scoreResult.error || 'Failed to re-analyze hiring fit');
+        if (scoreResult.isRateLimit) err.isRateLimit = true;
+        throw err;
+      }
+      if (scoreResult.batchPending) {
+        throw new Error('Saved-job re-analysis returned an unsupported deferred scoring task. Your existing hiring-fit results were kept.');
+      }
+
+      await finishScoringAndSpawn({
+        scoredJobs: scoreResult.scoredJobs,
+        gatheredCount: data.gatheredCount,
+        // Re-analysis does not collect anything. Preserve the original funnel
+        // rather than replacing it with the saved-listing count.
+        scrapedCount: data.scrapedCount,
+        scrapeWarnings: Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [],
+        aiSkipped: !!scoreResult.aiSkipped,
+        collectionOnly: !!scoreResult.collectionOnly,
+        testMode: !!scoreResult.testMode,
+        cancelled,
+        // This score-only action has no search run or history lifecycle.
+        completeRun: false,
+      });
+
+      if (!cancelled()) {
+        addToast({
+          title: 'Hiring Fit Re-analyzed',
+          description: `Updated hiring-fit assessments for ${existingScoredJobs.length} saved job${existingScoredJobs.length === 1 ? '' : 's'}.`,
+          type: 'success',
+        });
+      }
+    } catch (error) {
+      if (cancelled() || isNodeDeletedAbort(error)) return;
+      EventLogger.error('[JobSearch] Saved-job hiring-fit re-analysis failed:', error);
+      // No mutation of scoredJobs occurs until finishScoringAndSpawn succeeds.
+      // Restore all summary fields explicitly as a defense against a queued or
+      // partial scorer transition, and make the failure actionable in the hub.
+      updateGlobal(currentId, {
+        hubState: 'done',
+        queuedModuleRun: null,
+        ...restorePatch,
+        errorMessage: error?.message || String(error),
+        isRateLimit: !!error?.isRateLimit,
+      });
+      addToast({
+        title: 'Hiring Fit Re-analysis Failed',
+        description: 'Your existing scores were kept. Try again when the AI handoff is available.',
+        type: 'error',
+      });
+    } finally {
+      lease?.release();
+      if (reanalysisRestoreRef.current?.token === processingToken) {
+        reanalysisRestoreRef.current = null;
+      }
+      if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
+    }
+  }, [data, id, addToast, epoch, moduleRunQueue, updateGlobal, canvasFilePath, finishScoringAndSpawn, isMountedRef]);
+
   // Drop the hub's career identity (files + everything derived from them) while
   // keeping every search setting, so the user can drop FRESH career files onto
   // the SAME node instead of rebuilding a module from scratch.
@@ -2493,15 +2733,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
   useEffect(() => {
-    // The "Resume saved scrape" banner is a skip-AI testing affordance — only
-    // that mode ever creates the snapshot (scrape now, AI-score later). In
-    // full/normal runs never surface it, even if a stale snapshot file is left
-    // over from prior testing: a full run produces fresh results that supersede
-    // it (and trashes the file on start), so offering to resume it would mislead.
-    // (savedAnalysisMeta is only ever set below, so an early return keeps it at
-    // its initial null in full mode — no synchronous setState in the effect.)
-    if (!SKIP_AI_FOR_TESTING) return;
-    if (!['empty', 'done', 'sources-ready'].includes(hubState)) return;
+    // A manual-AI scoring handoff is intentionally process-local. Its durable
+    // scrape snapshot is not: after a quit, offer it back only to the exact
+    // hub/canvas that wrote it, never a different module sharing this canvas.
+    if (!['empty', 'done', 'sources-ready'].includes(hubState) || !hasReusableCareerProfile) {
+      setSavedAnalysisMeta(null);
+      return;
+    }
     let cancelled = false;
     void (async () => {
       if (!window.electronAPI?.getLastJobAnalysisSnapshot) {
@@ -2517,7 +2755,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           res.meta &&
           Array.isArray(res.snapshot?.jobs) &&
           res.snapshot.jobs.length > 0 &&
-          res.snapshot?.profile
+          res.snapshot?.profile &&
+          isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath)
         ) {
           setSavedAnalysisMeta(res.meta);
         } else {
@@ -2530,7 +2769,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     return () => {
       cancelled = true;
     };
-  }, [hubState, canvasFilePath]);
+  }, [hubState, canvasFilePath, hasReusableCareerProfile, id]);
 
   const handleOpenSavedPrompt = useCallback(async () => {
     if (!savedAnalysisMeta?.promptPath) return;
@@ -2546,7 +2785,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [savedAnalysisMeta, addToast]);
 
   const handleResumeSavedScrape = useCallback(async () => {
-    if (data.locked || processingRunsRef.current.active || platformsVerifying) return;
+    if (data.locked || !hasReusableCareerProfile || processingRunsRef.current.active || platformsVerifying) return;
     if (!window.electronAPI?.getLastJobAnalysisSnapshot) return;
     const processingToken = processingRunsRef.current.start();
     if (!processingToken) return;
@@ -2560,7 +2799,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // New snapshots retain the raw evidence used by the scorer. A current
       // hub can supply it for a legacy snapshot created before this field.
       const careerData = snapshot?.careerData || data.careerData || '';
-      if (!snapshot || !profile || savedJobs.length === 0) {
+      if (!snapshot || !profile || savedJobs.length === 0
+        || !isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath)) {
         addToast({
           title: 'No Saved Scrape',
           description: 'No saved scrape data is available to resume.',
@@ -2605,6 +2845,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           activeTargetRole,
           originalPos,
           cancelled,
+          jobRunId: snapshot.runId || null,
+          // Re-analysis snapshots have no search-run lifecycle. Only complete
+          // a staged search when this recovered snapshot owns that run token.
+          completeRun: !!snapshot.runId,
           locationSnapshot: snapshot.locationSnapshot || snapshot.snapshotContext?.locationSnapshot || (
             snapshot.snapshotContext?.searchLocation || snapshot.snapshotContext?.remoteResidences
               ? {
@@ -2630,7 +2874,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.locked, epoch, getNode, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.locked, epoch, getNode, hasReusableCareerProfile, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
@@ -2682,10 +2926,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           {savedAnalysisLoading ? 'Resuming…' : 'Resume saved scrape'}
         </button>
         <button
-          className="nodrag rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] text-white/55 hover:bg-white/10"
+          className="nodrag rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] text-white/55 hover:bg-white/10 disabled:cursor-default disabled:opacity-50"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={handleOpenSavedPrompt}
           type="button"
+          disabled={!savedAnalysisMeta.promptPath}
+          title={savedAnalysisMeta.promptPath ? 'Open the saved AI scoring prompt' : 'No verified prompt file is available for this recovered snapshot'}
         >
           Open prompt
         </button>
@@ -2937,6 +3183,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}
               onRerun={handleRerun}
+              onReanalyze={handleReanalyze}
               onClearCareerFiles={handleClearCareerFiles}
               maxAgeDays={maxAgeDays}
               setMaxAgeDays={setMaxAgeDays}
