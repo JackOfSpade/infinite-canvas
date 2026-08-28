@@ -70,6 +70,21 @@ const ZIPRECRUITER_DETAIL_GAP_MS = 2500;
 const ZIPRECRUITER_429_FALLBACK_WAIT_MS = 45_000;
 const ZIPRECRUITER_429_MAX_WAIT_MS = 60_000;
 const ZIPRECRUITER_429_RETRIES = 1;
+// A source-wide detail block (panel 429 / repeated panel HTTP errors) used to
+// last for the whole remaining source: one throttle on page 11 meant pages
+// 12-30 were walked with zero descriptions and every row deferred unscored.
+// Give the throttle a bounded cooldown, then let ONE normal expansion attempt
+// act as the probe — expandDescriptions already stops at its first blocked
+// panel, so a still-throttled retry costs a single card, never a page-wide
+// hammer (the per-listing no-retry rule in descriptionPanelRetryAllowed stays
+// intact). The re-probe cap bounds a long walk that keeps re-arming.
+const DETAIL_BLOCK_COOLDOWN_MS = 120_000;
+const DETAIL_BLOCK_MAX_REPROBES = 3;
+// Cards a cooldown re-probe may touch. MUST stay below DESC_STALE_THRESHOLD:
+// a silent throttle surfaces as panel timeouts, and that many in a row trips
+// abortWithError, which would turn an external rate limit into a bogus
+// "stale selectors" error and end the source walk.
+const DETAIL_BLOCK_PROBE_CARDS = 2;
 // Appcast can intermittently block a ZipRecruiter outbound detail redirect
 // while the original ZipRecruiter result page remains usable. Recover once by
 // discarding that detail tab, backing off, refreshing the known-good list page,
@@ -130,6 +145,22 @@ const manualScraperTelemetry = {
 // consume them can evict the first-party failure that actually explains a bad
 // scrape. Keep the allowlist URL-shaped and narrow: unfamiliar third parties and
 // every ordinary first-party URL remain reportable.
+/** Sleep that returns early if the run is cancelled. Never rejects. */
+function sleepUnlessAborted(ms, signal) {
+  const wait = Math.max(0, Math.round(Number(ms) || 0));
+  if (wait === 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); signal?.removeEventListener?.('abort', done); resolve(); };
+    const timer = setTimeout(done, wait);
+    signal?.addEventListener?.('abort', done, { once: true });
+  });
+}
+
+/** Lowercased hostname, or '' for anything unparseable. Never throws. */
+function safeUrlHost(rawUrl) {
+  try { return new URL(String(rawUrl || '')).hostname.toLowerCase(); } catch { return ''; }
+}
+
 function isKnownTelemetryNoiseUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return false;
   try {
@@ -195,7 +226,12 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   };
   manualScraperTelemetry.events.push(entry);
   if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
-  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction'].includes(entry.phase)) {
+  // The 30-slot `events` ring is a recency window: after a source-wide detail
+  // block, every later page emits two rows, so 18 pages of skip chatter evicted
+  // the single `detail-panel-rate-limit` event that explained the whole run.
+  // The rate-limit / panel-HTTP phases are the CAUSE rows — keep them in the
+  // longer-lived anomaly ring so a report written an hour later still has them.
+  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -235,6 +271,7 @@ export function resolveManualSourceStopReason({
   hitPerSourceCap = false,
   hitPageCap = false,
   hitEmptyPage = false,
+  hitPageTurnStalled = false,
   hitUnhandledPagination = false,
   dataStopReason = null,
 } = {}) {
@@ -262,6 +299,12 @@ export function resolveManualSourceStopReason({
   // warning (see bugReport/jobsSnapshot.js's stopReason flagging).
   if (dataStopReason) return dataStopReason;
   if (hitPageCap) return 'page-cap';
+  // A page turn that never landed is NOT the end of the results. Reporting it
+  // as `empty-page` would assert the board ran out when all we established is
+  // that our own click did not navigate — and `empty-page` is treated
+  // downstream as a clean, terminal, lossless finish. Ranked above empty-page
+  // so the specific observation wins over the generic one.
+  if (hitPageTurnStalled) return 'page-turn-stalled';
   if (hitEmptyPage) return 'empty-page';
   return 'completed';
 }
@@ -354,7 +397,14 @@ const NEXT_PAGE_SELECTORS = {
   // The current control is an anchor (`<a title="Next Page">`), rather than a
   // button, so it must be clicked as part of the regular pagination loop.
   ziprecruiter: 'a[title="Next Page"]',
-  glassdoor:    'button[data-test="pagination-next"]',
+  // Glassdoor has no pager: its Next.js rewrite replaced it with an in-page
+  // "Show more jobs" append, and its `?p=N` param is ignored. The old
+  // `button[data-test="pagination-next"]` here matched nothing, and a
+  // no-control result was indistinguishable from a finished board — so every
+  // Glassdoor search silently ended after its first ~30 rows and reported
+  // `completed`. Its advance control now comes from the task's
+  // `loadMoreSelector` (set in jobs.js) and runs through clickLoadMore.
+  glassdoor:    null,
 };
 
 // Sources that load more jobs by scrolling to the bottom (infinite scroll).
@@ -2201,6 +2251,16 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
         // Keep Glassdoor detail navigation on the exact country host whose list
         // page loaded successfully. Only the navigation target is rewritten.
+        //
+        // NOTE: no DESC_CONFIGS entry currently sets `pinToListHost`, so this
+        // branch is unreachable in production today — host pinning is NOT
+        // active, even though pinGlassdoorDetailUrlToListHost is unit-tested and
+        // reads as though it were. It is kept (rather than deleted) because
+        // Glassdoor's country redirect is a known, recurring failure mode and
+        // this is the ready mitigation; enable it by setting the flag on the
+        // glassdoor entry once a run actually shows cross-host detail failures.
+        // Don't infer from this code that a mixed .com/.ca walk is being
+        // corrected — it isn't.
         if (cfg.pinToListHost) {
           viewUrl = pinGlassdoorDetailUrlToListHost(viewUrl, listUrl);
         }
@@ -3697,10 +3757,15 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           url: rateLimit.url,
         }, { updateActive: false });
         logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor rate-limited the list-panel request for key=${rateLimitKey}; stopping card enrichment without retrying`);
+        // `block`, matching Google's identical panel-429 (see
+        // stopForGooglePanelRateLimit). `warn` did not gate, so the hub never
+        // paused and JobSourceCardNode suppressed the Solve button entirely —
+        // leaving the description-recovery path that jobs.js registers for
+        // Glassdoor unreachable while every later row was deferred unscored.
         descWarning = {
-          code: 'description-rate-limited', severity: 'warn',
-          evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${job.title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle.`,
-          suggestion: 'Wait a few minutes before rerunning Glassdoor. List results were retained; this and later rows may lack full descriptions.',
+          code: 'description-rate-limited', severity: 'block',
+          evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${job.title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle. List rows were kept, but this and later listings carry no description and are held back from scoring.`,
+          suggestion: 'Wait a few minutes, then click Solve to retry the unresolved descriptions. List results were retained; deferred listings are not recorded as seen, so a later run can still collect them.',
         };
         for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
           enhanced[unresolvedIndex] = {
@@ -4002,10 +4067,35 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
 // whose accessible text/title says "next page" is strong evidence that stopping
 // here would silently truncate a paginated search. It lets us surface selector
 // drift as an actionable warning instead of treating page 1 as a clean finish.
-async function inspectNextPageControl(page) {
+// Which label family counts as "there is more to fetch" depends on how the
+// source advances. A board that appends in place ("Show more jobs") is just as
+// much proof of an unfinished walk as a conventional pager, but a
+// `next page`-only pattern cannot see one — so a load-more source whose
+// configured selector had gone stale ended at page 1 and was reported as a
+// clean `completed`.
+//
+// The two families stay SEPARATE rather than merging into one pattern: a pager
+// source that has genuinely reached its last page often still shows an
+// end-of-results "More jobs like this" link, and matching that would turn every
+// completed pager walk into a false blocking warning.
+//
+// Held as pattern SOURCE strings, not RegExp literals, because the matching runs
+// inside page.evaluate — which is serialized into the browser and cannot close
+// over anything here. Passing the source across keeps one testable definition
+// instead of a copy in the page context that could silently drift.
+export const ADVANCE_CONTROL_LABEL_PATTERNS = Object.freeze({
+  pager:    String.raw`\bnext\s+page\b`,
+  loadMore: String.raw`\b(show|load|view|see)\s+(\d+\s+)?more\s+jobs?\b`,
+});
+
+async function inspectNextPageControl(page, { loadMore = false } = {}) {
+  const labelPattern = loadMore
+    ? ADVANCE_CONTROL_LABEL_PATTERNS.loadMore
+    : ADVANCE_CONTROL_LABEL_PATTERNS.pager;
   try {
-    return await page.evaluate(() => {
+    return await page.evaluate((patternSource) => {
       const normalized = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const ADVANCE_LABEL = new RegExp(patternSource);
       const candidate = [...document.querySelectorAll('a, button')].find((el) => {
         const label = normalized([
           el.getAttribute('aria-label'),
@@ -4016,14 +4106,14 @@ async function inspectNextPageControl(page) {
         const style = window.getComputedStyle(el);
         const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
         return !disabled && style.display !== 'none' && style.visibility !== 'hidden' &&
-          /\bnext\s+page\b/.test(label);
+          ADVANCE_LABEL.test(label);
       });
       if (!candidate) return null;
       return {
         label: String(candidate.getAttribute('aria-label') || candidate.getAttribute('title') || candidate.textContent || 'Next page').replace(/\s+/g, ' ').trim(),
         href: candidate instanceof HTMLAnchorElement ? candidate.href : null,
       };
-    });
+    }, labelPattern);
   } catch {
     return null;
   }
@@ -4033,6 +4123,15 @@ async function inspectNextPageControl(page) {
 // unhandled. Callers must never collapse the latter into a normal completion.
 async function clickNextPage(page, sourceId) {
   const sel = NEXT_PAGE_SELECTORS[sourceId];
+  // A SCROLL source has no pager by construction, so probing for one can only
+  // produce a false alarm — and the probe raises a BLOCK-severity warning.
+  // It matches on the TEXT of every <a>/<button>, and on a job board that text
+  // is job-title-derived: a posting titled "Next Page Media — Engineer" would
+  // trip it. Measured on Google: zero real controls among 846 anchors and 1125
+  // buttons, plus four near-misses in card aria-labels ("…Next-Generation
+  // Network Management Platform…") that only escaped because they are
+  // role="button" divs. Skip the probe rather than wait for one to land.
+  if (!sel && SCROLL_SOURCES.has(sourceId)) return { clicked: false, unhandled: null };
   if (!sel) return { clicked: false, unhandled: await inspectNextPageControl(page) };
   try {
     const clicked = await page.evaluate((s) => {
@@ -4047,6 +4146,86 @@ async function clickNextPage(page, sourceId) {
   }
 }
 
+// ── Load-more ("Show more jobs") advance ──────────────────────────────────────
+// Some boards replaced their pager with an in-page append: one URL load, then a
+// button that grows the SAME list. Glassdoor did exactly that (see the
+// `loadMoreSelector` note on its entry in jobs.js) — its `?p=N` param is
+// ignored, so a URL/pager walk re-serves page 1 forever and a next-page click
+// finds nothing. The selector is supplied by the task rather than inferred here,
+// so this stays a wiring path and not a guess about any site's markup.
+//
+// Same contract as clickNextPage: never collapse an unhandled-but-present
+// control into a normal completion, or a stale selector reads as an exhausted
+// board.
+async function clickLoadMore(page, sel) {
+  try {
+    const clicked = await page.evaluate((s) => {
+      const btn = document.querySelector(s);
+      if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+      const style = window.getComputedStyle(btn);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      btn.scrollIntoView({ block: 'center' });
+      btn.click();
+      return true;
+    }, sel);
+    return { clicked, unhandled: clicked ? null : await inspectNextPageControl(page, { loadMore: true }) };
+  } catch {
+    return { clicked: false, unhandled: await inspectNextPageControl(page, { loadMore: true }) };
+  }
+}
+
+// Wait for an in-page append to actually add rows. Unlike a pager there is no
+// navigation to await, and the click resolves long before the XHR lands. A
+// count that never grows means the board had nothing more to give — a real
+// end-of-results, not a failure.
+//
+// Measures the RAW row count, deliberately not countDistinctJobs: the caller's
+// baseline is `extracted.length`, and that same raw length is what its
+// `extracted.slice(prevCount)` index is expressed in. Mixing a de-duplicated
+// count against a raw-length baseline would under-report growth on a list
+// carrying duplicate DOM rows and end the walk early. Duplicates are already
+// absorbed downstream by the providerSeen/seen key sets.
+/**
+ * page.url() that cannot throw. A page torn down mid-walk (navigation, crash,
+ * abort) makes url() throw, and a page-turn assertion must never be the thing
+ * that kills a scrape.
+ */
+function safePageUrl(page) {
+  try { return page.url() || null; } catch { return null; }
+}
+
+/**
+ * Wait for a URL-paginated source to actually land on a new URL after a
+ * next-page click. Returns true once the URL differs from `beforeUrl`, false if
+ * it never changes within CONTENT_TIMEOUT_MS.
+ *
+ * This is the missing assertion behind the "no-new-jobs" false stop: the click
+ * itself resolves immediately, so without waiting for the URL to change the
+ * extractor can read the previous page's document.
+ */
+async function waitForUrlChange(page, beforeUrl, signal, timeoutMs = CONTENT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return false;
+    const current = safePageUrl(page);
+    if (current && current !== beforeUrl) return true;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+async function waitForListGrowth(page, extractorJS, previousCount, signal, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return previousCount;
+    const raw = await page.evaluate(extractorJS).catch(() => []);
+    const count = Array.isArray(raw) ? raw.length : 0;
+    if (count > previousCount) return count;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return previousCount;
+}
+
 // ── Pre-loader for scroll sources ─────────────────────────────────────────────
 // Scrolls until the source reaches its remaining per-platform job allowance, or
 // its configured reveal/page ceiling. Used for sources without traditional
@@ -4059,28 +4238,88 @@ async function clickNextPage(page, sourceId) {
 // having no such feature, since it looked supported. Removed rather than
 // guessing a selector for a source we can't verify; add it back with a real,
 // verified selector if a specific source needs it.
+/**
+ * Consecutive no-growth reveal passes required before calling a scroll list
+ * finished. Must exceed the longest observed stall INSIDE a still-growing list
+ * (one pass, at each ten-card batch boundary on Google) with margin for a slow
+ * network, while staying far below the iteration ceiling.
+ */
+const REVEAL_STABLE_PASSES = 5;
+
+/**
+ * Board-published "no more results" markers, checked during the reveal loop.
+ *
+ * Google keeps this node present on a ZERO-result page with empty text, so the
+ * predicate must read the text, never just the element. Anchored on `jsname`,
+ * which held stable across every page observed; the sibling class names are
+ * obfuscated build output and churn.
+ */
+const REVEAL_END_OF_LIST_SELECTORS = { google: '[jsname="OR4M9d"]' };
+
+async function revealEndOfListReached(page, sourceId) {
+  const selector = REVEAL_END_OF_LIST_SELECTORS[sourceId];
+  if (!selector) return false;
+  try {
+    return await page.evaluate(
+      (sel) => !!document.querySelector(sel)?.textContent?.trim(),
+      selector,
+    );
+  } catch {
+    // Diagnostics-grade signal only — a detached frame must never end a walk.
+    return false;
+  }
+}
+
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, { maxPages, jobsPerPlatform, existingJobs = 0 }) {
   const isScroll = SCROLL_SOURCES.has(sourceId);
   if (!isScroll) return;
 
   let prevCount = -1;
   let iterations = 0;
+  let count = 0;
+  let stableStreak = 0;
+  // How the reveal loop ended, so a run that stopped early stops being
+  // indistinguishable from one that revealed the whole list. Without this the
+  // scroll loop emitted NO telemetry at all and a reveal that plateaued at 30 of
+  // ~96 cards was reported downstream as a clean `completed`.
+  let exit = 'plateau';
   while (true) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) { exit = 'aborted'; break; }
     // Ceiling on top of the "count stopped increasing" exit below. A source
     // that trickles in one marginally-new item per reveal action forever would
     // otherwise never plateau exactly.
     if (++iterations > maxPages) {
       logger.info(`[BrowserScraper] preloadContent(${sourceId}) hit the ${maxPages}-iteration ceiling — stopping reveal actions`);
+      exit = 'iteration-ceiling';
       break;
     }
     const raw   = await page.evaluate(extractorJS).catch(() => []);
-    const count = countDistinctJobs(raw);
+    count = countDistinctJobs(raw);
     const target = Number.isFinite(jobsPerPlatform) ? Math.max(0, jobsPerPlatform - existingJobs) : null;
     await updateOverlay(page, { ...overlayBase, status: `Loading jobs… ${count}${target == null ? '' : `/${target}`}` });
-    if (target != null && count >= target) break;
-    if (count === prevCount) break;  // no new content after last action
-    prevCount = count;
+    if (target != null && count >= target) { exit = 'target-reached'; break; }
+
+    // The board's OWN end-of-list marker is definitive — stop immediately rather
+    // than spending the whole no-growth streak proving what the page already
+    // says. Measured on Google: the node exists on a zero-result page too, but
+    // with EMPTY text, so presence alone would read "reached the end" on a page
+    // that never had a list. Test the text.
+    if (await revealEndOfListReached(page, sourceId)) { exit = 'end-of-list'; break; }
+
+    // A SINGLE no-growth pass is not the end of the list. Measured on Google:
+    // cards arrive in batches of ten and the count stalls for one full pass at
+    // every batch boundary (…40, 40, 50… / …70, 70, 80…), while a complete
+    // reveal takes 18-47 passes. Breaking on the first plateau therefore stopped
+    // at a batch boundary and silently under-collected — which from the outside
+    // looks exactly like the list virtualizing (it does not; the DOM accumulates
+    // monotonically, verified across 29 passes with zero decreases).
+    if (count === prevCount) {
+      stableStreak++;
+      if (stableStreak >= REVEAL_STABLE_PASSES) { exit = 'plateau'; break; }
+    } else {
+      stableStreak = 0;
+      prevCount = count;
+    }
     if (isScroll) {
       if (sourceId === 'google') {
         // Google for Jobs renders cards in its own scrollable container inside the page.
@@ -4137,6 +4376,23 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     }
     await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
   }
+  // Observation only — never a stop rule, a filter, or a retry trigger. `exit`
+  // says WHY revealing stopped; `count` is what was actually on the page when it
+  // did. A `plateau` well below a source's known list length is the signature of
+  // a reveal that stalled, which previously looked identical to success.
+  // updateActive:false — this is an OUTCOME, not the scraper's current phase.
+  // Extraction runs immediately after this returns, so advancing `active` here
+  // would pin "reveal-finished" onto every later render of the phase field.
+  recordManualScraperTelemetry({
+    phase: 'reveal-finished',
+    sourceId,
+    srcName: SOURCE_LABELS[sourceId] || sourceId,
+    iterations,
+    count,
+    // 'end-of-list' means the board said so; 'plateau' means we inferred it from
+    // a no-growth streak. Only the first is proof the list was fully revealed.
+    exit,
+  }, { updateActive: false });
 }
 
 /**
@@ -4271,10 +4527,58 @@ export function glassdoorUrlHasLocationId(url, locId) {
   if (!/^\d+$/.test(id)) return false;
   try {
     const parsed = new URL(url);
-    return new RegExp(`_IN${id}(?:_|[.-]|$)`, 'i').test(decodeURIComponent(parsed.pathname));
+    // Glassdoor encodes the applied location by TYPE: _IN nation, _IS state,
+    // _IC city — all three verified live. Recognizing only _IN meant every city-
+    // or state-scoped search resolved correctly, navigated correctly, and was
+    // then discarded as "location not applied".
+    //
+    // The letter class is deliberately OPEN rather than the verified [NSC]. The
+    // safety property here is the numeric id, not the type letter: we require
+    // the exact locId WE resolved to appear in the landed path. A scope type we
+    // have not seen (a metro tier is the known gap — it could not be surfaced
+    // through the autocomplete) would otherwise read as "location not applied"
+    // and skip the whole source, which is the expensive failure. Accepting an
+    // unknown letter alongside the right id cannot admit a DIFFERENT location.
+    return new RegExp(`_I[A-Z]{1,2}${id}(?:_|[.-]|$)`, 'i').test(decodeURIComponent(parsed.pathname));
   } catch {
     return false;
   }
+}
+
+/**
+ * Is this a canonical Glassdoor results slug (the route that carries the
+ * `_I{type}{id}` location marker at all)?
+ *
+ * Glassdoor only rewrites a query it can normalize into a slug. A query it
+ * declines to slugify stays on `/Job/jobs.htm`, where no location marker is
+ * ever present — so on that shape the marker's ABSENCE proves nothing.
+ */
+export function isGlassdoorCanonicalResultsUrl(url) {
+  try {
+    return /SRCH/i.test(decodeURIComponent(new URL(url).pathname));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Three-way verdict on whether Glassdoor applied the location we resolved.
+ *
+ *   'applied'     — the canonical slug carries the matching _I{N|S|C}{id}.
+ *   'missing'     — canonical slug, but a different location (or none). A real
+ *                   failure: extracting would yield unscoped results.
+ *   'unavailable' — non-canonical route (`/Job/jobs.htm`), where the marker
+ *                   cannot appear. Says nothing either way.
+ *
+ * The third case used to be indistinguishable from the second, and its handler
+ * skipped the WHOLE SOURCE — discarding every remaining Glassdoor query in the
+ * run — because Glassdoor declined to slugify one query.
+ *
+ * @returns {'applied'|'missing'|'unavailable'}
+ */
+export function glassdoorLocationProof(url, locId) {
+  if (glassdoorUrlHasLocationId(url, locId)) return 'applied';
+  return isGlassdoorCanonicalResultsUrl(url) ? 'missing' : 'unavailable';
 }
 
 function glassdoorAutocompleteRows(data) {
@@ -4880,8 +5184,23 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let hitPerSourceCap          = false;
       let hitPageCap               = false;
       let hitEmptyPage             = false;
+      let hitPageTurnStalled       = false;
+      // Queries skipped because Glassdoor's non-canonical route cannot carry the
+      // location marker. Counted so a run where EVERY query was skipped cannot
+      // report a clean `completed` with zero jobs and no stated reason.
+      let locationProofUnavailableQueries = 0;
+      // Latches once a SOFT (country-only) locId lookup fails, so the remaining
+      // queries of this source do not each repeat the same failing lookup.
+      let softScopeLookupFailed = false;
       let hitUnhandledPagination   = false;
       let sourceDetailBlockCode    = null;
+      let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
+      let sourceDetailBlockPage    = null; // first page whose descriptions were skipped, for the report
+      let sourceDetailBlockCount   = 0;    // times the block armed (1 = never recovered)
+      let sourceDetailReprobes     = 0;    // cooldown re-probes attempted
+      let sourceDetailRecovered    = 0;    // re-probes that restored enrichment
+      let sourceDetailSkippedCards = 0;    // cards that never had a panel request issued
+      let redirectHostRecorded     = false; // geo-redirect noted once per source, not per page
       let dataStopReason           = null; // set by task.options.onPageScraped (age-window / no-new-jobs) — see jobPageStop.js
       // Exact requests that reached the navigation step. The task list is only
       // a plan: a source can hit its useful-result cap at q1/12.
@@ -4936,8 +5255,16 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // Glassdoor: locKeyword text is ignored; without a verified numeric locId
         // this would be a nationwide search. Treat a requested location as a
         // safety boundary: resolution failure skips this source before navigation.
-        if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved) {
+        // `_locResolved` is per TASK and there is one task per query, so a
+        // FAILING lookup used to be retried for every query — each attempt
+        // carrying the full multi-second autocomplete budget. Once a soft scope
+        // has failed for this source, skip straight to the unscoped walk.
+        if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved
+            && !(task.glassdoorLocationSoftScope && softScopeLookupFailed)) {
           task._locResolved = true;
+          // Snapshot so a soft-scope failure can restore, not clobber, a warning
+          // an earlier query of this same source already raised.
+          const warningBeforeLocationLookup = sourceSiteChangedWarning;
           const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal, resolvedGlassdoorLocations, overlayBase)
             .catch(() => ({ failure: 'autocomplete request threw before a location could be verified', failureKind: 'transient' }));
           if (picked?.locId) {
@@ -4971,14 +5298,35 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               failureKind,
               attempts: Array.isArray(picked?.attempts) ? picked.attempts.length : 0,
             });
-            await updateOverlay(page, {
-              ...overlayBase,
-              count: allJobs.length,
-              status: 'Location could not be verified — skipping Glassdoor to avoid a nationwide search.',
-              error: true,
-            }).catch(() => {});
-            sourceSkipped = true;
-            break;
+            // A SOFT scope (a bare country attached to a remote-only search, so
+            // the market is pinned without narrowing) must not be enforced as a
+            // boundary. Nationwide is already the correct answer for that search,
+            // so proceed unscoped — exactly what this source did before a country
+            // scope was attached at all. `_glassdoorLocId` stays unset, which
+            // leaves the applied-location proof correctly inert.
+            if (task.glassdoorLocationSoftScope) {
+              softScopeLookupFailed = true;
+              logger.warn(`[BrowserScraper] Glassdoor country scope "${task.resolveGlassdoorLocation}" could not be verified (${failure}); continuing unscoped for the rest of this source — a remote search is nationwide anyway.`);
+              // Restore whatever warning state existed BEFORE this branch rather
+              // than clearing it: `sourceSiteChangedWarning` is per-SOURCE, so an
+              // earlier query's real warning (a challenge, a stale-selector throw)
+              // must survive. Assigning null here erased it.
+              sourceSiteChangedWarning = warningBeforeLocationLookup;
+              await updateOverlay(page, {
+                ...overlayBase,
+                count: allJobs.length,
+                status: 'Country scope unverified — continuing with a nationwide search.',
+              }).catch(() => {});
+            } else {
+              await updateOverlay(page, {
+                ...overlayBase,
+                count: allJobs.length,
+                status: 'Location could not be verified — skipping Glassdoor to avoid a nationwide search.',
+                error: true,
+              }).catch(() => {});
+              sourceSkipped = true;
+              break;
+            }
           }
         }
 
@@ -5043,25 +5391,76 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // route as `_IN{id}`. Merely leaving locId in the input query is not proof
         // that the board applied it, so never extract from a page missing that
         // exact final-URL marker.
-        if (sourceId === 'glassdoor' && task._glassdoorLocId && !glassdoorUrlHasLocationId(page.url(), task._glassdoorLocId)) {
-          sourceSiteChangedWarning = {
-            code: 'location-not-applied',
-            severity: 'info',
-            evidence: `Glassdoor resolved location ID ${task._glassdoorLocId}, but the final results URL did not contain the matching _IN${task._glassdoorLocId} segment. The source was skipped without extracting unscoped results.`,
-            suggestion: 'Retry Glassdoor. If it continues to omit the resolved location from the final URL, use the other country-scoped sources for this run.',
-          };
-          recordManualScraperTelemetry({
-            phase: 'location-not-applied',
-            sourceId,
-            srcName,
-            queryIndex: qi + 1,
-            queryTotal: sourceTasks.length,
-            url: page.url(),
-            expectedLocId: task._glassdoorLocId,
-          });
-          logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
-          sourceSkipped = true;
-          break;
+        if (sourceId === 'glassdoor' && task._glassdoorLocId) {
+          const proof = glassdoorLocationProof(page.url(), task._glassdoorLocId);
+          if (proof === 'missing') {
+            sourceSiteChangedWarning = {
+              code: 'location-not-applied',
+              severity: 'info',
+              evidence: `Glassdoor resolved location ID ${task._glassdoorLocId}, but its canonical results URL did not carry the matching location marker (expected _IN/_IS/_IC${task._glassdoorLocId}; landed on ${page.url()}). The source was skipped without extracting unscoped results.`,
+              suggestion: 'Retry Glassdoor. If it continues to omit the resolved location from the final URL, use the other country-scoped sources for this run.',
+            };
+            recordManualScraperTelemetry({
+              phase: 'location-not-applied',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              url: page.url(),
+              expectedLocId: task._glassdoorLocId,
+            });
+            logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
+            sourceSkipped = true;
+            break;
+          }
+          if (proof === 'unavailable') {
+            // Glassdoor declined to slugify THIS query, so it stayed on
+            // /Job/jobs.htm where the location marker cannot appear. The marker
+            // being absent is not evidence the location was ignored, and it is
+            // certainly not evidence about the run's other queries — which is
+            // what the old shared `break` threw away. Skip only this query.
+            // updateActive:false — the run CONTINUES to the next query after
+            // this, so advancing the active phase would pin one query's
+            // outcome onto everything the scraper does afterwards.
+            recordManualScraperTelemetry({
+              phase: 'location-proof-unavailable',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              url: page.url(),
+              expectedLocId: task._glassdoorLocId,
+            }, { updateActive: false });
+            logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: results stayed on the non-canonical /Job/jobs.htm route, where the _I*${task._glassdoorLocId} location marker cannot appear — skipping this query only, without asserting the location was ignored.`);
+            locationProofUnavailableQueries++;
+            continue;
+          }
+        }
+
+        // Record — never correct — a geo-redirect away from the host the task
+        // was built for (a Toronto IP lands a www.glassdoor.com request on
+        // www.glassdoor.ca). This is OBSERVATIONAL: the session that cleared
+        // Cloudflare lives on the landed host, and re-navigating to force the
+        // intended one re-triggers the redirect and risks escalation. Without
+        // this line the report showed a .ca URL for a United States search with
+        // nothing recording that .com had been requested and reassigned.
+        if (!redirectHostRecorded) {
+          const intendedHost = safeUrlHost(task.url);
+          const landedHost = safeUrlHost(page.url());
+          if (intendedHost && landedHost && intendedHost !== landedHost) {
+            redirectHostRecorded = true;
+            recordManualScraperTelemetry({
+              phase: 'location-host-redirected',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              intendedHost,
+              landedHost,
+              url: page.url(),
+            });
+            logger.info(`[BrowserScraper] ${srcName}: requested ${intendedHost} but the session landed on ${landedHost} (geo-redirect) — continuing on the landed host, which holds the cleared session`);
+          }
         }
 
         await injectOverlay(page); // re-inject after challenge resolution may have navigated
@@ -5088,6 +5487,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // startPageNum > 1 on a resume: task.url was built at that page, so the
         // counter (+ the staging ledger) continue from there for URL-paginated sources.
         let pageNum              = task.options?.startPageNum || 1;
+        // Sources that append in place instead of paging (see clickLoadMore).
+        // Their extractor re-reads the SAME growing list every iteration, so the
+        // rows are cumulative running totals rather than a fresh page.
+        const loadMoreSelector   = task.options?.loadMoreSelector || null;
+        // Set in jobs.js for sources whose page number is part of the URL.
+        const urlPaginated       = !!task.options?.urlPaginated;
+        let loadMorePrevCount    = 0; // rows already evaluated on a load-more list
         let siteChangedStreak    = 0;
         let siteChangedWarning   = null;
         // Pages in THIS query's walk that extracted jobs cleanly. Proof that the
@@ -5279,13 +5685,57 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             count: allJobs.length,
             status: `Opening all ${jobsToExpand.length} platform-returned cards`,
           }).catch(() => {});
+          // A source-wide block is no longer permanent. Once the cooldown has
+          // elapsed, take ONE ordinary expansion attempt: expandDescriptions
+          // stops at its own first blocked panel, so a still-throttled source
+          // costs exactly one card, while a recovered one enriches the whole
+          // page. Without this, a single 429 stranded every later page's rows
+          // as `descriptionDeferredReason` and the run reported `completed`.
+          // Walking while blocked is CHEAP — no panel requests are issued — so a
+          // 19-page remainder can finish in ~40s and never reach the cooldown,
+          // leaving the re-probe below dead code. Spend that time waiting
+          // instead: every page walked while blocked yields rows the scoring
+          // evidence gate will discard anyway, so pausing to let the throttle
+          // clear strictly beats racing to the end with nothing to score.
+          // Bounded by DETAIL_BLOCK_MAX_REPROBES, and each failed re-probe
+          // re-arms the clock, so this can never busy-wait per page.
+          if (sourceDetailBlockCode && sourceDetailBlockAt > 0
+            && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
+            && jobsToExpand.length > 0 && !signal?.aborted) {
+            const cooldownRemainingMs = DETAIL_BLOCK_COOLDOWN_MS - (Date.now() - sourceDetailBlockAt);
+            if (cooldownRemainingMs > 0) {
+              logger.info(`[BrowserScraper] ${srcName}: descriptions blocked by ${sourceDetailBlockCode}; waiting ${Math.ceil(cooldownRemainingMs / 1000)}s on page ${pageNum} before re-probing rather than walking on with unusable rows`);
+              await updateOverlay(page, {
+                ...overlayBase,
+                pageNum,
+                count: allJobs.length,
+                status: `Waiting ${Math.ceil(cooldownRemainingMs / 1000)}s for the description throttle to clear…`,
+              }).catch(() => {});
+              await sleepUnlessAborted(cooldownRemainingMs, signal);
+            }
+          }
+          const detailBlockReprobeDue = Boolean(sourceDetailBlockCode)
+            && sourceDetailBlockAt > 0
+            && (Date.now() - sourceDetailBlockAt) >= DETAIL_BLOCK_COOLDOWN_MS
+            && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
+            && jobsToExpand.length > 0
+            && !signal?.aborted;
+          const detailSkippedForBlock = Boolean(sourceDetailBlockCode) && !detailBlockReprobeDue;
+          // Set when a re-probe did not restore enrichment. The descWarning
+          // latch below re-arms the block for the codes it knows; this covers
+          // the rest (notably a demoted descError) so a failed re-probe can
+          // never leave the source unblocked and hammering every later page.
+          let reprobeFailedThisPage = false;
           let detailResult;
-          if (sourceDetailBlockCode) {
+          if (detailSkippedForBlock) {
+            sourceDetailSkippedCards += jobsToExpand.length;
             recordManualScraperTelemetry({
               phase: 'detail-skipped-source-response', sourceId, srcName,
               queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
               count: allJobs.length, skipped: jobsToExpand.length,
               reason: sourceDetailBlockCode,
+              blockedSincePage: sourceDetailBlockPage,
+              blockedForMs: sourceDetailBlockAt > 0 ? Date.now() - sourceDetailBlockAt : null,
             });
             detailResult = {
               jobs: jobsToExpand.map(job => ({
@@ -5297,20 +5747,145 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               expandedCount: 0,
             };
           } else {
-            detailResult = await expandDescriptions(
-              page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal, walkPlan,
-            );
+            const reprobeOfCode = detailBlockReprobeDue ? sourceDetailBlockCode : null;
+            const reprobeWaitedMs = detailBlockReprobeDue ? Date.now() - sourceDetailBlockAt : 0;
+            if (detailBlockReprobeDue) {
+              sourceDetailReprobes += 1;
+              logger.info(`[BrowserScraper] ${srcName}: re-probing detail enrichment on page ${pageNum} after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode} (attempt ${sourceDetailReprobes}/${DETAIL_BLOCK_MAX_REPROBES})`);
+              recordManualScraperTelemetry({
+                phase: 'detail-block-reprobe', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
+                attempt: sourceDetailReprobes, maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
+              });
+              // Clear before the attempt so a successful pass falls straight
+              // through; the descWarning latch below re-arms it on failure.
+              sourceDetailBlockCode = null;
+            }
+            if (detailBlockReprobeDue) {
+              // Probe with a COUPLE of cards, never the whole page. A throttle
+              // does not always surface as a matched 429 — a suppressed XHR
+              // just times out — and DESC_STALE_THRESHOLD (3) consecutive
+              // timeouts trip abortWithError, so a full-page probe would both
+              // issue more requests against a throttled endpoint (the exact
+              // hammering the immediate-stop policy exists to prevent) and
+              // manufacture a bogus 'stale selectors' error out of an external
+              // rate limit. Staying under the threshold makes that impossible.
+              const probeJobs = jobsToExpand.slice(0, DETAIL_BLOCK_PROBE_CARDS);
+              const restJobs = jobsToExpand.slice(probeJobs.length);
+              const probeResult = await expandDescriptions(
+                page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal,
+                buildPhysicalCardWalkPlan(extracted, probeJobs),
+              );
+              const probeReBlocked = ['description-rate-limited', 'description-panel-http-error']
+                .includes(probeResult.descWarning?.code);
+              if (probeResult.expandedCount > 0 && !probeResult.descError && !probeReBlocked) {
+                // Throttle lifted — finish the page normally. A descError on
+                // THIS pass is genuine (enrichment demonstrably works now), so
+                // it is left intact to stop the walk as it always would.
+                const restResult = restJobs.length > 0
+                  ? await expandDescriptions(
+                    page, restJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal,
+                    buildPhysicalCardWalkPlan(extracted, restJobs),
+                  )
+                  : { jobs: [], descError: null, descWarning: null, expandedCount: 0 };
+                detailResult = {
+                  jobs: [...probeResult.jobs, ...restResult.jobs],
+                  descError: restResult.descError,
+                  descWarning: restResult.descWarning || probeResult.descWarning || null,
+                  expandedCount: probeResult.expandedCount + restResult.expandedCount,
+                };
+              } else {
+                // Still blocked. Leave the untouched remainder deferred rather
+                // than walking it — that is what the block means.
+                detailResult = {
+                  jobs: [
+                    ...probeResult.jobs,
+                    ...restJobs.map(job => ({ ...job, descriptionDeferredReason: reprobeOfCode })),
+                  ],
+                  descError: null,
+                  descWarning: probeResult.descWarning || probeResult.descError || null,
+                  expandedCount: probeResult.expandedCount,
+                };
+                sourceDetailSkippedCards += restJobs.length;
+              }
+            } else {
+              detailResult = await expandDescriptions(
+                page, jobsToExpand, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal, walkPlan,
+              );
+            }
+            if (detailBlockReprobeDue) {
+              // "Recovered" must mean the throttle actually lifted: rows came
+              // back AND nothing re-blocked on the same page. Counting a
+              // partially-expanded page that immediately re-blocked would make
+              // the report claim a recovery that did not happen.
+              const reBlocked = ['description-rate-limited', 'description-panel-http-error']
+                .includes(detailResult.descWarning?.code);
+              if (detailResult.expandedCount > 0 && !detailResult.descError && !reBlocked) {
+                sourceDetailRecovered += 1;
+                // Give a LATER block its own full budget. Leaving the counter
+                // at its high-water mark meant one successful recovery early in
+                // a walk made a second, unrelated block permanent.
+                sourceDetailReprobes = 0;
+                // Stop asserting a block that has provably lapsed — the skip log
+                // and the report both quote this page number.
+                sourceDetailBlockPage = null;
+                logger.info(`[BrowserScraper] ${srcName}: detail enrichment recovered on page ${pageNum} — ${detailResult.expandedCount}/${jobsToExpand.length} expanded after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode}`);
+                recordManualScraperTelemetry({
+                  phase: 'detail-block-cleared', sourceId, srcName,
+                  queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                  reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
+                  expanded: detailResult.expandedCount, attempted: jobsToExpand.length,
+                });
+              } else {
+                reprobeFailedThisPage = true;
+                // An opportunistic re-probe must never leave the run WORSE than
+                // the skip it replaced. A descError sets earlyExit below and
+                // ends the whole source walk — escalating a recoverable
+                // throttle into a truncated source. Demote it to a warning so
+                // the evidence still reaches the report while the walk
+                // continues (and keeps skipping) exactly as it would have.
+                if (detailResult.descError) {
+                  logger.warn(`[BrowserScraper] ${srcName}: re-probe on page ${pageNum} failed with ${detailResult.descError.code || 'an error'} — keeping the source block instead of ending the walk`);
+                  detailResult = {
+                    ...detailResult,
+                    descWarning: detailResult.descWarning || detailResult.descError,
+                    descError: null,
+                  };
+                }
+                // The source-level warning slot is already occupied by the
+                // original block warning, so a failed re-probe's evidence would
+                // otherwise be lost entirely. Record it as its own anomaly row.
+                recordManualScraperTelemetry({
+                  phase: 'detail-block-reprobe-failed', sourceId, srcName,
+                  queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                  reason: detailResult.descWarning?.code || reprobeOfCode,
+                  waitedMs: reprobeWaitedMs,
+                  attempt: sourceDetailReprobes, maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
+                  expanded: detailResult.expandedCount, attempted: DETAIL_BLOCK_PROBE_CARDS,
+                });
+              }
+            }
           }
           const { jobs: enhanced, descError, descWarning, expandedCount } = detailResult;
 
           const descCfg = DESC_CONFIGS[sourceId];
           if (descCfg?.panelSelector || descCfg?.expandViaNavigation) {
-            const strategy = [
-              descCfg?.jsonLdType    && `jsonLd(${descCfg.jsonLdType})`,
-              descCfg?.nextDataField && `nd(${descCfg.nextDataField.split('.').slice(-1)[0]})`,
-              'sel',
-            ].filter(Boolean).join('+');
-            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: ${expandedCount}/${jobsToExpand.length} expanded (${strategy}: ${descCfg?.panelSelector?.slice(0, 40) ?? 'none'})`);
+            if (detailSkippedForBlock) {
+              // State what happened, not what a zero could imply. The old line
+              // printed "0/N expanded (sel: …)" on this branch too, which is
+              // the exact signature of extractor drift — 19 consecutive pages
+              // of it pointed the next investigation at the CSS selector when
+              // no panel request had been issued at all.
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: enrichment skipped for ${jobsToExpand.length} card(s) — source blocked by ${sourceDetailBlockCode} since page ${sourceDetailBlockPage ?? '?'}; no panel request issued`);
+            } else {
+              const strategy = [
+                descCfg?.jsonLdType    && `jsonLd(${descCfg.jsonLdType})`,
+                descCfg?.nextDataField && `nd(${descCfg.nextDataField.split('.').slice(-1)[0]})`,
+                'sel',
+              ].filter(Boolean).join('+');
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: ${expandedCount}/${jobsToExpand.length} expanded (${strategy}: ${descCfg?.panelSelector?.slice(0, 40) ?? 'none'})`);
+            }
           }
 
           allJobs.push(...enhanced);
@@ -5334,7 +5909,23 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // warning in the result rather than converting it into a clean finish.
           if (descWarning && !sourceSiteChangedWarning) sourceSiteChangedWarning = descWarning;
           if (['description-rate-limited', 'description-panel-http-error'].includes(descWarning?.code)) {
+            // Stamping the clock on every arm is what re-arms a failed
+            // cooldown re-probe: the probe clears the code before attempting,
+            // so landing back here restarts the wait instead of retrying every
+            // subsequent page.
+            if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
             sourceDetailBlockCode = descWarning.code;
+            sourceDetailBlockAt = Date.now();
+            sourceDetailBlockCount += 1;
+          } else if (reprobeFailedThisPage && !sourceDetailBlockCode) {
+            // The re-probe cleared the code before attempting and came back
+            // with something the latch above does not recognise. Re-arm anyway
+            // or the next page would attempt a full enrichment pass against a
+            // source we just watched fail.
+            if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
+            sourceDetailBlockCode = descWarning?.code || 'description-rate-limited';
+            sourceDetailBlockAt = Date.now();
+            sourceDetailBlockCount += 1;
           }
 
           await updateOverlay(page, {
@@ -5361,9 +5952,17 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // resume paths) — the empty-extraction break above remains the safety
           // net in that case. Mirrors browserPool.js's onPageScraped call: a
           // throw is non-fatal and never stops the walk.
+          //
+          // On a load-more source `extracted` is the whole accumulated list, so
+          // it must be sliced down to THIS iteration's new rows first. Feeding
+          // the running total would permanently disable the age-window rule —
+          // page 1's in-window rows ride along in every later evaluation, so
+          // "not one row on this page is in-window" could never become true.
           let stopDecision = null;
+          const pageRows = loadMoreSelector ? extracted.slice(loadMorePrevCount) : extracted;
+          if (loadMoreSelector) loadMorePrevCount = extracted.length;
           try {
-            stopDecision = await task.options?.onPageScraped?.({ items: extracted, pageIndex: pageNum - 1 });
+            stopDecision = await task.options?.onPageScraped?.({ items: pageRows, pageIndex: pageNum - 1 });
           } catch (e) {
             logger.warn(`[BrowserScraper] ${srcName} onPageScraped threw (non-fatal): ${e?.message || e}`);
           }
@@ -5384,7 +5983,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             break;
           }
 
-          const nextPage = await clickNextPage(page, sourceId);
+          // Captured BEFORE the click so a URL-paginated source can prove the
+          // page actually turned (see the wait after the settle below).
+          const beforeUrl = urlPaginated ? safePageUrl(page) : null;
+          const nextPage = loadMoreSelector
+            ? await clickLoadMore(page, loadMoreSelector)
+            : await clickNextPage(page, sourceId);
           if (!nextPage.clicked) {
             if (nextPage.unhandled) {
               hitUnhandledPagination = true;
@@ -5397,7 +6001,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                   code:       'pagination-unhandled',
                   severity:   'block',
                   evidence,
-                  suggestion: `The ${srcName} pagination control changed or failed to respond. Update its next-page selector, then rerun this source so later pages are collected.`,
+                  // Name the selector the reader must actually go and fix. A
+                  // load-more source has no next-page selector to update — its
+                  // control comes from the task's `loadMoreSelector` (jobs.js) —
+                  // so a generic "next-page selector" instruction would send
+                  // them to the wrong map.
+                  suggestion: `The ${srcName} pagination control changed or failed to respond. Update its ${loadMoreSelector ? 'loadMoreSelector (jobs.js)' : 'next-page selector'}, then rerun this source so later results are collected.`,
                 };
               }
               recordManualScraperTelemetry({
@@ -5412,7 +6021,53 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           pageNum++;
           await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
           await injectOverlay(page);
-          await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `Loading page ${pageNum}…` });
+          await updateOverlay(page, {
+            ...overlayBase,
+            count:  allJobs.length,
+            status: loadMoreSelector ? 'Loading more jobs…' : `Loading page ${pageNum}…`,
+          });
+
+          // A load-more click appends to the current document — there is no
+          // navigation to wait on, and no challenge/readiness cycle to run. Wait
+          // for the list to actually grow instead: a click that adds nothing
+          // means the board is out of results.
+          if (loadMoreSelector) {
+            const grown = await waitForListGrowth(page, task.extractorJS, loadMorePrevCount, signal);
+            if (signal?.aborted) { earlyExit = true; break; }
+            if (grown <= loadMorePrevCount) {
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: "show more" added no further jobs after ${loadMorePrevCount} — end of results`);
+              hitEmptyPage = true;
+              break;
+            }
+            continue;
+          }
+
+          // Prove the page turned before extracting anything.
+          //
+          // clickNextPage is a bare in-page click with no navigation wait, and
+          // waitForReady returns `ok` on its first poll for a source whose
+          // CONTENT_SELECTORS entry is null. A slow page load therefore meant
+          // the extractor re-read the PREVIOUS page: every row deduped away,
+          // two such pages in a row produced {stop:true, reason:'no-new-jobs'},
+          // and the walk ended early while blaming the board. On ZipRecruiter
+          // the pages lost that way are its best ones — measured on-target rate
+          // rises with depth there (35% on page 1, ~100% by page 25).
+          if (urlPaginated && beforeUrl) {
+            const turned = await waitForUrlChange(page, beforeUrl, signal);
+            if (signal?.aborted) { earlyExit = true; break; }
+            if (!turned) {
+              // Do NOT extract the same document twice. Fall through to the
+              // existing stall reporting with an honest reason.
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: next-page click did not change the URL within ${CONTENT_TIMEOUT_MS}ms (still ${beforeUrl}) — stopping rather than re-reading page ${pageNum - 1}`);
+              recordManualScraperTelemetry({
+                phase: 'page-turn-stalled', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                count: allJobs.length, url: beforeUrl,
+              });
+              hitPageTurnStalled = true;
+              break;
+            }
+          }
 
           // Wait for new content to appear on the paginated page
           const pagedReady = await waitForReady(page, sourceId, overlayBase, signal, task.url);
@@ -5459,6 +6114,19 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         }
       }
 
+      // Every query skipped for an unverifiable location proof is a source that
+      // contributed nothing for a stated reason — without this it reported a
+      // clean `completed` with zero jobs, which reads as "the board had nothing".
+      if (locationProofUnavailableQueries > 0 && allJobs.length === 0 && !sourceSiteChangedWarning) {
+        sourceSiteChangedWarning = {
+          code: 'location-proof-unavailable',
+          severity: 'info',
+          evidence: `${srcName} returned results on its non-canonical /Job/jobs.htm route for all ${locationProofUnavailableQueries} quer${locationProofUnavailableQueries === 1 ? 'y' : 'ies'}, where the applied-location marker cannot appear. The rows were not extracted because the requested location could not be confirmed — this is not evidence that the location was ignored, only that it could not be proven.`,
+          suggestion: 'Retry this source. If it keeps landing on /Job/jobs.htm, the query wording may be one Glassdoor declines to normalize into its canonical results route.',
+        };
+        logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
+      }
+
       const stopReason = resolveManualSourceStopReason({
         earlyExit,
         aborted: !!signal?.aborted,
@@ -5467,6 +6135,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitPerSourceCap,
         hitPageCap,
         hitEmptyPage,
+        hitPageTurnStalled,
         hitUnhandledPagination,
         dataStopReason,
       });
@@ -5478,6 +6147,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         pagesWalked: sourcePagesWalked,
         stopReason,
         warning:     sourceSiteChangedWarning || null,
+        // A detail block does not stop the walk, so `stopReason` legitimately
+        // stays `completed` — but the rows it produced carry no description and
+        // are dropped by the scoring-evidence gate. Report it as its own fact
+        // instead of leaving the run to look clean. `null` = enrichment ran for
+        // every page.
+        detailBlock: sourceDetailBlockCode || sourceDetailBlockCount > 0
+          ? {
+            code: sourceDetailBlockCode,          // null once a re-probe recovered
+            active: Boolean(sourceDetailBlockCode),
+            firstPage: sourceDetailBlockPage,
+            arms: sourceDetailBlockCount,
+            reprobes: sourceDetailReprobes,
+            recovered: sourceDetailRecovered,
+            skippedCards: sourceDetailSkippedCards,
+          }
+          : null,
         executedQueries,
         providerGathered: providerSeen.size,
         relevanceDropped: 0,

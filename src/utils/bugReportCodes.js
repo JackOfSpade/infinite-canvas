@@ -257,6 +257,12 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['sessionTraces'],
   },
 
+  XJOBAUDIT: {
+    label: 'Exclude Job Pipeline Detail Audits',
+    description: 'Omit the heavy per-job audit prose inside the Job Search Pipeline section — the taxonomy salary-placement audit (one multi-line entry per job), the bounded scoring-evidence rows (long quoted reasons), the all-source role-relevance audit (one row per job), the Glassdoor location→locId cache dump, and the deferred-listing samples. The funnel numbers, stop reasons, warnings, and per-source outcomes in that same section are NOT affected — only the bulky per-job/per-location enumeration collapses to a one-line marker. Use this (not XNODES/XSESS) when a job-search report keeps hitting the clipboard cap on this content specifically; no other code can trim it.',
+    excludeSections: ['jobAuditDetail'],
+  },
+
   // ── Composite lenses ──────────────────────────────────────────────────────
 
   JOBS: {
@@ -264,6 +270,14 @@ export const CODE_DEFINITIONS = {
     description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
     logFilter: line =>
       /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  JOBHANDOFF: {
+    label: 'Manual Job-AI Handoff',
+    description: 'Manual Non-API job-AI lifecycle — issued prompts, validation rejections, dialog-remount replays, acceptance, cancellation, and terminal timing. Use when a copy/paste job-analysis step appears stuck or when a submitted response was not applied. The compact redacted lifecycle receipt is also included in FULL.',
+    logFilter: line =>
+      /non-api ai|non-api-ai|manual ai|manual handoff|taxonomy|scor(?:e|ing)|compensation|career-file|resume-parse/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

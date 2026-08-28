@@ -1,6 +1,7 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
-import { buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
+import { __loadJobAnalysisSnapshotForTests } from '../test-dependencies.js';
+import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
@@ -14,6 +15,7 @@ import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification } from '../../electron/ipc/jobs.js';
+import { logger } from '../../electron/logger.js';
 
 export default [
 {
@@ -209,7 +211,7 @@ export default [
       return { evidence: 'redacted' };
     },
   },
-{
+  {
     name: 'session report URLs strip query and fragment tokens in prose and trace fields',
     run: () => {
       const prose = redactReportUrlsInText('Anti-bot at https://secure.indeed.com/settings/account?__cf_chl_rt_tk=secret#step, retry later.');
@@ -232,6 +234,105 @@ export default [
         && !traces.includes('oauth=')
         && !traces.includes('token='),
       'session/auth report formatting keeps URL identity but never exports query/hash tokens');
+      return { redacted: true };
+    },
+  },
+{
+    // accounts.js writeStatusCache keeps a SEPARATE `lastNegative` slot that
+    // only a connected:false write ever touches, so a definitive "not
+    // connected" verdict survives a later connected:true write clobbering
+    // `lastTrace` (e.g. a startup verify says not-connected, then a login
+    // window auto-detects success 5 minutes later). Before this, the platform
+    // that actually misbehaved printed nothing but the bare positive verdict —
+    // the one platform a bug report couldn't diagnose.
+    name: 'session trace surfaces a preserved prior NOT-CONNECTED verdict only when it adds information the current verdict lacks',
+    run: () => {
+      const platforms = [{ id: 'glassdoor', name: 'Glassdoor' }];
+
+      // Currently connected, but a prior DEFINITIVE not-connected verdict is on
+      // record (the in-memory shape: reason + trace + ts). This is exactly the
+      // diagnostic that was missing — must render both the current positive
+      // trace AND the preserved negative.
+      const clobberedTs = Date.now() - 5 * 60 * 1000;
+      const reconnected = renderSessionTraceBlocks(platforms, {
+        glassdoor: {
+          connected: true,
+          lastTrace: { target: 'https://www.glassdoor.com/member/home', status: 'auto-detected' },
+          lastNegative: {
+            reason: 'Reached https://www.glassdoor.com/member/home?token=secret (HTTP 200) without auth redirect or sign-in body.',
+            trace: { finalUrl: 'https://www.glassdoor.com/member/home?token=secret', status: 200, bodyHead: 'Sign in to Glassdoor to continue' },
+            ts: clobberedTs,
+          },
+        },
+      });
+      assert(reconnected.includes('HTTP status: `auto-detected`'),
+        'the current positive trace still renders alongside the preserved negative');
+      assert(reconnected.includes('⚠️ preserved prior NOT-CONNECTED verdict'),
+        'a preserved negative verdict on a currently-connected platform is surfaced');
+      assert(reconnected.includes('without auth redirect or sign-in body')
+        && !reconnected.includes('token=secret'),
+      'the preserved negative reason renders but its URL query token is redacted, same as every other trace field');
+      assert(reconnected.includes('bodyHead: `Sign in to Glassdoor to continue`')
+        && reconnected.includes('HTTP 200'),
+      'the preserved negative carries its own nested trace evidence (status/bodyHead), not just the bare reason string');
+      assert(reconnected.includes(new Date(clobberedTs).toISOString()),
+        'the preserved negative is dated with the same absolute/relative style the surrounding session rows use, so a stale verdict cannot read as this-session');
+
+      // Currently NOT connected: the platform's own reason/trace already say
+      // why, so repeating lastNegative here would just restate the same fact.
+      const stillDown = renderSessionTraceBlocks(platforms, {
+        glassdoor: {
+          connected: false,
+          lastTrace: { target: 'https://www.glassdoor.com/member/home', status: 200, error: 'no auth redirect' },
+          lastNegative: { reason: 'no auth redirect', trace: { status: 200 }, ts: clobberedTs },
+        },
+      });
+      assert(!stillDown.includes('preserved prior NOT-CONNECTED verdict'),
+        'a currently-disconnected platform does not repeat lastNegative — its own trace already states the reason');
+
+      // Disk-restored shape (selectRestorableStatuses / persistStatusCache):
+      // connected:true, NO lastTrace at all, and lastNegative has only
+      // { reason, ts } — never a trace. Must render without crashing on the
+      // missing trace, and without fabricating trace lines that were never there.
+      const restored = renderSessionTraceBlocks(platforms, {
+        glassdoor: {
+          connected: true,
+          restoredFromDisk: true,
+          lastNegative: { reason: 'restored: prior session read not-connected', ts: clobberedTs },
+        },
+      });
+      assert(restored.includes('⚠️ preserved prior NOT-CONNECTED verdict')
+        && restored.includes('restored: prior session read not-connected'),
+      'a disk-restored entry with no lastTrace at all still surfaces its preserved negative verdict');
+      assert(!restored.includes('target:') && !restored.includes('HTTP status:'),
+        'a disk-restored entry with no current trace does not fabricate positive-trace lines it never had');
+
+      // No lastNegative at all → completely unaffected (most platforms, most of the time).
+      const clean = renderSessionTraceBlocks(platforms, {
+        glassdoor: { connected: true, lastTrace: { target: 'https://www.glassdoor.com/member/home', status: 200 } },
+      });
+      assert(!clean.includes('preserved prior NOT-CONNECTED verdict'),
+        'a platform with no recorded lastNegative renders exactly as before');
+      return { ok: true };
+    },
+  },
+{
+    name: 'FULL report redacts query and fragment tokens from recent main-process logs',
+    run: () => {
+      const secret = 'main-log-secret-token';
+      logger.info(`[Accounts] verifier redirected to https://secure.indeed.com/settings/account?__cf_chl_rt_tk=${secret}#challenge`);
+      const report = generateMarkdown({
+        description: 'Verify recent-log URL redaction.',
+        filterCode: 'FULL',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      }).markdown;
+      const logs = report.split('## Recent Main-Process Logs')[1]?.split('\n## Event History')[0] || '';
+      assert(logs.includes('https://secure.indeed.com/settings/account')
+        && !logs.includes('__cf_chl_rt_tk')
+        && !logs.includes(secret)
+        && !logs.includes('#challenge'),
+      'FULL keeps the diagnostic URL path in main-process logs but never exports query/hash tokens');
       return { redacted: true };
     },
   },
@@ -468,6 +569,45 @@ export default [
       assert(secondaryHard.markdown.includes('2 section(s) dropped: S10, S11')
         && secondaryHard.markdown.includes('"S9" cut mid-section'),
       'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
+
+      // A `##` cut mid-body silently took its `###` children with it: the
+      // heading scan is /^## (.+)$/gm, so named diagnostics (the Non-API AI
+      // handoff receipt, the Glassdoor location cache) disappeared with the
+      // notice reporting only that the PARENT was "cut mid-section". The
+      // subsection tally is reported separately — folding it into the `##`
+      // count would misstate how many top-level sections were lost.
+      const subsectionBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(4_000)
+        + '\n## Big Section\n' + 'B'.repeat(4_000)
+        + '\n### Handoff Lifecycle\nbody\n### Location Cache\nbody\n'
+        + '\n## Dropped Whole\nbody\n';
+      const subsectionCut = enforceClipboardMarkdownCap(subsectionBase, events, logs, cap);
+      assert(subsectionCut.markdown.includes('subsection(s) lost with them: ')
+        && subsectionCut.markdown.includes('Handoff Lifecycle')
+        && !/\d+ section\(s\) dropped:[^;]*Handoff Lifecycle/.test(subsectionCut.markdown),
+      'Clipboard cap: dropped ### subsections are named in their own clause, never folded into the ## dropped-section tally');
+
+      // The base is being cut mid-document either way, so spending only the
+      // FLOOR on the tail wasted budget the static cut could not use. The tail
+      // grows toward the full logs+events, bounded at half the cap so the
+      // static prefix stays meaningful.
+      const grownEvents = Array.from({ length: 120 }, (_, i) => `EVENT ${i} ${'x'.repeat(40)}`);
+      const grownLogs = Array.from({ length: 125 }, (_, i) => `LOG ${i} ${'y'.repeat(60)}`);
+      const grownBase = '# Bug Report\n## Job Search Pipeline\n'
+        + Array.from({ length: 500 }, (_, i) => `- audit row ${i}: ${'P'.repeat(70)}`).join('\n')
+        + '\n\n## Dropped Diagnostics\nbody\n';
+      const grownCap = 50_000;
+      const grown = enforceClipboardMarkdownCap(grownBase, grownEvents, grownLogs, grownCap);
+      const retainedEvents = grownEvents.length - grown.trimmedEventCount;
+      const retainedLogs = grownLogs.length - grown.trimmedLogCount;
+      assert(grown.hardTruncated && grown.markdown.length <= grownCap,
+        `Clipboard cap: grown-tail hard-cap output still respects the exact cap (${grown.markdown.length} <= ${grownCap})`);
+      assert(retainedEvents === grownEvents.length && retainedLogs === grownLogs.length,
+        `Clipboard cap: a hard-truncated report spends leftover budget on the tail instead of the floor (kept ${retainedEvents}/${grownEvents.length} events, ${retainedLogs}/${grownLogs.length} logs)`);
+      assert(grown.markdown.includes(`retained ${retainedEvents} of ${grownEvents.length} most-recent event line(s)`)
+        && grown.markdown.includes(`${retainedLogs} of ${grownLogs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: the banner reports the tail actually retained, not the floor it started from');
+      assert(grown.markdown.length >= grownCap * 0.9,
+        `Clipboard cap: the grown tail keeps overall utilisation high (${grown.markdown.length} of ${grownCap})`);
 
       // A single board re-combine tears down hundreds of uniquely-id'd nodes in
       // a couple of milliseconds. Capture-time collapsers cannot merge unique
@@ -2012,6 +2152,79 @@ export default [
       return { scoring: 6, recovery: 54, deferred: 48 };
     },
   },
+  {
+    name: 'saved scrape snapshots preserve and sanitize source-found counters independently from score-ready jobs',
+    run: async () => {
+      const jobs = Array.from({ length: 59 }, (_, index) => ({
+        source: 'linkedin', title: `Recovered role ${index}`, company: 'Acme',
+        url: `https://linkedin.example/jobs/${index}`,
+      }));
+      const base = {
+        jobs,
+        profile: { titles: ['Systems Architect'] },
+        nodeId: 'saved-scrape-counter-fixture',
+        targetRole: 'Systems Architect',
+      };
+      const { snapshot: current } = buildJobAnalysisSnapshot({
+        ...base,
+        snapshotContext: { sourceGatheredCount: 60 },
+      });
+      const { snapshot: malformed } = buildJobAnalysisSnapshot({
+        ...base,
+        snapshotContext: { sourceGatheredCount: 6 },
+      });
+      const { snapshot: legacy } = buildJobAnalysisSnapshot({
+        ...base,
+        snapshotContext: {},
+      });
+      assert(current.jobs.length === 59
+        && current.gatheredJobCount === 59
+        && current.sourceGatheredCount === 60,
+      'a saved scrape persists the score-ready jobs separately from the larger source-found total');
+      assert(malformed.gatheredJobCount === 59
+        && malformed.sourceGatheredCount === 59,
+      'a malformed source-found count below the 59 saved jobs clamps to the score-ready floor');
+      assert(legacy.gatheredJobCount === 59
+        && legacy.sourceGatheredCount === 59,
+      'a legacy snapshot with no source-found metadata falls back to its 59 saved score-ready jobs');
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-saved-scrape-counter-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          ...current,
+          sourceHubId: 'saved-scrape-counter-fixture',
+          canvasFilePath: canvas,
+        }), 'utf8');
+        const recovery = buildJobRecoverySnapshot(canvas, new Set(['saved-scrape-counter-fixture']));
+        assert(recovery.includes('60 found → 59 score-ready job(s)'),
+          'recovery diagnostics retain the saved source-found count alongside the 59 score-ready rows');
+        const legacyFunnelSnapshot = {
+          ...legacy,
+          sourceGatheredCount: undefined,
+          sourceHubId: 'saved-scrape-counter-fixture',
+          canvasFilePath: canvas,
+          searchFunnel: { relevanceKept: 60, raw: 60 },
+        };
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify(legacyFunnelSnapshot), 'utf8');
+        const loadedLegacy = await __loadJobAnalysisSnapshotForTests(canvas);
+        const restoredFound = loadedLegacy.snapshot.sourceGatheredCount
+          ?? loadedLegacy.snapshot.searchFunnel?.relevanceKept
+          ?? loadedLegacy.snapshot.searchFunnel?.raw
+          ?? loadedLegacy.snapshot.gatheredJobCount
+          ?? loadedLegacy.snapshot.jobs.length;
+        const legacyRecovery = buildJobRecoverySnapshot(canvas, new Set(['saved-scrape-counter-fixture']));
+        assert(loadedLegacy.snapshot.jobs.length === 59
+          && !Object.hasOwn(loadedLegacy.snapshot, 'sourceGatheredCount')
+          && restoredFound === 60
+          && legacyRecovery.includes('60 found → 59 score-ready job(s)'),
+        'a legacy 59-job snapshot exposes its 60-row durable funnel fallback for restore and recovery diagnostics without requiring new metadata');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { scoreReady: current.gatheredJobCount, found: current.sourceGatheredCount };
+    },
+  },
 {
     name: 'job pipeline report: repeated LinkedIn Solve merges accumulate session-gathered accounting',
     run: () => {
@@ -2374,6 +2587,7 @@ export default [
         windowId: telemetry.windowId,
         pipeline: telemetry.pipeline,
         search: telemetry.search,
+        careerParseCache: telemetry.careerParseCache,
       };
       Object.assign(telemetry, {
         nodeId: 'rerun-provenance-diagnostics',
@@ -2387,13 +2601,28 @@ export default [
           pendingSources: [],
         },
         search: null,
+        // A fingerprint-cache HIT means the supplied files were NOT actually
+        // re-parsed this run — reusing the prior parse instead. The Trigger
+        // line below must not contradict this by claiming a parse happened.
+        careerParseCache: { outcome: 'hit', fileCount: 1, fingerprint: 'de11f2a6acec' },
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['rerun-provenance-diagnostics']), null, null);
         assert(report.includes('✅ complete · phase: **completed** · completed in 812ms')
-          && report.includes('Trigger: **Re-run Search button** · career files reparsed')
+          && report.includes('Trigger: **Re-run Search button** · career files supplied')
+          && !report.includes('career files reparsed')
           && !report.includes('run age 5s'),
         'a completed run reports its actual duration and explicit button origin instead of an ever-growing run age');
+        assert(report.includes('Career Parse Cache')
+          && report.includes('hit — reused the prior parsed career data')
+          && report.includes('fingerprint `de11f2a6acec`'),
+        'the parse-cache outcome line is unchanged by this fix');
+        // The actual bug: "career files reparsed" next to "hit — reused the
+        // prior parsed career data" asserted two contradictory things about the
+        // same run. "career files supplied" describes the INPUT (fresh files
+        // were given to this run) and is true regardless of the cache outcome.
+        assert(!report.includes('career files reparsed'),
+        'a fingerprint-cache hit and the Trigger line no longer contradict each other — the Trigger line describes input, not an asserted parse action');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2701,8 +2930,11 @@ export default [
       assert(!renderer.includes('data.rerunNotice ? (')
         && !renderer.includes("title: 'No new jobs'")
         && doneState.includes("noNewResults ? 'new jobs'")
-        && doneState.includes("? `${gatheredCount || scrapedCount} scraped`"),
-      'zero-new completion has no notice/toast, shows 0 new jobs, and retains the current scraped count');
+        && doneState.includes('Math.max')
+        && doneState.includes('found')
+        && doneState.includes('score-ready')
+        && !doneState.includes('${gatheredCount} scraped → ${scrapedCount} kept'),
+      'zero-new completion has no notice/toast, shows 0 new jobs, and labels reconciled collection/scoring counts instead of rendering an impossible scraped-to-kept funnel');
       assert(backend.includes('rawCount: relevanceFunnel.raw')
         && backend.includes('gatheredCount: allJobs.length')
         && backend.includes('source-card')
@@ -2729,6 +2961,11 @@ export default [
         && resumeScoringPath.includes('const pausedGatheredCount = gatheredCountRef.current')
         && resumeScoringPath.includes('gatheredCount: pausedGatheredCount'),
       'a sources-ready pause preserves the source-card-aligned total through same-tick Solve/Skip into resumed scoring');
+      assert((pausedPath.match(/if \(saved && !saved\.saved\)/g) || []).length === 1
+        && (resumeScoringPath.match(/if \(saved && !saved\.saved\)/g) || []).length === 1
+        && !pausedPath.includes('if (saved && !saved.success)')
+        && !resumeScoringPath.includes('if (saved && !saved.success)'),
+      'both empty-run snapshot paths check the save-job-analysis-snapshot response contract (`saved`), so a successful write cannot emit a false failure');
       assert(resumeScoringPath.includes('saveJobAnalysisSnapshot?.({\n          jobs: []')
         && resumeScoringPath.includes('Failed to save paused empty-run analysis snapshot')
         && resumeScoringPath.includes("rerunOutcome: 'no-new-results'")
@@ -2737,29 +2974,35 @@ export default [
         && resumeScoringPath.includes('pendingJobsRef.current = null')
         && resumeScoringPath.includes("hubStateRef.current = 'done'"),
       'zero-pending resumed scoring replaces the current-run snapshot and reaches the same cleared 0-new-jobs terminal state as a direct empty search');
-      const pausedFixture = { gatheredCount: 5, pendingJobs: [{}, {}, {}] };
-      const resumedGatheredCount = pausedFixture.gatheredCount;
-      const zeroPendingGatheredCount = pausedFixture.gatheredCount;
-      const applyResolvedDelta = (count, delta) => Math.max(0, count + delta);
-      assert(resumedGatheredCount === 5 && pausedFixture.pendingJobs.length === 3
-        && zeroPendingGatheredCount === 5
-        && applyResolvedDelta(5, 2) === 7
-        && applyResolvedDelta(5, -2) === 3,
-      'paused counter contract: 5 gathered remains 5 with 3 pending or zero pending; additive +2 and replacement −2 resolve deltas reconcile card totals');
+      const applyGatheredCountDelta = (count, {
+        replaceSourceItems = false,
+        replaceMatchingItems = false,
+        resolvedCount = 0,
+      }) => Math.max(0, count + ((replaceSourceItems || replaceMatchingItems) ? 0 : resolvedCount));
+      const recoveredCounts = [24, 29, 33, 45, 49, 59];
+      const gatheredAfterReplacements = recoveredCounts.reduce(
+        (count, resolvedCount) => applyGatheredCountDelta(count, { replaceSourceItems: true, resolvedCount }),
+        60,
+      );
+      const gatheredAfterIncrement = applyGatheredCountDelta(gatheredAfterReplacements, { resolvedCount: 3 });
+      assert(gatheredAfterReplacements === 60 && gatheredAfterIncrement === 63,
+        'counter contract: description-replacement batches [24,29,33,45,49,59] preserve the initial 60 found listings; only a genuinely incremental three-row recovery raises it to 63');
       const resolvedStart = renderer.indexOf('const onResolved = (e) =>');
       const resolvedEnd = renderer.indexOf('document.addEventListener(\'job-source-resolved\'', resolvedStart);
       const resolvedPath = renderer.slice(resolvedStart, resolvedEnd);
       const sourceCardResolveStart = sourceCard.indexOf('if (result?.resolved)');
       const sourceCardResolveEnd = sourceCard.indexOf('} else if (prevForRestore)', sourceCardResolveStart);
       const sourceCardResolvePath = sourceCard.slice(sourceCardResolveStart, sourceCardResolveEnd);
-      assert(resolvedPath.includes('sourceCountDelta')
-        && resolvedPath.indexOf('if ((e.detail?.jobRunId || null)') < resolvedPath.indexOf('const sourceCountDelta')
+      assert(resolvedPath.includes('gatheredCountDelta')
+        && !resolvedPath.includes('sourceCountDelta')
+        && resolvedPath.indexOf('if ((e.detail?.jobRunId || null)') < resolvedPath.indexOf('const gatheredCountDelta')
         && resolvedPath.includes('gatheredCountRef.current = Math.max(0')
         && resolvedPath.includes('gatheredCount: gatheredCountRef.current')
-        && sourceCardResolvePath.includes('sourceCountDelta: nextSourceCount - previousSourceCount')
-        && sourceCardResolvePath.includes('replaceSourceItems')
-        && sourceCardResolvePath.includes('previousSourceCount + resolvedCount'),
-      'resolved source cards emit additive and replacement count deltas, and the guarded hub applies them to the paused gathered total');
+        && sourceCardResolvePath.includes('const gatheredCountDelta = (replaceSourceItems || replaceMatchingItems)')
+        && sourceCardResolvePath.includes('? 0')
+        && sourceCardResolvePath.includes(': resolvedCount')
+        && !sourceCardResolvePath.includes('sourceCountDelta'),
+      'resolved source cards emit zero gathered delta for replacement/re-match work and the resolved count only for incremental recovery; the hub consumes that explicit delta rather than a transient card count');
       const backgroundStart = renderer.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
       const backgroundEnd = renderer.indexOf('const handleJobsSettingsChange = useCallback', backgroundStart);
       const backgroundPath = renderer.slice(backgroundStart, backgroundEnd);
@@ -2770,6 +3013,23 @@ export default [
         && pipelinePath.includes('const processingToken = processingRunsRef.current.start();\n    if (!processingToken) return;\n    // This is a new top-level search')
         && pipelinePath.includes('gatheredCountRef.current = 0'),
       'a post-run USAJobs append preserves the aggregate gathered counter, while a newly owned top-level pipeline resets it');
+      const sourcesReadyStart = backgroundPath.indexOf("if (currentState === 'sources-ready')");
+      const sourcesReadyEnd = backgroundPath.indexOf("} else if (currentState === 'done')", sourcesReadyStart);
+      const sourcesReadyPath = backgroundPath.slice(sourcesReadyStart, sourcesReadyEnd);
+      const initialFound = 60;
+      const lateUSAJobsRows = [{ id: 'cross-source-duplicate' }, { id: 'another-duplicate' }, { id: 'fresh' }];
+      const dedupedLateRows = []; // all three can collapse against the paused cross-source pool
+      const foundAfterLateSource = initialFound + lateUSAJobsRows.length;
+      assert(sourcesReadyStart >= 0 && sourcesReadyEnd > sourcesReadyStart
+        && sourcesReadyPath.includes('const fresh = uniqueJobsAcrossSources(prevPending, freshJobs)')
+        && sourcesReadyPath.includes('gatheredCountRef.current = Math.max(')
+        && sourcesReadyPath.includes('(Number(gatheredCountRef.current) || 0) + freshJobs.length')
+        && sourcesReadyPath.includes('gatheredCount: gatheredCountRef.current')
+        && sourcesReadyPath.indexOf('gatheredCountRef.current = Math.max(') < sourcesReadyPath.indexOf('pendingJobsRef.current = mergedPending')
+        && sourcesReadyPath.indexOf('gatheredCount: gatheredCountRef.current') < sourcesReadyPath.indexOf('await resumeScoringRef.current?.()')
+        && dedupedLateRows.length === 0
+        && foundAfterLateSource === 63,
+      'a late USAJobs source contributes all three raw found rows (60→63) before cross-source dedup and auto-resume, even when it contributes no additional pending scoring row');
       return { replaced: true, notice: false, label: 'new jobs', rawDiagnostics: 90, visibleGathered: 3 };
     },
   },
@@ -3527,6 +3787,7 @@ export default [
       const tree = fs.readFileSync(path.resolve('src/nodes/jobsearch/buildJobTree.js'), 'utf8');
       const snapshot = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       const serialization = fs.readFileSync(path.resolve('src/utils/serializationUtils.js'), 'utf8');
+      const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
 
       const scoreCalls = search.split('window.electronAPI.scoreJobs({').slice(1);
       const snapshotWrites = search.split('saveJobAnalysisSnapshot?.({').slice(1);
@@ -3581,6 +3842,37 @@ export default [
       assert(search.includes('jobRunId: snapshot.runId || null')
         && search.includes('completeRun: !!snapshot.runId'),
       'saved-scrape scoring completes only its matching staged search run and never clears a tokenless re-analysis snapshot');
+      const normalScoreStart = search.indexOf('const runScoringAndSpawn = useCallback');
+      const normalScoreEnd = search.indexOf('// ── Legacy Batch-API recovery', normalScoreStart);
+      const normalScorePath = search.slice(normalScoreStart, normalScoreEnd);
+      const linkedInRebuildStart = jobsBackend.indexOf('const persistRecoveryPool = async');
+      const linkedInRebuildEnd = jobsBackend.indexOf('if (needEnrich.length > 0)', linkedInRebuildStart);
+      const linkedInRebuild = jobsBackend.slice(linkedInRebuildStart, linkedInRebuildEnd);
+      const googleRebuildStart = jobsBackend.indexOf('const persistSourceRecoveryJobs = async');
+      const googleRebuildEnd = jobsBackend.indexOf('// The normal manual-scrape path', googleRebuildStart);
+      const googleRebuild = jobsBackend.slice(googleRebuildStart, googleRebuildEnd);
+      assert(normalScoreStart >= 0 && normalScoreEnd > normalScoreStart
+        && normalScorePath.includes('sourceGatheredCount: gatheredCount'),
+      'normal scoring writes the current found count into saved-scrape metadata alongside the score-ready jobs');
+      const sourceFoundFallback = /snapshot\.sourceGatheredCount\s*\?\?\s*snapshot\.searchFunnel\?\.relevanceKept\s*\?\?\s*snapshot\.searchFunnel\?\.raw\s*\?\?\s*snapshot\.gatheredJobCount/;
+      assert(sourceFoundFallback.test(search)
+        && sourceFoundFallback.test(search.slice(search.indexOf('const handleResumeSavedScrape = useCallback'))),
+      'batch and Saved Scrape restores prefer sourceGatheredCount, then legacy searchFunnel.relevanceKept/raw, then gatheredJobCount');
+      assert(search.includes('const savedScoreReadyCount = Math.max(0, Number(savedAnalysisMeta?.gatheredJobCount) || 0)')
+        && search.includes('const savedSourceGatheredCount = Number.isFinite(Number(savedAnalysisMeta?.sourceGatheredCount))')
+        && search.includes('{savedSourceGatheredCount} found')
+        && search.includes('${savedScoreReadyCount} score-ready'),
+      'Saved Scrape labels the reconciled source-found and score-ready counters without reviving the old scraped-to-kept wording');
+      assert(search.includes('const savedAnalysisMatchesCurrentRun = !!savedAnalysisMeta?.runId')
+        && search.includes('&& savedAnalysisMeta.runId === data.jobRunId')
+        && search.includes('const doneGatheredCount = savedAnalysisMatchesCurrentRun')
+        && search.includes('gatheredCount={doneGatheredCount}'),
+      'only a Saved Scrape from the exact current run token may contribute its durable found counter to the done card');
+      assert(linkedInRebuildStart >= 0 && linkedInRebuildEnd > linkedInRebuildStart
+        && /sourceGatheredCount:\s*snapshot\.sourceGatheredCount\s*\?\?\s*snapshot\.searchFunnel\?\.relevanceKept\s*\?\?\s*snapshot\.searchFunnel\?\.raw\s*\?\?\s*snapshot\.gatheredJobCount/.test(linkedInRebuild)
+        && googleRebuildStart >= 0 && googleRebuildEnd > googleRebuildStart
+        && /sourceGatheredCount:\s*sourceRecoverySnapshot\.sourceGatheredCount\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.relevanceKept\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.raw\s*\?\?\s*sourceRecoverySnapshot\.gatheredJobCount/.test(googleRebuild),
+      'LinkedIn and Google description-recovery snapshot rebuilds preserve the original source-found count rather than replacing it with the current score-ready subset');
       assert(search.includes("|| !hasReusableCareerProfile")
         && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id]"),
       'saved-scrape recovery never reintroduces a profile deliberately cleared from this hub');
@@ -3919,6 +4211,52 @@ export default [
       assert(!missing.reconciled && missing.unexplainedDelta === -79,
         `an unexplained 79-row loss must fail reconciliation, got ${JSON.stringify(missing)}`);
       return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped };
+    },
+  },
+{
+    name: 'Job search funnel: the pinned-target-role gate is an accounted stage, not an unexplained loss',
+    run: () => {
+      // A pinned role rejects every title missing one of its words. That drop
+      // happens between the age and history stages, so the reconciler must
+      // subtract it — otherwise every role-pinned run reports a false
+      // funnel-integrity warning.
+      const gated = reconcileSearchFunnel({
+        raw: 400,
+        relevanceDropped: 0,
+        deduped: 400,
+        ageDropped: 20,
+        roleDropped: 300,
+        historyDropped: 10,
+        descriptionEvidenceDropped: { total: 0 },
+        kept: 70,
+      });
+      assert(gated.reconciled && gated.expectedKept === 70 && gated.unexplainedDelta === 0,
+        `a 300-row role-gate drop must be explained, got ${JSON.stringify(gated)}`);
+      assert(gated.roleDropped === 300, 'roleDropped is surfaced for the report line');
+
+      // The same run WITHOUT the stage registered is exactly the false alarm
+      // this guards against.
+      const unregistered = reconcileSearchFunnel({
+        raw: 400,
+        relevanceDropped: 0,
+        deduped: 400,
+        ageDropped: 20,
+        historyDropped: 10,
+        descriptionEvidenceDropped: { total: 0 },
+        kept: 70,
+      });
+      assert(!unregistered.reconciled && unregistered.unexplainedDelta === -300,
+        `an unregistered role-gate drop must fail reconciliation, got ${JSON.stringify(unregistered)}`);
+
+      // A role-less run is untouched: the field is absent and reconciliation is
+      // identical to how it behaved before the gate existed.
+      const roleless = reconcileSearchFunnel({
+        raw: 100, relevanceDropped: 0, deduped: 100, ageDropped: 0,
+        historyDropped: 0, descriptionEvidenceDropped: { total: 0 }, kept: 100,
+      });
+      assert(roleless.reconciled && roleless.roleDropped === 0,
+        `a role-less run must reconcile with roleDropped 0, got ${JSON.stringify(roleless)}`);
+      return { gatedDrop: gated.roleDropped, kept: gated.kept };
     },
   },
 {
@@ -5477,6 +5815,37 @@ export default [
     },
   },
 {
+    name: 'Advance-control label families stay separated so a finished pager is not misread as truncated',
+    run: () => {
+      const pager    = new RegExp(ADVANCE_CONTROL_LABEL_PATTERNS.pager);
+      const loadMore = new RegExp(ADVANCE_CONTROL_LABEL_PATTERNS.loadMore);
+      const norm = t => t.replace(/\s+/g, ' ').trim().toLowerCase();
+
+      // Why this test exists: Glassdoor's Next.js rewrite replaced its pager
+      // with an in-page "Show more jobs" append. The unhandled-control detector
+      // only recognized "next page", so a stale load-more selector ended the
+      // walk at page 1 and reported a clean `completed` — a silently truncated
+      // search that looked identical to an exhausted board.
+      assert(loadMore.test(norm('Show more jobs')) && loadMore.test(norm('Load more jobs'))
+        && loadMore.test(norm('Show 30 more jobs')),
+      'a load-more source recognizes the in-place append control that replaced its pager');
+
+      // The families must NOT be merged into one pattern. A pager source that
+      // has genuinely reached its last page still shows end-of-results
+      // furniture; matching it would turn every completed pager walk into a
+      // false blocking `pagination-unhandled` warning.
+      assert(!pager.test(norm('Show more jobs')) && !pager.test(norm('More jobs like this')),
+        'the pager family ignores load-more and end-of-results copy so a finished walk stays `completed`');
+      assert(!loadMore.test(norm('More jobs like this')) && !loadMore.test(norm('Load more reviews'))
+        && !loadMore.test(norm('Next steps')),
+      'the load-more family ignores adjacent page furniture that is not an advance control');
+
+      assert(pager.test(norm('Next Page')) && pager.test(norm('Go to next page')),
+        'the pager family still matches the conventional next-page control it always did');
+      return { pager: ADVANCE_CONTROL_LABEL_PATTERNS.pager, loadMore: ADVANCE_CONTROL_LABEL_PATTERNS.loadMore };
+    },
+  },
+{
     name: 'Glassdoor detail enrichment keeps the successful country host and recognizes the Humans only hard block',
     run: () => {
       const detail = 'https://fr.glassdoor.ca/job-listing/staff-engineer-acme-JV_IC2281069.htm?jl=101';
@@ -6672,5 +7041,167 @@ export default [
       assert(!shortWorkspace.includes('data-ic-letter-centered'), 'workspace: retired cover marker must be absent');
       return { ok: true };
     },
-  }
+  },
+{
+    name: 'job pipeline report: XJOBAUDIT collapses per-job/per-location audit prose without touching funnel numbers, warnings, or per-source outcomes',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const scrapeTelemetry = getManualScraperTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+      };
+      const savedEvents = scrapeTelemetry.events;
+      const store = tryGetStore();
+      const savedCache = { ...getGlassdoorLocIdCache() };
+      const priorCacheKeyCount = Object.keys(savedCache).length;
+
+      Object.assign(telemetry, {
+        nodeId: 'xjobaudit-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1,
+          remoteRelevance: {
+            remoteok: [{
+              url: 'https://remoteok.com/l/xjobaudit-role', title: 'XJOBAUDIT Marker Role', company: 'Acme',
+              matched: [{ query: 'XJOBAUDIT Marker Role', matchedTerms: ['xjobaudit'], requiredMatches: 1 }],
+              tags: ['xjobaudit-tag'],
+            }],
+          },
+        },
+        scoring: {
+          ts: Date.now(), input: 1, selectedForScoring: 1, cappedForBudget: 0, scored: 1,
+          placeholders: 0, batches: 1, failedBatches: 0, providerCalls: 1,
+          unscored: 0, models: ['gemini-test'],
+          audit: {
+            rows: [
+              { batch: 1, title: 'XJOBAUDIT Scoring Row', company: 'Acme', location: 'Remote', source: 'remoteok', url: 'https://jobs/xjobaudit-scoring', score: 70, direction: 'Support', reason: 'XJOBAUDIT reason text.', descriptionFingerprint: 'xjobaudit' },
+            ],
+            omitted: 0,
+            anomalies: [],
+          },
+        },
+        bucketing: {
+          ts: Date.now(), input: 1, roleCount: 1, placed: 1, missing: 0, duplicated: 0,
+          bandSummary: [{ label: 'Limited hiring fit (0–79)', count: 1 }], salaryRangeLabels: ['$80k–$120k/yr'],
+          // Deliberately a DIFFERENT title than the relevance/scoring/taxonomy
+          // rows below: the Roles (third level) summary's bounded sample title
+          // is a per-source OUTCOME, not per-job audit prose, so XJOBAUDIT must
+          // NOT remove it — using the same string here would make that survival
+          // indistinguishable from the marker-role leaking out of the (correctly
+          // omitted) relevance audit.
+          roleSummary: [{ name: 'Support', count: 1, sampleTitles: ['XJOBAUDIT Role-Summary Sample'] }],
+          taxonomyRepairs: ['XJOBAUDIT repair note'],
+          taxonomyAudit: [{ index: 0, title: 'XJOBAUDIT Taxonomy Row', source: 'remoteok', rawSalary: '$80k/yr', annualSalary: 80000, salaryRange: '$80k–$120k/yr', fitBand: 'Limited hiring fit (0–79)', role: 'Support' }],
+          taxonomyAuditOmitted: 0, model: 'gemini-test',
+        },
+      });
+      scrapeTelemetry.events = [];
+      recordManualScraperTelemetry({
+        phase: 'location-resolution-failed',
+        sourceId: 'glassdoor',
+        srcName: 'Glassdoor',
+        queryIndex: 1,
+        queryTotal: 1,
+        location: 'XJOBAUDIT City',
+        reason: 'test seed for XJOBAUDIT coverage',
+        failureKind: 'no-match',
+        attempts: 1,
+      });
+      saveGlassdoorLocId('xjobaudit city cache key', { locId: '999', locT: 'C', country: 'US' });
+      const expectedCacheCount = priorCacheKeyCount + 1;
+
+      try {
+        const full = buildJobsPipelineSnapshot(new Set(['xjobaudit-diagnostics']), null, null);
+        assert(full.includes('All-source role relevance audit (surviving jobs')
+          && full.includes('XJOBAUDIT Marker Role')
+          && full.includes('Scoring evidence (1/1 bounded row(s))')
+          && full.includes('XJOBAUDIT Scoring Row')
+          && full.includes('Taxonomy placement audit (raw salary')
+          && full.includes('XJOBAUDIT Taxonomy Row')
+          && full.includes('### Glassdoor Location Cache')
+          && full.includes('xjobaudit city cache key'),
+        'without XJOBAUDIT, all four per-job/per-location audit blocks render their full per-item detail');
+
+        const collapsed = buildJobsPipelineSnapshot(new Set(['xjobaudit-diagnostics']), null, null, [], true);
+        assert(!collapsed.includes('XJOBAUDIT Marker Role')
+          && !collapsed.includes('XJOBAUDIT Scoring Row')
+          && !collapsed.includes('XJOBAUDIT Taxonomy Row')
+          && !collapsed.includes('xjobaudit city cache key'),
+        'XJOBAUDIT removes every per-job/per-location audit detail line from all four blocks');
+        assert((collapsed.match(/omitted by filter code — XJOBAUDIT/g) || []).length === 4,
+          'XJOBAUDIT replaces each of the four bulky blocks with exactly one marker line (relevance, scoring, taxonomy, Glassdoor cache)');
+        assert(collapsed.includes('All-source role relevance audit (1 row(s) across 1 source(s)) omitted')
+          && collapsed.includes('Scoring evidence (1 bounded row(s)) omitted')
+          && collapsed.includes('Taxonomy placement audit (1 job row(s)) omitted')
+          && collapsed.includes(`${expectedCacheCount} cached location(s) omitted`),
+        'XJOBAUDIT markers state an honest count of what was omitted, keeping the section-omission accounting truthful');
+        assert(collapsed.includes('Found (raw): 1')
+          && collapsed.includes('Input: 1 → scored: 1')
+          && collapsed.includes('Batches: 1 (0 failed)')
+          && collapsed.includes('Hiring-fit bands')
+          && collapsed.includes('Limited hiring fit (0–79)')
+          && collapsed.includes('Taxonomy validation repaired: XJOBAUDIT repair note')
+          && collapsed.includes('Skipped `Glassdoor` for "XJOBAUDIT City" (no-match)')
+          && collapsed.includes('XJOBAUDIT Role-Summary Sample'),
+        'XJOBAUDIT keeps the funnel numbers, per-source outcomes (incl. the Roles third-level bounded sample), and warnings untouched — only the per-job/per-location audit prose is removed');
+      } finally {
+        Object.assign(telemetry, saved);
+        scrapeTelemetry.events = savedEvents;
+        if (store) store.set('jobs.glassdoorLocIds', savedCache);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    // A Glassdoor panel 429 on page 11 disabled description enrichment for the
+    // rest of the source: 19 more pages were walked, 275 of 336 in-window rows
+    // came back with no description and were dropped by the evidence gate — and
+    // the report still said `completed` with no flag anywhere. A detail block
+    // never reaches stopReason (the WALK finished; only enrichment stopped), and
+    // every warning render was gated on `count === 0`, so a source that returned
+    // 897 rows carried its warning silently.
+    name: 'Job diagnostics: a detail-enrichment block is reported even when the walk completed',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'detail-block-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 897, deduped: 897, ageDropped: 556, historyDropped: 5, kept: 61,
+          bySource: {
+            glassdoor: {
+              count: 897, pagesWalked: 30, stopReason: 'completed',
+              warning: {
+                code: 'description-rate-limited', severity: 'block',
+                evidence: 'Glassdoor returned HTTP 429 while loading the right-side panel.',
+              },
+              detailBlock: {
+                code: 'description-rate-limited', active: true, firstPage: 11,
+                arms: 1, reprobes: 1, recovered: 0, skippedCards: 570,
+              },
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['detail-block-diagnostics']), null, null);
+        assert(report.includes('walked 30 pages → stopped: completed')
+          && report.includes('detail enrichment blocked by description-rate-limited from page 11')
+          && report.includes('570 card(s) got no panel request')
+          && report.includes('held back from scoring'),
+        'a completed walk whose description enrichment was blocked says so on the same line, instead of reading as a clean run');
+        assert(report.includes('1 cooldown re-probe(s), 0 recovered'),
+          'the report states whether the cooldown re-probe recovered enrichment, so a stuck throttle is distinguishable from a transient one');
+        assert(report.includes('returned results BUT flagged (partial success')
+          && report.includes('glassdoor (description-rate-limited/block, 897 row(s) still returned)'),
+        'a warning on a source that RETURNED rows is rendered — the zero-results gates used to hide exactly this case');
+        return { ok: true };
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
 ];

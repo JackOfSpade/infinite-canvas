@@ -44,11 +44,11 @@ const CLAUDE_FAMILY_OPTIONS = [
 const CLAUDE_MODEL_GROUPS = [
   {
     key: 'judgment', label: 'Judgment', defaultToken: 'OPUS',
-    note: 'Job scoring and compensation research, plus pricing and bundle-price decisions.',
+    note: 'Pricing and bundle-price decisions. Job scoring and compensation research use the manual non-API handoff instead.',
   },
   {
     key: 'extraction', label: 'Extraction', defaultToken: 'SONNET',
-    note: 'Vision, résumé/career parsing, query generation, job bucketing, and fallback work.',
+    note: 'Vision/product analysis, plus fallback for unmapped tasks. Résumé parsing, query generation, and job bucketing use the manual non-API handoff instead.',
   },
   {
     key: 'light', label: 'Light', defaultToken: 'HAIKU',
@@ -947,7 +947,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                             <p className="text-white/30 text-[9px] mt-1">{note}</p>
                             {key === 'judgment' && selected === 'HAIKU' && (
                               <p className="text-amber-300/80 text-[9px] mt-1">
-                                Haiku is usable, but its lighter web-search support can weaken grounded compensation research. Sonnet or Opus is recommended here.
+                                Haiku is usable, but pricing and bundle-price decisions are recommendations you act on directly, so weaker judgment carries real cost. Sonnet or Opus is recommended here.
                               </p>
                             )}
                           </div>

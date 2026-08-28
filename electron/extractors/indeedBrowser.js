@@ -810,6 +810,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // resolved ceiling number — otherwise a user who chose "All" sees a plain
     // "up to 1000 pages" log line that reads like a deliberate 1000-page setting.
     logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${describeJobCollectionLimits(limits).pages} pages`);
+    // The preflight passed on the ACCOUNT page. Remembered so a block on the
+    // first /jobs page can be reported as endpoint-scoped rather than as a
+    // session problem (see stopForIndeedChallenge).
+    const preflightWasClean = !preflightSignals?.isChallenge;
 
     const allJobs = [];
     const seenKeys = new Set();
@@ -823,13 +827,37 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // full picture fits in the 60-line ring buffer regardless of run length.
     const perQueryChallenges = {}; // qi → challenge count
 
-    const stopForIndeedChallenge = async ({ q, qi, p, reason, label }) => {
+    const stopForIndeedChallenge = async ({ q, qi, p, reason, label, stage = 'search-page' }) => {
       totalChallenges++;
       perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
       const challengeUrl = page.url();
       const nativeHandoff = shouldHandoffIndeedChallengeToNative(reason);
-      manualChallenge = { q, qi, p, reason: reason || 'challenge', status: nativeHandoff ? 'native-handoff-required' : 'hard-block', challengeUrl, nativeHandoff };
+      // The account page verified the SESSION, not the search ENDPOINT. Indeed's
+      // block is endpoint-specific and survives a warm authenticated session:
+      // secure.indeed.com/settings/account loads clean and shows the user logged
+      // in while /jobs stays blocked. When the very first search page is blocked
+      // after a clean preflight, say so explicitly — otherwise both the Settings
+      // badge and this warning describe a healthy session, and the user is sent
+      // to re-log-in for a problem logging in cannot fix.
+      // ONLY a challenge on the search-page navigation itself evidences an
+      // endpoint-scoped block. The enrichment call site reaches here after the
+      // /jobs list page has already loaded and been extracted — its challenge is
+      // on a DETAIL card, so claiming "/jobs is blocked" there would assert
+      // something the run just disproved.
+      const endpointScopedBlock = stage === 'search-page' && qi === 0 && p === 0 && preflightWasClean;
+      manualChallenge = {
+        q, qi, p,
+        reason: reason || 'challenge',
+        status: nativeHandoff ? 'native-handoff-required' : 'hard-block',
+        challengeUrl,
+        nativeHandoff,
+        endpointScopedBlock,
+        ...(endpointScopedBlock ? {
+          endpointEvidence: `The session itself is valid — ${accountVerifyUrl} loaded clean and authenticated — but the very first https://${host}/jobs request was challenged. That makes this an endpoint-scoped block rather than a sign-in problem.`,
+        } : {}),
+      };
       logger.warn(`[Indeed/Browser] ${label} requires ${nativeHandoff ? 'native Chrome handoff' : 'a later retry'}; preserving the profile and stopping this controlled-browser run.`);
+      if (endpointScopedBlock) logger.warn(`[Indeed/Browser] ${manualChallenge.endpointEvidence}`);
       return false;
     };
 
@@ -1007,6 +1035,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           if (blankSignals.isChallenge) {
             const cleared = await stopForIndeedChallenge({
               q, qi, p, reason: blankSignals.reason || 'cf-blank-enrichment', label: `Cloudflare description challenge q="${q}" p=${p + 1}`,
+              stage: 'description-enrichment',
             });
             if (cleared) {
               p--;
@@ -1242,10 +1271,17 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       warning = {
         code: 'scrape-failed',
         severity: 'block',
-        evidence: `Indeed ${manualChallenge.reason} at "${manualChallenge.q}" page ${manualChallenge.p + 1} did not clear (${manualChallenge.status}). The browser profile and Cloudflare cookies were preserved.`,
-        suggestion: manualChallenge.status === 'hard-block'
-          ? 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.'
-          : 'Click Continue, then complete the check in the real Chrome window that opens.',
+        // The endpoint-scoped note is appended to the EVIDENCE, which is what the
+        // source card and the bug report actually render — computing it onto
+        // `manualChallenge` alone left it visible nowhere but the log.
+        evidence: `Indeed ${manualChallenge.reason} at "${manualChallenge.q}" page ${manualChallenge.p + 1} did not clear (${manualChallenge.status}). The browser profile and Cloudflare cookies were preserved.${manualChallenge.endpointEvidence ? ` ${manualChallenge.endpointEvidence}` : ''}`,
+        suggestion: manualChallenge.endpointScopedBlock
+          // Signing in again cannot fix an endpoint-scoped block, and the login
+          // check passes in exactly this state — so do not send the user there.
+          ? 'Indeed accepted the session but blocked its search endpoint. Logging in again will not help; wait before retrying, or use a different network.'
+          : manualChallenge.status === 'hard-block'
+            ? 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.'
+            : 'Click Continue, then complete the check in the real Chrome window that opens.',
         resumeState: {
           mode: manualChallenge.nativeHandoff ? 'native-challenge' : 'retry-later',
           challengeUrl: manualChallenge.challengeUrl,

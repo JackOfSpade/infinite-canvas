@@ -72,6 +72,61 @@ function stripHtml(html) {
 }
 
 // ── LinkedIn Hidden API ─────────────────────────────────────────────────────
+/**
+ * Why one LinkedIn query's page walk stopped — the pure decision behind the
+ * loop, so it is testable without a network round trip.
+ *
+ *   'exhausted'      — the page carried no well-formed cards at all.
+ *   'no-new-rows'    — cards were present but none were new TO THIS QUERY, i.e.
+ *                      the pager stopped advancing.
+ *   'result-ceiling' — the offset budget ran out with the query still yielding.
+ *   null             — keep walking.
+ *
+ * The critical distinction is that a page whose rows were all already returned
+ * by an EARLIER QUERY is none of these. Freshness used to be measured against
+ * the run-wide dedup set, so ordinary cross-query overlap — the expected case,
+ * since the generator emits several near-synonym queries — read as exhaustion
+ * and ended the walk on page 1, reported as "results exhausted".
+ *
+ * @param {{cardsOnPage: number, newToThisQuery: number, nextStart: number, maxResults: number}} state
+ * @returns {'exhausted'|'no-new-rows'|'result-ceiling'|null}
+ */
+export function linkedInPageStopReason({
+  cardsOnPage,
+  newToThisQuery,
+  unproductiveStreak = 0,
+  maxUnproductivePages = LINKEDIN_MAX_UNPRODUCTIVE_PAGES,
+  nextStart,
+  maxResults,
+} = {}) {
+  if (!(cardsOnPage > 0)) return 'exhausted';
+  if (!(newToThisQuery > 0)) return 'no-new-rows';
+  // Freshness-to-this-query proves the PAGER is advancing, but not that the walk
+  // is still producing OUTPUT. A query almost fully covered by an earlier one
+  // keeps yielding new-to-this-query cards that are all run-wide duplicates, so
+  // without this it would spend its entire offset budget adding zero rows. Two
+  // consecutive unproductive pages is the signal; one is normal (a page can be
+  // fully covered while the next is not).
+  if (unproductiveStreak >= maxUnproductivePages) return 'redundant-query';
+  if (Number.isFinite(nextStart) && Number.isFinite(maxResults) && nextStart >= maxResults) return 'result-ceiling';
+  return null;
+}
+
+/**
+ * Consecutive pages that may add zero NEW OUTPUT before a query's walk gives up.
+ * Bounds the cost of a query whose results an earlier query already returned.
+ */
+const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
+
+/**
+ * Offset ceiling for one LinkedIn query's walk (6 pages x 25). The binding
+ * constraint is not LinkedIn's own result cap but our enrichment budget: every
+ * gathered row costs one browser navigation in
+ * enrichLinkedInDescriptionsBrowser, which feeds the rate-limit wall. Raising
+ * this without also raising MAX_CONTEXT_ROTATIONS trades breadth for a block.
+ */
+const LINKEDIN_MAX_RESULTS = 150;
+
 // Public endpoint: linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
 // Returns HTML snippets of job cards — no auth, no page rendering needed.
 // Paginates in increments of 25 via the `start` parameter.
@@ -94,6 +149,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   const seenUrls = new Set();
   const allJobs = [];
   let warning = null;
+  // Per-query walk outcomes, so a ceiling-truncated source is distinguishable
+  // from an exhausted one in the bug report (see the return value below).
+  const queryStopReasons = [];
 
   for (let qi = 0; qi < queryList.length; qi++) {
     if (signal?.aborted) break;
@@ -116,11 +174,19 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     //   • a humanDelay log-normal gap (~6s anchor) before each page after the first
     //     (a fixed 2s drumbeat is a tell — an organically-spread cadence is the
     //     main signal we control),
-    //   • an early-exit the moment a page adds no new cards (below), so a low-volume
-    //     query never walks all 6 pages — we only go deep when results justify it,
+    //   • an early-exit the moment a page returns no cards, or no card this
+    //     QUERY has not already seen (below), so a low-volume query never walks
+    //     all 6 pages — we only go deep when results justify it. Freshness is
+    //     deliberately per-query: measuring it against the run-wide dedup set
+    //     ended a query's walk whenever an earlier query had already returned
+    //     that page's rows, which is the normal case, not an edge case,
     //   • bail on the first block/non-OK (below), returning whatever we gathered so
     //     far rather than hammering through and turning a soft throttle into a 0.
-    const LINKEDIN_MAX_RESULTS = 150;
+    // Freshness is tracked per query; `seenUrls` remains the run-wide OUTPUT
+    // dedup so the same posting is never returned twice across queries.
+    const seenInThisQuery = new Set();
+    let stopReason = null;
+    let unproductiveStreak = 0;
     for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
       if (signal?.aborted) break;
       // Human-scale log-normal pause before each subsequent page.
@@ -153,11 +219,12 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       if (r.warning && !warning) warning = r.warning;
       if (!r.ok) {
         logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
+        stopReason = 'blocked';
         break;
       }
 
       const html = r.text;
-      if (!html || html.trim().length < 50) break;
+      if (!html || html.trim().length < 50) { stopReason = 'empty-response'; break; }
 
       // Parse HTML snippets with regex — LinkedIn returns <li> cards
       // Each card has: title in <h3>, company in <h4>, location, link, datetime
@@ -165,7 +232,18 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       const cards = html.match(cardPattern) || [];
 
       let pageUrlMisses = 0;
+      // Run-wide output count before this page, so the productivity stop below
+      // can tell "the pager advanced" from "the walk actually gained rows".
       const before = allJobs.length;
+      // Freshness must be measured PER QUERY, not against the run-wide seenUrls
+      // set. `seenUrls`/`allJobs` span every query, so a page made entirely of
+      // cards an earlier query already returned would add nothing to
+      // `allJobs.length` and trip the exhaustion break below — ending THIS
+      // query's walk on page 1. Heavy page-1 overlap is the expected case
+      // (the generator emits 2-3 exact-title plus 3-5 adjacent-role queries),
+      // and the old behaviour reported it as "results exhausted".
+      let cardsOnPage = 0;
+      let newToThisQuery = 0;
       for (const card of cards) {
         try {
           const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
@@ -187,12 +265,20 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
 
           const title = stripHtml(titleMatch?.[1] || '').trim();
           if (!title) continue;
+          // A well-formed card counts toward "did this page return anything at
+          // all", independently of whether we keep it — that is what separates
+          // true exhaustion from a page of cross-query repeats.
+          cardsOnPage++;
 
           let rawUrl = linkMatch?.[1]?.split('?')[0] || '';
           // Normalize relative /jobs/view/ paths to absolute URLs
           if (rawUrl.startsWith('/')) rawUrl = `https://www.linkedin.com${rawUrl}`;
           const url = rawUrl;
           if (!url) pageUrlMisses++;
+          if (url && !seenInThisQuery.has(url)) {
+            seenInThisQuery.add(url);
+            newToThisQuery++;
+          }
           if (url && seenUrls.has(url)) continue; // cross-query dedup by job URL
           if (url) seenUrls.add(url);
 
@@ -229,15 +315,49 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         // Progress callback is diagnostics-only — never let it break the scrape.
       }
 
-      // Page added nothing new → results exhausted (or a soft block served an empty
-      // shell). Stop instead of spending more requests walking empty pages.
-      if (allJobs.length === before) break;
+      // Two genuinely different stop conditions, kept apart so the report can
+      // say which one happened:
+      //   • no well-formed cards at all → results exhausted (or a soft block
+      //     served an empty shell);
+      //   • cards present but none new TO THIS QUERY → the pager has stopped
+      //     advancing (LinkedIn re-serving the same offset).
+      // A page whose rows were all already returned by an EARLIER QUERY is
+      // neither — it is normal overlap, and the walk continues.
+      // Did this page add anything to the RUN's output (not merely to this
+      // query's seen set)? `before` is captured above, per page.
+      if (allJobs.length > before) unproductiveStreak = 0;
+      else unproductiveStreak++;
+      const pageStop = linkedInPageStopReason({
+        cardsOnPage,
+        newToThisQuery,
+        unproductiveStreak,
+        nextStart: start + 25,
+        maxResults: LINKEDIN_MAX_RESULTS,
+      });
+      if (pageStop) {
+        stopReason = pageStop;
+        if (pageStop !== 'result-ceiling') break;
+      }
     }
+    if (stopReason) queryStopReasons.push({ query, stopReason });
   }
 
   // `gathered` is the pre-user-limit match count. jobs.js applies the persisted
   // per-platform allowance centrally so every source shares the same semantics.
-  return { items: allJobs, warning, gathered: allJobs.length };
+  //
+  // `stopReasons` + `cap` make a ceiling-truncated walk distinguishable from an
+  // exhausted one. Without them a query stopped by LINKEDIN_MAX_RESULTS and a
+  // query that genuinely ran out both reported the same thing, and `capOverflow`
+  // in jobs.js could never fire because `gathered` was already the truncated
+  // number. Observation only — nothing downstream branches on it.
+  const ceilingBound = queryStopReasons.some(r => r.stopReason === 'result-ceiling');
+  return {
+    items: allJobs,
+    warning,
+    gathered: allJobs.length,
+    stopReasons: queryStopReasons,
+    cap: ceilingBound ? { type: 'source-internal', limit: LINKEDIN_MAX_RESULTS } : null,
+  };
 }
 
 /**
@@ -1234,7 +1354,7 @@ export function formatUSAJobsSalary(salary) {
  * @param {string} apiKey — USAJobs API key (from .env or config)
  * @param {string} email — registered email for User-Agent header
  */
-export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30, location = '') {
+export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30, location = '', rowBudget = Infinity) {
   if (!apiKey) {
     logger.warn('[USAJobs] No API key configured — skipping');
     // Surface the skip reason as a `warning` so the source card can render
@@ -1252,35 +1372,15 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
     };
   }
 
-  const requestedAgeDays = Math.max(1, Math.floor(maxAgeDays || 30));
-  const params = new URLSearchParams({
-    Keyword: query,
-    ResultsPerPage: '150', // uncapped breadth; USAJobs DatePosted below already keeps these in-window
-    // USAJobs accepts only 0–60. Omitting it above 60 preserves breadth; the
-    // shared client age filter applies the user's larger requested window.
-    ...(requestedAgeDays <= 60 ? { DatePosted: String(requestedAgeDays) } : {}),
-    ...(location ? { LocationName: location } : {}),
-  });
+  return runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, location, rowBudget);
+}
 
-  const r = await safeApiFetch(`https://data.usajobs.gov/api/search?${params}`, {
-    headers: {
-      'Host': 'data.usajobs.gov',
-      'User-Agent': email || 'job-search-app@example.com',
-      'Authorization-Key': apiKey,
-    },
-    signal: createTimeoutSignal(signal, apiTimeout('usajobs-api')),
-  }, 'usajobs');
-
-  if (!r.ok) {
-    if (r.warning) logger.warn(`[USAJobs] ${r.warning.code}: ${r.warning.evidence}`);
-    else logger.error(`[USAJobs] API returned ${r.status}`);
-    return { items: [], warning: r.warning };
-  }
-
-  const data = r.json;
-  const resultItems = data?.SearchResult?.SearchResultItems || [];
-
-  const mapped = resultItems.map(item => {
+/**
+ * One page of USAJobs rows → our job shape. Split out of fetchUSAJobs so the
+ * paging loop below can map each page as it arrives.
+ */
+function mapUSAJobsRows(resultItems) {
+  return resultItems.map(item => {
     const pos = item.MatchedObjectDescriptor || {};
     const salary = pos.PositionRemuneration?.[0];
     const salaryStr = formatUSAJobsSalary(salary);
@@ -1304,15 +1404,134 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       source: 'usajobs',
     };
   });
-  // Trust USAJobs' own keyword matching and ranking. Position-title wording can
-  // legitimately differ from the user's role phrase, so a second local title
-  // gate would throw away provider-approved results.
+}
+
+/**
+ * Rows per USAJobs request. 500 is accepted by the API (verified live) and
+ * keeps a typical query to one or two requests instead of seven.
+ */
+const USAJOBS_RESULTS_PER_PAGE = 500;
+
+/**
+ * Backstop on the page walk. The real stop condition is the provider's own
+ * SearchResultCountAll; this only bounds a pathological response where the
+ * reported total never agrees with the rows actually served.
+ */
+const USAJOBS_MAX_PAGES = 10;
+
+export async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget = Infinity) {
+  const rows = [];
+  let providerTotal = null;
+  let warning = null;
+  let lastStatusOk = false;
+  let pagesFetched = 0;
+  // True when the walk stopped because a LATER page failed, i.e. we hold a
+  // partial result set rather than the whole corpus.
+  let truncatedByError = false;
+
+  for (let page = 1; page <= USAJOBS_MAX_PAGES; page++) {
+    if (signal?.aborted) break;
+    const params = new URLSearchParams({
+      Keyword: query,
+      ResultsPerPage: String(USAJOBS_RESULTS_PER_PAGE),
+      Page: String(page),
+      // USAJobs accepts only 0–60. Omitting it above 60 preserves breadth; the
+      // shared client age filter applies the user's larger requested window.
+      ...(requestedAgeDays <= 60 ? { DatePosted: String(requestedAgeDays) } : {}),
+      ...(location ? { LocationName: location } : {}),
+    });
+
+    const r = await safeApiFetch(`https://data.usajobs.gov/api/search?${params}`, {
+      headers: {
+        'Host': 'data.usajobs.gov',
+        'User-Agent': email || 'job-search-app@example.com',
+        'Authorization-Key': apiKey,
+      },
+      signal: createTimeoutSignal(signal, apiTimeout('usajobs-api')),
+    }, 'usajobs');
+
+    if (!r.ok) {
+      if (r.warning) logger.warn(`[USAJobs] ${r.warning.code}: ${r.warning.evidence}`);
+      else logger.error(`[USAJobs] API returned ${r.status}`);
+      // A failure PART-WAY through the walk is not the same as a failure on page
+      // one: rows were gathered, but the set is now truncated at an arbitrary
+      // point. Record it so the caller cannot report a partial gather as a clean
+      // success, and never overwrite an earlier warning with a later one.
+      if (!warning) {
+        warning = r.warning || {
+          code: 'scrape-failed',
+          severity: pagesFetched > 0 ? 'warn' : 'block',
+          evidence: `USAJobs returned ${r.status} on page ${page} of the result walk.`,
+          suggestion: 'Retry this source — the federal API intermittently rejects rapid paging.',
+        };
+      }
+      truncatedByError = pagesFetched > 0;
+      break;
+    }
+    lastStatusOk = true;
+    if (r.warning && !warning) warning = r.warning;
+    pagesFetched++;
+
+    const search = r.json?.SearchResult;
+    const pageItems = search?.SearchResultItems || [];
+    // The provider's exact corpus size for this query. Read once; it is the
+    // walk's stop condition and the only way to tell a truncated query from a
+    // genuinely small one — previously both reported the same row count.
+    if (providerTotal == null) {
+      const all = Number(search?.SearchResultCountAll);
+      if (Number.isFinite(all) && all >= 0) providerTotal = all;
+    }
+    if (pageItems.length === 0) break;
+    rows.push(...pageItems);
+    if (providerTotal != null && rows.length >= providerTotal) break;
+    // Stop as soon as the user's per-platform allowance is satisfied. Walking
+    // the provider's full corpus and slicing afterwards would fetch (and later
+    // LLM-score) rows the user already said they did not want — JOB_SCORE_CAP is
+    // Infinity, so every gathered row is scored. Infinity ("All") keeps walking.
+    if (rows.length >= rowBudget) break;
+    if (pageItems.length < USAJOBS_RESULTS_PER_PAGE) break; // short page = last page
+  }
+
+  return { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError };
+}
+
+async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, location, rowBudget = Infinity) {
+  const requestedAgeDays = Math.max(1, Math.floor(maxAgeDays || 30));
+  const { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError } =
+    await fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget);
+
+  if (!lastStatusOk && rows.length === 0) return { items: [], warning };
+
+  const mapped = mapUSAJobsRows(rows);
+  // Trust USAJobs' own keyword matching. A second local title gate was tried and
+  // removed because it starved the source: federal position titles are written
+  // in their own vocabulary ("IT Specialist (INFOSEC)") and legitimately differ
+  // from the user's role phrase. This is NOT a claim that the ranking is good —
+  // measured on-target rate is flat across depth, with no usable relevance
+  // ordering — only that a local gate discards more real rows than it removes.
   const items = mapped;
+  // A 200 carrying zero rows is a real, reportable outcome and is otherwise
+  // indistinguishable from an empty federal search.
+  if (providerTotal === 0) {
+    logger.info(`[USAJobs] 200 with SearchResultCountAll=0 for "${query}" — provider reports no matching federal postings`);
+  } else if (providerTotal != null && rows.length < providerTotal) {
+    const why = truncatedByError ? 'a page request failed mid-walk'
+      : Number.isFinite(rowBudget) && rows.length >= rowBudget ? 'the per-platform allowance was reached'
+      : 'the walk ended early';
+    logger.info(`[USAJobs] "${query}": gathered ${rows.length} of ${providerTotal} reported after ${pagesFetched} page(s) — ${why}`);
+  }
   return {
     items,
-    warning: r.warning,
+    warning,
     gathered: mapped.length,
-    providerGathered: resultItems.length,
+    providerGathered: rows.length,
+    // The provider's own count for this query. Distinct from providerGathered so
+    // "150 of 973" is legible instead of looking like a 150-row corpus.
+    providerTotal,
+    // Set only when a LATER page failed, so the caller can distinguish a partial
+    // set from a complete one. Without it a truncated walk was indistinguishable
+    // from a source that genuinely had this many rows.
+    truncated: truncatedByError,
     relevanceDropped: 0,
     relevanceRejected: [],
   };
@@ -1337,16 +1556,98 @@ export function isRemoteOkSponsoredPlacement(job) {
 }
 
 /**
- * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
+ * RemoteOK ships bare integers in salary_min / salary_max, and uses 0 (not
+ * null) to mean "no figure". Emit a range only when both bounds are real
+ * positive numbers, a single figure when only one is, and '' when neither is —
+ * never a half-formed "$X - $undefined". Exported for unit testing.
+ *
+ * @param {number|string|null|undefined} min
+ * @param {number|string|null|undefined} max
+ * @returns {string}
  */
-export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const r = await safeApiFetch('https://remoteok.com/api', {
+export function formatRemoteOkSalary(min, max) {
+  const num = (x) => {
+    const n = Number(x);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const lo = num(min);
+  const hi = num(max);
+  const money = (n) => `$${n.toLocaleString('en-US')}`;
+  if (lo != null && hi != null) return lo === hi ? money(lo) : `${money(lo)} - ${money(hi)}`;
+  if (lo != null) return money(lo);
+  if (hi != null) return money(hi);
+  return '';
+}
+
+/**
+ * Tags to request from RemoteOK in addition to the bare feed, derived from the
+ * run's own queries.
+ *
+ * The bare /api response is a HARD 100-element cap (1 metadata object + 99
+ * postings) — verified live: `?limit=200` and `?offset=100` are both ignored and
+ * still return 101 elements. `?tag=` is the only server-side selector that
+ * works, and it returns a DIFFERENT 99 postings, so it is the only way to reach
+ * inventory the bare feed cannot show. A bogus tag returns metadata only, which
+ * is what proves the parameter is honoured server-side and also makes a wrong
+ * guess harmless — it yields zero rows after the slice(1), never an error.
+ *
+ * Deliberately bounded: RemoteOK's own API terms (element 0 of every response)
+ * threaten to suspend access for misuse, so this adds at most
+ * REMOTEOK_MAX_TAG_FETCHES requests per run, never one per query.
+ *
+ * @param {string[]} queries
+ * @returns {string[]} lowercase single-word tags, deduped, capped
+ */
+export function remoteOkTagsFromQueries(queries, max = REMOTEOK_MAX_TAG_FETCHES) {
+  const seen = new Set();
+  const tags = [];
+  for (const query of Array.isArray(queries) ? queries : [queries]) {
+    for (const word of String(query || '').toLowerCase().split(/[^a-z0-9+#]+/)) {
+      // RemoteOK tags are single tokens. Very short words are ambiguous and very
+      // long ones are never tags; stopwords would match half the feed.
+      if (word.length < 3 || word.length > 20) continue;
+      if (REMOTEOK_TAG_STOPWORDS.has(word)) continue;
+      if (seen.has(word)) continue;
+      seen.add(word);
+      tags.push(word);
+      if (tags.length >= max) return tags;
+    }
+  }
+  return tags;
+}
+
+/** At most this many extra tag-scoped requests per run (ToS courtesy). */
+const REMOTEOK_MAX_TAG_FETCHES = 3;
+
+/** Words that are never useful RemoteOK tags. */
+const REMOTEOK_TAG_STOPWORDS = new Set([
+  'and', 'the', 'for', 'with', 'jobs', 'job', 'remote', 'senior', 'junior', 'lead',
+  'staff', 'principal', 'entry', 'level', 'years', 'experience', 'work', 'time',
+  'full', 'part', 'new', 'all', 'any', 'top', 'best',
+]);
+
+async function fetchRemoteOkFeed(url, signal) {
+  const r = await safeApiFetch(url, {
     headers: {
       'Accept': 'application/json',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     },
     signal: createTimeoutSignal(signal, apiTimeout('remoteok-api')),
   }, 'remoteok');
+  return r;
+}
+
+/**
+ * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
+ *
+ * ATTRIBUTION: RemoteOK's API terms (returned as element 0 of every response)
+ * require linking back to the posting's Remote OK URL and naming Remote OK as
+ * the source, or they may suspend API access. We satisfy this by carrying each
+ * posting's own remoteok.com `url` through to the job card, which is what the
+ * user opens — do not replace it with a rewritten or direct-employer link.
+ */
+export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
+  const r = await fetchRemoteOkFeed('https://remoteok.com/api', signal);
 
   if (!r.ok) {
     if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
@@ -1357,6 +1658,24 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   const data = r.json;
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
+  // The bare feed is capped at 99 postings, so widen with a few tag-scoped
+  // fetches that return DIFFERENT inventory. Additive only: the bare feed is
+  // always the base and is never replaced, and rows are deduped by id/url below.
+  const seenFeedKeys = new Set(jobs.map(j => String(j?.id || j?.url || '')).filter(Boolean));
+  for (const tag of remoteOkTagsFromQueries(queries)) {
+    if (signal?.aborted) break;
+    const tagged = await fetchRemoteOkFeed(`https://remoteok.com/api?tag=${encodeURIComponent(tag)}`, signal);
+    if (!tagged.ok || !Array.isArray(tagged.json)) continue;
+    let added = 0;
+    for (const job of tagged.json.slice(1)) {
+      const key = String(job?.id || job?.url || '');
+      if (!key || seenFeedKeys.has(key)) continue;
+      seenFeedKeys.add(key);
+      jobs.push(job);
+      added++;
+    }
+    logger.info(`[RemoteOK API] ?tag=${tag} added ${added} posting(s) beyond the bare feed`);
+  }
 
   // Remove sponsored placements before role admission. RemoteOK's endpoint is
   // a whole feed, not a query result, so the remaining rows are filtered below.
@@ -1389,7 +1708,14 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       title: job.position || '',
       company: job.company || '',
       location: job.location || 'Remote',
-      salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
+      // Build from whichever bounds are real numbers. The feed has no `salary`
+      // key at all, so that branch never fires; and guarding only salary_min
+      // meant a max-only posting reported NO salary (bucketed Unspecified and
+      // excluded from the 75+ compensation-fit gate) while a min-only posting
+      // rendered the literal "$120000 - $undefined" on the card and in the
+      // scoring prompt. Never invent a cadence — parseSalaryToNumeric's range
+      // path annualizes correctly from this shape.
+      salary: formatRemoteOkSalary(job.salary_min, job.salary_max),
       // Pipeline convention: the FULL JD lives in `snippet` — that's the field the
       // scorer reads (jobs.js slimBatch + "Description: ${job.snippet}") and the
       // bug-report field-quality check measures. RemoteOK's API hands us the full
@@ -1489,14 +1815,60 @@ function contextAround(s, index, length, pad = 70) {
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
+/**
+ * WeWorkRemotely category feeds, keyed by the query words that imply them.
+ *
+ * The main feed is ~90 postings and has NO keyword parameter (`?search=` is a
+ * verified no-op, returning the identical feed). Category feeds are the only
+ * server-side selector that works, and they carry genuinely different
+ * inventory: measured live, three categories contributed 78 postings the main
+ * feed did not list at all.
+ *
+ * Only categories implied by the run's own queries are fetched, so an unrelated
+ * taxonomy branch is never pulled just to be discarded by the title gate. Some
+ * slugs return 403 (WWR rate-limits, and not every guessable slug exists), which
+ * is why every fetch here is best-effort and additive.
+ */
+const WWR_CATEGORY_FEEDS = [
+  { slug: 'remote-programming-jobs', match: /\b(engineer|engineering|developer|programmer|architect|software|backend|frontend|fullstack|devops|data|ml|ai)\b/ },
+  { slug: 'remote-devops-sysadmin-jobs', match: /\b(devops|sysadmin|sre|infrastructure|platform|cloud|operations|reliability)\b/ },
+  { slug: 'remote-design-jobs', match: /\b(design|designer|ux|ui|product design|graphic|brand)\b/ },
+  { slug: 'remote-product-jobs', match: /\b(product|pm|roadmap|owner)\b/ },
+  { slug: 'remote-customer-support-jobs', match: /\b(support|customer|success|helpdesk|service)\b/ },
+];
+
+/** At most this many extra category requests per run (WWR rate-limits). */
+const WWR_MAX_CATEGORY_FETCHES = 3;
+
+/**
+ * Which category feeds do this run's queries imply?
+ * @param {string[]} queries
+ * @returns {string[]} category slugs, capped
+ */
+export function wwrCategoriesFromQueries(queries, max = WWR_MAX_CATEGORY_FETCHES) {
+  const text = (Array.isArray(queries) ? queries : [queries])
+    .map(q => String(q || '').toLowerCase()).join(' ');
+  if (!text.trim()) return [];
+  const slugs = [];
+  for (const { slug, match } of WWR_CATEGORY_FEEDS) {
+    if (match.test(text)) slugs.push(slug);
+    if (slugs.length >= max) break;
+  }
+  return slugs;
+}
+
+async function fetchWwrFeed(url, signal) {
+  return safeApiFetch(url, {
     headers: {
       'Accept': 'application/rss+xml, application/xml, text/xml',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     },
     signal: createTimeoutSignal(signal, apiTimeout('wwr-api')),
   }, 'weworkremotely');
+}
+
+export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
+  const r = await fetchWwrFeed('https://weworkremotely.com/remote-jobs.rss', signal);
 
   if (!r.ok) {
     if (r.warning) logger.warn(`[WWR RSS] ${r.warning.code}: ${r.warning.evidence}`);
@@ -1504,9 +1876,32 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
     return { items: [], warning: r.warning };
   }
 
-  const xml = r.text;
-  // Parse RSS items with regex (no XML parser dependency needed)
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
+  let xml = r.text;
+  // Widen with the category feeds this run's queries imply. Additive only: the
+  // main feed is always the base, duplicates are dropped by <link>, and a 403 or
+  // an unknown slug simply contributes nothing.
+  const mainLinks = new Set((xml.match(itemPattern) || [])
+    .map(item => (item.match(/<link>\s*([^<\s]+)\s*<\/link>/i) || [])[1])
+    .filter(Boolean));
+  for (const slug of wwrCategoriesFromQueries(queries)) {
+    if (signal?.aborted) break;
+    const cat = await fetchWwrFeed(`https://weworkremotely.com/categories/${slug}.rss`, signal);
+    if (!cat.ok || !cat.text) {
+      logger.info(`[WWR RSS] category ${slug} returned ${cat.status} — skipped`);
+      continue;
+    }
+    const fresh = (cat.text.match(itemPattern) || []).filter(item => {
+      const link = (item.match(/<link>\s*([^<\s]+)\s*<\/link>/i) || [])[1];
+      if (!link || mainLinks.has(link)) return false;
+      mainLinks.add(link);
+      return true;
+    });
+    if (fresh.length > 0) xml += fresh.join('');
+    logger.info(`[WWR RSS] category ${slug} added ${fresh.length} posting(s) beyond the main feed`);
+  }
+
+  // Parse RSS items with regex (no XML parser dependency needed)
   const rssItems = xml.match(itemPattern) || [];
   const jobs = [];
 
@@ -1540,7 +1935,16 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       snippet: descText,
       description: descText,
       url,
-      posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
+      // ISO, never toLocaleDateString(). The locale form is only parseable on
+      // en-US: "27/08/2026" or "27.8.2026" makes Date.parse NaN, so
+      // parsePostedDate returns null, filterJobsByAge then KEEPS the row
+      // unconditionally, and postedMs falls back to -Infinity so every WWR job
+      // sorts last. A malformed pubDate previously stored the literal string
+      // "Invalid Date" and rendered it verbatim on the card.
+      posted: (() => {
+        const d = pubDateMatch?.[1] ? new Date(pubDateMatch[1]) : null;
+        return d && !Number.isNaN(d.getTime()) ? d.toISOString() : '';
+      })(),
       source: 'weworkremotely',
     });
   }
@@ -2411,6 +2815,14 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     sortBy: 'relevance', // explicit (= Dice's default) so an API default change can't silently flip us off relevance
     pageSize: bucket ? '400' : '1000',
     ...(location ? { location } : {}),
+    // Dice EXCLUDES remote postings by default (`meta.includeRemote` comes back
+    // false, and flipping this took a live "Systems Architect" probe from 422 to
+    // 468). When we send no location we are not geo-filtering at all — which is
+    // exactly the remote-only / nationwide case — so excluding remote jobs there
+    // drops the very postings the search wants. A LOCATED search keeps the
+    // default so a city filter is not quietly widened, which would undo the
+    // location-adherence work.
+    ...(location ? {} : { includeRemote: 'true' }),
   });
   // Coarse server-side date bound — only when the window exactly matches a bucket.
   // The client-side filterJobsByAge below still runs (a no-op when the bucket already

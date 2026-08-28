@@ -97,6 +97,29 @@ export const GLASSDOOR_EXTRACTOR = `
 (function() {
   const jobs = [];
 
+  // Strategy 0: believe the board's own stated count.
+  //
+  // A Glassdoor search with genuinely zero matches still RENDERS about five
+  // unrelated recommendation cards under a header that reads "0 <query> jobs in
+  // <place>". Card presence is therefore not evidence of results. Because the
+  // DOM harvest below is unconditional, jobs.length was never 0 on such a page
+  // and the "no jobs found" body-text check at the bottom could never run — so
+  // those five rows were returned as real: each one paged, description-clicked
+  // against Glassdoor's throttled endpoint, and LLM-scored.
+  //
+  // This reads the count Glassdoor itself publishes, mirroring the ZipRecruiter
+  // document.title check above. It is not a heuristic relevance filter — it
+  // asserts nothing about the rows, only that the board said there are none.
+  try {
+    const headerEl = document.querySelector('[data-test="search-title"], h1');
+    const headerText = (headerEl?.innerText || '').trim();
+    const titleText = (document.title || '').trim();
+    // Anchored so "10 jobs" / "204 jobs" can never match, and requiring the
+    // word "job" so an unrelated leading zero cannot trigger it.
+    const saysZero = (t) => /^0\\s/.test(t) && /\\bjobs?\\b/i.test(t);
+    if (saysZero(headerText) || saysZero(titleText)) return [];
+  } catch {}
+
   // Strategy 1: __NEXT_DATA__ Apollo cache
   try {
     const ndEl = document.getElementById('__NEXT_DATA__');

@@ -154,10 +154,18 @@ export const LOCATION_TREATMENT = {
  * diagnostics; this helper only makes a report's observed parameter concrete.
  * It does not construct or alter request URLs.
  */
-export function describeLocationTreatment(sourceId, canonicalLocation = '') {
+export function describeLocationTreatment(sourceId, canonicalLocation = '', countryScope = '') {
   const location = String(canonicalLocation || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  const country = String(countryScope || '').trim().replace(/\s+/g, ' ').slice(0, 60);
   const generic = LOCATION_TREATMENT[sourceId] || 'unknown';
   if (!location) {
+    // Glassdoor is the one source that still pins a MARKET when there is no
+    // location filter: a remote-only search resolves the bare country to a
+    // nation-level locId. Reporting "unscoped" there would contradict the URL
+    // the run actually issued.
+    if (sourceId === 'glassdoor' && country) {
+      return `param: locId= (nation-level, resolved in-browser from country=${country}; no city/region filter — a remote search is nationwide by design)`;
+    }
     if (['usajobs', 'dice', 'indeed', 'ziprecruiter', 'glassdoor', 'linkedin'].includes(sourceId)) {
       return 'no location param (unscoped)';
     }

@@ -188,7 +188,7 @@ export default [
       const postSearchEnd = jobSearchNode.indexOf('if (foundJobs.length === 0)', postSearchStart);
       const postSearch = jobSearchNode.slice(postSearchStart, postSearchEnd);
       assert(postSearch.includes('const needsDescriptionRecoverySnapshot')
-        && postSearch.includes("['google', 'linkedin'].includes(w?.sourceId)")
+        && postSearch.includes("['google', 'linkedin', 'glassdoor', 'ziprecruiter'].includes(w?.sourceId)")
         && postSearch.includes('descriptionRecoveryJobs,')
         && postSearch.includes('runId: jobRunId')
         && sourceCard.includes('jobRunId,\n          secondTabUrl')
@@ -197,6 +197,34 @@ export default [
         && generic.includes('description-recovery-snapshot-stale'),
       'a Google/LinkedIn pre-score gate persists the current run recovery pool, and Resolve rejects a same-hub snapshot from another run instead of merging stale rows');
       return { kept: evidence.jobs.length, deferred: evidence.dropped.length };
+    },
+  },
+  {
+    // A Glassdoor panel-429 strands description rows exactly the way a Google
+    // block does, so Solve must be able to target the stranded identities
+    // instead of re-deriving candidates from the reopened page (which re-applies
+    // age + history and can discard the very rows Solve was clicked to fix).
+    // But the snapshot is only REQUIRED by Google: a missing/stale/row-less
+    // snapshot must never wedge another source's Solve.
+    name: 'description recovery targets stranded rows for every enrichment source, and only Google is blocked without a snapshot',
+    run: () => {
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(jobsSource.includes("if (resolveConfig?.requiresDescriptionEnrichment) {")
+        && !jobsSource.includes("if (sourceId === 'google' && canvasFilePath) {"),
+      'the recovery snapshot is loaded for every source whose Solve enriches descriptions, not Google alone');
+      assert(jobsSource.includes("const recoveryBlocksResolve = sourceId === 'google';")
+        && jobsSource.includes('return recoveryBlocksResolve\n')
+        && jobsSource.includes('if (blocked) return blocked;'),
+      'only Google is hard-blocked by a missing/stale/row-less snapshot — every other source falls through to the ordinary resolve path rather than wedging on Solve');
+      assert(jobsSource.includes('if (sourceRecoveryJobs.length > 0) {\n            // The recovery snapshot is already the current run')
+        && !jobsSource.includes("if (sourceId === 'google' && sourceRecoveryJobs.length > 0) {"),
+      'candidate selection targets the snapshot identities for any source that has them, instead of re-running age + history over the reopened page');
+      assert(jobsSource.includes("replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,"),
+        'replaceSourceItems stays Google-only: other sources recover a visible subset and must merge, or unreached rows would look like they vanished');
+      assert(!/unresolved Google listing\(s\)/.test(jobsSource)
+        && jobsSource.includes('export function resolveSourceLabel(sourceId)'),
+      'recovery messages name the actual source now that non-Google sources reach them');
+      return { blockedSources: ['google'] };
     },
   },
 ];

@@ -40,11 +40,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // jobs every time the user re-solves a source.
   const nav = useContext(CanvasNavigationContext);
   const [progress, setProgress] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
-  // A Solve can finish after several intermediate progress events. Keep the
-  // latest displayed source count in a ref so the resolved event carries the
-  // exact card-total delta the hub needs for its aggregate counter.
-  const progressRef = useRef(progress);
-  progressRef.current = progress;
   const [resolving, setResolving] = useState(false);
   // `setResolving(true)` does not update this closure until React renders, so a
   // quick double-click could otherwise open two native Chrome verification
@@ -203,6 +198,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
+          // Rows recovered by a native-challenge resume go through the same
+          // pinned-role title gate as the main search (jobTitleMatch.js), or a
+          // solved source would be the one way off-role jobs reach the board.
+          targetRole: (hubData.targetRole || '').trim(),
           resumeState,
         });
       } else {
@@ -216,6 +215,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+          // Same gate as the main search — a captcha Solve re-extracts rows
+          // in-page, so without this the solved source could ship off-role jobs.
+          targetRole: (hubData.targetRole || '').trim(),
         });
       }
       // When the captcha-resolve window auto-detects the challenge as
@@ -231,19 +233,25 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         const replaceSourceItems = !!result.replaceSourceItems;
         const replaceMatchingItems = !!result.replaceMatchingItems;
         const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
-        const previousSourceCount = Number.isFinite(progressRef.current?.count)
-          ? Math.max(0, progressRef.current.count)
-          : 0;
-        const nextSourceCount = replaceSourceItems
-          ? resolvedCount
-          : replaceMatchingItems
-            ? (previousSourceCount || resolvedCount)
-            : previousSourceCount + resolvedCount;
-        const nextCount = (prev) => replaceSourceItems
-          ? resolvedCount
-          : replaceMatchingItems
-            ? (prev?.count || resolvedCount)
-            : (prev?.count || 0) + resolvedCount;
+        // `gatheredCount` describes listings newly collected from a source, not
+        // the card's changing description-ready/pending subset. A replacement
+        // Solve re-enriches or replaces rows already counted by the initial
+        // search, while an incremental recovery really did collect these rows.
+        const gatheredCountDelta = (replaceSourceItems || replaceMatchingItems)
+          ? 0
+          : resolvedCount;
+        const nextCount = (prev) => {
+          const priorCount = Number.isFinite(prev?.count) && prev.count >= 0
+            ? prev.count
+            : null;
+          // A replacement/re-enrichment Solve improves already-collected rows.
+          // Keep the card's collection count stable; its score-ready response
+          // count is not a new source collection total.
+          if (replaceSourceItems || replaceMatchingItems) {
+            return priorCount ?? resolvedCount;
+          }
+          return (priorCount ?? 0) + resolvedCount;
+        };
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
           // Carry the resolve's own warning (if any) so the hub can re-derive
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
@@ -251,7 +259,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // warm IP). Captcha/resume paths don't return a warning → stays null.
           detail: {
             hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, replaceMatchingItems, removedItemKeys,
-            sourceCountDelta: nextSourceCount - previousSourceCount,
+            gatheredCountDelta,
             warning: result.warning || null,
             jobRunId,
           },
@@ -273,7 +281,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
               },
             } : prev;
-            progressRef.current = next;
             return next;
           });
         } else if (result.warning) {
@@ -290,7 +297,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               warning: result.warning,
               count: nextCount(prev),
             } : prev;
-            progressRef.current = next;
             return next;
           });
         } else {
@@ -310,7 +316,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               warning: null,
               count: nextCount(prev),
             } : prev;
-            progressRef.current = next;
             return next;
           });
         }
@@ -343,7 +348,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               url: rawRestoreWarning.url || prev.url,
               warning: restoreWarning,
             };
-            progressRef.current = next;
             return next;
           });
           document.dispatchEvent(new CustomEvent('job-source-resolved', {
@@ -354,7 +358,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               replaceSourceItems: false,
               replaceMatchingItems: false,
               removedItemKeys: [],
-              sourceCountDelta: 0,
+              gatheredCountDelta: 0,
               warning: restoreWarning,
               jobRunId,
             },

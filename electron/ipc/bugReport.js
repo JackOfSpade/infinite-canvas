@@ -19,12 +19,12 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
-import { isNonApiJobTask } from './nonApiAi.js';
+import { isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
-import { buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
+import { buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -131,7 +131,7 @@ function formatStealthBrowserActivity(activity) {
   const ageBit = ageSec == null ? '' : ` (observed ${ageSec}s ago)`;
   if (activity.livePageCount === 0) return `idle — 0 live pages${ageBit}`;
   const urls = Array.isArray(activity.livePageUrls)
-    ? activity.livePageUrls.map(u => String(u).replace(/[`|]/g, "'")).join(', ')
+    ? activity.livePageUrls.map(u => redactReportUrl(u).replace(/[`|]/g, "'")).join(', ')
     : '';
   return `${activity.livePageCount} live page(s)${ageBit}${urls ? `: ${urls}` : ''}`;
 }
@@ -445,6 +445,15 @@ function buildAIConfigSnapshot() {
   let taskRouting = null;
   try { taskRouting = taskModelRoutingSnapshot(ai); } catch { /* keep the rest of the report */ }
 
+  // Job-domain tasks NEVER follow `provider` above — providerForTask() (llm.js)
+  // short-circuits every task in NON_API_JOB_TASKS to the manual copy/paste
+  // handoff before it ever looks at ai.provider. A reader diagnosing a job-run
+  // report who only sees "Active provider: gemini" has no way to know the job
+  // pipeline's AI calls never touched Gemini at all — this is a routing FACT
+  // (which task ids are hard-wired to the handoff), not a claim about what
+  // happened in any specific run.
+  const nonApiJobTaskIds = [...NON_API_JOB_TASKS].sort();
+
   return {
     provider,
     modelSelection: provider === 'gemini'
@@ -462,6 +471,8 @@ function buildAIConfigSnapshot() {
     serviceAccountUsable: !!resolvedSAPath,
     activeEndpoint,
     effectivelyConfigured,
+    nonApiJobTaskCount: nonApiJobTaskIds.length,
+    nonApiJobTaskIds,
     geminiLastAttemptedModel: telemetry.lastAttemptedModel,
     geminiLastSuccessfulModel: telemetry.lastSuccessfulModel,
     geminiLastAttemptedError: telemetry.lastAttemptedError,
@@ -980,7 +991,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
-      if (d.url) previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
+      if (d.url) previewParts.push(`url: ${redactReportUrl(d.url).slice(0, 50)}`);
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
       // ── Price-drop reminder plan (sellhub) ──────────────────────────────
       // The plan is configured on the hub and broadcast to its marketplace
@@ -1859,7 +1870,10 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
         // of ERROR entries, not the whole 60-line buffer), so raising just their
         // cap can't blow the section's overall byte budget the way raising the
         // default for every retained line would.
-        const raw = (l.message || '').replace(/\r?\n/g, ' ⏎ ');
+        // Logger messages can contain redirect/challenge URLs with OAuth,
+        // Cloudflare, or tracking tokens. The path is useful diagnostic
+        // evidence; query and fragment values are not safe to export.
+        const raw = redactReportUrlsInText(l.message || '').replace(/\r?\n/g, ' ⏎ ');
         const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
@@ -1942,6 +1956,7 @@ ${tokenBudgetLines.join('\n')}`
 - service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
 - service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
 - **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fail until a key is added in Settings'}
+- ⚠️ **Job-domain tasks bypass this provider entirely**: ${aiConfig.nonApiJobTaskCount} task id(s) (\`${(aiConfig.nonApiJobTaskIds || []).join('`, `')}\`) are hard-routed to the non-API manual copy/paste handoff (\`providerForTask()\` in llm.js short-circuits them before consulting \`Active provider\` above) — everything above this line describes routing for non-job AI calls only.
 
 ### Claude Model Routing (live API task groups → resolved model)
 > Which model serves each task GROUP on the Claude provider (llm.js
@@ -1995,8 +2010,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
-- Scrapfly API key set: ${jobsConfig.hasScrapflyKey ? '✅' : '❌'}
-- Scrapfly key prefix: \`${jobsConfig.scrapflyKeyPrefix}\`${testModeLines}
+- Dice API key: ${jobsConfig.hasCapturedDiceKey ? 'captured from dice.com ✅' : 'using the built-in bootstrap default'}${testModeLines}
 `;
   } catch (err) { jobsConfigMarkdown = diagnosticRenderFailureMarkdown('Job Search API Configuration', err); }
 
@@ -2039,9 +2053,29 @@ ${(aiConfig.geminiWarnings || []).length > 0
     });
 
   const canvasFilePath = frontEndState?.currentFile || frontEndState?.settings?.lastOpenedWorkspace || null;
+  // XJOBAUDIT (bugReportCodes.js) is the only code that can shrink the bulky
+  // per-job/per-location audit prose inside this section (taxonomy placement,
+  // scoring evidence, all-source relevance, Glassdoor location cache) — FULL
+  // alone cannot, because those blocks carry no other section-exclusion name.
+  // 'jobAuditDetail' is not a top-level payload key (like 'sessionTraces'),
+  // it exists purely as this marker.
+  const omitJobAudit = sectionOmitted('jobAuditDetail');
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit); }
   catch { /* never break the report on diagnostic failure */ }
+
+  // Its own top-level section, deliberately ordered BEFORE the (unbounded) Job
+  // Search Pipeline block. It used to be appended to that section's tail, where
+  // the clipboard cap's positional prefix cut made it the first casualty — and
+  // it is the only witness to the ORDER manual handoffs were issued in.
+  // Gated like every other job section rather than always-on. JOBS is included
+  // because the receipt used to ride inside the Job Search Pipeline section,
+  // and a JOBS report must not silently lose it in the move.
+  let nonApiHandoffMarkdown = '';
+  if (isFullReport || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS')) {
+    try { nonApiHandoffMarkdown = buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId); }
+    catch { /* never break the report on diagnostic failure */ }
+  }
 
   let jobLinkMarkdown = '';
   if (isFullReport || reportCodes.has('JOBLINK')) {
@@ -2127,7 +2161,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

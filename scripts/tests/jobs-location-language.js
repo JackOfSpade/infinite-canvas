@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -43,10 +43,48 @@ export default [
       assert(validateGlassdoorLocationPick({ locId: '1002', locT: 'C' }, [denver], 'Denver, CO') === null, 'Denver/CO accepts a result spelling Colorado in full');
       assert(!!validateGlassdoorLocationPick({ locId: '1', locT: 'N' }, [usa], 'Canada'), 'a US result is rejected for Canada');
       assert(!!validateGlassdoorLocationPick({ locId: '1001', locT: 'C' }, [toronto], 'Canada'), 'country-only target rejects a city result');
+      // A remote-only search has no location FILTER but still pins a market via
+      // a nation-level locId. Reporting it as "unscoped" would contradict the URL
+      // the run actually issued.
+      assert(describeLocationTreatment('glassdoor', '', 'United States').includes('nation-level'),
+        'a country-pinned Glassdoor run is not reported as unscoped');
+      assert(describeLocationTreatment('glassdoor', '', '') === 'no location param (unscoped)',
+        'with neither a filter nor a country, unscoped is still the honest answer');
+      assert(describeLocationTreatment('ziprecruiter', '', 'United States') === 'no location param (unscoped)',
+        'the country pin is Glassdoor-specific — no other source gains one');
+      assert(describeLocationTreatment('glassdoor', 'Denver, CO', 'United States').includes('Denver, CO'),
+        'an explicit location still reports the location, not the country');
       assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '3'), 'matching IN3 canonical route is accepted');
       assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/united-states-jobs-SRCH_IL.0,13_IN1_KO14,31.htm', '1'), 'matching IN1 canonical route is accepted');
       assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/jobs.htm?locId=3&locT=N', '3'), 'query-only locId is not proof that Glassdoor applied the location');
       assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1'), 'mismatched canonical route is rejected');
+      // City and state routes use _IC / _IS. Recognizing only _IN meant every
+      // city- or state-scoped search resolved and navigated correctly and was
+      // then discarded as "location not applied".
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170'), 'city route _IC is accepted');
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/colorado-jobs-SRCH_IL.0,8_IS1234_KO9,26.htm', '1234'), 'state route _IS is accepted');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '999'), 'a mismatched city id is still rejected');
+      // N/S/C are verified live; the letter class stays OPEN because the safety
+      // property is the numeric id, not the type letter. An unseen scope tier
+      // (a metro type is the known gap) must not be read as "location not
+      // applied" — that skips the whole source, the expensive failure.
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/metro-jobs-SRCH_IL.0,5_IM987654_KO6,23.htm', '987654'),
+        'an unseen scope letter is accepted when the resolved id matches');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/metro-jobs-SRCH_IL.0,5_IM987654_KO6,23.htm', '1148170'),
+        'an unseen scope letter with a DIFFERENT id is still rejected — the id is the proof');
+      // `_IL` brackets the LOCATION substring (not the keyword), so it must
+      // never be read as a type marker: the type is the letter before the digits.
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '0'),
+        'the _IL offset pair is not mistaken for a location id');
+
+      // Three-way proof: a query Glassdoor declines to slugify stays on
+      // /Job/jobs.htm, where the marker CANNOT appear — so its absence proves
+      // nothing and must not skip the whole source.
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170') === 'applied', 'canonical slug carrying the id reads applied');
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1') === 'missing', 'canonical slug with the WRONG id is a real failure');
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x&locId=1', '1') === 'unavailable', 'non-canonical route cannot prove or disprove the location');
+      assert(isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3.htm'), 'SRCH slug is canonical');
+      assert(!isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x'), 'jobs.htm is not canonical');
       return { ok: true };
     },
   },

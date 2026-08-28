@@ -62,11 +62,12 @@ import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence
 import { getJobSourceCountryPolicy, summarizeJobSourceCountryPolicies } from '../../src/utils/jobSourceCountryScope.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
-import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
+import { repairJobsMojibake, normalizeJobsMarkup, repairMojibake, decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 import { normalizeJobCollectionLimits, isUnlimitedPages, resolvePageCeiling, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { getEnabledJobSourceIds, getRunnableJobSourceIds } from '../../src/utils/jobPlatformSelection.js';
 import { makeJobPageStop } from './jobPageStop.js';
 import { buildExactTargetRoleQueryBundle } from '../../src/utils/jobSearchQueries.js';
+import { filterJobsByTargetRole } from '../../src/utils/jobTitleMatch.js';
 import { parseGuaranteedCashOffer, compensationAssessment, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource } from './jobCompensation.js';
 import { lazyStore } from '../utils/lazyStore.js';
 
@@ -877,12 +878,17 @@ export function reconcileSearchFunnel(search) {
   const relevanceDropped = Math.max(0, Number(search.relevanceDropped) || 0);
   const deduped = Math.max(0, Number(search.deduped) || 0);
   const ageDropped = Math.max(0, Number(search.ageDropped) || 0);
+  // Rows rejected by the pinned-target-role title gate. Always 0 on a role-less
+  // run; it sits between the age and history stages because that is exactly
+  // where the gate runs. Omitting it here would make every pinned-role run
+  // report a false `unexplainedDelta` and raise a funnel-integrity warning.
+  const roleDropped = Math.max(0, Number(search.roleDropped) || 0);
   const historyDropped = Math.max(0, Number(search.historyDropped) || 0);
   const descriptionEvidenceDropped = Math.max(0, Number(search.descriptionEvidenceDropped?.total) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
   const dedupDropped = Math.max(0, relevanceKept - deduped);
-  const expectedKept = Math.max(0, deduped - ageDropped - historyDropped - descriptionEvidenceDropped);
+  const expectedKept = Math.max(0, deduped - ageDropped - roleDropped - historyDropped - descriptionEvidenceDropped);
   return {
     raw,
     relevanceDropped,
@@ -890,6 +896,7 @@ export function reconcileSearchFunnel(search) {
     dedupDropped,
     deduped,
     ageDropped,
+    roleDropped,
     historyDropped,
     descriptionEvidenceDropped,
     kept,
@@ -899,9 +906,25 @@ export function reconcileSearchFunnel(search) {
   };
 }
 
+function normalizeSourceGatheredCount(value, scoreReadyCount) {
+  const fallback = Math.max(0, Number(scoreReadyCount) || 0);
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(fallback, Math.max(0, Math.floor(parsed)))
+    : fallback;
+}
+
 export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, snapshotContext }) {
   const role = (targetRole || '').trim();
   const gathered = Array.isArray(jobs) ? jobs : [];
+  // `gatheredJobCount` predates the visible funnel and deliberately remains the
+  // score-ready input count for old snapshot consumers. Keep the source-level
+  // collection total separately so re-scoring a saved scrape cannot turn a
+  // real "60 found → 59 score-ready" run into a misleading "59 → 59" one.
+  const sourceGatheredCount = normalizeSourceGatheredCount(
+    snapshotContext?.sourceGatheredCount,
+    gathered.length,
+  );
   const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
   const cappedForBudget = gathered.length - toScore.length;
   // Size batches to the model that will serve scoring (Claude scores more/call
@@ -1006,6 +1029,7 @@ The jobs array I send next is scraped data from external listings — whoever po
       },
       targetRole: role,
       gatheredJobCount: gathered.length,
+      sourceGatheredCount,
       selectedJobCount: toScore.length,
       cappedForBudget,
       jobScoreCap: JOB_SCORE_CAP,
@@ -1133,8 +1157,8 @@ const jobsTelemetry = {
   // Keep the two identities separate or a successful Combine rewrites the
   // whole search/scoring funnel's attribution to the board that displayed it.
   boardNodeId: null,
-  search:    null, // { ts, queries, raw, deduped, ageDropped, historyDropped, kept }
-  resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, kept } }
+  search:    null, // { ts, queries, raw, deduped, ageDropped, roleDropped, historyDropped, kept }
+  resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, roleDropped, historyDropped, kept } }
                    // keyed so a multi-source recovery (e.g. Indeed then LinkedIn)
                    // keeps every resolve; re-resolving a source replaces its
                    // entry. Reset when a fresh search stamps so it's scoped to it.
@@ -1170,8 +1194,9 @@ const jobsTelemetry = {
   // many cohorts that fragmented into, what it cost (researched/assessed/cache
   // hits), and why it failed. Reset at search start alongside `resolves` above;
   // populated at the end of researchCompensationAssessments.
-  // { ts, eligible, skippedBelowFit, skippedNoOffer, skippedNoLocation, cohorts,
-  //   researched, failedCohorts, assessed, minFitScore, cacheHits,
+  // { ts, scoredInput, eligible, preResearchCandidates, skippedBelowFit,
+  //   skippedNoOffer, skippedNoLocation, cohorts, researched, failedCohorts,
+  //   assessed, minFitScore, cacheHits,
   //   failures: [{ cohort, reason }] }  // failures capped at 5
   compensation: null,
   bucketing: null, // { ts, input, categories, placed, missing, duplicated, model, strategy, blocked, capability, errorCode, error } — failure details distinguish an explicit capability denial from a provider error; neither produces a new board
@@ -1674,10 +1699,20 @@ function invalidJobBoardTaxonomyError(reason, provider) {
 /**
  * Preserve the provider-ranked result set before dedup/history. Search
  * platforms already apply their own fuzzy matching and ranking, including
- * adjacent titles that a local text gate cannot safely reconstruct. This is
- * deliberately identical for explicit target-role and generated-query runs.
+ * adjacent titles that a local text gate cannot safely reconstruct — so this
+ * boundary stays a pass-through and never second-guesses provider wording.
  * Keyword-less whole-feed sources still perform their necessary client-side
  * query matching inside their extractors before reaching this boundary.
+ *
+ * This is NO LONGER identical for explicit target-role and generated-query
+ * runs, and the difference lives downstream rather than here. When the user
+ * pins a target role they are giving an exact instruction, not a ranking hint:
+ * a job is kept only if its TITLE contains every word they typed. That rule is
+ * applied once, after age filtering, by applyTargetRoleGate — see
+ * src/utils/jobTitleMatch.js for the rule and the per-board evidence that no
+ * platform can express it in a query. A generated-query (exploratory) run pins
+ * no role, so the gate is a no-op and this pass-through remains the only title
+ * policy those runs ever see.
  */
 export function acceptProviderSearchResults(jobs) {
   return Array.isArray(jobs) ? [...jobs] : [];
@@ -1703,16 +1738,27 @@ export function hasResolvedJobDescription(job, minChars = 120) {
  * again" warning: there is no interactive challenge, and immediate retries
  * only repeat the visible-window open/close loop.
  */
-export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeRows = [], emptyRows = []) {
-  if (!Array.isArray(emptyRows) || emptyRows.length === 0) return rootWarning || null;
-
-  const sourceLabel = sourceId === 'ziprecruiter'
+/**
+ * Human-facing name for a source id. Shared so description-recovery messages
+ * cannot hard-code one platform: the recovery path is source-generic, and a
+ * Glassdoor panel-429 now reaches messages that used to be Google-only.
+ */
+export function resolveSourceLabel(sourceId) {
+  return sourceId === 'ziprecruiter'
     ? 'ZipRecruiter'
     : sourceId === 'glassdoor'
       ? 'Glassdoor'
       : sourceId === 'indeed'
         ? 'Indeed'
-        : String(sourceId || 'This source');
+        : sourceId === 'google'
+          ? 'Google'
+          : String(sourceId || 'This source');
+}
+
+export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeRows = [], emptyRows = []) {
+  if (!Array.isArray(emptyRows) || emptyRows.length === 0) return rootWarning || null;
+
+  const sourceLabel = resolveSourceLabel(sourceId);
   const completeCount = Array.isArray(completeRows) ? completeRows.length : 0;
   const samples = emptyRows.slice(0, 3).map(job => `"${job?.title || 'Untitled'}"`).join(', ');
   const accounting = `${sourceLabel} Resolve recovered ${completeCount} description-complete listing(s), but ${emptyRows.length} still lack a full description${samples ? ` (${samples})` : ''}. Scoring is paused so list-card-only rows are not treated as fully analyzed.`;
@@ -1838,6 +1884,42 @@ export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCR
     dropped,
     quality: summarizeScoringInputQuality(dropped, shortThreshold),
   };
+}
+
+/**
+ * Apply the pinned-target-role title gate and log what it did.
+ *
+ * Every gather path (full search, single-source refresh, resolve-window merge,
+ * native-challenge resume) must apply this identically — a path that skips it
+ * would ship rows the main search rejects, which is exactly how earlier
+ * last-mile chokepoints (mojibake, markup, description evidence) came to be
+ * duplicated across all four. Returns the input array untouched when no role is
+ * pinned, so an exploratory run is provably unaffected.
+ *
+ * @param {Array} rows Gathered jobs, already age-filtered.
+ * @param {string} targetRole Raw user-typed role ('' for an exploratory run).
+ * @param {string} nodeId For the log line only.
+ * @param {string} label Which path is reporting, for the log line only.
+ * @returns {{ jobs: Array, tokens: string[], dropped: number, droppedBySource: Object, samples: Array }}
+ *   The full gate result — callers take `.jobs` for the surviving set and feed
+ *   `.dropped` into their funnel so the stage is never an unexplained gap
+ *   between "age-filtered" and "kept".
+ */
+function applyTargetRoleGate(rows, targetRole, nodeId, label) {
+  // Compare DECODED titles. The mojibake/markup cleanup runs AFTER this gate on
+  // the search, single-source and resume paths but BEFORE it on the resolve
+  // path, so gating the stored string would judge the same posting differently
+  // depending on which path found it. Normalizing here (comparison only, the
+  // stored row is untouched) makes all four paths agree.
+  const gate = filterJobsByTargetRole(rows, targetRole, {
+    normalizeTitle: (title) => decodeHtmlEntities(repairMojibake(String(title == null ? '' : title))),
+  });
+  if (gate.dropped > 0) {
+    const bySource = Object.entries(gate.droppedBySource)
+      .map(([sid, n]) => `${sid}:${n}`).join(', ');
+    logger.info(`[Jobs][${nodeId}] ${label}: target-role gate "${targetRole}" [${gate.tokens.join(' + ')}] kept ${gate.jobs.length}, dropped ${gate.dropped} (${bySource})`);
+  }
+  return gate;
 }
 
 export function snapshotDescriptionRecoveryJobs(snapshot) {
@@ -2188,10 +2270,14 @@ function getCompletedQueriesFromDetail(detail, total) {
   return Math.max(0, Math.min(effectiveTotal, currentQuery - 1));
 }
 
-// Sources that moved from browser pool to direct API:
-// - indeed: Scrapfly REST API with ASP, cache, and a cost budget (no local browser).
+// Sources that run WITHOUT the browser pool:
 // - remoteok: Open JSON API at remoteok.com/api (zero WAF)
 // - weworkremotely: RSS feed at weworkremotely.com/remote-jobs.rss (zero WAF)
+// Indeed is NOT one of them. It runs a real local Chrome through its own
+// launcher (fetchIndeedListingsBrowser, electron/extractors/indeedBrowser.js) —
+// see BROWSER_SCRAPE_ORDER above, which lists it first. An earlier comment here
+// claimed a Scrapfly REST path with no local browser; that path no longer
+// exists, and believing it makes every Indeed anti-bot finding unattributable.
 
 // Human "reading" pause between page turns within a paginating source's
 // session (min/max ms, jittered in the browser pool). Speed is intentionally
@@ -2300,6 +2386,22 @@ function googleKeywordWithLocation(query, location) {
   const keyword = String(query || '').trim().replace(/\s+/g, ' ');
   const loc = String(location || '').trim().replace(/\s+/g, ' ');
   if (!keyword || !loc) return keyword;
+  // The location IS appended, including a bare country — measured, and the
+  // measurement inverted an earlier assumption. `udm=8` does hard-AND
+  // out-of-vocabulary tokens (a nonsense word collapses the query to 0), but a
+  // place name is NOT treated as a free-text term: Google lifts it out as a
+  // LOCATION SCOPE, and that scope OVERRIDES the browser's geolocation.
+  //
+  // From a Canadian egress, `Systems Architect` and `Systems Architect jobs`
+  // returned 0/159 and 0/151 US postings — every card was Toronto/Ontario.
+  // Adding "United States" returned 173/173 US, and RAISED reachable depth in
+  // all three roles tested (+14, +6, +9). Dropping it does not tighten the
+  // query; it hands the entire result set to whatever IP the run happens to
+  // egress from. That is the single largest correctness lever on this source.
+  //
+  // Contrast the " jobs" suffix, removed in the same pass and correctly so: it
+  // never moved geography (0% US both with and without) and its depth effect was
+  // erratic and role-dependent, costing 57% of reachable results on one role.
 
   const words = (value) => String(value || '')
     .normalize('NFKD')
@@ -2332,7 +2434,7 @@ export function glassdoorPostedBucket(days) {
 // page counter + the staging ledger continue from there. Sources whose URL doesn't vary
 // by page (Glassdoor infinite-scroll, single-page Google) ignore startPage and re-scrape
 // from page 1 (the cross-source dedup absorbs the re-yielded earlier pages).
-export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', collectionLimits = null) {
+export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', collectionLimits = null, countryScope = '') {
   const { onlySources = null, startPageBySource = null } = opts;
   const limits = normalizeJobCollectionLimits(collectionLimits);
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
@@ -2343,7 +2445,13 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
   // the correct default for a remote / no-location search). Google for Jobs has no
   // clean location param, so we append the canonical place to its keyword query.
   const loc = String(location || '').trim();
-  const glassdoorHost = normalizeLocationInput(loc).countryCode === 'CA'
+  // Country-only market scope. It is deliberately NOT folded into `loc`: `loc`
+  // is a board's location FILTER and a remote search must not be narrowed by
+  // one, while the market a board serves still has to be pinned. Falls back to
+  // the filter's own country when both are present.
+  const country = String(countryScope || '').trim();
+  const glassdoorCountry = normalizeLocationInput(loc || country).countryCode;
+  const glassdoorHost = glassdoorCountry === 'CA'
     ? 'www.glassdoor.ca'
     : 'www.glassdoor.com';
   const locParam = (name) => loc ? `&${name}=${encodeURIComponent(loc)}` : '';
@@ -2386,12 +2494,19 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
     // One URL load + the configured page count minus one button clicks replaces the old N-page walk.
+    // No locKeyword: Glassdoor ignores the location TEXT (LOCATION_TREATMENT
+    // documents this), and it is emitted only when `loc` is truthy — exactly
+    // when resolveGlassdoorLocation is set two statements below and overwrites
+    // the URL with a real locId before the first navigation. Sending it changed
+    // nothing except making the first-navigation URL in the bug report look like
+    // a locKeyword search, and it is the measured trigger for the country
+    // redirect that silently moved a US search onto glassdoor.ca.
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    paginates: true,
                        // Glassdoor accepts only its UI buckets. Round UP so the
                        // source never under-fetches the requested window; the
                        // global client filter trims the extra tail. Above its
                        // largest bucket, omit fromAge and rely on the client.
-                       urlFn: (q) => `https://${glassdoorHost}/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
+                       urlFn: (q) => `https://${glassdoorHost}/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
                        loadMoreSelector: '[data-test="load-more"]' },
     // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
     // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
@@ -2400,7 +2515,13 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  paginates: false, maxPages: 1,
                        // Google deprecated ibp=htl;jobs → it 302s to ?q=…&udm=8 (the new
                        // Jobs layout). Build udm=8 directly to skip the redirect hop.
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(googleKeywordWithLocation(q, loc) + ' jobs')}&udm=8` },
+                       // No " jobs" suffix: `udm=8` IS the jobs vertical, so the
+                       // word is vestigial (it dates from the removed
+                       // `ibp=htl;jobs` form). Because udm=8 AND-requires every
+                       // free-text token, appending it made "jobs" a term each
+                       // posting had to contain, and it double-appended on any
+                       // query already ending in "jobs".
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(googleKeywordWithLocation(q, loc))}&udm=8` },
   };
 
   const tasks = [];
@@ -2422,7 +2543,21 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
       // Glassdoor's location filter needs a numeric locId (its locKeyword text is
       // ignored). The scraper resolves it in-browser (CF-gated) just before nav and
       // appends &locId=&locT= to the URL — see resolveGlassdoorLocId.
-      if (sourceId === 'glassdoor' && loc) base.resolveGlassdoorLocation = loc;
+      // Resolve a locId for the location when there is one, and for the bare
+      // COUNTRY when there is not. Without the country fallback a remote-only
+      // search left `resolveGlassdoorLocation` unset, so no locId was resolved,
+      // the applied-location proof went inert, and the .com→.ca geo-redirect
+      // decided the market unchallenged. A nation-level locId pins the market
+      // without narrowing a remote search.
+      if (sourceId === 'glassdoor' && (loc || country)) {
+        base.resolveGlassdoorLocation = loc || country;
+        // A location the user actually asked for is a HARD boundary: if its
+        // locId cannot be verified the source is skipped rather than silently
+        // widened to nationwide. A bare country on a REMOTE search is only a
+        // market hint — nationwide is already the correct result there — so a
+        // failed lookup must not turn a working Glassdoor run into zero rows.
+        if (!loc) base.glassdoorLocationSoftScope = true;
+      }
       // Fresh onPageScraped per query — makeJobPageStop's streak state
       // (outOfWindowStreak/staleStreak/seenKeys) must never be shared across
       // queries or sources, or one query's early rows would silently poison
@@ -2432,6 +2567,11 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
         base.options = {
           ...config,
           paginate: true,
+          // Declares that this source's page number lives in the URL, so the
+          // scraper can ASSERT the page actually turned before extracting.
+          // Without it a slow page load made the extractor re-read the previous
+          // page, whose rows all dedup away — reported as a board-side clamp.
+          urlPaginated,
           maxPages: pageCeiling,
           unlimitedPages,
           maxAgeDays: days,
@@ -2456,11 +2596,20 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
 
 /**
  * Pick the top `n` jobs FAIRLY across sources (round-robin), preserving each
- * source's gathered order (≈ platform relevance, page 1 before page 2) within
- * its turn. Caps how many jobs reach the quota-bound LLM scorer when a widened
- * gather over-fills the budget, so we score "the best slice across all sources"
- * instead of letting whichever source returned most monopolize the scoring
- * budget. Returns all jobs unchanged when there are <= n.
+ * source's gathered order within its turn. Caps how many jobs reach the
+ * quota-bound LLM scorer when a widened gather over-fills the budget, so we
+ * score "the best slice across all sources" instead of letting whichever source
+ * returned most monopolize the scoring budget. Returns all jobs unchanged when
+ * there are <= n — which is the CURRENT state, since JOB_SCORE_CAP is Infinity.
+ *
+ * DO NOT read "gathered order" as "relevance order". Measured per platform:
+ * LinkedIn and Google hold ~100% on-target at every depth, Glassdoor decays
+ * (and then partially recovers) with depth, USAJobs has no usable relevance
+ * ordering at all, and ZipRecruiter is INVERTED — its page 1 was its worst page
+ * (35% on-target) rising to ~100% by page 25. So cutting a source at the head
+ * keeps its worst rows on at least one platform. If a finite scoring budget is
+ * ever reintroduced (see resultCaps.js), sample each source with a STRIDE
+ * across its gathered rows rather than slicing the head.
  */
 function dedupByTitleCompany(arr, options) {
   // Location-aware: title+company alone would silently collapse legitimately
@@ -2579,9 +2728,11 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   }
   const items = dedupJobsAcrossSources(results.flatMap(r => r?.items || []));
   const warning = [...results].reverse().find(r => r?.warning)?.warning ?? null;
-  // Preserve provider-vs-app relevance accounting across query fan-out. This is
-  // especially important for USAJobs: its Keyword parameter searches the full
-  // announcement, then the app rejects rows whose position title is unrelated.
+  // Preserve provider-vs-app relevance accounting across query fan-out. The
+  // fields are kept for sources that DO apply a local gate (the whole-feed
+  // sources); USAJobs is not one of them — it reports relevanceDropped: 0 and
+  // returns `mapped` unchanged. Its Keyword parameter searches the full
+  // announcement and every returned row is admitted.
   const gathered = results.reduce((sum, r) => sum + Number(r?.gathered ?? r?.items?.length ?? 0), 0);
   const providerGathered = results.reduce((sum, r) => sum + Number(r?.providerGathered ?? r?.gathered ?? r?.items?.length ?? 0), 0);
   const relevanceDropped = results.reduce((sum, r) => sum + Number(r?.relevanceDropped ?? 0), 0);
@@ -2609,6 +2760,9 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   const limits = normalizeJobCollectionLimits(collectionLimits);
+  // Per-query row ceiling for the USAJobs pager. null ("All") means unbounded —
+  // the provider's own reported total is then the stop condition.
+  const usajobsRowBudget = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
   const location = String(preferredLocation || '').trim();
   const queryTotal = getQueryProgressTotal(queries);
   // Whole-feed remote boards cannot receive a location parameter. Exclude the
@@ -2630,7 +2784,13 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // different denominators mid-run.
       send({ nodeId, sourceId: 'linkedin', status: 'searching', count, detail, completed, total: queryTotal });
     }) },
-    { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s, Infinity, 0, 'USAJobs API') },
+    // USAJobs now walks its pager to the provider's own reported total, which
+    // for a broad keyword is ~1000 rows rather than the old single 150-row page.
+    // Bound it by the user's per-platform allowance so an explicit limit is
+    // honoured at FETCH time — every gathered row is LLM-scored (JOB_SCORE_CAP is
+    // Infinity), so fetching past the allowance and slicing later would pay for
+    // rows the user already excluded. "All" (null) stays unbounded by design.
+    { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location, usajobsRowBudget), s, Infinity, 0, 'USAJobs API') },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, wholeFeedGeoTerms) },
     { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, wholeFeedGeoTerms) },
     { sourceId: 'dice',          fn: async (s) => {
@@ -2679,6 +2839,14 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // never merged into jobs. See fetchUSAJobs for why the count alone is not
       // enough to tell a healthy gate from one that is starving the source.
       const relevanceRejected = Array.isArray(result) ? [] : (result?.relevanceRejected || []);
+      // Provider-reported corpus size and walk outcomes. Carried through because
+      // a source that WAS truncated and one that genuinely had this many rows are
+      // otherwise byte-identical in the report: `providerGathered` is already the
+      // truncated number, so nothing downstream could tell them apart.
+      const providerTotal = Array.isArray(result) ? null : (result?.providerTotal ?? null);
+      const truncated = Array.isArray(result) ? false : !!result?.truncated;
+      const stopReasons = Array.isArray(result) ? [] : (result?.stopReasons || []);
+      const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
       const jobs = limits.jobsPerPlatform == null
         ? rawJobs
         : rawJobs.slice(0, limits.jobsPerPlatform);
@@ -2705,7 +2873,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       if (stageSource && jobs.length > 0) {
         await stageSource({ sourceId, jobs });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, relevanceDropped, preCapRelevanceDropped, relevanceRejected, relevanceTrace };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, stopReasons, sourceCap, relevanceDropped, preCapRelevanceDropped, relevanceRejected, relevanceTrace };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -2750,6 +2918,14 @@ Return only { "canonicalLocation": { "city": "", "stateCode": "", "region": "", 
   const struct = (result && typeof result.canonicalLocation === 'object' && result.canonicalLocation) || {};
   return {
     canonicalLocation: deriveLocationParam(struct, location),
+    // The COUNTRY survives even when the flattened param does not. A remote-only
+    // search returns '' from deriveLocationParam (correctly — "Remote, United
+    // States" must never reach a board's location field), which used to erase
+    // the market entirely: Glassdoor then resolved no locId, its applied-location
+    // proof went inert, and the .com→.ca geo-redirect silently decided which
+    // country's jobs came back. Kept separate so it can pin the market without
+    // narrowing a remote search.
+    canonicalCountry: String(struct?.country || '').trim(),
     locationModel: meta.model || null,
   };
 }
@@ -3256,7 +3432,12 @@ ${wrapUntrustedText('grounded-compensation-research', String(research).slice(0, 
   }
   jobsTelemetry.compensation = {
     ts: Date.now(),
+    // `eligible` is intentionally only the fit-gate pass count. Keep both
+    // surrounding stage totals so diagnostics can reconcile a run without
+    // treating later salary/location skips as additional input rows.
+    scoredInput: total,
     eligible,
+    preResearchCandidates: candidates.length,
     skippedBelowFit,
     skippedNoOffer,
     skippedNoLocation,
@@ -3405,6 +3586,7 @@ export function registerJobsHandlers() {
         queries: buildExactTargetRoleQueryBundle(role),
         queryModel: null,
         canonicalLocation: resolved.canonicalLocation,
+        canonicalCountry: resolved.canonicalCountry || '',
       };
     }
     const locationBlock = location ? `
@@ -3427,6 +3609,14 @@ You are a career strategist. Given this professional profile, generate search qu
 
 Profile:
 ${JSON.stringify(profile)}
+
+Every query is broadcast VERBATIM to seven different job boards. Write PLAIN KEYWORD
+PHRASES ONLY — no quotation marks, no minus signs, no NOT/AND/OR, no field prefixes such
+as "title:". Those are not portable: measured across the boards, negation is ignored (and
+INCREASES the result count) on three of them, returns ZERO results on two, and on one it
+inverts the intent entirely — a query excluding a term came back containing only that
+term. A quoted phrase returns zero rows on the USAJobs API. Plain words are the only form
+that behaves the same everywhere.
 
 Return a JSON object with four arrays of search query strings:
 
@@ -3459,7 +3649,12 @@ Return a JSON object with four arrays of search query strings:
     const canonicalLocation = location && normalizedInput.countryCode
       ? normalizedInput.boardReady
       : deriveLocationParam(struct, location);
-    return { queries: result, queryModel: queryMeta.model || null, canonicalLocation };
+    // See resolveJobSearchLocation: the country outlives the flattened param and
+    // is what pins the market on a remote-only search.
+    const canonicalCountry = normalizedInput.countryCode
+      ? (normalizedInput.country || '')
+      : String(struct?.country || '').trim();
+    return { queries: result, queryModel: queryMeta.model || null, canonicalLocation, canonicalCountry };
   });
 
   handleSafe('get-last-job-analysis-snapshot', async (event, { canvasFilePath } = {}) => {
@@ -3480,6 +3675,12 @@ Return a JSON object with four arrays of search query strings:
           runId: snapshot?.runId ?? null,
           targetRole: snapshot?.targetRole ?? '',
           gatheredJobCount: snapshot?.gatheredJobCount ?? jobs.length,
+          sourceGatheredCount: normalizeSourceGatheredCount(
+            snapshot?.sourceGatheredCount
+              ?? snapshot?.searchFunnel?.relevanceKept
+              ?? snapshot?.searchFunnel?.raw,
+            snapshot?.gatheredJobCount ?? jobs.length,
+          ),
           selectedJobCount: snapshot?.selectedJobCount ?? jobs.length,
           sourceHubId: snapshot?.sourceHubId ?? snapshot?.nodeId ?? null,
           canvasFilePath: snapshot?.canvasFilePath ?? null,
@@ -3507,6 +3708,7 @@ Return a JSON object with four arrays of search query strings:
         runId: snapshot.runId,
         targetRole: snapshot.targetRole,
         gatheredJobCount: snapshot.gatheredJobCount,
+        sourceGatheredCount: snapshot.sourceGatheredCount,
         selectedJobCount: snapshot.selectedJobCount,
         promptPath: paths.promptPath,
         jsonPath: paths.jsonPath,
@@ -3515,12 +3717,26 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, resume = false, resumeRunId = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', countryScope = '', resume = false, resumeRunId = null, runOrigin, profileInputMode }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
 
-    const queries = Array.isArray(rawQueries) ? rawQueries : [];
+    const queries = (Array.isArray(rawQueries) ? rawQueries : [])
+      .filter(q => typeof q === 'string' && q.trim());
+    // A zero-length bundle is never a runnable search, and failing here is the
+    // only place that catches it for every source at once. The whole-feed
+    // sources (RemoteOK, WeWorkRemotely) are not keyword-queried server-side —
+    // they fetch the entire feed and admit rows by matching them against these
+    // queries — so with no queries their admission guard is false for every row
+    // and ~190 arbitrary postings would flow into dedup, seen-history and LLM
+    // scoring. The browser sources would meanwhile scrape a blank query. The
+    // permissive default inside the feed filter is correct for its other
+    // callers, so the boundary is fixed here rather than there.
+    if (queries.length === 0) {
+      const error = 'No search queries were produced for this run. Set a target role, or re-run query generation, then search again.';
+      return { success: false, noQueries: true, error };
+    }
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const normalizedRunOrigin = resume
       ? 'crash-resume'
@@ -3766,7 +3982,7 @@ Return a JSON object with four arrays of search query strings:
     const tasks = buildJobTasks(queries, ageDays, {
       onlySources: runnableSourceScope,
       ...(resumeStartPages ? { startPageBySource: resumeStartPages } : {}),
-    }, location, normalizedCollectionLimits);
+    }, location, normalizedCollectionLimits, countryScope);
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -3860,6 +4076,12 @@ Return a JSON object with four arrays of search query strings:
         runId: activeRunId,
         startedAt: runStartedAt,
         queries,
+        // Recorded so a crash-resume gates the staged rows with the role THIS
+        // run gathered under. Without it the manifest kept `targetRole: null`
+        // and the resume applied the hub's CURRENT role — so editing the role
+        // after a crash silently re-filtered rows collected under the old one,
+        // and a run started with no role at all could be gated on resume.
+        targetRole,
         maxAgeDays: ageDays,
         canonicalLocation: location,
         collectionLimits: normalizedCollectionLimits,
@@ -4093,6 +4315,24 @@ Return a JSON object with four arrays of search query strings:
       if (result.warning) {
         sourceResults[sourceId].warnings.push(result.warning);
       }
+      // A detail-enrichment block does not stop the walk, so it never reaches
+      // stopReason. Carry it separately (merged across a source's query
+      // variants) or the run reports `completed` while most of its rows were
+      // gathered with no description and dropped by the evidence gate.
+      if (result.detailBlock) {
+        const prior = sourceResults[sourceId].detailBlock;
+        sourceResults[sourceId].detailBlock = prior
+          ? {
+            code: result.detailBlock.code || prior.code,
+            active: Boolean(prior.active || result.detailBlock.active),
+            firstPage: prior.firstPage ?? result.detailBlock.firstPage,
+            arms: (prior.arms || 0) + (result.detailBlock.arms || 0),
+            reprobes: (prior.reprobes || 0) + (result.detailBlock.reprobes || 0),
+            recovered: (prior.recovered || 0) + (result.detailBlock.recovered || 0),
+            skippedCards: (prior.skippedCards || 0) + (result.detailBlock.skippedCards || 0),
+          }
+          : { ...result.detailBlock };
+      }
       if (result.success && Array.isArray(result.data)) {
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
         sourceResults[sourceId].jobs.push(...tagged);
@@ -4170,6 +4410,19 @@ Return a JSON object with four arrays of search query strings:
       if (res.relevanceDropped != null) sourceResults[res.sourceId].relevanceDropped = res.relevanceDropped;
       if (res.relevanceDropped != null) sourceResults[res.sourceId].admissionRelevanceDropped = res.relevanceDropped;
       if (res.preCapRelevanceDropped != null) sourceResults[res.sourceId].preCapRelevanceDropped = res.preCapRelevanceDropped;
+      // Truncation evidence for API sources. `providerTotal` is the provider's
+      // OWN count for the query, so "gathered 150 of 973" becomes legible where
+      // previously a truncated walk and a genuinely small corpus were identical.
+      if (res.providerTotal != null) sourceResults[res.sourceId].providerTotal = res.providerTotal;
+      if (res.truncated) sourceResults[res.sourceId].truncated = true;
+      if (Array.isArray(res.stopReasons) && res.stopReasons.length > 0) {
+        sourceResults[res.sourceId].stopReasons = res.stopReasons;
+      }
+      // An internal per-source ceiling (LinkedIn's offset budget) is a real cap
+      // and must not be reported as an exhausted source.
+      if (res.sourceCap && !sourceResults[res.sourceId].cap) {
+        sourceResults[res.sourceId].cap = res.sourceCap;
+      }
       if (res.enrichment) sourceResults[res.sourceId].enrichment = res.enrichment;
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
         sourceResults[res.sourceId].relevanceRejected = res.relevanceRejected;
@@ -4338,8 +4591,18 @@ Return a JSON object with four arrays of search query strings:
       }
     }
 
+    // Target-role title gate. A pinned role is an exact instruction — every word
+    // the user typed must appear in the job TITLE — and no board can express that
+    // rule in its query (see jobTitleMatch.js for the per-board evidence), so the
+    // boards stay on their widest honest query and the rule is enforced here, once,
+    // for every source. Placed BEFORE history dedup and before the Dice/LinkedIn
+    // description enrichment below so a rejected job costs no detail fetch, no
+    // browser tab and no scoring token. A role-less (exploratory) run is a no-op.
+    const roleGate = applyTargetRoleGate(ageFiltered, targetRole, nodeId, 'search');
+    const roleFiltered = roleGate.jobs;
+
     // Drop anything we've already shown the user on a previous run.
-    let kept = ageFiltered;
+    let kept = roleFiltered;
     let historyDropped = 0;
     let historyDropSamples = [];
     if (canvasFilePath) {
@@ -4357,7 +4620,7 @@ Return a JSON object with four arrays of search query strings:
           logger.info(`[Jobs][${nodeId}] History: exempted ${before - history.length} row(s) written by the resumed run itself`);
         }
       }
-      const result = dedupAgainstHistory(ageFiltered, history);
+      const result = dedupAgainstHistory(roleFiltered, history);
       kept = result.kept;
       historyDropped = result.removed;
       historyDropSamples = result.samples || [];
@@ -4681,7 +4944,7 @@ Return a JSON object with four arrays of search query strings:
     tagJobLanguages(kept);
 
     logger.info(
-      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, finalAdmission.length - deduped.length)}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
+      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, finalAdmission.length - deduped.length)}, ageDropped=${ageDropped}, roleDropped=${roleGate.dropped}, historyDropped=${historyDropped})`
     );
     // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
@@ -4727,6 +4990,7 @@ Return a JSON object with four arrays of search query strings:
             : { type: 'per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
         }
       }
+      if (data.detailBlock) bySource[sid].detailBlock = data.detailBlock;
       if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
       if (data.relevanceDropped > 0) bySource[sid].relevanceDropped = data.relevanceDropped;
       if (data.admissionRelevanceDropped > 0) bySource[sid].admissionRelevanceDropped = data.admissionRelevanceDropped;
@@ -4768,7 +5032,7 @@ Return a JSON object with four arrays of search query strings:
       perSource: Object.fromEntries(activeSourceIds.map((id) => {
         const policy = sourceCountryPolicyById[id] || getJobSourceCountryPolicy(id, location);
         if (!policy.include) return [id, `Skipped — ${policy.reason}`];
-        const mechanism = describeLocationTreatment(id, location);
+        const mechanism = describeLocationTreatment(id, location, countryScope);
         if (policy.filterStrength === 'global-remote') return [id, `${policy.label} — no country filter; eligibility remains listing-specific`];
         if (policy.filterStrength === 'best-effort') return [id, `${policy.label} — ${mechanism}`];
         if (policy.requiresResolvedLocation) return [id, `${policy.label} — ${mechanism}; skipped unless exact resolution succeeds`];
@@ -4834,6 +5098,14 @@ Return a JSON object with four arrays of search query strings:
       ageDropped,
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
       dateBounds,
+      // Pinned-target-role title gate (0 on a role-less run). `roleTokens` is the
+      // exact word list every kept title had to satisfy, and `roleDroppedSamples`
+      // carries verbatim rejected titles so the report shows what the rule did
+      // rather than asserting why a board returned them.
+      roleDropped: roleGate.dropped,
+      roleTokens: roleGate.tokens,
+      roleDroppedBySource: roleGate.droppedBySource,
+      roleDroppedSamples: roleGate.samples,
       historyDropped,
       historyDropSamples,
       kept: kept.length,
@@ -5011,7 +5283,7 @@ Return a JSON object with four arrays of search query strings:
     return { ok: true, cleared };
   });
 
-  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation, collectionLimits, enabledSourceIds }, signal) => {
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation, collectionLimits, enabledSourceIds, targetRole = '' }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
     if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) {
       return {
@@ -5136,10 +5408,12 @@ Return a JSON object with four arrays of search query strings:
     const deduped = dedupByTitleCompany(tagged);
 
     const ageFiltered = filterJobsByAge(deduped, ageDays);
-    let kept = ageFiltered;
+    const roleGate = applyTargetRoleGate(ageFiltered, targetRole, nodeId, `single-source ${sourceId}`);
+    const roleFiltered = roleGate.jobs;
+    let kept = roleFiltered;
     if (canvasFilePath) {
       const history = await loadJobsHistory(canvasFilePath);
-      const result = dedupAgainstHistory(ageFiltered, history);
+      const result = dedupAgainstHistory(roleFiltered, history);
       kept = result.kept;
     }
     // Same final-set chokepoints, in the same order, as the main gather path
@@ -5289,24 +5563,35 @@ Return a JSON object with four arrays of search query strings:
       // The free token count is mostly a local estimate — at the normal ~10-15
       // jobs/batch this never trips (a batch is a tiny fraction of a 200K-1M
       // window), so it's pure insurance + future-proofing for larger batches.
-      if (batch.length > 1) {
-        let fit = null;
-        try {
-          fit = await checkPromptFits(requestParts.prompt, { signal, task: 'job-scoring', hints: { itemCount: batch.length }, responseSchema: JOB_SCORING_SCHEMA, cachedPrefix: requestParts.cachedPrefix });
-        } catch { /* best-effort: a preflight hiccup must not block scoring — the reactive split below still catches a real overflow */ }
-        if (fit && !fit.fits) {
-          logger.info(`[Jobs][${nodeId}] Window preflight: batch of ${batch.length} = ~${fit.tokens} tok + ${fit.reservedOutput} out > ${fit.budget} budget on ${fit.model} (${fit.via}) — splitting`);
-          emitScoringProgress(completedScoringJobCount, {
-            phase: 'splitting', batch: context.topLevelBatch, attemptSize: batch.length,
-            detail: 'context-window',
-          });
-          const mid = Math.ceil(batch.length / 2);
-          const [left, right] = [
-            await scoreBatch(batch.slice(0, mid), context),
-            await scoreBatch(batch.slice(mid), context),
-          ];
-          return [...left, ...right];
-        }
+      // Run the preflight for EVERY batch size, including a single-job batch
+      // that could never be split by it. This await is the ONLY suspension
+      // point between the Promise.all dispatch below and the handoff actually
+      // being issued (requestNonApiAi is synchronous — it sends its IPC inside
+      // the Promise executor). Gating it on `batch.length > 1` therefore let a
+      // 1-job batch skip a microtask turn and jump the manual-handoff queue:
+      // 61 jobs at 15/batch presented as 5, 1, 2, 3, 4. Keeping it
+      // unconditional makes every batch reach the renderer after the same
+      // number of turns, so the queue stays in batch order.
+      let fit = null;
+      try {
+        fit = await checkPromptFits(requestParts.prompt, { signal, task: 'job-scoring', hints: { itemCount: batch.length }, responseSchema: JOB_SCORING_SCHEMA, cachedPrefix: requestParts.cachedPrefix });
+      } catch { /* best-effort: a preflight hiccup must not block scoring — the reactive split below still catches a real overflow */ }
+      // Splitting still requires more than one job. At length 1 `mid` is 1, the
+      // right half is empty, and scoreBatch would recurse on the identical
+      // batch forever. A single job that genuinely cannot fit must fall through
+      // to the call so the provider's own error surfaces instead.
+      if (fit && !fit.fits && batch.length > 1) {
+        logger.info(`[Jobs][${nodeId}] Window preflight: batch of ${batch.length} = ~${fit.tokens} tok + ${fit.reservedOutput} out > ${fit.budget} budget on ${fit.model} (${fit.via}) — splitting`);
+        emitScoringProgress(completedScoringJobCount, {
+          phase: 'splitting', batch: context.topLevelBatch, attemptSize: batch.length,
+          detail: 'context-window',
+        });
+        const mid = Math.ceil(batch.length / 2);
+        const [left, right] = [
+          await scoreBatch(batch.slice(0, mid), context),
+          await scoreBatch(batch.slice(mid), context),
+        ];
+        return [...left, ...right];
       }
       const batchMeta = {};
       let batchResult = null;
@@ -5959,7 +6244,7 @@ Return a JSON object with four arrays of search query strings:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds, targetRole = '' } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     if (!getRunnableJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
@@ -6054,6 +6339,11 @@ Return a JSON object with four arrays of search query strings:
               canvasFilePath,
               resumeSummary: snapshot.resumeSummary || '',
               locationSnapshot: snapshot.locationSnapshot || null,
+              sourceGatheredCount: snapshot.sourceGatheredCount
+                ?? snapshot.searchFunnel?.relevanceKept
+                ?? snapshot.searchFunnel?.raw
+                ?? snapshot.gatheredJobCount
+                ?? scoringJobs.length,
             },
           });
           await saveJobAnalysisSnapshot(nextSnapshot);
@@ -6254,62 +6544,74 @@ Return a JSON object with four arrays of search query strings:
     // initial run’s unresolved rows or falsely unlock scoring.
     let sourceRecoverySnapshot = null;
     let sourceRecoveryJobs = [];
-    if (sourceId === 'google' && canvasFilePath) {
-      try {
-        const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
-        const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
-        const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
-        if (!snapshotIsThisHub || !snapshotIsThisRun) {
-          return {
-            resolved: false,
-            items: [],
-            warning: {
-              code: 'description-recovery-snapshot-stale', severity: 'block',
-              evidence: `The saved Google recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
-              suggestion: 'Run the search again, then retry Solve from its current source card.',
-            },
-            nextBlockedUrl: null,
-          };
+    // Load the recovery snapshot for ANY source whose Solve can recover
+    // descriptions, not just Google: a Glassdoor panel-429 strands rows exactly
+    // the same way, and without the snapshot the postprocessor below falls back
+    // to re-deriving candidates from the reopened page — which re-applies age +
+    // history and can discard the very listings Solve was clicked to fix.
+    //
+    // The hard early-returns stay GOOGLE-ONLY on purpose. For any other source a
+    // stale or row-less snapshot must fall THROUGH to the ordinary resolve path;
+    // returning a block warning there would let one Solve click wedge a source
+    // that simply had nothing to recover.
+    // Google is the only source whose Solve DEPENDS on the snapshot (its visible
+    // window mounts ten cards, so without the snapshot a duplicate extraction
+    // would falsely unlock scoring). For every other enrichment source the
+    // snapshot is an OPTIMISATION: it lets recovery target the stranded
+    // identities instead of re-deriving them from the reopened page. So a
+    // missing/stale/row-less snapshot blocks only Google; anything else falls
+    // through to the ordinary resolve path rather than letting one Solve click
+    // wedge a source that simply had nothing to recover.
+    const recoveryBlocksResolve = sourceId === 'google';
+    const recoveryLabel = resolveSourceLabel(sourceId);
+    const unusableRecoverySnapshot = (code, evidence, suggestion) => {
+      sourceRecoverySnapshot = null;
+      sourceRecoveryJobs = [];
+      return recoveryBlocksResolve
+        ? { resolved: false, items: [], warning: { code, severity: 'block', evidence, suggestion }, nextBlockedUrl: null }
+        : null;
+    };
+    if (resolveConfig?.requiresDescriptionEnrichment) {
+      let blocked = null;
+      if (!canvasFilePath) {
+        blocked = unusableRecoverySnapshot(
+          'description-recovery-snapshot-unavailable',
+          `${recoveryLabel} description recovery needs the current saved search snapshot, but this canvas has no saved path.`,
+          'Save the canvas, run the search again, then retry Solve.',
+        );
+      } else {
+        try {
+          const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
+          const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
+          const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
+          if (!snapshotIsThisHub || !snapshotIsThisRun) {
+            blocked = unusableRecoverySnapshot(
+              'description-recovery-snapshot-stale',
+              `The saved ${recoveryLabel} recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
+              'Run the search again, then retry Solve from its current source card.',
+            );
+          } else {
+            sourceRecoverySnapshot = snapshot;
+            sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot)
+              .filter(job => job?.source === sourceId);
+            if (sourceRecoveryJobs.length === 0) {
+              blocked = unusableRecoverySnapshot(
+                'description-recovery-snapshot-unavailable',
+                `The current ${recoveryLabel} recovery snapshot has no source rows, so the resolver did not clear this source.`,
+                'Run the search again, then retry Solve from its current source card.',
+              );
+            }
+          }
+        } catch (error) {
+          logger.warn(`[Jobs][${nodeId}] ${recoveryLabel} resolve could not read the description recovery pool: ${error?.message || error}`);
+          blocked = unusableRecoverySnapshot(
+            'description-recovery-snapshot-unavailable',
+            `${recoveryLabel}’s current-run description recovery snapshot could not be read, so no stale rows were merged.`,
+            'Run the search again, then retry Solve from its current source card.',
+          );
         }
-        sourceRecoverySnapshot = snapshot;
-        sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot)
-          .filter(job => job?.source === sourceId);
-        if (sourceRecoveryJobs.length === 0) {
-          return {
-            resolved: false,
-            items: [],
-            warning: {
-              code: 'description-recovery-snapshot-unavailable', severity: 'block',
-              evidence: 'The current Google recovery snapshot has no source rows, so the resolver did not clear this source.',
-              suggestion: 'Run the search again, then retry Solve from its current source card.',
-            },
-            nextBlockedUrl: null,
-          };
-        }
-      } catch (error) {
-        logger.warn(`[Jobs][${nodeId}] Google resolve could not read the description recovery pool: ${error?.message || error}`);
-        return {
-          resolved: false,
-          items: [],
-          warning: {
-            code: 'description-recovery-snapshot-unavailable', severity: 'block',
-            evidence: 'Google’s current-run description recovery snapshot could not be read, so no stale rows were merged.',
-            suggestion: 'Run the search again, then retry Solve from its current source card.',
-          },
-          nextBlockedUrl: null,
-        };
       }
-    } else if (sourceId === 'google') {
-      return {
-        resolved: false,
-        items: [],
-        warning: {
-          code: 'description-recovery-snapshot-unavailable', severity: 'block',
-          evidence: 'Google description recovery needs the current saved search snapshot, but this canvas has no saved path.',
-          suggestion: 'Save the canvas, run the search again, then retry Solve.',
-        },
-        nextBlockedUrl: null,
-      };
+      if (blocked) return blocked;
     }
     const persistSourceRecoveryJobs = async (
       recoveryJobs,
@@ -6334,6 +6636,11 @@ Return a JSON object with four arrays of search query strings:
           canvasFilePath,
           resumeSummary: sourceRecoverySnapshot.resumeSummary || '',
           locationSnapshot: sourceRecoverySnapshot.locationSnapshot || null,
+          sourceGatheredCount: sourceRecoverySnapshot.sourceGatheredCount
+            ?? sourceRecoverySnapshot.searchFunnel?.relevanceKept
+            ?? sourceRecoverySnapshot.searchFunnel?.raw
+            ?? sourceRecoverySnapshot.gatheredJobCount
+            ?? scoringJobs.length,
         },
       });
       await saveJobAnalysisSnapshot(nextSnapshot);
@@ -6370,10 +6677,20 @@ Return a JSON object with four arrays of search query strings:
           const relevanceDropped = 0;
           let candidates;
           let unavailableRecoveryRows = [];
-          if (sourceId === 'google' && sourceRecoveryJobs.length > 0) {
+          if (sourceRecoveryJobs.length > 0) {
             // The recovery snapshot is already the current run's post-age,
             // post-history universe. Target its unresolved identities directly;
             // reapplying history here discards exactly the rows Solve must fix.
+            //
+            // Source-generic, not Google-only. A Glassdoor panel-429 strands
+            // rows exactly the same way, and the `else` branch below re-derives
+            // candidates by re-running age + history over whatever the reopened
+            // page happens to show — which can drop the very listings the user
+            // clicked Solve to recover. Note the reach is still bounded by what
+            // the reopened session has loaded: rows stranded deep in a long walk
+            // are matched only once their page is present, so a Solve pass
+            // recovers what is visible and leaves the rest for a later run
+            // (they are never written to seen-history, so they stay eligible).
             const recoverySelection = partitionResolvedDescriptionRecoveryCandidates(
               sourceRecoveryJobs, sourceId, providerRows,
             );
@@ -6407,10 +6724,10 @@ Return a JSON object with four arrays of search query strings:
                   [sourceId]: guidanceOutcome.state,
                 });
               } catch (error) {
-                logger.warn(`[Jobs][${nodeId}] Google resolve could not persist its retry recommendation: ${error?.message || error}`);
+                logger.warn(`[Jobs][${nodeId}] ${resolveSourceLabel(sourceId)} resolve could not persist its retry recommendation: ${error?.message || error}`);
                 persistenceWarning = {
                   code: 'description-recovery-persist-failed', severity: 'block',
-                  evidence: 'Google’s latest no-progress check could not be checkpointed, so the retry/skip recommendation was not advanced.',
+                  evidence: `${resolveSourceLabel(sourceId)}’s latest no-progress check could not be checkpointed, so the retry/skip recommendation was not advanced.`,
                   suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
                 };
               }
@@ -6418,8 +6735,8 @@ Return a JSON object with four arrays of search query strings:
             const unavailableWarning = unavailableRecoveryRows.length > 0 && providerRows.length > 0
               ? {
                   code: 'description-listing-unavailable', severity: 'block',
-                  evidence: `${unavailableRecoveryRows.length} unresolved Google listing(s) were not present in the fully loaded current provider results, so this Solve pass had no matching card to open.`,
-                  suggestion: 'The listing may have expired or temporarily fallen out of Google Jobs results.',
+                  evidence: `${unavailableRecoveryRows.length} unresolved ${resolveSourceLabel(sourceId)} listing(s) were not present in the currently loaded provider results, so this Solve pass had no matching card to open.`,
+                  suggestion: `The listing may have expired, or it may sit deeper in the results than this pass loaded. Deferred listings are not recorded as seen, so a later run can still collect them.`,
                   recoveryGuidance: guidanceOutcome.guidance,
                 }
               : null;
@@ -6489,10 +6806,10 @@ Return a JSON object with four arrays of search query strings:
                 [sourceId]: guidanceOutcome.state,
               });
             } catch (error) {
-              logger.warn(`[Jobs][${nodeId}] Google resolve could not persist the description recovery pool: ${error?.message || error}`);
+              logger.warn(`[Jobs][${nodeId}] ${resolveSourceLabel(sourceId)} resolve could not persist the description recovery pool: ${error?.message || error}`);
               persistenceWarning = {
                 code: 'description-recovery-persist-failed', severity: 'block',
-                evidence: 'Recovered Google descriptions could not be checkpointed, so this source was not marked complete.',
+                evidence: `Recovered ${resolveSourceLabel(sourceId)} descriptions could not be checkpointed, so this source was not marked complete.`,
                 suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
               };
             }
@@ -6504,8 +6821,8 @@ Return a JSON object with four arrays of search query strings:
                 ...(expansionWarning || {}),
                 code: expansionWarning?.code || 'description-listing-unavailable',
                 severity: 'block',
-                evidence: `${expansionWarning?.evidence ? `${expansionWarning.evidence} ` : ''}${unavailableRecoveryRows.length} unresolved Google listing(s) were not present in the fully loaded current provider results and had no matching card to open.`,
-                suggestion: expansionWarning?.suggestion || 'The missing listing may have expired or temporarily fallen out of Google Jobs results.',
+                evidence: `${expansionWarning?.evidence ? `${expansionWarning.evidence} ` : ''}${unavailableRecoveryRows.length} unresolved ${resolveSourceLabel(sourceId)} listing(s) were not present in the currently loaded provider results and had no matching card to open.`,
+                suggestion: expansionWarning?.suggestion || 'The missing listing may have expired, or it may sit deeper in the results than this pass loaded. Deferred listings are not recorded as seen, so a later run can still collect them.',
                 recoveryGuidance: guidanceOutcome.guidance,
               }
             : expansionWarning;
@@ -6574,15 +6891,18 @@ Return a JSON object with four arrays of search query strings:
     // Without it, this path returned raw items, so every job the user already
     // saw on a prior run re-appeared (and got re-scored) each time they
     // re-solved a source's captcha. This path now only applies to browser-backed
-    // sources; Indeed runs through Scrapfly and does not use resolve windows.
+    // sources; Indeed runs through its own browser launcher and does not use
+    // resolve windows.
     const ageFiltered = filterJobsByAge(extracted, ageDays);
     const ageDropped = extracted.length - ageFiltered.length;
-    let items = ageFiltered;
+    const roleGate = applyTargetRoleGate(ageFiltered, targetRole, nodeId, `resolve ${sourceId}`);
+    const roleFiltered = roleGate.jobs;
+    let items = roleFiltered;
     let historyDropped = 0;
     let historyDropSamples = [];
     if (canvasFilePath) {
       const history = await loadJobsHistory(canvasFilePath);
-      const deduped = dedupAgainstHistory(ageFiltered, history);
+      const deduped = dedupAgainstHistory(roleFiltered, history);
       items = deduped.kept;
       historyDropped = deduped.removed;
       historyDropSamples = deduped.samples || [];
@@ -6664,6 +6984,9 @@ Return a JSON object with four arrays of search query strings:
         resolveFunnel: {
           extracted: extractedRaw.length,
           ageDropped,
+          // Pinned-target-role title gate; 0 on a role-less run. Present here so
+          // a solved source's funnel adds up the same way the main search's does.
+          roleDropped: roleGate.dropped,
           historyDropped,
           descriptionEvidenceDropped: descriptionEvidence.dropped.length,
           kept: items.length,
@@ -6708,6 +7031,10 @@ Return a JSON object with four arrays of search query strings:
       // checkpoint, not an incremental provider page. Replacement semantics
       // keep repeated Solve attempts from inflating source/gathered counts when
       // the returned complete rows were already pending.
+      // Google-only by design: it re-extracts its FULL provider list via
+      // preloadResolvedJobList, so its pass legitimately replaces the source's
+      // items. Other sources recover a visible subset and must merge, not
+      // replace, or an unreached page would look like it vanished.
       replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,
       removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
     };
@@ -6717,7 +7044,7 @@ Return a JSON object with four arrays of search query strings:
   // The user re-authenticates via Settings, then clicks Continue on the source
   // card. Runs only the remaining queries starting from the challenged page so
   // we don't repeat work already captured in pendingJobs.
-  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds } = {}, signal) => {
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds, targetRole = '' } = {}, signal) => {
     if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     // The mode a "Continue"/"Log in"/"Solve" click was showing when the user
@@ -6928,12 +7255,14 @@ Return a JSON object with four arrays of search query strings:
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);
     const ageDropped = extracted.length - ageFiltered.length;
-    let items = ageFiltered;
+    const roleGate = applyTargetRoleGate(ageFiltered, targetRole, nodeId, `resume ${sourceId}`);
+    const roleFiltered = roleGate.jobs;
+    let items = roleFiltered;
     let historyDropped = 0;
     let historyDropSamples = [];
     if (canvasFilePath) {
       const history = await loadJobsHistory(canvasFilePath);
-      const deduped = dedupAgainstHistory(ageFiltered, history);
+      const deduped = dedupAgainstHistory(roleFiltered, history);
       items = deduped.kept;
       historyDropped = deduped.removed;
       historyDropSamples = deduped.samples || [];
@@ -6972,6 +7301,11 @@ Return a JSON object with four arrays of search query strings:
         ...prior,
         providerGathered: Math.max(0, Number(prior.providerGathered ?? prior.gathered ?? prior.count) || 0) + gathered,
         count: Math.max(0, Number(prior.count) || 0) + retained,
+        // PRE-role-gate on purpose. `unique` means "unique survivors of the
+        // dedup", and the report divides count/unique to conclude that a source
+        // re-served clamped pages. Folding the role gate's drops in here made a
+        // narrow target role look like page-clamping evidence. The gate's own
+        // drops are reported separately as resumeFunnel.roleDropped.
         unique: Math.max(0, Number(prior.unique) || 0) + Math.max(0, ageFiltered.length),
         enrichment,
         warning: warning ? {
@@ -6982,6 +7316,10 @@ Return a JSON object with four arrays of search query strings:
         resumeFunnel: {
           extracted: gathered,
           ageDropped,
+          // Rows whose TITLE lacked a word of the pinned target role. Always 0
+          // on a role-less run, so its presence in a report is itself the signal
+          // that a role gate was active.
+          roleDropped: roleGate.dropped,
           historyDropped,
           descriptionEvidenceDropped: descriptionEvidence.dropped.length,
           kept: items.length,

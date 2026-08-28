@@ -49,6 +49,7 @@ import {
   writeLastRemoteResidences,
 } from '../utils/jobSearchLocations';
 import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
+import { detectQueryOperators } from '../utils/jobTitleMatch';
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
@@ -465,6 +466,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Prefer the query-gen-normalized location (typo-safe) over the raw input
         // — USAJobs LocationName is an exact-ish match and won't tolerate "denvr".
         preferredLocation: (data.canonicalLocation || data.preferredLocation || '').trim(),
+        // A pinned role gates this background refresh exactly as it gates the main
+        // search, or USAJobs would be the one source able to ship off-role rows.
+        targetRole: (data.targetRole || '').trim(),
       });
 
       if (cancelled()) return;
@@ -488,11 +492,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const fresh = uniqueJobsAcrossSources(prevPending, freshJobs);
         const mergedPending = [...prevPending, ...fresh];
+        // This source completed after the main search paused. Its collected
+        // volume belongs in the funnel even when every returned row collapses
+        // against another source before scoring.
+        gatheredCountRef.current = Math.max(
+          0,
+          (Number(gatheredCountRef.current) || 0) + freshJobs.length,
+        );
         pendingJobsRef.current = mergedPending;
         scrapeWarningsRef.current = filteredWarnings;
         updateGlobal(currentId, {
           pendingJobs: mergedPending,
           jobCount: mergedPending.length,
+          gatheredCount: gatheredCountRef.current,
           scrapeWarnings: filteredWarnings,
         });
 
@@ -534,6 +546,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               runId: jobRunIdRef.current,
               canvasFilePath,
               resumeSummary: buildResumeSummary(profile),
+              sourceGatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length,
               searchLocation: locationSnapshot.searchLocation,
               remoteResidences: locationSnapshot.remoteResidences,
             },
@@ -543,6 +556,45 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
           if (!scoreResult.success) {
             throw new Error(scoreResult.error || 'Failed to score background USAJobs');
+          }
+
+          // `scoreJobs` saves its own prompt snapshot, but this background pass
+          // scores only the new USAJobs subset. Replace that transient subset
+          // snapshot with the same deduped union the done state is about to
+          // expose, so Saved Scrape recovery never drops previously visible
+          // results after a late source refresh.
+          const existingScoredJobs = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
+          const freshScoredJobs = Array.isArray(scoreResult.scoredJobs) ? scoreResult.scoredJobs : [];
+          const addedScoredJobs = uniqueJobsAcrossSources(existingScoredJobs, freshScoredJobs);
+          const combinedScoredJobs = addedScoredJobs.length
+            ? [...existingScoredJobs, ...addedScoredJobs]
+            : existingScoredJobs;
+          const aggregateSourceGatheredCount = (Number(data.gatheredCount) || 0) + freshJobs.length;
+          try {
+            const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
+              jobs: combinedScoredJobs,
+              profile,
+              careerData: data.careerData,
+              nodeId: currentId,
+              targetRole: activeTargetRole,
+              snapshotContext: {
+                sourceHubId: currentId,
+                runId: jobRunIdRef.current || null,
+                canvasFilePath,
+                resumeSummary: buildResumeSummary(profile),
+                sourceGatheredCount: aggregateSourceGatheredCount,
+                locationSnapshot,
+                searchLocation: locationSnapshot.searchLocation,
+                remoteResidences: locationSnapshot.remoteResidences,
+              },
+            });
+            if (saved && !saved.saved) {
+              EventLogger.error(`[JobSearch][${id}] Failed to save combined USAJobs snapshot: ${saved.error || 'unknown error'}`);
+            }
+          } catch (snapshotError) {
+            // The append itself is already valid; a local recovery snapshot
+            // failure must not turn a successful background refresh into an error.
+            EventLogger.error(`[JobSearch][${id}] Failed to save combined USAJobs snapshot:`, snapshotError);
           }
 
           appendJobsToDoneCanvas({
@@ -574,7 +626,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, data.careerData, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
+  }, [id, data.maxAgeDays, data.gatheredCount, data.scoredJobs, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, data.careerData, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -675,6 +727,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     setLastStoreRemoteResidences(storeRemoteResidencesKey);
     setRemoteResidencesDraft(storeRemoteResidences);
   }
+  // Non-blocking advisory only — the typed text is always sent through
+  // unchanged. Boolean syntax is unsafe to broadcast: measured across the seven
+  // boards, negation is ignored (and count-INCREASING) on Glassdoor, LinkedIn
+  // and ZipRecruiter, destructive on Google and USAJobs, and on ZipRecruiter it
+  // inverts intent — "Controller NOT carpenter NOT superintendent" returned five
+  // results, every one of them a carpenter or superintendent. None of that is
+  // visible in the run report, so the warning has to happen at the input.
+  const roleOperators = detectQueryOperators(targetRole);
+
   const setTargetRole = useCallback((val) => {
     const v = typeof val === 'string' ? val : '';
     setRoleDraft(v);                                  // synchronous local update → caret preserved
@@ -972,6 +1033,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         runId: jobRunId,
         canvasFilePath,
         resumeSummary: buildResumeSummary(profile),
+        sourceGatheredCount: gatheredCount,
         searchLocation: effectiveLocationSnapshot.searchLocation,
         remoteResidences: effectiveLocationSnapshot.remoteResidences,
       },
@@ -1058,7 +1120,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           profile: snapshot.profile,
           careerData: typeof snapshot.careerData === 'string' ? snapshot.careerData : data.careerData,
           jobs: snapshot.jobs,
-          gatheredCount: Number(snapshot.gatheredJobCount) || snapshot.jobs.length,
+          gatheredCount: snapshot.sourceGatheredCount
+            ?? snapshot.searchFunnel?.relevanceKept
+            ?? snapshot.searchFunnel?.raw
+            ?? snapshot.gatheredJobCount
+            ?? snapshot.jobs.length,
           scrapeWarnings: data.scrapeWarnings || [],
           activeTargetRole: String(snapshot.targetRole || res.targetRole || data.targetRole || '').trim(),
           originalPos: getNode(id)?.position || { x: 0, y: 0 },
@@ -1174,10 +1240,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       ensureBlockedSourceCards(blockingWarnings);
       // Description-recovery Solve actions run before score-jobs writes its usual
       // snapshot. Persist the current run's full recovery universe now; otherwise
-      // a Google/LinkedIn Solve can load a prior same-hub snapshot or mistake the
-      // score-safe subset for a completed source.
+      // a Solve can load a prior same-hub snapshot or mistake the score-safe
+      // subset for a completed source.
+      //
+      // Must list every source whose Solve targets stranded description rows —
+      // i.e. JOB_SOURCE_RESOLVE_CONFIG's requiresDescriptionEnrichment set
+      // (google, ziprecruiter, glassdoor) plus LinkedIn's guest-wall recovery.
+      // Glassdoor earns its place now that a panel-429 blocks BEFORE scoring:
+      // without it that run would pause with no snapshot on disk at all, and
+      // its Solve would have nothing to target.
       const needsDescriptionRecoverySnapshot = blockingWarnings.some(w =>
-        ['google', 'linkedin'].includes(w?.sourceId),
+        ['google', 'linkedin', 'glassdoor', 'ziprecruiter'].includes(w?.sourceId),
       );
       if (needsDescriptionRecoverySnapshot) {
         try {
@@ -1193,6 +1266,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               runId: jobRunId,
               canvasFilePath: cfp,
               resumeSummary: buildResumeSummary(profile),
+              sourceGatheredCount: gatheredCount,
               locationSnapshot,
               searchLocation: locationSnapshot?.searchLocation || null,
               remoteResidences: locationSnapshot?.remoteResidences || null,
@@ -1224,12 +1298,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             runId: jobRunId,
             canvasFilePath: cfp,
             resumeSummary: buildResumeSummary(profile),
+            sourceGatheredCount: gatheredCount,
             locationSnapshot,
             searchLocation: locationSnapshot?.searchLocation || null,
             remoteResidences: locationSnapshot?.remoteResidences || null,
           },
         });
-        if (saved && !saved.success) {
+        if (saved && !saved.saved) {
           EventLogger.error(`[JobSearch][${currentId}] Failed to save empty-run analysis snapshot: ${saved.error || 'unknown error'}`);
         }
       } catch (err) {
@@ -1469,6 +1544,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           queries: buildExactTargetRoleQueryBundle(activeTargetRole),
           queryModel: null,
           canonicalLocation: locationResult.canonicalLocation,
+          canonicalCountry: locationResult.canonicalCountry || '',
         };
         EventLogger.log(`[JobSearch][${currentId}] Target role set — skipping query variation generation and searching exactly "${activeTargetRole}"`);
       } else {
@@ -1490,6 +1566,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const canonicalLocation =
         (canReuseQueries ? data.canonicalLocation : queriesResult.canonicalLocation)
         || activePreferredLocation;
+      // Survives a remote-only search, where canonicalLocation is deliberately
+      // empty. Used only to pin a board's MARKET (never to narrow the search).
+      // Fall through to the fresh result rather than short-circuiting on the
+      // cache branch: a canvas created before canonicalCountry existed has none
+      // stored, and `canReuseQueries ? data.x : y` would then yield '' forever,
+      // silently un-pinning the market on every reused run.
+      const canonicalCountry =
+        (canReuseQueries ? data.canonicalCountry : '')
+        || queriesResult.canonicalCountry
+        || data.canonicalCountry
+        || '';
 
       // Step 3: Search
       handledDuringSearchRef.current.clear();
@@ -1500,6 +1587,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queryModel,
         queryCacheKey,
         canonicalLocation,
+        canonicalCountry,
         resumeFingerprint,
       });
       const searchResult = await window.electronAPI.searchJobs({
@@ -1519,6 +1607,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // job title as role relevance, or a Denver cinematographer pulls in
         // every Denver SWE/sales posting at Datadog et al.
         profileLocations: profile?.locations || [],
+        // Enforced main-process side against every source's gathered rows: when a
+        // role is pinned, a job is kept only if its TITLE contains every word the
+        // user typed (see src/utils/jobTitleMatch.js).
+        targetRole: activeTargetRole,
+        // Country only, kept separate from preferredLocation so a remote-only
+        // search still pins which country's market a board serves.
+        countryScope: canonicalCountry,
         runOrigin,
         profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
       });
@@ -1602,6 +1697,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               runId: searchResult.runId || null,
               canvasFilePath,
               resumeSummary: buildResumeSummary(profile),
+              sourceGatheredCount: visibleGatheredCount,
               searchLocation: runLocationSnapshot.searchLocation,
               remoteResidences: runLocationSnapshot.remoteResidences,
             },
@@ -1751,12 +1847,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             runId: activeJobRunId,
             canvasFilePath,
             resumeSummary: buildResumeSummary(profile),
+            sourceGatheredCount: pausedGatheredCount,
             locationSnapshot,
             searchLocation: locationSnapshot.searchLocation || null,
             remoteResidences: locationSnapshot.remoteResidences || null,
           },
         });
-        if (saved && !saved.success) {
+        if (saved && !saved.saved) {
           EventLogger.error(`[JobSearch][${id}] Failed to save paused empty-run analysis snapshot: ${saved.error || 'unknown error'}`);
         }
       } catch (err) {
@@ -1958,6 +2055,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferredLocation: data.canonicalLocation || data.preferredLocation || '',
         rawLocation: data.preferredLocation || '',
         profileLocations: profile?.locations || [],
+        // A crash-resumed run must apply the same pinned-role gate as the run it
+        // is continuing, or recovery would re-admit rows the original rejected.
+        // The role THIS RUN was gathered under, from its manifest — never the
+        // hub's current value. Editing the target role after a crash must not
+        // retroactively re-filter rows collected under the old one, and a run
+        // started with no role must stay ungated. A manifest written before this
+        // field existed reports null, which correctly means "do not gate".
+        targetRole: offer.targetRole || '',
+        countryScope: data.canonicalCountry || '',
         resume: true,
         // The offer is canvas-scoped and can become stale if another run starts
         // before this click reaches the main process. Bind recovery to the exact
@@ -2042,7 +2148,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
     }
-  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.locationSnapshot, data.searchLocation, data.remoteResidences, collectionLimits, enabledSourceIds, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
+  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.locationSnapshot, data.searchLocation, data.remoteResidences, collectionLimits, enabledSourceIds, data.preferredLocation, data.canonicalLocation, data.canonicalCountry, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
 
   const handleDiscardResume = useCallback(async () => {
     // Defense in depth for a stale async offer: only its owning hub may clear
@@ -2101,7 +2207,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   // Listen for job-source-resolved dispatched after a captcha/continue attempt.
   // Carries `items` on successful recoveries plus the active warning on failed
-  // attempts, so the hub can keep source counts and warning state aligned.
+  // attempts, so the hub can keep its collected-listing count and warning state
+  // aligned. Replacement solves do not change that collection count: they only
+  // improve or replace rows that the initial source search already gathered.
   // Merge jobs into pendingJobs by (title|company|url) fingerprint so a
   // retry-of-a-retry doesn't double-count, drop the source's warning, and
   // auto-resume scoring once the last blocking warning is cleared.
@@ -2117,12 +2225,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       const resolvedSourceId = e.detail?.sourceId;
       if (!resolvedSourceId) return;
-      // The source card computes this from its actual before/after display
-      // count. Apply it only after the run-token guard above so a late Solve
-      // cannot alter a newer run's aggregate.
-      const sourceCountDelta = Number(e.detail?.sourceCountDelta);
-      if (Number.isFinite(sourceCountDelta)) {
-        gatheredCountRef.current = Math.max(0, (Number(gatheredCountRef.current) || 0) + sourceCountDelta);
+      // Apply only an explicit collection delta. Do not infer it from the
+      // source card's transient display count: during description recovery that
+      // count can mean the remaining/enriched subset rather than listings the
+      // provider returned, which would corrupt the source-gathered total.
+      const gatheredCountDelta = Number(e.detail?.gatheredCountDelta);
+      if (Number.isFinite(gatheredCountDelta)) {
+        gatheredCountRef.current = Math.max(0, (Number(gatheredCountRef.current) || 0) + gatheredCountDelta);
       }
       const items = Array.isArray(e.detail?.items) ? e.detail.items : [];
       // Track sources resolved while the search is still running so the
@@ -2592,6 +2701,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           sourceHubId: currentId,
           canvasFilePath,
           resumeSummary: buildResumeSummary(data.resumeProfile),
+          sourceGatheredCount: data.gatheredCount ?? jobsToReanalyze.length,
           searchLocation: locationSnapshot.searchLocation,
           remoteResidences: locationSnapshot.remoteResidences,
         },
@@ -2840,7 +2950,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           profile,
           careerData,
           jobs: savedJobs,
-          gatheredCount: snapshot.gatheredJobCount ?? savedJobs.length,
+          gatheredCount: snapshot.sourceGatheredCount
+            ?? snapshot.searchFunnel?.relevanceKept
+            ?? snapshot.searchFunnel?.raw
+            ?? snapshot.gatheredJobCount
+            ?? savedJobs.length,
           scrapeWarnings: [],
           activeTargetRole,
           originalPos,
@@ -2897,11 +3011,24 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [data.locked, id, updateGlobal, handleRerun]);
 
   const savedAnalysisWarning = getSavedAnalysisWarning(savedAnalysisMeta, id, canvasFilePath);
+  const savedScoreReadyCount = Math.max(0, Number(savedAnalysisMeta?.gatheredJobCount) || 0);
+  const savedSourceGatheredCount = Number.isFinite(Number(savedAnalysisMeta?.sourceGatheredCount))
+    ? Math.max(savedScoreReadyCount, Math.max(0, Math.floor(Number(savedAnalysisMeta.sourceGatheredCount))))
+    : savedScoreReadyCount;
+  // Saved snapshots are canvas-scoped, so an older run can legitimately exist
+  // beside the current done state. Only use its durable funnel when it belongs
+  // to this exact run token.
+  const savedAnalysisMatchesCurrentRun = !!savedAnalysisMeta?.runId
+    && savedAnalysisMeta.runId === data.jobRunId;
+  const doneGatheredCount = savedAnalysisMatchesCurrentRun
+    ? Math.max(Number(data.gatheredCount) || 0, savedSourceGatheredCount)
+    : data.gatheredCount;
   const savedAnalysisPanel = savedAnalysisMeta ? (
     <div className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-2 text-left">
       <div className="text-[9px] uppercase tracking-[0.14em] text-white/25">Saved Scrape</div>
       <div className="mt-1 text-[10px] text-white/65">
-        {savedAnalysisMeta.gatheredJobCount} scraped
+        {savedSourceGatheredCount} found
+        {savedSourceGatheredCount !== savedScoreReadyCount ? ` • ${savedScoreReadyCount} score-ready` : ''}
         {savedAnalysisMeta.selectedJobCount ? ` • ${savedAnalysisMeta.selectedJobCount} selected for AI` : ''}
       </div>
       {!!savedAnalysisMeta.targetRole && (
@@ -3070,6 +3197,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once."
                   className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
                 />
+                {roleOperators.length > 0 && (
+                  <p className="text-amber-300/70 text-[9px] leading-snug px-0.5">
+                    {roleOperators.join(', ')} {roleOperators.length > 1 ? 'are' : 'is'} sent as ordinary words, not search operators — job boards either ignore them or return the opposite of what you meant. Type the role in plain words.
+                  </p>
+                )}
                 <JobSearchLocationFields
                   searchLocation={searchLocation}
                   setSearchLocation={setSearchLocation}
@@ -3175,7 +3307,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             <JobSearchDoneState
               resultCount={data.resultCount}
               scrapedCount={data.scrapedCount}
-              gatheredCount={data.gatheredCount}
+              gatheredCount={doneGatheredCount}
               queryModel={data.queryModel || null}
               testMode={!!data.testMode}
               aiSkipped={!!data.aiSkipped}

@@ -371,6 +371,20 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     return { unionFloor: merged.min };
   },
 }, {
+  name: 'Competitive-salary report labels the fit gate separately from nested pre-research skips',
+  run: () => {
+    const snapshotSource = readFileSync(new URL('../../electron/ipc/bugReport/jobsSnapshot.js', import.meta.url), 'utf8');
+    assert(snapshotSource.includes('Scored input: ${rec(c.scoredInput)} job(s) = ${rec(c.skippedBelowFit)} below the fit threshold + ${rec(c.eligible)} fit-qualified at or above ${rec(c.minFitScore)}'),
+      'the report must reconcile its input into the below-threshold and fit-qualified partitions, rather than imply eligible is a final research candidate count');
+    assert(snapshotSource.includes('Of the fit-qualified jobs, skipped before market research: ${rec(c.skippedNoOffer)} with no stated usable salary')
+      && snapshotSource.includes('${rec(c.skippedNoLocation)} with no resolvable location; ${rec(c.preResearchCandidates)} passed to experience-band/cohort preparation'),
+    'salary/location skips must be labeled as nested pre-research filters, so they are not added to the below-threshold count');
+    const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    assert(/scoredInput:\s*total,[\s\S]*?eligible,[\s\S]*?preResearchCandidates:\s*candidates\.length,/.test(jobsSource),
+      'compensation telemetry must retain the reconciled input and post-salary/location candidate counts');
+    return { stagedFunnel: true };
+  },
+}, {
   // Contracts A + C: the compensation-research fit gate. The gate's boundary
   // check itself (rawScore >= COMPENSATION_MIN_FIT_SCORE, and the unscored-vs-
   // known-low-score branch) lives inline in the non-exported async
@@ -380,11 +394,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   // two things that ARE exported and load-bearing: the threshold constant
   // itself, and — via compensationAssessment(), the same helper jobs.js calls
   // to build the skip's fallback card — that a below-threshold skip and an
-  // unscored skip are honestly distinguishable in the justification text even
-  // though both currently share the reasonCode 'below_fit_threshold' (contract
-  // C), and that JOB_COMPENSATION_EVIDENCE distinguishes them from a REAL
-  // researched verdict via reasonCode.
-  name: 'Compensation fit gate: threshold constant and below_fit_threshold skip shape',
+  // unscored skip retain distinct reason codes as well as distinct prose.
+  name: 'Compensation fit gate: threshold constant and distinct skip shapes',
   run: () => {
     assert(COMPENSATION_MIN_FIT_SCORE === 75, `COMPENSATION_MIN_FIT_SCORE must be 75 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
 
@@ -405,17 +416,15 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       'a known below-threshold score justification must name the actual score so it reads as a real assessment, not a missing one');
 
     // Mirrors the sibling branch for a job whose score is unknown/null
-    // (unscored, or the UNSCORED_FALLBACK_SCORE sentinel) — same reasonCode,
-    // but the justification must say the score was unavailable rather than
-    // implying a real low score was measured. This is the "distinguishable"
-    // half of contract C: there is no separate reasonCode for this case today,
-    // so the justification text is the only signal a bug report can show.
+    // (unscored, or the UNSCORED_FALLBACK_SCORE sentinel) — a distinct
+    // reasonCode and justification must say the score was unavailable rather
+    // than imply a real low score was measured.
     const unknownScoreSkip = compensationAssessment({
       offer: knownLowOffer,
-      reasonCode: 'below_fit_threshold',
+      reasonCode: 'fit_score_unavailable',
       justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
     });
-    assert(unknownScoreSkip.reasonCode === 'below_fit_threshold', 'an unscored job must also be gated out under the below_fit_threshold reason code');
+    assert(unknownScoreSkip.reasonCode === 'fit_score_unavailable', 'an unscored job must retain its own fit_score_unavailable reason code');
     assert(unknownScoreSkip.justification.includes('unavailable') && !unknownScoreSkip.justification.includes('scored'),
       'an unscored skip must read as "score unavailable", not be confused with a known below-threshold score');
     assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,

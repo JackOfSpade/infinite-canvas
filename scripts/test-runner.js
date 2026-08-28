@@ -22,6 +22,8 @@ import login_url_markers from './tests/login-url-markers.js';
 import compensation_assessment from './tests/compensation-assessment.js';
 import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_search_locations from './tests/job-search-locations.js';
+import job_title_match from './tests/job-title-match.js';
+import job_posted_date from './tests/job-posted-date.js';
 import job_board_provider from './tests/job-board-provider.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
@@ -60,6 +62,8 @@ const testGroups = [
   ['compensation-assessment.js', compensation_assessment],
   ['job-compensation-pipeline.js', job_compensation_pipeline],
   ['job-search-locations.js', job_search_locations],
+  ['job-title-match.js', job_title_match],
+  ['job-posted-date.js', job_posted_date],
   ['job-board-provider.js', job_board_provider],
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],

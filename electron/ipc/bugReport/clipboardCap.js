@@ -174,7 +174,17 @@ function truncateBaseForClipboard(baseMarkdown, room) {
     break;
   }
 
-  return { text: candidate.slice(0, cut).trimEnd() + note, droppedSections, partialSection };
+  // A `##` cut mid-body can silently take a dozen `###` subsections with it,
+  // and the scan above cannot see them — so the notice named the parent as
+  // merely "cut mid-section" while whole named diagnostics disappeared with no
+  // trace. Report them SEPARATELY from the `##` tally: folding them into the
+  // dropped-section count would misreport how many top-level sections were lost.
+  const droppedSubsections = [...baseMarkdown.matchAll(/^### (.+)$/gm)]
+    .filter((m) => m.index >= cut)
+    .map((m) => m[1].trim())
+    .filter((name) => !droppedSections.includes(name));
+
+  return { text: candidate.slice(0, cut).trimEnd() + note, droppedSections, partialSection, droppedSubsections };
 }
 
 // The filter summary is assembled before the clipboard cap runs. When a FULL
@@ -218,8 +228,8 @@ function displaySectionName(name) {
 // most MAX_NAMED_DROPPED_SECTIONS short section names, then a "+N more" tally.
 // Null when truncateBaseForClipboard found nothing to name (no heading was
 // dropped or cut mid-section).
-function formatSectionOmissionDetail(droppedSections, partialSection) {
-  if (droppedSections.length === 0 && !partialSection) return null;
+function formatSectionOmissionDetail(droppedSections, partialSection, droppedSubsections = []) {
+  if (droppedSections.length === 0 && !partialSection && droppedSubsections.length === 0) return null;
   const parts = [];
   if (droppedSections.length > 0) {
     const shown = droppedSections
@@ -230,11 +240,22 @@ function formatSectionOmissionDetail(droppedSections, partialSection) {
     parts.push(`${droppedSections.length} section(s) dropped: ${names}`);
   }
   if (partialSection) parts.push(`"${displaySectionName(partialSection)}" cut mid-section`);
+  // Reported as its own clause, never folded into the `##` tally above — the
+  // counts mean different things and merging them would misstate how many
+  // top-level sections were lost.
+  if (droppedSubsections.length > 0) {
+    const shown = droppedSubsections
+      .slice(0, MAX_NAMED_DROPPED_SECTIONS)
+      .map(displaySectionName);
+    const extra = droppedSubsections.length - shown.length;
+    const names = extra > 0 ? `${shown.join(', ')}, +${extra} more` : shown.join(', ');
+    parts.push(`${droppedSubsections.length} subsection(s) lost with them: ${names}`);
+  }
   return parts.join('; ');
 }
 
-function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections = [], partialSection = null) {
-  const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection);
+function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections = [], partialSection = null, droppedSubsections = []) {
+  const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection, droppedSubsections);
   const parts = [sectionDetail ? `static report content (${sectionDetail})` : 'static report content'];
   if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
   if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
@@ -244,7 +265,7 @@ function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSectio
 }
 
 // A "floor" tail: a guaranteed minimum of the MOST-RECENT logs + events, balanced
-// so neither fully crowds out the other. The main-process logs (a bounded ~60-line
+// so neither fully crowds out the other. The main-process logs (a bounded 200-line
 // ring buffer holding swallowed-error detail) get up to ~45% of the floor; the
 // rest goes to the most-recent event lines, which reclaim the slack when the logs
 // are short or absent. Returns the trimmed slices (newest-kept) — NOT mutated copies.
@@ -265,21 +286,23 @@ function reserveFloorTail(allLogs, allEvents, floorChars) {
 function buildNamedStaticTruncation(baseMarkdown, tailMarkdown, maxChars, buildBanner) {
   let droppedSections = [];
   let partialSection = null;
+  let droppedSubsections = [];
   let priorKey = null;
 
   for (let pass = 0; pass < 24; pass++) {
-    const banner = buildBanner(droppedSections, partialSection);
+    const banner = buildBanner(droppedSections, partialSection, droppedSubsections);
     const room = maxChars - banner.length - tailMarkdown.length;
     const next = truncateBaseForClipboard(baseMarkdown, room);
-    const nextKey = JSON.stringify([next.droppedSections, next.partialSection]);
+    const nextKey = JSON.stringify([next.droppedSections, next.partialSection, next.droppedSubsections]);
     if (nextKey === priorKey) return { banner, cutBase: next.text };
     ({ droppedSections, partialSection } = next);
+    droppedSubsections = next.droppedSubsections || [];
     priorKey = nextKey;
   }
 
   // Section names are bounded above, so this is only a defensive escape hatch
   // for adversarially-shaped Markdown; it still uses the latest true cut.
-  const banner = buildBanner(droppedSections, partialSection);
+  const banner = buildBanner(droppedSections, partialSection, droppedSubsections);
   const room = maxChars - banner.length - tailMarkdown.length;
   return { banner, cutBase: truncateBaseForClipboard(baseMarkdown, room).text };
 }
@@ -336,9 +359,9 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, rawEvents.length);
     }
 
-    const buildNotice = (droppedSections = [], partialSection = null) => {
+    const buildNotice = (droppedSections = [], partialSection = null, droppedSubsections = []) => {
       const parts = [];
-      const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection);
+      const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection, droppedSubsections);
       if (sectionDetail) parts.push(`static report content (${sectionDetail})`);
       if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
       if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
@@ -388,16 +411,29 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   // from truncateBaseForClipboard's heading scan rather than staying silent
   // about which one was cut. Save-to-file (export-bug-report handler) remains
   // the complete, uncapped artifact.
-  const tailMd = tailOf(floor.logs, floor.events);
-  const trimmedEventCount = allEvents.length - floor.events.length;
-  const trimmedLogCount = allLogs.length - floor.logs.length;
+  // The base is being cut off mid-document either way, so spending the leftover
+  // budget on the FLOOR tail alone wastes it: the run that motivated this kept
+  // only 55 of 125 log lines while the static cut had already thrown away far
+  // more than the difference. Grow the tail above the floor toward the full
+  // logs+events, bounded at half the cap so the static sections still get a
+  // meaningful prefix (the hard-cap assertions in job-diagnostics.js depend on
+  // that half — an unbounded tail starves the base and five of them fail).
+  const TAIL_CEILING = Math.floor(maxChars * 0.5);
+  const grown = reserveFloorTail(allLogs, allEvents, Math.max(TAIL_FLOOR, TAIL_CEILING));
+  const floorTailLength = tailOf(floor.logs, floor.events).length;
+  const useGrown = tailOf(grown.logs, grown.events).length >= floorTailLength;
+  const tail = useGrown ? grown : floor;
+
+  const tailMd = tailOf(tail.logs, tail.events);
+  const trimmedEventCount = allEvents.length - tail.events.length;
+  const trimmedLogCount = allLogs.length - tail.logs.length;
   const omissionVerb = trimmedEventCount > 0 || trimmedLogCount > 0 ? 'were' : 'was';
-  const cappedBase = clarifyCappedFilterSummary(baseMarkdown, floor.events.length, rawEvents.length);
-  const buildBanner = (droppedSections = [], partialSection = null) =>
-    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(floor.events.length, allEvents.length, floor.logs.length, allLogs.length, foldDetail)}). Use "Save to file" for the full uncapped report.\n\n`;
+  const cappedBase = clarifyCappedFilterSummary(baseMarkdown, tail.events.length, rawEvents.length);
+  const buildBanner = (droppedSections = [], partialSection = null, droppedSubsections = []) =>
+    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection, droppedSubsections)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(tail.events.length, allEvents.length, tail.logs.length, allLogs.length, foldDetail)}). Use "Save to file" for the full uncapped report.\n\n`;
 
   const { banner, cutBase } = buildNamedStaticTruncation(cappedBase, tailMd, maxChars, buildBanner);
   let out = banner + cutBase + tailMd;
-  if (out.length > maxChars) out = out.slice(0, maxChars); // absolute backstop if the floor tail itself overran
+  if (out.length > maxChars) out = out.slice(0, maxChars); // absolute backstop if the retained tail itself overran
   return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };
 }

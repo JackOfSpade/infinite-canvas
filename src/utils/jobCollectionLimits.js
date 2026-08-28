@@ -8,7 +8,11 @@
  *     until it runs out of results, until its listings fall outside the hub's
  *     look-back window (see makeJobPageStop in electron/ipc/jobPageStop.js),
  *     or until the JOB_COLLECTION_PAGE_CEILING backstop below.
- * API/feed sources do not paginate and simply ignore pagesPerPlatform.
+ * Feed sources (RemoteOK, WeWorkRemotely) are single un-paginated requests and
+ * have no page count to limit. The API sources DO paginate — LinkedIn walks
+ * `start` in steps of 25 and USAJobs walks `Page` — but each bounds its own walk
+ * internally (LinkedIn on an enrichment-budget ceiling, USAJobs on the
+ * provider's reported total), so neither reads pagesPerPlatform today.
  */
 export const JOB_COLLECTION_LIMITS_DEFAULT = Object.freeze({
   jobsPerPlatform: null,

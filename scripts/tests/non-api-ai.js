@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { assert, callLLMText, checkPromptFits, fs, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -431,6 +431,75 @@ export default [
     },
   },
   {
+    name: 'non-API AI: implausible-paste gate catches a non-JSON clipboard mistake before schema validation',
+    run: () => {
+      const schema = {
+        type: 'object', required: ['scores'], additionalProperties: false,
+        properties: { scores: { type: 'array', items: { type: 'object' } } },
+      };
+      let failure = null;
+      try {
+        validateNonApiAiSubmission({
+          response: 'Sorry, I no longer have access to that conversation.',
+          responseSchema: schema, task: 'job-scoring',
+        });
+      } catch (error) { failure = error; }
+      assert(failure?.message.includes("task 'job-scoring'")
+        && failure.message.includes("no '{' or '['")
+        && failure.message.includes('wrong clipboard content')
+        && failure.message.includes("FULL response")
+        && !failure.message.includes('missing required property'),
+      'a paste with no JSON delimiters at all is rejected with an actionable clipboard hint instead of the misleading schema-shape complaint');
+      return { rejected: true };
+    },
+  },
+  {
+    name: 'non-API AI: implausible-paste gate never rejects a genuinely valid response',
+    run: () => {
+      const schema = {
+        type: 'object', required: ['scores'], additionalProperties: false,
+        properties: {
+          scores: {
+            type: 'array',
+            items: {
+              type: 'object', required: ['index', 'matchScore'], additionalProperties: false,
+              properties: { index: { type: 'integer' }, matchScore: { type: 'integer' } },
+            },
+          },
+        },
+      };
+      const scores = Array.from({ length: 11 }, (_, index) => ({ index, matchScore: 50 + index }));
+      const response = JSON.stringify({ scores });
+      const value = validateNonApiAiSubmission({ response, responseSchema: schema, task: 'job-scoring' });
+      assert(Array.isArray(value.scores) && value.scores.length === 11,
+        'a real, fully-populated response clears the delimiter gate and reaches the caller unchanged');
+      return { accepted: true, length: response.length };
+    },
+  },
+  {
+    name: 'non-API AI: no item-count length heuristic is applied — a short but schema-valid response is always accepted',
+    run: () => {
+      // itemCount describes the REQUEST, not a promise about the response's
+      // shape: an aggregate answer, or a task that legitimately returns few
+      // or no rows for many inputs, is short and still fully valid. The gate
+      // therefore applies no length floor at all — only the '{'/'[' delimiter
+      // check above runs. Prove it with a deliberately sparse reply (one
+      // bare integer) against a much larger requested item count; a
+      // length-vs-itemCount heuristic would have rejected this.
+      const schema = {
+        type: 'object', required: ['roleByIndex'], additionalProperties: false,
+        properties: { roleByIndex: { type: 'array', items: { type: 'integer', minimum: 0 } } },
+      };
+      const response = '{"roleByIndex":[0]}';
+      const value = validateNonApiAiSubmission({
+        response, responseSchema: schema, task: 'job-taxonomy-classify', itemCount: 24,
+      });
+      assert(Array.isArray(value.roleByIndex) && value.roleByIndex.length === 1,
+        'a short response that fully satisfies its schema is accepted no matter how much larger the unrelated itemCount hint is');
+      return { accepted: true, length: response.length };
+    },
+  },
+  {
     name: 'non-API AI: job prompt preflight is manual and never invokes a provider token counter',
     run: async () => {
       const fit = await checkPromptFits('x'.repeat(250_000), {
@@ -615,6 +684,64 @@ export default [
     },
   },
   {
+    name: 'non-API AI: bug-report lifecycle is bounded, redacted, and proves reject/replay/accept settlement',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 721, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-lifecycle-report-test', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: 'TOP_SECRET_PROMPT must never be reported',
+          task: 'job-taxonomy-classify',
+          responseSchema: {
+            type: 'object', required: ['result'], properties: { result: { type: 'string' } },
+          },
+          batch: 2, batchTotal: 3, itemCount: 24, signal,
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-lifecycle-report-test')({ sender }, { nodeId: 'handoff-report-node' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: '{}' });
+      const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: '{"result":"TOP_SECRET_RESPONSE"}' });
+      await run;
+      const lifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
+      const receipt = lifecycle.find(item => item.requestId === request.requestId.slice(0, 12));
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['handoff-report-node']), sender.id);
+      const focused = applyBugReportCode([
+        '[Jobs] Taxonomy classifying: 1/1 chunk(s)',
+        '[Non-API AI] Rejected response for task job-taxonomy-classify',
+        'viewport changed source=interaction',
+      ], {}, 'JOBHANDOFF');
+      assert(rejected.accepted === false && replay.count === 1 && accepted.accepted === true
+        && receipt?.deliveries === 3 && receipt?.rejected === 1 && receipt?.reissues === 1
+        && receipt?.replays === 1 && receipt?.outcome === 'accepted' && receipt?.acceptedAt && receipt?.settledAt,
+      'the lifecycle records initial delivery, validation rejection/reissue, remount replay, acceptance, and final settlement');
+      assert(markdown.includes('Non-API AI Handoff Lifecycle')
+        && markdown.includes('1 paste rejection(s)')
+        && markdown.includes('1 reissued')
+        && markdown.includes('1 replayed after dialog remount')
+        && markdown.includes('**accepted** in')
+        && !markdown.includes('TOP_SECRET_PROMPT')
+        && !markdown.includes('TOP_SECRET_RESPONSE')
+        && !markdown.includes('is missing required property'),
+      'the report receipt exposes only bounded lifecycle metadata, never prompt, response, or validator text');
+      assert(focused.matchedCodes.includes('JOBHANDOFF')
+        && focused.filteredLogs.some(line => line.includes('Rejected response'))
+        && focused.sectionExclusions.has('nodeInternals')
+        && focused.sectionExclusions.has('nodes'),
+      'JOBHANDOFF is a focused filter that keeps handoff evidence while dropping the heavy canvas payload');
+      return { deliveries: receipt.deliveries, replays: receipt.replays, filter: 'JOBHANDOFF' };
+    },
+  },
+  {
     name: 'non-API AI: main-frame navigation aborts its orphaned handoff instead of leaking it across reload',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
@@ -700,6 +827,79 @@ export default [
         && replay?.count === 0,
       'a correction re-emit that loses its renderer tears down the same request instead of retaining it forever');
       return { replayed: replay.count };
+    },
+  },
+  {
+    name: 'non-API AI: the manual handoff queue is ordered by batch, not by arrival',
+    run: () => {
+      // A 1-job scoring batch used to reach the renderer FIRST. scoreBatch's
+      // only pre-handoff await (checkPromptFits) was gated on `batch.length > 1`,
+      // and requestNonApiAi sends its IPC synchronously — so inside the single
+      // Promise.all dispatch pass the singleton skipped a microtask turn and
+      // jumped the queue. 61 jobs at 15/batch presented as 5, 1, 2, 3, 4.
+      const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const scoreBatchBody = jobsSource.slice(
+        jobsSource.indexOf('const scoreBatch = async (batch, context = {}) => {'),
+        jobsSource.indexOf('const batchMeta = {};'),
+      );
+      assert(scoreBatchBody.length > 0
+        && /\n\s*let fit = null;\n\s*try \{\n\s*fit = await checkPromptFits\(/.test(scoreBatchBody)
+        && !/if \(batch\.length > 1\) \{[\s\S]*await checkPromptFits\(/.test(scoreBatchBody),
+      'the context-window preflight await runs for EVERY batch size, so no batch can skip a microtask turn and issue its handoff early');
+      assert(/if \(fit && !fit\.fits && batch\.length > 1\) \{/.test(scoreBatchBody),
+        'the SPLIT stays guarded on batch.length > 1 — at length 1 mid is 1, the right half is empty, and scoreBatch would recurse forever');
+      assert(jobsSource.includes('Promise.all(scoringBatches.map(async (batch, batchIndex) =>'),
+        'top-level batches still dispatch together so the person can run every manual prompt in parallel');
+
+      // Renderer-side belt and braces: arrival order is not a contract, so the
+      // queue sorts itself rather than trusting main to emit in order.
+      const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert(!dialogSource.includes('if (index === -1) return [...previous, incoming];')
+        && dialogSource.includes('next.splice(at, 0, incoming);')
+        && dialogSource.includes('&& queued.batch > incoming.batch'),
+      'receiveRequest inserts a new handoff by batch number instead of appending it in arrival order');
+
+      // Behavioural check of that insert, including the cases it must NOT reorder.
+      const insert = (previous, incoming) => {
+        const index = previous.findIndex(request => request.requestId === incoming.requestId);
+        if (index >= 0) {
+          const updated = [...previous];
+          updated[index] = { ...updated[index], ...incoming };
+          return updated;
+        }
+        const next = [...previous];
+        let at = next.length;
+        for (let i = 0; i < next.length; i += 1) {
+          const queued = next[i];
+          if (queued.nodeId === incoming.nodeId
+            && queued.task === incoming.task
+            && Number.isFinite(queued.batch)
+            && Number.isFinite(incoming.batch)
+            && queued.batch > incoming.batch) { at = i; break; }
+        }
+        next.splice(at, 0, incoming);
+        return next;
+      };
+      const scoringRequest = (batch) => ({ requestId: `r${batch}`, nodeId: 'hub', task: 'job-scoring', batch });
+      const order = (arrival) => arrival.reduce((queue, request) => insert(queue, request), []).map(r => r.batch).join(',');
+      assert(order([5, 1, 2, 3, 4].map(scoringRequest)) === '1,2,3,4,5'
+        && order([1, 2, 3, 4, 5].map(scoringRequest)) === '1,2,3,4,5'
+        && order([3, 5, 1, 4, 2].map(scoringRequest)) === '1,2,3,4,5',
+      'any arrival order of one hub’s scoring batches presents ascending, so the chip strip matches the prompt numbering');
+
+      const settled = [1, 2, 3].map(scoringRequest).reduce((queue, request) => insert(queue, request), []);
+      assert(insert(settled, { ...scoringRequest(1), validationError: 'retry' }).map(r => r.batch).join(',') === '1,2,3',
+        'a validation re-emit updates its request in place and never moves the chip the person is answering');
+
+      const mixed = [
+        scoringRequest(2),
+        { requestId: 'taxonomy', nodeId: 'hub', task: 'job-taxonomy-plan' },
+        scoringRequest(1),
+        { requestId: 'other-hub', nodeId: 'other', task: 'job-scoring', batch: 1 },
+      ].reduce((queue, request) => insert(queue, request), []);
+      assert(mixed.map(r => r.requestId).join(',') === 'r1,r2,taxonomy,other-hub',
+        'ordering is scoped to one node+task: unnumbered handoffs and other hubs keep arrival order instead of being interleaved');
+      return { ordering: 'batch-ascending', scope: 'node+task' };
     },
   },
 ];
