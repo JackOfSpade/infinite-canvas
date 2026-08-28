@@ -2544,11 +2544,20 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
       // ignored). The scraper resolves it in-browser (CF-gated) just before nav and
       // appends &locId=&locT= to the URL — see resolveGlassdoorLocId.
       // Resolve a locId for the location when there is one, and for the bare
-      // COUNTRY when there is not. Without the country fallback a remote-only
-      // search left `resolveGlassdoorLocation` unset, so no locId was resolved,
-      // the applied-location proof went inert, and the .com→.ca geo-redirect
-      // decided the market unchallenged. A nation-level locId pins the market
-      // without narrowing a remote search.
+      // COUNTRY when there is not, so the applied-location proof has something
+      // to check instead of going inert on a remote search.
+      //
+      // ⚠️ A NATION-tier locId does NOT actually filter. Measured on Glassdoor:
+      // `_IN1` ("United States") returned Toronto/Mississauga listings under the
+      // header "50,231 United States jobs"; `_IN1` and `_IN3` returned identical
+      // counts; and Ontario alone (`_IS4080`, 83,887) exceeded all of Canada
+      // (`_IN3`, 50,233) — impossible if the nation tier filtered. It persists
+      // with countryRedirect=false, so the TLD hop is not the cause. STATE, CITY
+      // and METRO tiers ARE honoured cross-border. So a country-scoped Glassdoor
+      // run is really scoped by the browsing egress, and the page echoes the
+      // country you asked for — a header or label check would pass it. The
+      // scraper records that caveat rather than reporting a country filter it
+      // cannot deliver; see the nation-tier warning in manualScraper.js.
       if (sourceId === 'glassdoor' && (loc || country)) {
         base.resolveGlassdoorLocation = loc || country;
         // A location the user actually asked for is a HARD boundary: if its

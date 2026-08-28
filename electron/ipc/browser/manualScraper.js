@@ -4532,13 +4532,23 @@ export function glassdoorUrlHasLocationId(url, locId) {
     // or state-scoped search resolved correctly, navigated correctly, and was
     // then discarded as "location not applied".
     //
-    // The letter class is deliberately OPEN rather than the verified [NSC]. The
-    // safety property here is the numeric id, not the type letter: we require
-    // the exact locId WE resolved to appear in the landed path. A scope type we
-    // have not seen (a metro tier is the known gap — it could not be surfaced
-    // through the autocomplete) would otherwise read as "location not applied"
-    // and skip the whole source, which is the expensive failure. Accepting an
-    // unknown letter alongside the right id cannot admit a DIFFERENT location.
+    // The alphabet is now fully measured: N nation, S state/province, C city,
+    // M metro. Canadian provinces use S — there is no separate non-US
+    // subdivision letter. The metro tier is NOT additive (`_IM615` and
+    // `_IC1132348` return the same top listings; M labels merely append the
+    // country), so there is nothing to gain by targeting it — do not add a
+    // metro lookup expecting extra reach.
+    //
+    // The class stays OPEN anyway, because the safety property is the numeric
+    // id and not the type letter: we require the exact locId WE resolved to
+    // appear in the landed path. A tier Glassdoor adds later would otherwise
+    // read as "location not applied" and skip the whole source, the expensive
+    // failure. An unknown letter beside the right id cannot admit a DIFFERENT
+    // location.
+    //
+    // The .com -> .ca redirect is slug-safe: the path is preserved byte-for-byte
+    // and only the host changes (plus a countryRedirect param), so this proof
+    // survives it.
     return new RegExp(`_I[A-Z]{1,2}${id}(?:_|[.-]|$)`, 'i').test(decodeURIComponent(parsed.pathname));
   } catch {
     return false;
@@ -5192,6 +5202,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Latches once a SOFT (country-only) locId lookup fails, so the remaining
       // queries of this source do not each repeat the same failing lookup.
       let softScopeLookupFailed = false;
+      // One nation-tier caveat per source, not one per query.
+      let nationTierCaveatRecorded = false;
       let hitUnhandledPagination   = false;
       let sourceDetailBlockCode    = null;
       let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
@@ -5275,7 +5287,35 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             resolvedUrl.searchParams.set('locT', String(picked.locT || 'C'));
             task.url = resolvedUrl.toString();
             task._glassdoorLocId = String(picked.locId);
+            task._glassdoorLocT = String(picked.locT || 'C').toUpperCase();
             logger.info(`[BrowserScraper] Glassdoor "${task.resolveGlassdoorLocation}" → locId ${picked.locId}/${picked.locT}`);
+            // The NATION tier is accepted by Glassdoor and echoed in the header,
+            // but it does not filter: `_IN1` ("United States") returned Ontario
+            // listings titled "United States jobs", `_IN1` and `_IN3` returned
+            // identical counts, and one province out-counted all of Canada.
+            // State/city/metro tiers ARE honoured cross-border. Say so once per
+            // source — silence here would let a country-labelled page pass for a
+            // country-filtered one, which is exactly what the header check does.
+            if (task._glassdoorLocT === 'N' && !nationTierCaveatRecorded) {
+              nationTierCaveatRecorded = true;
+              const evidence = `${srcName} accepted the country scope "${task.resolveGlassdoorLocation}" (locId ${picked.locId}, nation tier) — but Glassdoor does not enforce nation-tier scopes: the results reflect this machine's browsing region, while the page header still names the requested country. Treat these rows as region-unverified; the location adherence summary is the authority, not the header.`;
+              logger.warn(`[BrowserScraper] ${evidence}`);
+              recordManualScraperTelemetry({
+                phase: 'location-nation-tier-unenforced',
+                sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                location: task.resolveGlassdoorLocation,
+                locId: String(picked.locId), locT: task._glassdoorLocT,
+              }, { updateActive: false });
+              if (!sourceSiteChangedWarning) {
+                sourceSiteChangedWarning = {
+                  code: 'location-nation-tier-unenforced',
+                  severity: 'info',
+                  evidence,
+                  suggestion: 'Set a state/province or city in the Job Search location field — those tiers ARE enforced, including across borders. A country alone cannot scope this source.',
+                };
+              }
+            }
           } else {
             const failure = picked?.failure || 'autocomplete returned no verified exact match';
             const failureKind = picked?.failureKind || 'unknown';

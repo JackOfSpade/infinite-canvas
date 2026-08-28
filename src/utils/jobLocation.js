@@ -164,7 +164,13 @@ export function describeLocationTreatment(sourceId, canonicalLocation = '', coun
     // nation-level locId. Reporting "unscoped" there would contradict the URL
     // the run actually issued.
     if (sourceId === 'glassdoor' && country) {
-      return `param: locId= (nation-level, resolved in-browser from country=${country}; no city/region filter — a remote search is nationwide by design)`;
+      // Measured: Glassdoor ACCEPTS a nation-tier locId and echoes the country in
+      // its header, but does not filter on it — `_IN1` returned Ontario listings
+      // titled "United States jobs", and one province out-counted all of Canada.
+      // State/city/metro tiers ARE enforced cross-border. Saying "pinned to
+      // <country>" here would put a filter in the report that the board never
+      // applied, so name the tier and its limit instead.
+      return `param: locId= (nation tier, from country=${country}) — NOT enforced by Glassdoor: results follow this machine's browsing region regardless of the country requested. Set a state/province or city to actually scope this source.`;
     }
     if (['usajobs', 'dice', 'indeed', 'ziprecruiter', 'glassdoor', 'linkedin'].includes(sourceId)) {
       return 'no location param (unscoped)';

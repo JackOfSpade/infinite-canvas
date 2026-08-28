@@ -46,8 +46,14 @@ export default [
       // A remote-only search has no location FILTER but still pins a market via
       // a nation-level locId. Reporting it as "unscoped" would contradict the URL
       // the run actually issued.
-      assert(describeLocationTreatment('glassdoor', '', 'United States').includes('nation-level'),
-        'a country-pinned Glassdoor run is not reported as unscoped');
+      // Glassdoor accepts a nation-tier locId and echoes the country in its
+      // header, but does NOT filter on it (measured: `_IN1` returned Ontario
+      // listings titled "United States jobs"; one province out-counted all of
+      // Canada). The report must not describe a filter the board never applied.
+      const nationLine = describeLocationTreatment('glassdoor', '', 'United States');
+      assert(nationLine.includes('nation tier'), 'the tier is named');
+      assert(/NOT enforced/i.test(nationLine), 'the report states the nation tier is not enforced');
+      assert(!/\bpins\b|\bpinned\b/i.test(nationLine), 'the report never claims the country was pinned');
       assert(describeLocationTreatment('glassdoor', '', '') === 'no location param (unscoped)',
         'with neither a filter nor a country, unscoped is still the honest answer');
       assert(describeLocationTreatment('ziprecruiter', '', 'United States') === 'no location param (unscoped)',
