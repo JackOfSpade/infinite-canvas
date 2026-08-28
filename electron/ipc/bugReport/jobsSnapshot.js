@@ -2089,6 +2089,31 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // warning channel would both occupy the single per-source slot ahead of a real
   // block and, because any info-severity warning maps to terminal status
   // 'skipped', make a fully successful run read as skipped.
+  // Scroll-source reveal outcome. Rendered because the failure it detects is
+  // SILENT by construction: Google's list only loads on trusted wheel input, and
+  // scrolling it any other way produces a clean run of ~20 cards that terminates
+  // without complaint and is indistinguishable from a genuinely small result
+  // set. The one tell is that it ends on a no-growth plateau rather than the
+  // board's own end-of-list marker. Measured bound for context: six unrelated
+  // high-volume roles all exhausted between 174 and 194 cards, so a reveal that
+  // plateaus in the low tens has almost certainly not seen the whole list.
+  const revealRuns = (browserScrape?.events || []).filter(e => e?.phase === 'reveal-finished');
+  if (revealRuns.length > 0) {
+    lines.push('\n### Scroll reveal');
+    for (const e of revealRuns.slice(0, 6)) {
+      const count = Number(e.count) || 0;
+      const viaMarker = e.exit === 'end-of-list';
+      // State the observation; do NOT assert the cause. A small corpus plateaus
+      // legitimately, and only the board's marker proves completeness.
+      const note = viaMarker
+        ? 'ended on the board\'s end-of-list marker — the full list was revealed'
+        : e.exit === 'plateau'
+          ? `ended on a no-growth plateau, NOT the board's end-of-list marker — completeness is unproven${count > 0 && count < 60 ? ' (and this count is far below the 174-194 range every high-volume query exhausted at, which is the signature of a reveal that never loaded)' : ''}`
+          : `ended: ${e.exit || 'unknown'}`;
+      lines.push(`- \`${e.sourceId || '?'}\`: revealed ${count} card(s) over ${Number(e.iterations) || 0} pass(es) — ${note}`);
+    }
+  }
+
   const nationTierNotes = (browserScrape?.events || []).filter(e => e?.phase === 'location-nation-tier-unenforced');
   if (nationTierNotes.length > 0) {
     lines.push('\n### Country scope not enforced');
