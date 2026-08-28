@@ -1078,6 +1078,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // page depth with jobs still coming. `per-source-cap` = its intentional
       // per-platform job limit (not an exhausted source). One-shot/API sources
       // have no walk and don't appear here.
+      // Completeness against the board's OWN advertised total, where that number
+      // is trustworthy. Only ZipRecruiter publishes one that matched its
+      // reachable count exactly when walked to the end; the figure drifts a unit
+      // or two between requests, hence the "~". Observation only.
+      for (const [sid, v] of entries) {
+        if (v.claimedTotal == null) continue;
+        const got = Number(v.count) || 0;
+        // State both numbers; do NOT call the difference a loss. The kept count
+        // is already past the age filter, the per-platform cap and cross-source
+        // dedup, so a source correctly capped at 50 of 520 is not missing 470.
+        // The "~" is literal: the advertised number drifts a unit or two between
+        // requests from live index churn.
+        // `count` is the RAW rows this source's scraper returned — it is taken
+        // before the run's client-side age, seen-history and target-role
+        // filtering, so calling it "kept" and blaming those filters for the
+        // shortfall would attribute the gap to stages that never touched this
+        // number. What CAN separate the two is the per-platform cap, the board's
+        // own server-side date filter, and paging stopping early.
+        lines.push(
+          `  - \`${sid}\` completeness: collected ${got} raw row(s); the board advertised ~${v.claimedTotal} for this query`
+          + ' (pre-filter count — the gap reflects the per-platform cap, the board-side date filter, or a walk that ended early)',
+        );
+      }
       const walked = entries.filter(([, v]) => v.pagesWalked > 0);
       for (const [k, v] of walked) {
         let flag = '';
@@ -2059,6 +2082,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // existed is therefore the difference between "this run had to make that
   // fragile call" and "it should never have needed to" — unanswerable from the
   // rest of the report, so it is printed whenever the question can come up.
+  // Glassdoor ACCEPTS a nation-tier locId and echoes the requested country in
+  // its page header, but does not filter on it (measured: `_IN1` returned
+  // Ontario listings titled "United States jobs"; one province out-counted all
+  // of Canada). Reported from telemetry rather than as a source warning — the
+  // warning channel would both occupy the single per-source slot ahead of a real
+  // block and, because any info-severity warning maps to terminal status
+  // 'skipped', make a fully successful run read as skipped.
+  const nationTierNotes = (browserScrape?.events || []).filter(e => e?.phase === 'location-nation-tier-unenforced');
+  if (nationTierNotes.length > 0) {
+    lines.push('\n### Country scope not enforced');
+    for (const e of nationTierNotes.slice(0, 4)) {
+      lines.push(
+        `- \`${e.sourceId || '?'}\` requested country "${e.location || '?'}" (locId ${e.locId || '?'}, nation tier)`
+        + ' — the board accepts and echoes it but does not filter on it, so these rows follow this machine\'s'
+        + ' browsing region. The header naming the country is NOT evidence of scoping; the location adherence'
+        + ' summary above is. Set a state/province or city to actually scope this source — those tiers ARE enforced.',
+      );
+    }
+  }
+
   const locationSkips = (browserScrape?.events || []).filter(e => e?.phase === 'location-resolution-failed');
   let glassdoorLocCache = {};
   try { glassdoorLocCache = getGlassdoorLocIdCache() || {}; } catch { /* store may not be ready */ }

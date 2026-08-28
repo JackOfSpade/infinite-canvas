@@ -4349,6 +4349,12 @@ Return a JSON object with four arrays of search query strings:
         // How deep the same-session walk went, and why it stopped (paginating
         // sources only; one-shot sources leave pagesWalked at 0). Aggregated
         // across a source's query variants: deepest walk + the set of reasons.
+        // Board-advertised total, where the board publishes a trustworthy one.
+        // Observation only — it makes under-collection legible ("141 of ~587
+        // advertised") and must never gate, filter, or retry.
+        if (result.claimedTotal != null && sourceResults[sourceId].claimedTotal == null) {
+          sourceResults[sourceId].claimedTotal = result.claimedTotal;
+        }
         if (result.pagesWalked != null) {
           sourceResults[sourceId].pagesWalked = Math.max(sourceResults[sourceId].pagesWalked, result.pagesWalked);
           if (result.stopReason) sourceResults[sourceId].stopReasons.add(result.stopReason);
@@ -4977,6 +4983,7 @@ Return a JSON object with four arrays of search query strings:
       };
       // How deep the date-bounded walk went + why it stopped — only for the
       // paginating browser sources (one-shot / API sources leave it unset).
+      if (data.claimedTotal != null) bySource[sid].claimedTotal = data.claimedTotal;
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
         bySource[sid].stopReason = [...(data.stopReasons || [])].join('/') || null;

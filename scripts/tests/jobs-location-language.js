@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -89,6 +89,26 @@ export default [
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170') === 'applied', 'canonical slug carrying the id reads applied');
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1') === 'missing', 'canonical slug with the WRONG id is a real failure');
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x&locId=1', '1') === 'unavailable', 'non-canonical route cannot prove or disprove the location');
+      // ZipRecruiter is the ONE board whose advertised total matched its
+      // reachable count when walked to the end (520 reachable, 520 in the
+      // header). Two shapes must never be read as a total: the path form's
+      // capped "1000+", and the "Showing results N-M" window.
+      // A scroll list must NOT stop on the first no-growth pass. Google's cards
+      // arrive in batches of ten and the count stalls for one full pass at every
+      // batch boundary, while a complete reveal takes 18-47 passes — so a
+      // first-plateau stop halts at a boundary and silently under-collects,
+      // which from outside looks exactly like the list virtualizing (it does
+      // not). This guards a regression back to 1.
+      assert(REVEAL_STABLE_PASSES > 1, 'a single no-growth pass must never end a scroll reveal');
+      assert(REVEAL_STABLE_PASSES >= 3, 'the streak must clear the observed one-pass batch-boundary stall with margin');
+      assert(parseClaimedResultTotal('521 Systems Architect Jobs in Denver, CO') === 521, 'a plain advertised total parses');
+      assert(parseClaimedResultTotal('12,431 Registered Nurse Jobs') === 12431, 'thousands separators parse');
+      assert(parseClaimedResultTotal('1000+ Sales Jobs') === null, 'a capped 1000+ is a ceiling, not a count');
+      assert(parseClaimedResultTotal('Showing results 501-520') === null, 'a result window is not a total');
+      assert(parseClaimedResultTotal('No jobs found') === null, 'no number means no total');
+      for (const junk of ['', null, undefined, '0 jobs']) {
+        assert(parseClaimedResultTotal(junk) === null, `"${junk}" yields no total`);
+      }
       assert(isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3.htm'), 'SRCH slug is canonical');
       assert(!isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x'), 'jobs.htm is not canonical');
       return { ok: true };

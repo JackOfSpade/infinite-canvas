@@ -4239,12 +4239,126 @@ async function waitForListGrowth(page, extractorJS, previousCount, signal, timeo
 // guessing a selector for a source we can't verify; add it back with a real,
 // verified selector if a specific source needs it.
 /**
+ * Read a board's own advertised result total, where that number is known to be
+ * trustworthy.
+ *
+ * Only ZipRecruiter qualifies, and only on its query-string SERP: walked to the
+ * end, its header matched the reachable count exactly (520 reachable against a
+ * 520 header). Its /jobs-search/N path form instead shows a capped "1000+" that
+ * is not a count at all. Every other board measured is unusable for this —
+ * Glassdoor UNDER-reports and its number drifts upward while paginating,
+ * LinkedIn buckets to "1,000+" over a corpus that stops at 1,000, and Google
+ * publishes no total.
+ *
+ * Returns null when no trustworthy number is present. Never throws.
+ *
+ * @returns {Promise<number|null>}
+ */
+async function readClaimedResultTotal(page, sourceId) {
+  if (sourceId !== 'ziprecruiter') return null;
+  try {
+    // Our own overlay is a real DOM node inside the page, so document.innerText
+    // INCLUDES its status line ("Loading jobs… 141"). Reading the whole body
+    // could therefore report the scraper's own number as the board-advertised
+    // total. Hide the panel for the read (innerText skips display:none), prefer
+    // the results heading, and restore the panel immediately.
+    const text = await page.evaluate(() => {
+      const overlay = document.getElementById('__ic-panel');
+      const prev = overlay ? overlay.style.display : null;
+      if (overlay) overlay.style.display = 'none';
+      try {
+        const heading = document.querySelector('h1')?.innerText || '';
+        return heading.trim() || document.body?.innerText || '';
+      } finally {
+        if (overlay) overlay.style.display = prev || '';
+      }
+    });
+    return parseClaimedResultTotal(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pull a board's advertised result total out of its page text.
+ *
+ * Split from readClaimedResultTotal so the parsing is unit-testable without a
+ * browser. Rejects the two shapes that are NOT totals:
+ *   - a capped "1000+ jobs", which is a ceiling the path-form SERP shows; and
+ *   - a "Showing results 501-520" range, which is a window, not a count.
+ *
+ * @param {string} text
+ * @returns {number|null}
+ */
+export function parseClaimedResultTotal(text) {
+  const body = String(text == null ? '' : text);
+  if (/\b1000\+/.test(body)) return null;
+  const match = body.match(/([\d,]{1,9})\s+(?:[\w-]+\s+){0,4}?jobs?\b/i);
+  if (!match) return null;
+  const n = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Scroll a lazy list with TRUSTED wheel input.
+ *
+ * Puppeteer's page.mouse.wheel dispatches through CDP Input.dispatchMouseEvent,
+ * so the page sees `isTrusted: true` — the difference that decides whether
+ * Google's batch loader runs at all. The mouse is parked over a real card first,
+ * because a wheel event scrolls whatever sits under the cursor: without the
+ * move, the wheel lands on the document instead of the inner results container
+ * and the list never advances.
+ *
+ * Fails soft. This is a reveal optimisation, not a correctness gate — a
+ * detached frame or a card that never rendered must not end the scrape.
+ *
+ * @param {import('puppeteer').Page} page
+ * @param {string} cardSelector Any card in the list, used to aim the cursor.
+ * @param {number} steps Wheel ticks to send.
+ */
+async function revealByTrustedWheel(page, cardSelector, steps = 12) {
+  try {
+    // Aim at a card that is actually ON SCREEN. querySelector returns the FIRST
+    // card, which scrolls above the viewport after the first pass — its rect
+    // goes negative, and a wheel dispatched at negative coordinates lands
+    // outside the results container and reveals nothing. Pick the first card
+    // intersecting the viewport instead, and fall back to the viewport centre so
+    // a pass is never skipped just because no card rect was usable.
+    const box = await page.evaluate((sel) => {
+      const vh = window.innerHeight || 800;
+      const vw = window.innerWidth || 1200;
+      for (const el of document.querySelectorAll(sel)) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        if (r.bottom <= 0 || r.top >= vh) continue;      // fully off-screen
+        const y = Math.min(Math.max(r.top + Math.min(r.height / 2, 80), 8), vh - 8);
+        const x = Math.min(Math.max(r.left + r.width / 2, 8), vw - 8);
+        return { x, y };
+      }
+      return { x: Math.floor(vw / 2), y: Math.floor(vh / 2) };
+    }, cardSelector);
+    if (!box || !Number.isFinite(box.x) || !Number.isFinite(box.y)) return false;
+    await page.mouse.move(box.x, box.y);
+    const viewport = page.viewport?.() || { height: 800 };
+    for (let i = 0; i < steps; i++) {
+      const height = Number(viewport?.height) > 0 ? Number(viewport.height) : 800;
+      const delta = Math.floor(height * (0.55 + Math.random() * 0.3));
+      await page.mouse.wheel({ deltaY: delta });
+      await new Promise(r => setTimeout(r, 90 + Math.random() * 120));
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Consecutive no-growth reveal passes required before calling a scroll list
  * finished. Must exceed the longest observed stall INSIDE a still-growing list
  * (one pass, at each ten-card batch boundary on Google) with margin for a slow
  * network, while staying far below the iteration ceiling.
  */
-const REVEAL_STABLE_PASSES = 5;
+export const REVEAL_STABLE_PASSES = 5;
 
 /**
  * Board-published "no more results" markers, checked during the reveal loop.
@@ -4329,33 +4443,28 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
           ...overlayBase,
           status: `Loading the full Google list — not selecting cards yet… ${count}`,
         });
+        // TRUSTED wheel events are REQUIRED here. Google's batch loader ignores
+        // programmatic scrolling entirely: `window.scrollTo`/`scrollBy` and
+        // `el.scrollTop` move the viewport to the page floor and load NOTHING —
+        // measured sitting at exactly 20 cards across 14 passes, with no
+        // end-of-list sentinel. That is indistinguishable from a genuine small
+        // result set, so the failure is silent. Synthetic `WheelEvent` dispatch
+        // and `End` keypresses are equally ignored (both are untrusted).
+        // page.mouse.wheel goes through CDP Input.dispatchMouseEvent, which the
+        // page receives as a real user wheel.
+        await revealByTrustedWheel(page, '.EimVGf, [jscontroller="b11o3b"]');
+        // Keep a programmatic nudge AFTER the wheel pass. It cannot trigger the
+        // loader, but it costs nothing and still helps any lazy <img>/observer
+        // work that keys off scroll position rather than input trust.
         await page.evaluate(async () => {
-          const card = document.querySelector('.EimVGf, [jscontroller="b11o3b"]');
-          if (card) {
-            let el = card.parentElement;
-            while (el && el !== document.body) {
-              const s = getComputedStyle(el);
-              if (s.overflowY === 'auto' || s.overflowY === 'scroll') {
-                const step = Math.floor(el.clientHeight * (0.55 + Math.random() * 0.3));
-                let innerSteps = 0;
-                while (el.scrollTop + el.clientHeight < el.scrollHeight - 10 && innerSteps < 20) {
-                  el.scrollTop += step;
-                  await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
-                  innerSteps++;
-                }
-                break;
-              }
-              el = el.parentElement;
-            }
-          }
           const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
           let steps = 0;
-          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 20) {
+          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 6) {
             window.scrollBy(0, step);
             await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
             steps++;
           }
-        });
+        }).catch(() => {});
       } else {
         // Cap scroll steps to prevent an infinite loop on true infinite-scroll pages
         // (e.g. ZipRecruiter "Director of Brand Marketing") where scrollHeight grows
@@ -5204,6 +5313,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let softScopeLookupFailed = false;
       // One nation-tier caveat per source, not one per query.
       let nationTierCaveatRecorded = false;
+      // Board-advertised result total for this source's first query, when the
+      // board publishes a trustworthy one. Reported, never acted on.
+      let sourceClaimedTotal = null;
+      let claimedTotalRecorded = false;
       let hitUnhandledPagination   = false;
       let sourceDetailBlockCode    = null;
       let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
@@ -5307,14 +5420,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 location: task.resolveGlassdoorLocation,
                 locId: String(picked.locId), locT: task._glassdoorLocT,
               }, { updateActive: false });
-              if (!sourceSiteChangedWarning) {
-                sourceSiteChangedWarning = {
-                  code: 'location-nation-tier-unenforced',
-                  severity: 'info',
-                  evidence,
-                  suggestion: 'Set a state/province or city in the Job Search location field — those tiers ARE enforced, including across borders. A country alone cannot scope this source.',
-                };
-              }
+              // Deliberately NOT a source warning. `sourceSiteChangedWarning`
+              // is a single per-source slot that every later site fills only
+              // `if (!sourceSiteChangedWarning)` — so claiming it here, before
+              // the first navigation, would permanently mask a real Cloudflare
+              // block found later. Worse, jobs.js maps ANY info-severity warning
+              // to terminal status 'skipped' BEFORE it checks for a block, so a
+              // fully successful Glassdoor run carrying this caveat would report
+              // as skipped with its jobs hidden. The telemetry event above is
+              // the carrier; the bug report renders it from there.
             }
           } else {
             const failure = picked?.failure || 'autocomplete returned no verified exact match';
@@ -5692,6 +5806,30 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           }
 
           siteChangedStreak = 0;
+
+          // Read the board's advertised total BEFORE the empty-page break below.
+          // A zero-row page 1 is exactly when a completeness oracle matters most
+          // — "the board says 520, we collected 0" is the finding — and reading
+          // it after that break left the oracle silent in precisely that case.
+          //
+          // Single-query sources ONLY: the advertised total belongs to ONE
+          // query, while the report's per-source count is summed across every
+          // query and then cross-source deduped, so comparing them on a
+          // multi-query run yields nonsense like "900 of ~520". A pinned target
+          // role issues exactly one query, which is where this applies.
+          if (pageNum === 1 && !claimedTotalRecorded && sourceTasks.length === 1) {
+            claimedTotalRecorded = true;
+            const claimed = await readClaimedResultTotal(page, sourceId);
+            if (claimed != null) {
+              sourceClaimedTotal = claimed;
+              recordManualScraperTelemetry({
+                phase: 'claimed-total', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                claimedTotal: claimed,
+              }, { updateActive: false });
+              logger.info(`[BrowserScraper] ${srcName} advertises ~${claimed} result(s) for this query`);
+            }
+          }
 
           // No jobs on this page despite a clean extraction → end of results
           if (extracted.length === 0) {
@@ -6113,7 +6251,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           const pagedReady = await waitForReady(page, sourceId, overlayBase, signal, task.url);
           if (pagedReady === 'abort' || signal?.aborted) { earlyExit = true; break; }
           if (pagedReady === 'hard-block' || pagedReady === 'skip') {
-            if (!sourceSiteChangedWarning) {
+            // A block must be able to replace a non-block warning: this slot is
+            // per-source and every writer used to bail on ANY existing value, so
+            // one early info-severity note could permanently hide a real
+            // Cloudflare block.
+            if (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block') {
               sourceSiteChangedWarning = pagedReady === 'hard-block'
                   ? {
                     code:       'cloudflare-hard-block',
@@ -6186,6 +6328,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         data:        allJobs,
         pagesWalked: sourcePagesWalked,
         stopReason,
+        // Board-advertised total for this source, when it publishes a
+        // trustworthy one (ZipRecruiter only — see readClaimedResultTotal).
+        // OBSERVATION ONLY: it lets the report say "141 of ~587 advertised"
+        // instead of leaving under-collection invisible. It must never become a
+        // stop rule, a filter, or a retry trigger — the count drifts a unit or
+        // two between requests, and every other board's total is untrustworthy.
+        claimedTotal: sourceClaimedTotal,
         warning:     sourceSiteChangedWarning || null,
         // A detail block does not stop the walk, so `stopReason` legitimately
         // stays `completed` — but the rows it produced carry no description and
