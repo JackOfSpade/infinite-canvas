@@ -120,6 +120,27 @@ export default [
       assert(remote.resolveGlassdoorLocation === 'United States', 'the country pins the market');
       assert(remote.glassdoorLocationSoftScope === true, 'a country-only scope is soft — a failed lookup must not zero the source');
       assert(new URL(remote.url).hostname === 'www.glassdoor.com', 'a US country scope selects the US host');
+
+      // Google pins the BARE template to the egress metro — measured from a
+      // Canadian exit, a bare query returned 0/159 US cards, all Toronto/Ontario.
+      // A remote search produces an empty location FILTER by design, so without
+      // the country it was answered with jobs near whatever IP the run left from.
+      // Remote IS nationwide, so the country is the correct scope exactly here.
+      const remoteGoogle = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, 'United States',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(remoteGoogle.url).searchParams.get('q') === 'Systems Architect United States',
+        'a remote search sends Google the country scope instead of a metro-pinned bare query');
+      const remoteGoogleCa = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, 'Canada',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(remoteGoogleCa.url).searchParams.get('q') === 'Systems Architect Canada',
+        'the remote country scope is not US-specific');
+      const noScopeGoogle = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, '',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(noScopeGoogle.url).searchParams.get('q') === 'Systems Architect',
+        'with neither a location nor a country there is nothing to append');
       assert(new URL(remote.url).searchParams.get('locKeyword') === null, 'the ignored locKeyword text is never sent');
 
       const remoteCa = buildJobTasks(

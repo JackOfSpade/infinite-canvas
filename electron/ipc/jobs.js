@@ -2521,7 +2521,17 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
                        // free-text token, appending it made "jobs" a term each
                        // posting had to contain, and it double-appended on any
                        // query already ending in "jobs".
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(googleKeywordWithLocation(q, loc))}&udm=8` },
+                       // `loc || country`: a REMOTE search deliberately produces an
+                       // empty `loc` (a location FILTER must not narrow it), which
+                       // left Google with the bare template — and the bare template
+                       // is pinned to the EGRESS METRO, not nationwide. Measured
+                       // from a Canadian exit: the bare query returned 0/159 US
+                       // cards, all Toronto/Ontario, while appending the country
+                       // returned 173/173 US AND raised reachable depth. So a
+                       // remote search was silently answered with jobs near
+                       // whatever IP the run left from. The country is the correct
+                       // scope precisely here, because remote IS nationwide.
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(googleKeywordWithLocation(q, loc || country))}&udm=8` },
   };
 
   const tasks = [];
