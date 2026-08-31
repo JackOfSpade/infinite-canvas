@@ -43,6 +43,12 @@ export const ago = (ts) => {
   return Number.isFinite(s) ? ` (${s}s ago)` : '';
 };
 
+/** Bounded free text with an explicit truncation marker — a silent cut reads as corrupted evidence rather than a clipped line. */
+export function clipReportText(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
+}
+
 // Human age ("32s ago" / "5m ago" / "2h14m ago" / "never") for a timestamp —
 // shared by the marketplace module/status rollups' check-recency columns.
 export function formatAge(ts) {
@@ -242,13 +248,13 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         t.finalUrl != null ? `  - finalUrl: \`${redactReportUrl(t.finalUrl)}\`` : null,
         t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
         t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
-        t.pageTitle ? `  - pageTitle: \`${String(t.pageTitle).replace(/`/g, "'").slice(0, 160)}\`` : null,
+        t.pageTitle ? `  - pageTitle: \`${clipReportText(String(t.pageTitle).replace(/`/g, "'"), 160)}\`` : null,
         t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
         t.error ? `  - error: \`${redactReportUrlsInText(t.error)}\`` : null,
         typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
         Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
         t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
-        t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
+        t.bodyHead ? `  - bodyHead: \`${clipReportText(t.bodyHead.replace(/`/g, "'"), 240)}\`` : null,
       ].filter(Boolean),
     );
     if (Array.isArray(t.checks) && t.checks.length > 0) {
@@ -263,7 +269,7 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
           check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
           check.error ? `error=${redactReportUrlsInText(check.error)}` : null,
         ].filter(Boolean);
-        lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+        lines.push(`    - ${clipReportText(parts.join(' | ').replace(/`/g, "'"), 320)}`);
         // Surface the captured visible-text head per check. The top-level bodyHead
         // is only set on the CONNECTED return path, so on a verify FAILURE
         // (soft-wall match, redirect, 401/403) the page text was captured per-check
@@ -273,7 +279,7 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         // mis-fired / an SPA hadn't client-rendered the account UI yet". Only when
         // the top-level bodyHead is absent, to avoid duplicating it for connected.
         if (!t.bodyHead && check.bodyHead) {
-          lines.push(`      bodyHead: \`${String(check.bodyHead).replace(/`/g, "'").slice(0, 240)}\``);
+          lines.push(`      bodyHead: \`${clipReportText(String(check.bodyHead).replace(/`/g, "'"), 240)}\``);
         }
       }
     }
@@ -300,10 +306,10 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         nt.error ? `error=${redactReportUrlsInText(nt.error)}` : null,
       ].filter(Boolean);
       if (negTraceParts.length > 0) {
-        lines.push(`    - ${negTraceParts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+        lines.push(`    - ${clipReportText(negTraceParts.join(' | ').replace(/`/g, "'"), 320)}`);
       }
       if (nt.bodyHead) {
-        lines.push(`    - bodyHead: \`${String(nt.bodyHead).replace(/`/g, "'").slice(0, 240)}\``);
+        lines.push(`    - bodyHead: \`${clipReportText(String(nt.bodyHead).replace(/`/g, "'"), 240)}\``);
       }
     }
   }

@@ -20,14 +20,14 @@ import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js
 import { ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
-  name: 'classifyCompensationFitEligibility: the 75 boundary is inclusive and an unscored job is not a low-scoring job',
+  name: 'classifyCompensationFitEligibility: the 70 boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
     const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
-    // Boundary. The user asked for "75% match or above", so 75 must be
+    // Boundary. The user asked for "70% hiring fit or above", so 70 must be
     // INCLUSIVE — an off-by-one here silently denies the check to exactly the
     // jobs sitting on the bar they named.
-    assert(classifyCompensationFitEligibility(75, opts) === 'eligible', '75 must be eligible (threshold is inclusive)');
-    assert(classifyCompensationFitEligibility(74, opts) === 'below-threshold', '74 must be below the threshold');
+    assert(classifyCompensationFitEligibility(70, opts) === 'eligible', '70 must be eligible (threshold is inclusive)');
+    assert(classifyCompensationFitEligibility(69, opts) === 'below-threshold', '69 must be below the threshold');
     assert(classifyCompensationFitEligibility(100, opts) === 'eligible', '100 must be eligible');
     assert(classifyCompensationFitEligibility(0, opts) === 'below-threshold', '0 must be below the threshold');
     // An unscored job must NEVER be reported as a weak match. The scorer's
@@ -156,6 +156,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       'market evidence with no currency cannot be treated as the listing currency');
     assert(isAuditableCompensationSource({ sourceName: 'Survey', sourceUrl: 'https://example.test/pay' }), 'an http(s) source with a title is auditable');
     assert(!isAuditableCompensationSource({ sourceName: 'Survey', sourceUrl: 'file:///etc/passwd' }) && !isAuditableCompensationSource({ min: 1, max: 2 }), 'unlinked or unsafe source evidence cannot drive a verdict');
+    assert(!isAuditableCompensationSource({ sourceName: 'Leaked session', sourceUrl: 'https://secret-token@example.test/pay' }),
+      'credential-bearing URLs must never become auditable compensation evidence');
     const evidence = [
       { comparable: true, min: 100000, max: 120000, sourceName: 'one', sourceUrl: 'https://example.test/one' },
       { comparable: true, min: 95000, max: 125000, sourceName: 'two', sourceUrl: 'https://example.test/two' },
@@ -178,6 +180,12 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const cadEvidence = selectComparableEvidence(currencyCompetition, 5, 'CAD');
     assert(cadEvidence.length === 5 && cadEvidence.every(item => item.currency.trim().toUpperCase() === 'CAD'),
       'wrong-currency extrema must not consume capped target-currency evidence slots');
+    const canonicalDuplicateEvidence = selectComparableEvidence([
+      { comparable: true, min: 90000, max: 110000, currency: 'USD', sourceName: 'Canonical', sourceUrl: 'https://example.test/pay' },
+      { comparable: true, min: 90000, max: 110000, currency: 'USD', sourceName: 'Same source spelling', sourceUrl: 'HTTPS://EXAMPLE.TEST/pay' },
+    ], 5, 'USD');
+    assert(canonicalDuplicateEvidence.length === 1,
+      'canonical-equivalent source URLs must not occupy multiple evidence slots');
     assert(compensationAssessment({ offer: canadian, competitiveRanges: [merged] }).status === 'competitive', 'offer maximum reaching floor is competitive');
     assert(compensationAssessment({ offer: { ...canadian, max: 84999 }, competitiveRanges: [merged] }).status === 'below_market', 'no hidden buffer below floor');
     const withEvidence = compensationAssessment({
@@ -186,6 +194,12 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       sourceLinks: [{ title: 'Salary survey', url: 'https://example.test/pay', min: 85000, max: 130000, currency: 'CAD', note: 'Senior role in Toronto.' }],
     });
     assert(withEvidence.sourceLinks[0]?.note === 'Senior role in Toronto.' && withEvidence.justification.includes('reaches or exceeds'), 'auditable source details and deterministic verdict must be retained');
+    const unsafeEvidence = compensationAssessment({
+      offer: canadian, competitiveRanges: [merged],
+      sourceLinks: ['https://secret-token@example.test/pay', 'https://example.test/pay'],
+    });
+    assert(unsafeEvidence.sourceLinks.length === 1 && unsafeEvidence.sourceLinks[0] === 'https://example.test/pay',
+      'credential-bearing compensation links must be removed before assessments are persisted');
     const loc = resolveCompensationLocation({}, { workMode: 'remote', remoteRegion: 'canada' }, { canada: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } });
     assert(loc?.display === 'Toronto, Ontario, Canada', 'remote Canada work uses Canada residence');
     const inferredRemote = resolveCompensationLocation(
@@ -397,7 +411,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   // unscored skip retain distinct reason codes as well as distinct prose.
   name: 'Compensation fit gate: threshold constant and distinct skip shapes',
   run: () => {
-    assert(COMPENSATION_MIN_FIT_SCORE === 75, `COMPENSATION_MIN_FIT_SCORE must be 75 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
+    assert(COMPENSATION_MIN_FIT_SCORE === 70, `COMPENSATION_MIN_FIT_SCORE must be 70 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
 
     // Mirrors jobs.js's compensationFallback(job, 'below_fit_threshold', ...)
     // for a job that DOES have a real, parseable salary but scored below the
@@ -430,12 +444,12 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,
       'a known-low-score skip and an unscored skip must never render identical text on the card — that would erase the only signal that distinguishes them');
 
-    // A boundary-inclusive pass (score === 75) never reaches this fallback path
+    // A boundary-inclusive pass (score === 70) never reaches this fallback path
     // at all in jobs.js; it is asserted here only as the documented contract on
     // the constant itself, since the real branch is not independently callable
     // (see the risk note above).
-    assert(75 >= COMPENSATION_MIN_FIT_SCORE && 74 < COMPENSATION_MIN_FIT_SCORE,
-      'the fit gate must be boundary-inclusive: 75 eligible, 74 not — pinned against the real constant');
+    assert(70 >= COMPENSATION_MIN_FIT_SCORE && 69 < COMPENSATION_MIN_FIT_SCORE,
+      'the fit gate must be boundary-inclusive: 70 eligible, 69 not — pinned against the real constant');
 
     return { minFitScore: COMPENSATION_MIN_FIT_SCORE };
   },

@@ -585,6 +585,7 @@ export async function callLLMText(prompt, opts = {}) {
     const result = await requestNonApiAi({
       prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
       formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
       requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -694,6 +695,7 @@ export async function callLLMRaw(prompt, opts = {}) {
     const result = await requestNonApiAi({
       prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
       formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
       requestKind: 'raw-text', signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -751,6 +753,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     const result = await requestNonApiAi({
       prompt, task, responseSchema, maxOutputTokens: maxTokens, formulaSeed,
       handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
       attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator, signal,
     });
     if (meta) meta.model = 'non-api-ai';
@@ -817,6 +820,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
     return requestNonApiAi({
       prompt, task, responseSchema, maxOutputTokens: maxTokens,
       formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+      attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
       attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator, signal,
     });
   }

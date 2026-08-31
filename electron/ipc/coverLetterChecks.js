@@ -1234,7 +1234,7 @@ export function checkPostingReference(paragraphs = []) {
 // state a fact rather than assert an analogy, so “mirrors” is gone entirely
 // and “translates to/into” fires only when “directly” makes the claim a
 // cross-domain equivalence rather than a conversion.
-const CLAIMED_EQUIVALENCE_PATTERN = /\bmaps?\s+(?:directly\s+)?onto\b|\btranslates?\s+directly\s+(?:to|into)\b|\bis\s+(?:exactly|precisely)\s+what\b/giu;
+const CLAIMED_EQUIVALENCE_PATTERN = /\bmaps?\s+(?:directly\s+)?onto\b|\btranslates?\s+directly\s+(?:to|into)\b|\bis\s+(?:exactly|precisely)\s+what\b|\b[^.!?]{1,80}\s+and\s+[^.!?]{1,80}\s+are\s+(?:two|both)\s+(?:answers?|responses?|sides?|forms?)\s+(?:to|of)\s+(?:one|the\s+same)\s+(?:(?:[\p{L}-]+)\s+){0,4}(?:decision|question|call|choice)\b/giu;
 
 /** Flags asserted cross-domain equivalence, not the transfer argument itself. */
 export function checkClaimedEquivalence(paragraphs = []) {
@@ -1251,6 +1251,26 @@ export function checkClaimedEquivalence(paragraphs = []) {
   }
   return observationResult('claimed-equivalence', observations, MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS,
     `${list.length} paragraph(s) argue transfer without asserting an equivalence`);
+}
+
+// A non-final paragraph must not spend its last sentence announcing a new
+// workplace/practice that the next paragraph never develops. This deliberately
+// targets the high-confidence generated shape rather than trying to infer the
+// topic of every possible final sentence.
+const DANGLING_TERMINAL_SYNTHESIS = /^(?:the|this|that)\s+(?:boundary|practice|approach|discipline|experience|judgment|work|decision)\b[^.!?]{0,120}\b(?:also\s+)?(?:shaped|informed|guided)\s+how\s+i\s+(?:used|approached|handled|worked)\b[^.!?]{0,180}\b(?:at|in)\s+[^.!?]+[.!?]?$/iu;
+
+/** Rejects a paragraph-final topic launch that is neither developed nor carried forward. */
+export function checkDanglingParagraphTransition(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length - 1; index++) {
+    const finalSentence = sentences(list[index]).at(-1) || '';
+    const match = DANGLING_TERMINAL_SYNTHESIS.exec(text(finalSentence));
+    if (!match) continue;
+    observations.push(`paragraph ${index + 1} ends by launching an undeveloped topic (“${boundedDetailValue(finalSentence)}”); develop the concrete mechanism or result in that paragraph, carry the exact subject into the next paragraph, or remove the sentence`);
+  }
+  return observationResult('dangling-paragraph-transition', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) conclude their own point or explicitly carry the next subject forward`);
 }
 
 /**
@@ -1430,6 +1450,8 @@ const CONDITIONAL_WELCOME_CLOSE = /\bI(?:\s+would|'d)\s+welcome\s+(?:(?:the\s+)?
 // invitations that occur before the final sentence of the letter.
 const SELF_DIRECTED_CONVERSATION_CLOSE = /\bI\s+(?:want|hope|plan|aim|intend)\s+to\s+(?:talk|speak|discuss|connect|learn|explore)\b/iu;
 const LOOK_FORWARD_CONVERSATION_CLOSE = /\bI\s+look\s+forward\s+to\s+(?:talking|speaking|discussing|connecting|learning|exploring)\b/iu;
+const DIRECT_CONVERSATION_CLOSE = /\bI\s+welcome\s+(?:(?:(?:the\s+)?(?:chance|opportunity))\s+to\s+(?:talk|speak|discuss|connect|share|explore)|(?:a\s+)?(?:conversation|discussion)\b)/iu;
+const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b[^.!?]{0,180}\b(?:or|versus)\b/iu;
 const CANDIDATE_CONTRIBUTION_CLOSE = /\bmy\s+(?:(?:[\p{L}’'-]+\s+){0,3})(?:experience|skills?|work|background|perspective|practice)\b[^.!?]{0,180}\b(?:can|could|would|will)\s+(?:support|contribute(?:\s+to)?|help|advance|strengthen|improve|build|deliver|apply)\b/iu;
 
 // A future-facing discussion can be an effective close when it makes the
@@ -1453,6 +1475,13 @@ export function checkDirectWelcomeClosing(paragraphs = []) {
     || LOOK_FORWARD_CONVERSATION_CLOSE.exec(finalSentence);
   if (selfDirectedMatch && !hasCandidateContributionClose(finalSentence)) {
     observations.push(`paragraph ${index + 1} ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; close by connecting the candidate's experience, skills, or work to the specific work they could support`);
+  }
+  const directConversation = DIRECT_CONVERSATION_CLOSE.exec(finalSentence);
+  const employerChoice = EMPLOYER_CHOICE_CLOSE.exec(finalSentence);
+  if (employerChoice) {
+    observations.push(`paragraph ${index + 1} asks the employer to choose between initiatives (“${boundedDetailValue(employerChoice[0])}”); close with the candidate's concrete contribution to the target work instead of posing an employer-facing prototype question`);
+  } else if (directConversation && !hasCandidateContributionClose(text(list[index]))) {
+    observations.push(`paragraph ${index + 1} uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; name the experience, skills, or work that could support the specific target responsibility`);
   }
   return observationResult('direct-welcome-closing', observations, MAX_COPY_PRECISION_OBSERVATIONS,
     `${list.length} paragraph(s) use a direct, specific invitation when they close with “welcome”`);
@@ -1644,6 +1673,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkContainerizationTechnologyRoles(paragraphs),
     checkPostingReference(paragraphs),
     checkClaimedEquivalence(paragraphs),
+    checkDanglingParagraphTransition(paragraphs),
     checkSentenceLength(paragraphs),
     checkPunctuationStyle(paragraphs),
     checkPlainRegister(paragraphs),

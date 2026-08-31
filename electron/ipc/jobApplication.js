@@ -15,7 +15,9 @@ import { PDFDocument } from 'pdf-lib';
 import { JSDOM } from 'jsdom';
 import { applicationConvergenceInstruction } from './applicationConvergence.js';
 import { handleSafe } from './ipcUtils.js';
-import { embedApplicationSyncConfig } from './resumeHtml.js';
+import { embedApplicationSyncConfig, extractVariantAttrs, isDualMode } from './resumeHtml.js';
+import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
+import { applyDualPdf, pdfHasDualModeBackground, renderPdf } from './resumeRender.js';
 import { LEDGER_VERSION, MINING_TARGET } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart } from './applicationBundle.js';
@@ -84,6 +86,51 @@ export function normalizeApplicationAdditionalNotes(value) {
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
+
+/**
+ * Verify that one generated PDF is actually derived from the selected HTML
+ * panel and carries the paper treatment declared on the root element. Hashes
+ * alone prove identity, not that two independently produced artifacts match.
+ */
+export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }) {
+  const expectedDualMode = isDualMode(extractVariantAttrs(html));
+  const actualDualMode = await pdfHasDualModeBackground(pdf);
+  const reconciliation = await reconcileApplicationHtmlFromPdf({
+    html,
+    pdfBytes: pdf,
+    documentKind,
+  });
+  const textMatches = reconciliation?.success === true && reconciliation?.changed === false;
+  const variantMatches = expectedDualMode === actualDualMode;
+  return {
+    valid: textMatches && variantMatches,
+    textMatches,
+    variantMatches,
+    expectedVariant: expectedDualMode ? 'dual-pdf' : 'ink-only',
+    actualVariant: actualDualMode ? 'dual-pdf' : 'ink-only',
+    reason: !textMatches
+      ? String(reconciliation?.error || reconciliation?.reason || 'PDF text does not match its HTML panel.')
+      : (!variantMatches ? 'PDF paper treatment does not match the HTML root variant.' : ''),
+  };
+}
+
+async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
+  if (pdf == null) return null;
+  const inspection = await inspectGeneratedApplicationPdf({ html, pdf, documentKind });
+  if (inspection.valid) return pdf;
+  logger.warn(`[JobApplication] Regenerating mismatched ${documentKind} PDF before export: ${inspection.reason}`);
+  const rendered = await renderPdf(html, { document: documentKind });
+  if (rendered.fontsLoaded === false) {
+    throw new Error(`The ${documentKind === 'cover' ? 'cover-letter' : 'résumé'} fonts were unavailable while repairing an inconsistent generated PDF.`);
+  }
+  let repaired = rendered.bytes;
+  if (isDualMode(extractVariantAttrs(html))) repaired = await applyDualPdf(repaired);
+  const repairedInspection = await inspectGeneratedApplicationPdf({ html, pdf: repaired, documentKind });
+  if (!repairedInspection.valid) {
+    throw new Error(`Could not produce a ${documentKind} PDF consistent with Application.html: ${repairedInspection.reason}`);
+  }
+  return Buffer.from(repaired);
+}
 
 /**
  * Register an already-built, app-owned application workspace for the normal
@@ -693,6 +740,30 @@ export function checkResumeBulletSelfContainment(mainHtml) {
     : { id: 'resume-bullet-self-containment', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) are self-contained` };
 }
 
+// Containerization and runtime topology are related deployment facts, but a
+// trailing participial topology clause usually turns one concise résumé point
+// into an implementation inventory. Keep this check narrow: an explicit
+// second predicate with a result or constraint remains legal.
+const RESUME_CONTAINERIZATION_TOPOLOGY_TAIL = /\bcontaineri[sz](?:e|ed|ing)\b[^.!?]{0,180},\s*(?:while\s+)?(?:running|serving|routing|proxying|hosting)\b[^.!?]{0,180}\b(?:Nginx|Gunicorn|uWSGI|Apache|Tomcat|Caddy|HAProxy|Traefik|IIS|Passenger|Puma|Unicorn|mod_wsgi)\b/iu;
+
+/** Keeps each résumé highlight focused on one principal achievement. */
+export function checkResumeBulletFocus(mainHtml) {
+  const evidence = extractResumeEvidence(mainHtml);
+  const observations = [];
+  evidence.roles.forEach((role, roleIndex) => {
+    (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
+      const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const match = RESUME_CONTAINERIZATION_TOPOLOGY_TAIL.exec(value);
+      if (!match) return;
+      const label = role.company || role.title || `role ${roleIndex + 1}`;
+      observations.push(`${label} bullet ${bulletIndex + 1} appends runtime topology to a containerization point (“${match[0]}”); keep the principal containerization claim, or retain topology only in a separate result- or constraint-bearing predicate`);
+    });
+  });
+  return observations.length
+    ? { id: 'resume-bullet-focus', passed: false, detail: observations.slice(0, 8).join('; ') }
+    : { id: 'resume-bullet-focus', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement` };
+}
+
 /** Shared pre-publication prose checks for the résumé's generated copy. */
 export function evaluateResumeProseChecks(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -702,6 +773,7 @@ export function evaluateResumeProseChecks(mainHtml) {
   ]).filter(Boolean);
   return [
     checkResumeBulletSelfContainment(mainHtml),
+    checkResumeBulletFocus(mainHtml),
     checkCompoundHyphenation(prose),
     checkParallelStructure(prose),
     checkReferenceClarity(prose),
@@ -1193,7 +1265,7 @@ export function registerJobApplicationHandlers() {
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
     };
-    const [sourceHtml, resumePdfData, coverLetterPdfData, jobListingData] = await Promise.all([
+    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData] = await Promise.all([
       readRegisteredApplicationArtifact(resolvedWorkDir, resumeHtmlPath, {
         ...registeredReadOptions,
         encoding: 'utf8',
@@ -1215,6 +1287,10 @@ export function registerJobApplicationHandlers() {
         expectedSha256: pending.artifactSha256?.jobListing,
       }) : null,
     ]);
+    const [resumePdfData, coverLetterPdfData] = await Promise.all([
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume' }),
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover' }),
+    ]);
     const hasPdf = resumePdfData != null;
     const hasCoverLetterPdf = coverLetterPdfData != null;
     const hasListing = jobListingData != null;
@@ -1223,7 +1299,11 @@ export function registerJobApplicationHandlers() {
     // readback. Registration runs inside the transaction verifier, so a
     // persistence failure rolls the visible bundle back too.
     const syncToken = crypto.randomBytes(32).toString('hex');
-    const sync = applicationSyncConfig(syncToken);
+    const sync = applicationSyncConfig(syncToken, {
+      html: sourceHtml,
+      resumePdf: resumePdfData,
+      coverPdf: coverLetterPdfData,
+    });
     const generatedHtml = embedApplicationSyncConfig(sourceHtml, sync);
 
     // The workspace is deliberately unzipped and predictable. Treat all four

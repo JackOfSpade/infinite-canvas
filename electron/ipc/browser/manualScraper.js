@@ -22,7 +22,7 @@ import {
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
-import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
+import { buildOverlayScript, updateOverlay as paintOverlay } from './scraperOverlay.js';
 import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
@@ -137,7 +137,54 @@ const manualScraperTelemetry = {
   paused: false,  // survives page navigations — source of truth is Node.js, not the page
   consoleLogs: [],   // last 60 browser-side console errors/warnings from the stealth page
   networkErrors: [], // last 30 network failures / 4xx-5xx responses from the stealth page
+  // The phase ring is a 30-slot RECENCY window, so on a long walk the rows that
+  // establish what this run even is — source-start, query-start, the location
+  // resolution/redirect trail — are evicted by per-job anomaly chatter before a
+  // reader ever opens the report. These are emitted at most once per source, so
+  // retaining them separately costs almost nothing and keeps a report readable.
+  origins: [],
+  // Last observed sign of life from the scrape loop, refreshed by every overlay
+  // paint (see updateOverlay below). Distinct from `active`, which only moves on
+  // telemetry PHASES — and Glassdoor's per-card description walk emits no phase
+  // on its success path, so `active` legitimately sits on `page-extract` for
+  // minutes while the walk is healthy. Without this, a healthy walk and a wedged
+  // renderer are the same observation: silence.
+  beat: null,
+  // What the scrape loop is awaiting right now, and since when. A bug report
+  // written mid-walk otherwise names the last COMPLETED phase and leaves the
+  // in-flight operation — the one that is actually slow — unnamed.
+  inFlight: null,
+  // The Chrome the manual scraper launched for itself. scrapeManualSources
+  // closes the shared stealthBrowser singleton and spawns its own process, so
+  // the singleton-derived "scrape browser" line in a bug report reads "not
+  // running" while this one is very much running on the same profile.
+  browser: null,
 };
+
+// Renderer sink for mid-walk progress, installed per run by scrapeManualSources.
+// The module never imports Electron or reaches for a webContents itself — the
+// orchestrator owns which node the events belong to.
+let activitySink = null;
+let lastSinkEmitAt = 0;
+let lastSinkEmitKey = null;
+// Overlay paints are cheap and frequent (every scroll tick in preloadContent);
+// renderer IPC should not be. One second is far below the ~5-7s Glassdoor card
+// cadence, so no real progress step is ever coalesced away.
+const ACTIVITY_SINK_MIN_INTERVAL_MS = 1000;
+// How long a single awaited scrape step may run before it is worth a log line.
+// Well under puppeteer-core's 180s CDP protocolTimeout so a wedged renderer is
+// NAMED long before the protocol gives up on it and the retry loop restarts it.
+const IN_FLIGHT_WARN_MS = 30_000;
+
+// Rows that establish the identity and setup of a source's walk. Each is emitted
+// at most once per source, so they are the first casualties of the 30-slot
+// recency ring on a long run — and the last thing a reader can afford to lose,
+// since they carry the query, the requested location, and any host redirect.
+const ORIGIN_PHASES = new Set([
+  'source-start', 'query-start', 'source-finished', 'reveal-finished',
+  'location-nation-tier-unenforced', 'location-resolution-failed',
+  'location-not-applied', 'location-proof-unavailable', 'location-host-redirected',
+]);
 
 // Browser job boards routinely emit failed ad/analytics requests and CSP/ORB
 // console errors that have no bearing on whether the listing scraper worked.
@@ -226,6 +273,14 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   };
   manualScraperTelemetry.events.push(entry);
   if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+  // Sources run strictly sequentially, so the last phase to name a source names
+  // the source every subsequent overlay paint belongs to. This is what lets the
+  // beat below carry a sourceId without threading one through ~30 call sites.
+  if (entry.sourceId) manualScraperTelemetry.currentSourceId = entry.sourceId;
+  if (ORIGIN_PHASES.has(entry.phase)) {
+    manualScraperTelemetry.origins.push(entry);
+    if (manualScraperTelemetry.origins.length > 24) manualScraperTelemetry.origins.shift();
+  }
   // The 30-slot `events` ring is a recency window: after a source-wide detail
   // block, every later page emits two rows, so 18 pages of skip chatter evicted
   // the single `detail-panel-rate-limit` event that explained the whole run.
@@ -273,6 +328,8 @@ export function resolveManualSourceStopReason({
   hitEmptyPage = false,
   hitPageTurnStalled = false,
   hitUnhandledPagination = false,
+  hitChallengeRecoveryLoop = false,
+  hitProviderResultWindow = false,
   dataStopReason = null,
 } = {}) {
   if (sourceSkipped) return 'blocked';
@@ -291,6 +348,15 @@ export function resolveManualSourceStopReason({
   // stopped before the board's end. Keep it distinct from a normal completion
   // and from a user-configured page cap so the report states the real cause.
   if (hitUnhandledPagination) return 'pagination-unhandled';
+  // A challenge that bounced the walk back to page 1 twice ends it with the
+  // pages past the challenge never read. Ranked ABOVE the data-driven stops
+  // because age-window / no-new-jobs / end-of-results all read as clean,
+  // complete finishes and would hide a walk that gave up.
+  if (hitChallengeRecoveryLoop) return 'challenge-recovery-loop';
+  // The board stopped linking later pages and a direct continuation request
+  // was redirected/clamped somewhere else. This is a provider result-window
+  // boundary, not proof that the advertised corpus was exhausted.
+  if (hitProviderResultWindow) return 'provider-result-window';
   // A data-driven stop (age-window / no-new-jobs, from makeJobPageStop via
   // task.options.onPageScraped) means the walk ended because the DATA said
   // stop, not because it was cut short by the hub's page ceiling — surface it
@@ -313,9 +379,17 @@ export function getManualScraperTelemetry() {
   return {
     active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
     events: manualScraperTelemetry.events.map(e => ({ ...e })),
+    origins: manualScraperTelemetry.origins.map(e => ({ ...e })),
     fieldAnomalies: manualScraperTelemetry.fieldAnomalies.map(e => ({ ...e })),
     consoleLogs: manualScraperTelemetry.consoleLogs.map(e => ({ ...e })),
     networkErrors: manualScraperTelemetry.networkErrors.map(e => ({ ...e })),
+    // `paused` was tracked on every ~500ms waitIfPaused poll but dropped here,
+    // so a scrape a user had deliberately paused reported as a hang — with the
+    // pause button, and the reason for the silence, invisible in a FULL report.
+    paused: manualScraperTelemetry.paused,
+    beat: manualScraperTelemetry.beat ? { ...manualScraperTelemetry.beat } : null,
+    inFlight: manualScraperTelemetry.inFlight ? { ...manualScraperTelemetry.inFlight } : null,
+    browser: manualScraperTelemetry.browser ? { ...manualScraperTelemetry.browser } : null,
   };
 }
 
@@ -1741,6 +1815,93 @@ async function recoverFromChallengeHomeLanding(page, overlayBase, signal, resume
 // button only toggles the page-local window.__icPaused; the Node side reads it by
 // POLLING (waitIfPaused) and re-asserts it after navigations (injectOverlay).
 const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true });
+
+/**
+ * Paint the in-page overlay AND record that the scrape is alive.
+ *
+ * Every progress signal a user needs already existed at exactly the right
+ * granularity — "Opening result card 4/30", "Extracting page 3…", "Loading more
+ * jobs…" — but it was written only into the scraper's own Chrome window and
+ * never left it. The app, the main-process log, and the bug report were all
+ * blind to work happening on screen, so a healthy multi-minute Glassdoor
+ * description walk (whose per-card loop emits telemetry ONLY on failure) was
+ * indistinguishable from a wedged renderer. That ambiguity is what "processing
+ * stuck" reports look like.
+ *
+ * Wrapping the imported painter rather than editing ~30 call sites means every
+ * existing paint — present and future — becomes a heartbeat for free, and the
+ * beat can never drift out of sync with what the window shows.
+ */
+async function updateOverlay(page, state) {
+  recordActivityBeat(state);
+  return paintOverlay(page, state);
+}
+
+/**
+ * Record one liveness beat and forward it to the renderer sink.
+ *
+ * Split out of updateOverlay so the throttle/emit contract is unit-testable
+ * without a live page. Exported for tests only.
+ */
+export function recordActivityBeat(state) {
+  const beat = {
+    ts:         Date.now(),
+    sourceId:   manualScraperTelemetry.currentSourceId || null,
+    srcName:    state?.srcName ?? null,
+    status:     state?.status ?? null,
+    // By default every different overlay message is a meaningful progress
+    // step. Tight loops can provide one stable key while their copy/count
+    // changes, so the renderer limiter remains effective.
+    activityKey: state?.activityKey ?? state?.activityKind ?? state?.status ?? null,
+    count:      Number.isFinite(state?.count) ? state.count : null,
+    queryIndex: state?.queryIndex ?? null,
+    queryTotal: state?.queryTotal ?? null,
+    pageNum:    state?.pageNum ?? null,
+  };
+  manualScraperTelemetry.beat = beat;
+  // Throttled so a scroll loop cannot flood the renderer, but ordinary callers
+  // still emit a changed status immediately because the fallback key is status.
+  // Tight loops opt into a stable key when their changing count is not a new
+  // semantic step.
+  if (!activitySink) return beat;
+  const changed = beat.activityKey !== lastSinkEmitKey;
+  if (changed || Date.now() - lastSinkEmitAt >= ACTIVITY_SINK_MIN_INTERVAL_MS) {
+    lastSinkEmitAt = Date.now();
+    lastSinkEmitKey = beat.activityKey;
+    try { activitySink(beat); } catch { /* a reporting sink must never break a scrape */ }
+  }
+  return beat;
+}
+
+/** Install the renderer activity sink. Exported for tests; runs set it via scrapeManualSources. */
+export function setActivitySink(sink) {
+  activitySink = typeof sink === 'function' ? sink : null;
+  lastSinkEmitAt = 0;
+  lastSinkEmitKey = null;
+}
+
+/**
+ * Run one awaited scrape step with its identity recorded while it is in flight.
+ *
+ * A report written mid-walk otherwise names only the last COMPLETED phase, so
+ * the operation that is actually slow is the one thing it cannot name. Records
+ * a bounded marker, logs once if the step outlives IN_FLIGHT_WARN_MS, and always
+ * clears — including on throw, so a failure cannot leave a phantom marker that
+ * makes the next report claim a step is still running.
+ */
+async function withInFlight(label, detail, run) {
+  const started = Date.now();
+  manualScraperTelemetry.inFlight = { label, detail: detail || null, since: started };
+  const warn = setTimeout(() => {
+    logger.warn(`[BrowserScraper] still awaiting ${label}${detail ? ` (${detail})` : ''} after ${Math.round(IN_FLIGHT_WARN_MS / 1000)}s — the page may be unresponsive; puppeteer gives up on a wedged evaluate at 180s and this step is then retried`);
+  }, IN_FLIGHT_WARN_MS);
+  try {
+    return await run();
+  } finally {
+    clearTimeout(warn);
+    manualScraperTelemetry.inFlight = null;
+  }
+}
 
 async function injectOverlay(page) {
   await page.evaluate(OVERLAY_SCRIPT).catch(() => {});
@@ -4299,6 +4460,42 @@ export function parseClaimedResultTotal(text) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/** Return the 1-based page encoded by ZipRecruiter's /jobs-search[/N] route. */
+export function zipRecruiterSearchPageNumber(value) {
+  try {
+    const pathname = new URL(String(value || '')).pathname.replace(/\/+$/, '');
+    if (pathname === '/jobs-search') return 1;
+    const match = pathname.match(/^\/jobs-search\/(\d+)$/);
+    const page = match ? Number(match[1]) : NaN;
+    return Number.isInteger(page) && page >= 1 ? page : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ZipRecruiter can stop rendering its Next link after page 20 even while a
+ * direct /jobs-search/21 request serves new rows. Probe that hidden tail only
+ * when the board itself says more results exist and the hub's page limit still
+ * permits another page. Other sources must retain their verified controls.
+ */
+export function shouldTryZipRecruiterDirectContinuation({
+  sourceId,
+  claimedTotal,
+  collected,
+  pageNum,
+  maxPages,
+  hasNextUrl,
+} = {}) {
+  return sourceId === 'ziprecruiter'
+    && Number.isFinite(Number(claimedTotal))
+    && Number(claimedTotal) > Number(collected || 0)
+    && Number.isInteger(pageNum)
+    && Number.isInteger(maxPages)
+    && pageNum < maxPages
+    && hasNextUrl === true;
+}
+
 /**
  * Scroll a lazy list with TRUSTED wheel input.
  *
@@ -4410,7 +4607,13 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     const raw   = await page.evaluate(extractorJS).catch(() => []);
     count = countDistinctJobs(raw);
     const target = Number.isFinite(jobsPerPlatform) ? Math.max(0, jobsPerPlatform - existingJobs) : null;
-    await updateOverlay(page, { ...overlayBase, status: `Loading jobs… ${count}${target == null ? '' : `/${target}`}` });
+    await updateOverlay(page, {
+      ...overlayBase,
+      // Both paints in this hot loop describe the same reveal operation. Keep
+      // the visible count fresh in Chrome, but coalesce their renderer beats.
+      activityKey: 'google-preload',
+      status: `Loading jobs… ${count}${target == null ? '' : `/${target}`}`,
+    });
     if (target != null && count >= target) { exit = 'target-reached'; break; }
 
     // The board's OWN end-of-list marker is definitive — stop immediately rather
@@ -4441,6 +4644,7 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
         // scroll document.body so either trigger path gets hit.
         await updateOverlay(page, {
           ...overlayBase,
+          activityKey: 'google-preload',
           status: `Loading the full Google list — not selecting cards yet… ${count}`,
         });
         // TRUSTED wheel events are REQUIRED here. Google's batch loader ignores
@@ -5173,7 +5377,25 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
 
   let closed = false;
   let intentional = false;
-  browser.on('disconnected', () => { closed = true; if (!intentional) onCrash?.(); });
+  // A bug report's "Scrape/stealth browser" line is derived from the
+  // stealthBrowser singleton — which scrapeManualSources deliberately closes
+  // before spawning THIS process on the same shared profile. Recording it here
+  // is what stops a report from stating "not running (profile lock free)" while
+  // a visible scrape Chrome holds that very profile.
+  manualScraperTelemetry.browser = {
+    running: true,
+    launchedAt: Date.now(),
+    executablePath: executablePath || null,
+    profileDir: userDataDir || null,
+    pid: browser.process()?.pid ?? null,
+  };
+  browser.on('disconnected', () => {
+    closed = true;
+    if (manualScraperTelemetry.browser) {
+      manualScraperTelemetry.browser = { ...manualScraperTelemetry.browser, running: false, closedAt: Date.now() };
+    }
+    if (!intentional) onCrash?.();
+  });
 
   // Re-inject overlay after any navigation that kills it (CF blocks, redirects).
   // OVERLAY_SCRIPT is a no-op when the panel is already present; skips challenge pages.
@@ -5196,6 +5418,13 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
       clearInterval(overlayKeepAlive);
       if (!closed) await browser.close().catch(() => {});
       closed = true;
+      // Set here as well as in the 'disconnected' handler. The report claims the
+      // shared profile lock is HELD while this reads running, so it must not
+      // depend on an event that a failed/forced close might not deliver —
+      // over-reporting a live browser would send a reader after a phantom lock.
+      if (manualScraperTelemetry.browser?.running) {
+        manualScraperTelemetry.browser = { ...manualScraperTelemetry.browser, running: false, closedAt: Date.now() };
+      }
       // Let Chrome release the shared-profile SingletonLock before the next launch.
       await new Promise(r => setTimeout(r, 600));
     },
@@ -5222,15 +5451,27 @@ export function resetManualScraperDiagnostics() {
 export function resetManualScraperTelemetry() {
   manualScraperTelemetry.active = null;
   manualScraperTelemetry.events = [];
+  manualScraperTelemetry.origins = [];
   manualScraperTelemetry.paused = false;
+  manualScraperTelemetry.beat = null;
+  manualScraperTelemetry.inFlight = null;
+  manualScraperTelemetry.currentSourceId = null;
+  // Cleared at the RUN boundary, not at teardown: a report written after a run
+  // finishes should still show which Chrome that run used and that it closed,
+  // but a NEW run must not display the previous run's process as its own.
+  manualScraperTelemetry.browser = null;
   resetManualScraperDiagnostics();
 }
 
-// `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null } — for
-// per-source dispatch the orchestrator passes resetDiagnostics:false (it cleared
-// once up front) and the real index/total so the "Starting X/Y" log stays correct.
+// `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null, onActivity=null }
+// — for per-source dispatch the orchestrator passes resetDiagnostics:false (it
+// cleared once up front) and the real index/total so the "Starting X/Y" log stays
+// correct. `onActivity` receives the mid-walk liveness beat (see updateOverlay);
+// it is the ONLY channel this module has to the renderer, and it is optional so
+// direct callers and tests need not supply one.
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null, opts = {}) {
-  const { resetDiagnostics = true, sourceIndexBase = 0, sourceTotal = null } = opts;
+  const { resetDiagnostics = true, sourceIndexBase = 0, sourceTotal = null, onActivity = null } = opts;
+  setActivitySink(onActivity);
   // Direct callers start a complete browser-scrape run here. The jobs
   // orchestrator dispatches one source at a time and has already performed the
   // equivalent reset at its overall run boundary, so it passes false to retain
@@ -5239,6 +5480,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
   if (!Array.isArray(tasks) || tasks.length === 0) {
     clearManualScraperTelemetry('idle');
+    // This branch returns before the normal finally block. Do not let a
+    // callback supplied for an empty probe survive into a later run.
+    setActivitySink(null);
     return [];
   }
 
@@ -5304,6 +5548,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let hitPageCap               = false;
       let hitEmptyPage             = false;
       let hitPageTurnStalled       = false;
+      // Set when a challenge bounced the walk back to page 1 twice and the walk
+      // gave up rather than loop. Source-scoped because `paginationRecoveries`
+      // is declared per-query and cannot be read at the resolve site.
+      let hitChallengeRecoveryLoop = false;
+      let hitProviderResultWindow  = false;
       // Queries skipped because Glassdoor's non-canonical route cannot carry the
       // location marker. Counted so a run where EVERY query was skipped cannot
       // report a clean `completed` with zero jobs and no stated reason.
@@ -5317,6 +5566,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // board publishes a trustworthy one. Reported, never acted on.
       let sourceClaimedTotal = null;
       let claimedTotalRecorded = false;
+      let directContinuationFromPage = null;
+      let directContinuationPages = 0;
+      let directContinuationStop = null;
       let hitUnhandledPagination   = false;
       let sourceDetailBlockCode    = null;
       let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
@@ -5325,6 +5577,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let sourceDetailReprobes     = 0;    // cooldown re-probes attempted
       let sourceDetailRecovered    = 0;    // re-probes that restored enrichment
       let sourceDetailSkippedCards = 0;    // cards that never had a panel request issued
+      // `skippedCards` only counts pages ENTERED under an already-armed block, so
+      // the page that TRIGGERS one — the page that stops mid-walk and defers every
+      // remaining card — contributes zero. A 30-page run that lost 21 rows on page
+      // 29 and recovered on page 30 therefore reported `skippedCards: 0` and read
+      // "enrichment resumed", i.e. no loss at all. These three survive recovery so
+      // the report can state what the episode actually cost.
+      let sourceDetailUnenriched   = 0;    // rows that ended the walk with no description
+      let sourceDetailReprobeTotal = 0;    // re-probes attempted (NOT reset on recovery)
+      let sourceDetailFirstBlockPg = null; // first page ever blocked (NOT cleared on recovery)
+      // The funnel's "Found (raw)" is computed from what this scraper RETURNS, so
+      // it is already net of this per-source sourceJobKey dedup. A 30-page walk
+      // over ~900 physical cards that returned 782 rows reported "after dedup:
+      // 782 (0 dropped)" — true of the later cross-source title+company stage,
+      // but it hid an entire earlier layer. Count it so the drop is attributable
+      // instead of only inferable by subtracting overlay card indices by hand.
+      let sourcePhysicalCards      = 0;    // distinct physical cards the walk actually scanned
       let redirectHostRecorded     = false; // geo-redirect noted once per source, not per page
       let dataStopReason           = null; // set by task.options.onPageScraped (age-window / no-new-jobs) — see jobPageStop.js
       // Exact requests that reached the navigation step. The task list is only
@@ -5692,7 +5960,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             url: page.url(),
           });
 
-          const { jobs: extracted, siteChangedError, evalError } = await runExtractor(page, task.extractorJS);
+          // `page-extract` above announces that extraction is ABOUT to start and
+          // carries the pre-extraction cumulative count, so on its own it cannot
+          // distinguish "extractor still running" from "extractor returned 0".
+          // Naming the await makes a stalled evaluate visible while it stalls,
+          // and the outcome row below closes the pair.
+          const { jobs: extracted, siteChangedError, evalError } = await withInFlight(
+            'extractor evaluate',
+            `${srcName} q${qi + 1} p${pageNum}`,
+            () => runExtractor(page, task.extractorJS),
+          );
+          recordManualScraperTelemetry({
+            phase: 'page-extracted',
+            sourceId,
+            srcName,
+            queryIndex: qi + 1,
+            queryTotal: sourceTasks.length,
+            pageNum,
+            extracted: extracted.length,
+            outcome: evalError ? 'eval-error' : siteChangedError ? 'site-changed' : 'ok',
+          }, { updateActive: false });
 
           // A non-SITE_CHANGED throw (e.g. "context destroyed" from a
           // mid-evaluate navigation) is usually transient and should retry,
@@ -5841,6 +6128,16 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // Trust the platform's ranked/fuzzy search results. Every distinct row
           // returned for the issued query is eligible for detail expansion; the
           // app must not impose a second exact-ish title admission policy.
+          // Physical cards this iteration actually put in front of us. On a
+          // load-more source `extracted` is the WHOLE accumulated list and is
+          // re-scanned from row 0 every iteration, so counting a duplicate per
+          // re-encounter measures re-scanning, not shed cards — over 30 pages it
+          // would have reported ~13,000 instead of the real 118. `loadMorePrevCount`
+          // still holds the previous iteration's total here (it is advanced later,
+          // at the pageRows slice), so this delta is exactly the new cards.
+          sourcePhysicalCards += loadMoreSelector
+            ? Math.max(0, extracted.length - loadMorePrevCount)
+            : extracted.length;
           const newJobs = [];
           for (const job of extracted) {
             // One listing can surface in two role queries. Google embeds that
@@ -5929,6 +6226,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             const reprobeWaitedMs = detailBlockReprobeDue ? Date.now() - sourceDetailBlockAt : 0;
             if (detailBlockReprobeDue) {
               sourceDetailReprobes += 1;
+              sourceDetailReprobeTotal += 1;
               logger.info(`[BrowserScraper] ${srcName}: re-probing detail enrichment on page ${pageNum} after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode} (attempt ${sourceDetailReprobes}/${DETAIL_BLOCK_MAX_REPROBES})`);
               recordManualScraperTelemetry({
                 phase: 'detail-block-reprobe', sourceId, srcName,
@@ -6046,6 +6344,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             }
           }
           const { jobs: enhanced, descError, descWarning, expandedCount } = detailResult;
+          // Exactly the rows the scoring-evidence gate will drop — no inference
+          // about which branch deferred them, and it stays correct on the
+          // triggering page where only a suffix of the cards was deferred.
+          sourceDetailUnenriched += enhanced.filter(j => j?.descriptionDeferredReason).length;
 
           const descCfg = DESC_CONFIGS[sourceId];
           if (descCfg?.panelSelector || descCfg?.expandViaNavigation) {
@@ -6092,6 +6394,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // so landing back here restarts the wait instead of retrying every
             // subsequent page.
             if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
+            if (sourceDetailFirstBlockPg == null) sourceDetailFirstBlockPg = pageNum;
             sourceDetailBlockCode = descWarning.code;
             sourceDetailBlockAt = Date.now();
             sourceDetailBlockCount += 1;
@@ -6164,9 +6467,47 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // Captured BEFORE the click so a URL-paginated source can prove the
           // page actually turned (see the wait after the settle below).
           const beforeUrl = urlPaginated ? safePageUrl(page) : null;
-          const nextPage = loadMoreSelector
+          let nextPage = loadMoreSelector
             ? await clickLoadMore(page, loadMoreSelector)
             : await clickNextPage(page, sourceId);
+          let directAdvance = null;
+          if (!nextPage.clicked && !nextPage.unhandled && shouldTryZipRecruiterDirectContinuation({
+            sourceId,
+            claimedTotal: sourceClaimedTotal,
+            collected: allJobs.length,
+            pageNum,
+            maxPages,
+            hasNextUrl: typeof task.options?.nextUrl === 'function',
+          })) {
+            const expectedPage = pageNum + 1;
+            let directUrl = null;
+            try { directUrl = task.options.nextUrl(pageNum); }
+            catch { /* invalid task wiring falls through to the normal stop */ }
+            if (directUrl) {
+              directContinuationFromPage ??= expectedPage;
+              logger.info(`[BrowserScraper] ${srcName} page ${pageNum} exposed no Next link with ${allJobs.length}/${sourceClaimedTotal} advertised rows collected — probing direct page ${expectedPage}`);
+              recordManualScraperTelemetry({
+                phase: 'direct-page-probe', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                pageNum: expectedPage, count: allJobs.length, url: directUrl,
+              });
+              await updateOverlay(page, {
+                ...overlayBase,
+                count: allJobs.length,
+                status: `Checking unlinked page ${expectedPage}…`,
+              }).catch(() => {});
+              const issued = await page.evaluate(u => { window.location.href = u; }, directUrl)
+                .then(() => true)
+                .catch(() => false);
+              if (issued) {
+                directAdvance = { expectedPage, url: directUrl };
+                nextPage = { clicked: true, unhandled: null };
+              } else {
+                directContinuationStop = 'navigation-failed';
+                hitPageTurnStalled = true;
+              }
+            }
+          }
           if (!nextPage.clicked) {
             if (nextPage.unhandled) {
               hitUnhandledPagination = true;
@@ -6243,6 +6584,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 count: allJobs.length, url: beforeUrl,
               });
               hitPageTurnStalled = true;
+              if (directAdvance) {
+                directContinuationStop = 'navigation-stalled';
+                pageNum -= 1; // attempted page was never reached
+              }
               break;
             }
           }
@@ -6281,8 +6626,48 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // CF clearance is now set and a DOM-click navigation may avoid the 403
             // that a direct URL jump to start=N triggered. Give up after 1 retry.
             paginationRecoveries++;
-            if (paginationRecoveries >= 2) break;
+            if (paginationRecoveries >= 2) {
+              // Two bounces back to page 1 = the walk gave up; the pages past
+              // the challenge were never read. Without this flag the break fell
+              // through to `completed` and reported as a clean finish.
+              hitChallengeRecoveryLoop = true;
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: anti-bot recovery returned to page 1 twice — abandoning this query's walk at page ${pageNum}`);
+              recordManualScraperTelemetry({
+                phase: 'challenge-recovery-loop', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                count: allJobs.length,
+              });
+              break;
+            }
+            if (directAdvance) directContinuationStop = 'challenge-recovery';
             pageNum = 1;
+          }
+          // Validate only after readiness settles. The URL can briefly expose
+          // /jobs-search/21 before a provider redirect finishes; checking at the
+          // first URL change would accept that transient route and then extract
+          // the redirected page 1 as if it were page 21.
+          if (directAdvance && pagedReady !== 'recovered') {
+            const landedPage = zipRecruiterSearchPageNumber(safePageUrl(page));
+            if (landedPage !== directAdvance.expectedPage) {
+              directContinuationStop = landedPage == null ? 'redirected-off-results' : `clamped-to-page-${landedPage}`;
+              hitProviderResultWindow = true;
+              logger.info(`[BrowserScraper] ${srcName} direct page ${directAdvance.expectedPage} landed on ${landedPage == null ? safePageUrl(page) || 'an unknown route' : `page ${landedPage}`} — provider result window reached`);
+              recordManualScraperTelemetry({
+                phase: 'direct-page-rejected', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                pageNum: directAdvance.expectedPage, landedPage,
+                count: allJobs.length, reason: directContinuationStop, url: safePageUrl(page),
+              });
+              pageNum -= 1; // keep pagesWalked at the deepest page actually served
+              break;
+            }
+            directContinuationStop = null;
+            directContinuationPages += 1;
+            recordManualScraperTelemetry({
+              phase: 'direct-page-landed', sourceId, srcName,
+              queryIndex: qi + 1, queryTotal: sourceTasks.length,
+              pageNum: landedPage, count: allJobs.length, url: safePageUrl(page),
+            });
           }
         }
 
@@ -6319,6 +6704,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitEmptyPage,
         hitPageTurnStalled,
         hitUnhandledPagination,
+        hitChallengeRecoveryLoop,
+        hitProviderResultWindow,
         dataStopReason,
       });
       const result = {
@@ -6330,30 +6717,45 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         stopReason,
         // Board-advertised total for this source, when it publishes a
         // trustworthy one (ZipRecruiter only — see readClaimedResultTotal).
-        // OBSERVATION ONLY: it lets the report say "141 of ~587 advertised"
-        // instead of leaving under-collection invisible. It must never become a
-        // stop rule, a filter, or a retry trigger — the count drifts a unit or
-        // two between requests, and every other board's total is untrustworthy.
+        // Also gates only ZipRecruiter's bounded direct-page continuation when
+        // its visible pager disappears. It never filters rows or asserts that
+        // the drifting headline is an exact completion target.
         claimedTotal: sourceClaimedTotal,
+        directContinuation: directContinuationFromPage != null
+          ? {
+            fromPage: directContinuationFromPage,
+            pages: directContinuationPages,
+            lastPage: directContinuationPages > 0
+              ? directContinuationFromPage + directContinuationPages - 1
+              : null,
+            stop: directContinuationStop || dataStopReason || stopReason,
+          }
+          : null,
         warning:     sourceSiteChangedWarning || null,
         // A detail block does not stop the walk, so `stopReason` legitimately
         // stays `completed` — but the rows it produced carry no description and
         // are dropped by the scoring-evidence gate. Report it as its own fact
         // instead of leaving the run to look clean. `null` = enrichment ran for
         // every page.
-        detailBlock: sourceDetailBlockCode || sourceDetailBlockCount > 0
+        detailBlock: sourceDetailBlockCode || sourceDetailBlockCount > 0 || sourceDetailUnenriched > 0
           ? {
             code: sourceDetailBlockCode,          // null once a re-probe recovered
             active: Boolean(sourceDetailBlockCode),
             firstPage: sourceDetailBlockPage,
+            // Survives recovery — `firstPage`/`reprobes` above are reset when a
+            // re-probe succeeds, which erased the episode from the report.
+            everBlockedPage: sourceDetailFirstBlockPg,
             arms: sourceDetailBlockCount,
             reprobes: sourceDetailReprobes,
+            reprobesTotal: sourceDetailReprobeTotal,
             recovered: sourceDetailRecovered,
             skippedCards: sourceDetailSkippedCards,
+            unenrichedRows: sourceDetailUnenriched,
           }
           : null,
         executedQueries,
         providerGathered: providerSeen.size,
+        providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),
         relevanceDropped: 0,
         preCapRelevanceDropped: 0,
         relevanceRejected: [],
@@ -6386,6 +6788,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
   } finally {
     await teardownCurrent();
     clearManualScraperTelemetry(signal?.aborted ? 'aborted' : 'finished');
+    // Drop the renderer sink with the run that installed it. A later direct
+    // caller (or a test) that passes no sink must not keep emitting into the
+    // previous run's node, and an in-flight marker must never outlive the
+    // await it described.
+    activitySink = null;
+    manualScraperTelemetry.inFlight = null;
   }
 
   // Emit empty results for sources we never reached

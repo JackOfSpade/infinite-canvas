@@ -7,6 +7,7 @@ import os from 'os';
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
+import { getManualScraperTelemetry } from './browser/manualScraper.js';
 import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
@@ -140,12 +141,11 @@ function formatStealthBrowserActivity(activity) {
 // broken diagnostic section from suppressing the rest, but make that omission
 // explicit (and bounded) so it cannot be mistaken for an observed empty state.
 function diagnosticRenderFailureMarkdown(section, err) {
-  const detail = String(err?.message || err || 'unknown error')
+  const detail = truncateDiagnosticText(String(err?.message || err || 'unknown error')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/`/g, "'")
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 240) || 'unknown error';
+    .trim(), 240) || 'unknown error';
   return `\n## ${section}\n_(section failed to render: \`${detail}\`)_\n`;
 }
 
@@ -181,7 +181,7 @@ export function formatLoginVerificationTimingResult(duration = {}) {
       // was introduced. Keep their prior report shape rather than treating them
       // as an unverified failure.
       if (duration.skipped) return withReason('skipped');
-      if (duration.error) return `error: ${redactReportUrlsInText(duration.error).replace(/\|/g, '\\|').slice(0, 80)}`;
+      if (duration.error) return `error: ${truncateDiagnosticText(redactReportUrlsInText(duration.error), 80).replace(/\|/g, '\\|')}`;
       return duration.connected ? 'connected' : 'not connected';
   }
 }
@@ -588,6 +588,16 @@ function buildScraperAdaptationSnapshot() {
   }
 
   const budgetLines = [];
+  // These stats have EXACTLY ONE writer: browserPool.js's scrapeMultiple
+  // (recordReady/recordBodySize), whose only caller is marketplace.js. The job
+  // browser scraper (manualScraper.js) imports neither browserPool nor
+  // scrapeBudget, so any job-source key here is a fossil left by the retired
+  // scrapeMultiple job path and describes NOTHING about how a job scrape ran
+  // today. Rendered undated and unattributed, "glassdoor-0: ema 9950ms" reads as
+  // live tuning state and invites sizing a "should have finished by now"
+  // judgement against a number that has not been written in months.
+  const JOB_SOURCE_KEY = /^(glassdoor|google|indeed|ziprecruiter|linkedin|dice|usajobs|remoteok|weworkremotely|wellfound)(-\d+)?$/;
+  let staleJobKeys = 0;
   if (budgets && Object.keys(budgets).length > 0) {
     for (const [key, s] of Object.entries(budgets).sort((a, b) => a[0].localeCompare(b[0]))) {
       if (!s || (!(s.samples > 0) && !(s.bodySamples > 0))) continue;
@@ -601,8 +611,20 @@ function buildScraperAdaptationSnapshot() {
       if (s.bodySamples > 0) {
         parts.push(`body ~${Math.round(s.bodyEma / 1000)}KB /${s.bodySamples}`);
       }
-      budgetLines.push(`- \`${key}\`: ${parts.join(', ')}`);
+      const written = Math.max(Number(s.updated) || 0, Number(s.bodyUpdated) || 0);
+      if (written > 0) {
+        const ageH = (Date.now() - written) / 3_600_000;
+        parts.push(ageH < 1 ? `written ${Math.max(0, Math.round(ageH * 60))}m ago` : ageH < 48 ? `written ${ageH.toFixed(1)}h ago` : `written ${Math.round(ageH / 24)}d ago`);
+      } else {
+        parts.push('write time not recorded');
+      }
+      const isJobKey = JOB_SOURCE_KEY.test(key);
+      if (isJobKey) staleJobKeys++;
+      budgetLines.push(`- \`${key}\`: ${parts.join(', ')}${isJobKey ? ' — ⚠️ **not written by the job scraper**' : ''}`);
     }
+  }
+  if (staleJobKeys > 0) {
+    budgetLines.push(`- ⚠️ ${staleJobKeys} key(s) above name a JOB source but this store is written only by \`browserPool.scrapeMultiple\` (marketplace comp scrapes). \`manualScraper.js\` imports neither \`browserPool\` nor \`scrapeBudget\`, so these are fossils of a retired job path — do NOT read them as this run's per-page cost or use them to judge whether a job scrape is overdue.`);
   }
 
   if (rlLines.length === 0 && budgetLines.length === 0) return '';
@@ -616,6 +638,10 @@ function buildScraperAdaptationSnapshot() {
 > budget far below a source's seed means it normally settles fast. The body
 > baseline is the source's typical good-response size — soft blocks are flagged
 > when a response is anomalously small relative to it.
+> **Scope:** learned budgets are written ONLY by the marketplace comp-scrape
+> driver (browserPool.scrapeMultiple). The job browser scraper does not feed
+> or read them, so a job-source key here is stale by construction and each row
+> now carries its write age.
 
 ### Rate limiter (this session)
 ${rlLines.length ? rlLines.join('\n') : '- (shared scraper rate limiter idle; LinkedIn guest-enrichment limits are reported separately in Job Search Pipeline)'}
@@ -698,7 +724,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
           for (const key of getJobSearchTransientKeysForSave(d.hubState)) {
             const v = d[key];
             if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length}`); }
-            else if (v) hits.push(v === true ? `${key}=true` : typeof v === 'string' ? `${key}="${v.slice(0, 60)}"` : `${key}=set`);
+            else if (v) hits.push(v === true ? `${key}=true` : typeof v === 'string' ? `${key}="${truncateDiagnosticText(v, 60)}"` : `${key}=set`);
           }
         }
         if (n.type === 'sellhub' && d.platformFitPending) hits.push('platformFitPending=true');
@@ -956,10 +982,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       // distinguish an intentional hidden prior result from a ghost board.
       if (n.type === 'jobboard') {
         previewParts.push(`stale: ${d.stale ? 'true' : 'false'}`);
-        if (d.staleReason) previewParts.push(`staleReason: ${String(d.staleReason).slice(0, 100)}`);
+        if (d.staleReason) previewParts.push(`staleReason: ${truncateDiagnosticText(d.staleReason, 100)}`);
         if (d.combineSignature != null) previewParts.push(`combineSignature: ${String(d.combineSignature).slice(0, 160) || '∅'}`);
       }
-      if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
+      if (d.errorMessage) previewParts.push(`err: ${truncateDiagnosticText(d.errorMessage, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
       // Warnings: show total + block-severity + DISTINCT source breakdown. The
       // hub renders one card per source but stores one warning per blocked
@@ -1060,7 +1086,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       }
       if (d.platformId) previewParts.push(`platform: ${d.platformId}`);
       if (d.status) previewParts.push(`status: ${d.status}`);
-      if (d.statusMessage) previewParts.push(`statusMsg: ${String(d.statusMessage).slice(0, 100)}`);
+      if (d.statusMessage) previewParts.push(`statusMsg: ${truncateDiagnosticText(d.statusMessage, 100)}`);
       if (d.listingUrl) {
         try {
           const u = new URL(d.listingUrl);
@@ -1334,7 +1360,22 @@ ${rows}
         }
         if (latestLog) signals.push({ ts: latestLog, label: 'node-tagged log' });
         if (jobsTel?.nodeId === nodeId && jobsTel?.pipeline?.ts) {
-          signals.push({ ts: jobsTel.pipeline.ts, label: 'search progress heartbeat' });
+          // `pipeline.ts` moves on stage transitions and on every source-progress
+          // emit — NOT on a timer. Naming it a "heartbeat" invited the reading
+          // that a stale value proves a stall, which is wrong for any source that
+          // simply has nothing to emit between its start and its finish.
+          signals.push({ ts: jobsTel.pipeline.ts, label: 'search stage/progress emit' });
+        }
+        // The browser scraper's activity beat is the one signal that ticks
+        // continuously during a browser walk (every overlay paint: per card, per
+        // page, per pagination step). Without it, a healthy multi-minute
+        // Glassdoor description walk trips the hung flag every single time,
+        // because its per-card loop emits telemetry only on failure.
+        if (jobsTel?.nodeId === nodeId) {
+          try {
+            const beatTs = getManualScraperTelemetry?.()?.beat?.ts;
+            if (Number.isFinite(beatTs)) signals.push({ ts: beatTs, label: 'browser scrape activity beat' });
+          } catch { /* ignore */ }
         }
         if (jobsTel?.nodeId === nodeId && jobsTel?.scoringHeartbeat?.active && jobsTel.scoringHeartbeat?.ts) {
           signals.push({ ts: jobsTel.scoringHeartbeat.ts, label: 'scoring stream heartbeat' });
@@ -1355,9 +1396,14 @@ ${rows}
           const last = lastActivityForNode(t.nodeId);
           // Suspect a hang when the node has shown no signal past the hint window
           // (or none at all) while a task is still registered and aging.
-          const suspect = (last == null ? t.oldestAgeMs : last.ms) > HUNG_HINT_MS;
+          // A scrape the user deliberately paused is silent BY REQUEST. Flagging
+          // it "possibly hung" sends a reader hunting for a deadlock that does
+          // not exist, so the pause state overrides the staleness heuristic.
+          let scrapePaused = false;
+          try { scrapePaused = getManualScraperTelemetry?.()?.paused === true && jobsTel?.nodeId === t.nodeId; } catch { /* ignore */ }
+          const suspect = !scrapePaused && (last == null ? t.oldestAgeMs : last.ms) > HUNG_HINT_MS;
           const lastCell = last == null ? 'no node activity recorded' : `${fmtAge(last.ms)} ago (${last.label})`;
-          const flag = suspect ? ' ⚠️ possibly hung' : '';
+          const flag = scrapePaused ? ' ⏸️ paused by user' : suspect ? ' ⚠️ possibly hung' : '';
           const chans = t.channels?.length ? t.channels.join(', ') : '—';
           return `| \`${shortId(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
         })
@@ -1698,7 +1744,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
     if (entries.length > 0 || profileReservation || (collisionTelemetry?.total || 0) > 0) {
       const rows = entries.map(d => {
         const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
-        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
+        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${truncateDiagnosticText(String(d.title || '—'), 80).replace(/\|/g, '\\|')} | ${d.result || '—'} | ${age} |`;
       }).join('\n');
       const argsRows = entries
         .filter(d => Array.isArray(d.chromeArgs) && d.chromeArgs.length > 0)
@@ -1727,7 +1773,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           // title/price sub-selector names) before a bug report ever showed it, even
           // under FULL. This is a bounded, per-window field (not a log ring buffer),
           // so the wider cap can't blow the report's size budget.
-          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${redactReportUrlsInText(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 1400)}`);
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${truncateDiagnosticText(redactReportUrlsInText(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' '), 1400)}`);
           return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
         });
       const resolveDiagSection = resolveDiagRows.length > 0
@@ -1749,7 +1795,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
           const detected = isNativeChallenge
             ? (h.result === 'cleared' ? '✅ challenge cleared' : `challenge result=${h.result || '—'}`)
             : h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
-          const title = h.title ? `, title="${String(h.title).replace(/\s+/g, ' ').slice(0, 100)}"` : '';
+          const title = h.title ? `, title="${truncateDiagnosticText(String(h.title).replace(/\s+/g, ' '), 100)}"` : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
           const close = h.closeDisposition
             ? ` · close=${h.closeDisposition}, flush=${h.cookieFlushMs ?? 0}ms, exit=${h.processExitObserved ? 'observed' : 'NOT observed'}`
@@ -1771,7 +1817,17 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
       try {
         const sb = getStealthBrowserInfo?.() || {};
         const sbAge = sb.launchedAt ? `${Math.round((Date.now() - sb.launchedAt) / 1000)}s ago` : '—';
-        stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : '⚪ not running (profile lock free)'}\n`;
+        // A job browser scrape CLOSES this singleton and launches its own Chrome
+        // on the same shared userDataDir, so `connected:false` proves only that
+        // the singleton is down — not that the profile is free. Saying "profile
+        // lock free" on that basis was affirmatively wrong during every manual
+        // scrape; report the scraper's own process instead of inferring.
+        const ms = getManualScraperTelemetry?.() || {};
+        const scrapeChrome = ms.browser?.running ? ms.browser : null;
+        const lockNote = scrapeChrome
+          ? `⚪ singleton not running — but the job scraper's OWN Chrome is 🟢 running (pid ${scrapeChrome.pid ?? '—'}, launched ${scrapeChrome.launchedAt ? `${Math.round((Date.now() - scrapeChrome.launchedAt) / 1000)}s ago` : '—'}) on the shared profile, so the profile lock is **held**`
+          : '⚪ not running (no scrape browser of either kind — profile lock free)';
+        stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : lockNote}\n`;
       } catch { /* ignore */ }
       // A visible login/captcha window may reserve the profile before Chrome is
       // launched. That reservation blocks a concurrent headless scrape even
@@ -1781,7 +1837,7 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
         const age = Number.isFinite(profileReservation.since)
           ? `${Math.max(0, Math.round((Date.now() - profileReservation.since) / 1000))}s ago`
           : 'at an unknown time';
-        const reason = String(profileReservation.reason || 'visible window').replace(/`/g, "'").slice(0, 180);
+        const reason = truncateDiagnosticText(String(profileReservation.reason || 'visible window').replace(/`/g, "'"), 180);
         profileReservationLine = `\n- ⚠️ Shared profile reservation: \`${reason}\` (${age}) — a headless scrape must wait until that visible browser closes.\n`;
       }
       // Shared-profile launch collisions — PERSISTED across the log ring buffer.
@@ -2070,9 +2126,10 @@ ${(aiConfig.geminiWarnings || []).length > 0
   // it is the only witness to the ORDER manual handoffs were issued in.
   // Gated like every other job section rather than always-on. JOBS is included
   // because the receipt used to ride inside the Job Search Pipeline section,
-  // and a JOBS report must not silently lose it in the move.
+  // and a JOBS report must not silently lose it in the move. TAXONOMY also
+  // needs the receipt because its plan/classify steps use this manual handoff.
   let nonApiHandoffMarkdown = '';
-  if (isFullReport || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS')) {
+  if (isFullReport || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS') || reportCodes.has('TAXONOMY')) {
     try { nonApiHandoffMarkdown = buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId); }
     catch { /* never break the report on diagnostic failure */ }
   }

@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -109,6 +109,24 @@ export default [
       for (const junk of ['', null, undefined, '0 jobs']) {
         assert(parseClaimedResultTotal(junk) === null, `"${junk}" yields no total`);
       }
+      assert(zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobs-search?search=x') === 1
+        && zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobs-search/21?search=x') === 21
+        && zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobseeker/home') === null,
+      'ZipRecruiter direct-continuation verification accepts only the exact numbered results route');
+      assert(shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }), 'an unlinked ZipRecruiter page below its advertised count probes the next direct page');
+      assert(!shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 20, hasNextUrl: true,
+      }) && !shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'glassdoor', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }) && !shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 385, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }), 'direct continuation respects the user page ceiling and never broadens another source or a complete corpus');
       assert(isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3.htm'), 'SRCH slug is canonical');
       assert(!isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x'), 'jobs.htm is not canonical');
       return { ok: true };
@@ -684,6 +702,37 @@ export default [
       // English JD with a lone accented loanword must NOT be tagged.
       const enBody = 'Estimator II. About Us: Honeywell helps organizations solve the world\'s most complex challenges in automation and energy. You will prepare cost estimates, bids, and proposals. 5 years experience required.';
       assert(detectLanguage(enBody) === 'en', `English body → en, got ${detectLanguage(enBody)}`);
+      return { ok: true };
+  },
+},
+{
+    name: 'tagJobLanguage: refreshed English content clears a stale non-English card chip',
+    run: () => {
+      const job = {
+        title: 'Développeur logiciel',
+        snippet: 'Nous recherchons un développeur expérimenté pour concevoir des applications et collaborer avec notre équipe produit.',
+      };
+      tagJobLanguage(job);
+      assert(job.language === 'fr', `French initial scrape must be tagged, got ${job.language}`);
+
+      // Detail recovery can replace a localized teaser with the employer's
+      // English job description. A retained `fr` field would render a false
+      // language chip even though the latest, richer evidence is English.
+      job.title = 'Software Engineer';
+      job.snippet = 'Join our engineering team to build reliable software, improve developer workflows, and collaborate with product partners.';
+      job.description = 'You will design services, review code, ship product improvements, and work closely with a collaborative team of engineers and designers.';
+      tagJobLanguage(job);
+      assert(job.language === undefined, `English refresh must remove stale language, got ${job.language}`);
+
+      // A sparse post-detail state is inconclusive, not evidence that the old
+      // French label remains valid. The detector deliberately defaults weak
+      // signals to English, which means no chip should be rendered.
+      job.language = 'fr';
+      job.title = 'VP';
+      job.snippet = '';
+      job.description = '';
+      tagJobLanguage(job);
+      assert(job.language === undefined, `inconclusive refresh must remove stale language, got ${job.language}`);
       return { ok: true };
     },
   },

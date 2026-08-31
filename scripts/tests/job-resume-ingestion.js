@@ -28,7 +28,7 @@ export default [
       const staging = source.slice(stagingStart, stagingEnd);
       assert(staging.includes('if (resumeScope) {')
         && staging.includes('if (!resumeGatheredOnly) {\n        await setJobRunStage')
-        && staging.includes('} else {\n      activeRunId = `${nodeId || \'job\'}-${runStartedAt}`;\n      await startJobRun'),
+        && staging.includes('} else {\n      activeRunId = `${nodeId || \'job\'}-${runStartedAt}`;\n      const startedRun = await startJobRun'),
       'gathered-only recovery remains inside the resume branch, preserving its original manifest token and staged rows instead of starting/truncating a fresh run');
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);

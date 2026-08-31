@@ -2313,6 +2313,37 @@ export default [
         && jobsSource.indexOf('await throwIfSearchAborted();\n    await setJobRunStage') >= 0,
       'a Reset during scrape discards only its token-scoped recovery run and cannot mark the cancelled manifest gathered');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
+  },
+},
+{
+    name: 'Legacy Job Search auto-start is one-shot per persisted path and keeps failure retry input',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const pipelineStart = source.indexOf('const runPipeline = useCallback');
+      const pipelineEnd = source.indexOf('const startProcessing = useCallback', pipelineStart);
+      const pipeline = source.slice(pipelineStart, pipelineEnd);
+      const autoStartStart = source.indexOf('// Auto-start legacy drop-created hubs once per mounted node/path');
+      const autoStartEnd = source.indexOf('// Handle file drops directly onto this node.', autoStartStart);
+      const autoStart = source.slice(autoStartStart, autoStartEnd);
+
+      assert(pipelineStart >= 0 && pipelineEnd > pipelineStart,
+        'the pipeline boundary was not found; this test must inspect the catch that resolves a failed job search');
+      assert(!pipeline.includes('filePath: null'),
+        'a pipeline failure must retain a legacy resume path so Try Again can re-parse it before a profile exists');
+      assert(source.includes('const autoStartedFilePathRef = useRef(null);'),
+        'legacy auto-start needs a mounted-session latch instead of clearing the retry input on failure');
+      assert(autoStart.includes("const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
+        && autoStart.includes('autoStartedFilePathRef.current === autoStartPath')
+        && autoStart.includes('autoStartedFilePathRef.current = autoStartPath')
+        && autoStart.includes('startProcessing(autoStartPath);'),
+      'auto-start must launch each exact persisted path once, while allowing a genuinely changed path to launch');
+
+      const rerunStart = source.indexOf('const handleRerun = useCallback');
+      const rerunEnd = source.indexOf('const handleClearCareerFiles', rerunStart);
+      const rerun = source.slice(rerunStart, rerunEnd);
+      assert(rerun.includes(': (data.filePath ? [data.filePath] : [])'),
+        'the retained legacy path must remain a valid explicit Re-run input after a pre-parse failure');
+      return { oneShotAutoStart: true, retainedLegacyRetryInput: true };
     },
   },
 {
@@ -2749,10 +2780,23 @@ export default [
         'a failed card-detail pass must not be reported as user-done');
       assert(resolveManualSourceStopReason({}) === 'completed',
         'manual scraper must reserve completed for a normal non-capped finish');
+      // An anti-bot challenge that bounced the walk back to page 1 twice used to
+      // break with no flag set, falling through to `completed` — reporting an
+      // abandoned walk identically to a clean finish.
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true }) === 'challenge-recovery-loop',
+        'a walk abandoned after two challenge bounces back to page 1 must not report a clean completion');
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true, dataStopReason: 'end-of-results' }) === 'challenge-recovery-loop',
+        'giving up after repeated challenge recovery outranks a data stop that reads as a clean finish');
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true, sourceSkipped: true }) === 'blocked',
+        'a concrete block still outranks the challenge-recovery give-up');
+      assert(resolveManualSourceStopReason({ hitProviderResultWindow: true }) === 'provider-result-window',
+        'a direct continuation redirected or clamped by the provider must not report a clean completion');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
-        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);"),
-      'ZipRecruiter must use its verified Next Page anchor instead of stopping after the first scroll-loaded page');
+        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);")
+        && manualScraperSource.includes("phase: 'direct-page-probe'")
+        && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({'),
+      'ZipRecruiter uses its verified Next Page anchor, then a bounded direct-page probe when the board hides that anchor early');
       assert(manualScraperSource.includes("description-card-unavailable")
         && manualScraperSource.includes("googlePanelRateLimit")
         && manualScraperSource.includes("page.off('response', googlePanelResponseListener)"),
@@ -2860,6 +2904,18 @@ export default [
         && wholeFeedAdmission.relevanceTrace.some(row => row.url === 'wwr-entity' && row.title === 'Customer Support Systems & Analytics Architect')
         && wholeFeedRows[2].title === 'Customer Support Systems &amp; Analytics Architect',
       'whole-feed relevance: decodes entity-encoded titles for admission/telemetry, keeps source rows intact, and ranks near-miss samples first');
+      // RemoteOK occasionally returns UTF-8 text mis-decoded as Latin-1. The
+      // matcher/report must show the repaired diagnostic title, while the
+      // source object remains raw for the pipeline's normal ownership rules.
+      const rawMojibakeTitle = `HIGIENIZADOR DE CARROS MACA${String.fromCharCode(0xc3, 0x89)} RJ`;
+      const mojibakeAdmission = filterWholeFeedJobsByTitleRelevance(
+        [{ title: rawMojibakeTitle, url: 'remoteok-mojibake' }],
+        ['System Architect'],
+      );
+      assert(mojibakeAdmission.items.length === 0
+        && mojibakeAdmission.relevanceRejected[0] === 'HIGIENIZADOR DE CARROS MACAÉ RJ'
+        && rawMojibakeTitle.includes(String.fromCharCode(0x89)),
+      'whole-feed relevance: repairs mojibake for matcher diagnostics without mutating the source title');
       const wholeFeedOrAdmission = filterWholeFeedJobsByTitleRelevance(wholeFeedRows, ['Systems Architect', 'Customer Success Engineer']);
       assert(wholeFeedOrAdmission.items.map(job => job.url).join('|') === 'wwr-1|wwr-2|wwr-entity|wwr-3',
         'whole-feed relevance: multiple generated role queries use OR admission');
@@ -3362,8 +3418,8 @@ export default [
         filterCode: 'FULL+ERR',
         filterStats: { eventsShown: logs.length, eventsTotal: logs.length, omittedSections: [] },
       });
-      assert(fullErrSummary.includes('Full report requested') && fullErrSummary.includes(`event log kept all ${logs.length} line(s)`),
-        'Bug report filter summary: FULL+ERR remains a truthful full event timeline');
+      assert(fullErrSummary.includes('currently retained') && fullErrSummary.includes(`event log kept all ${logs.length} line(s)`),
+        'Bug report filter summary: FULL+ERR remains truthful about the retained event timeline');
       // XSESS drops the verbose per-platform verify-trace blocks (bodyHead dumps).
       const xsess = applyBugReportCode(logs, {}, 'XSESS');
       assert(xsess.sectionExclusions.has('sessionTraces') && xsess.matchedCodes.includes('XSESS'),
@@ -3388,8 +3444,10 @@ export default [
       });
       assert(fullSummary.includes('event log kept all 69 line(s)'),
         'Bug report filter summary: FULL should say the event log was kept, not trimmed');
-      assert(fullSummary.includes('Full report requested') && !fullSummary.includes('This is a filtered view'),
-        'Bug report filter summary: plain FULL should not claim the report is filtered');
+      assert(fullSummary.includes('currently retained')
+        && fullSummary.includes('does not restore history from an earlier app process')
+        && !fullSummary.includes('This is a filtered view'),
+      'Bug report filter summary: plain FULL explains its current-process retention boundary');
       const fullXnodesSummary = buildFilterSummaryMarkdown({
         filterCode: 'FULL+XNODES',
         filterStats: { eventsShown: 10, eventsTotal: 10, omittedSections: ['nodeInternals'] },

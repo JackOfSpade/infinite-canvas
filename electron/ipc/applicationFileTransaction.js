@@ -9,6 +9,10 @@ import crypto from 'node:crypto';
  * an older sibling from a prior generation. All new bytes are staged before
  * any visible file changes. Existing files are then moved to same-directory
  * backups; if a promotion or readback check fails, every original is restored.
+ * An entry may additionally supply `expectedCurrentData`; after its current
+ * destination is moved aside, the backup must still match those bytes before
+ * ANY promotion begins. This closes stale-read races for callers that first
+ * render a derived artifact from an editable on-disk source.
  * This avoids both mixed-generation bundles and stale PDFs beside new HTML.
  */
 export async function replaceApplicationBundleAtomically(entries, { fileOps = fs.promises, verify = null } = {}) {
@@ -21,9 +25,15 @@ export async function replaceApplicationBundleAtomically(entries, { fileOps = fs
       throw new Error('Every application bundle entry requires a destination path.');
     }
     const destination = path.resolve(entry.destination);
+    const hasExpectedCurrentData = Object.prototype.hasOwnProperty.call(entry, 'expectedCurrentData');
+    if (hasExpectedCurrentData && entry.expectedCurrentData == null) {
+      throw new Error('Application bundle expected-current data must be bytes or text.');
+    }
     return {
       destination,
       data: entry.data == null ? null : entry.data,
+      expectedCurrentData: hasExpectedCurrentData ? Buffer.from(entry.expectedCurrentData) : null,
+      hasExpectedCurrentData,
       temporary: path.join(path.dirname(destination), `.${path.basename(destination)}.${transactionId}.tmp`),
       backup: path.join(path.dirname(destination), `.${path.basename(destination)}.${transactionId}.bak`),
       hadOriginal: false,
@@ -74,6 +84,25 @@ export async function replaceApplicationBundleAtomically(entries, { fileOps = fs
 
     for (const entry of normalized) {
       if (entry.hadOriginal) await fileOps.rename(entry.destination, entry.backup);
+    }
+    // The backup is the exact original object the transaction would otherwise
+    // delete after success. Validate it only after the rename, not during an
+    // earlier preflight: an external editor can save between those moments.
+    // Run this before promoting any staged sibling so a mismatch has a simple
+    // full rollback and can never leave a new PDF beside an old HTML.
+    for (const entry of normalized) {
+      if (!entry.hasExpectedCurrentData) continue;
+      if (!entry.hadOriginal) {
+        throw new Error(`Application bundle source disappeared before promotion: ${entry.destination}`);
+      }
+      const backupStat = await fileOps.lstat(entry.backup);
+      if (!backupStat.isFile() || backupStat.isSymbolicLink()) {
+        throw new Error(`Application bundle source changed into an unsafe file before promotion: ${entry.destination}`);
+      }
+      const actual = await fileOps.readFile(entry.backup);
+      if (!Buffer.from(actual).equals(entry.expectedCurrentData)) {
+        throw new Error(`Application bundle source changed before promotion: ${entry.destination}`);
+      }
     }
     for (const entry of normalized) {
       if (entry.data == null) continue;

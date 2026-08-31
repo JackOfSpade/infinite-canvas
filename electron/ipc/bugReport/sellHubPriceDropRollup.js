@@ -1,4 +1,4 @@
-import { shortId, visitCanvasNodes } from './helpers.js';
+import { shortId, visitCanvasNodes, clipReportText } from './helpers.js';
 
 function escapeCell(value) {
   return String(value ?? '—').replace(/\|/g, '\\|').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim();
@@ -91,7 +91,7 @@ export function buildSellHubPriceDropRollup(nodes) {
     const due = dueCounts.get(node.id) || 0;
     const cardText = due > 0 ? `${cards} (${due} due)` : String(cards);
 
-    return `| \`${shortId(node.id)}\` | ${escapeCell(productLabel(d)).slice(0, 70)} | ${escapeCell(d.hubState || '—')} | ${formatCadence(d.priceDropReminderWeeks)} | ${escapeCell(d.priceDropMustSellDate || '—')} | ${formatMoney(target)} | ${formatMoney(start)} | ${escapeCell(d.priceDropStartingTier || '—')} | ${cardText} | ${escapeCell(flags)} |`;
+    return `| \`${shortId(node.id)}\` | ${escapeCell(clipReportText(productLabel(d), 70))} | ${escapeCell(d.hubState || '—')} | ${formatCadence(d.priceDropReminderWeeks)} | ${escapeCell(d.priceDropMustSellDate || '—')} | ${formatMoney(target)} | ${formatMoney(start)} | ${escapeCell(d.priceDropStartingTier || '—')} | ${cardText} | ${escapeCell(flags)} |`;
   });
 
   const summary = [

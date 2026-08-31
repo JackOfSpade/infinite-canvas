@@ -16,6 +16,9 @@ import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResu
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
+import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
+import { isTerminalSourceStatus } from '../test-dependencies.js';
+import { clipReportText } from '../test-dependencies.js';
 
 export default [
 {
@@ -83,6 +86,82 @@ export default [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    },
+  },
+{
+    name: 'job recovery diagnostics retain a redacted prior-process terminal receipt and call absence unknown',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const savedPipeline = telemetry.pipeline;
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-last-run-receipt-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'receipt-hub';
+      const receiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+      try {
+        // Simulate a fresh Electron process: no in-memory pipeline telemetry is
+        // available, while the compact terminal receipt survives its predecessor.
+        telemetry.pipeline = null;
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId: 'prior-run-42', nodeId,
+          startedAt: 1_700_100_000_000, completedAt: 1_700_100_093_000,
+          terminal: { status: 'completed', outcome: 'populated' },
+          stagingStarted: true, cleanup: { attempted: true, cleared: true },
+          funnel: {
+            raw: 13, relevanceDropped: 2, deduped: 11, ageDropped: 4,
+            roleDropped: 2, historyDropped: 1, descriptionEvidenceDropped: 0, kept: 4,
+          },
+          sources: {
+            google: {
+              count: 11, providerGathered: 13, relevanceDropped: 2,
+              stopReason: 'end-of-results',
+              warning: { code: 'rate-limit', severity: 'block', evidence: 'PRIVATE WARNING EVIDENCE' },
+              url: 'https://private.example/?token=SECRET_URL_TOKEN',
+              jobs: [{ title: 'PRIVATE JOB TITLE' }],
+            },
+          },
+          queries: ['PRIVATE QUERY'],
+          profile: { name: 'PRIVATE PROFILE' },
+          prompt: 'PRIVATE PROMPT', response: 'PRIVATE RESPONSE', error: 'PRIVATE ERROR BODY',
+        }), 'utf8');
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(recovery.includes('Last terminal run receipt: ✅ completed')
+          && recovery.includes('previous-process receipt — live pipeline telemetry is unavailable in this process')
+          && recovery.includes('Funnel: 13 raw → 11 deduped → 4 kept')
+          && recovery.includes('`google`: 11 returned')
+          && recovery.includes('warning rate-limit (block)'),
+        'a prior-process receipt preserves terminal status, timing/funnel, source warning codes, and provenance');
+        for (const secret of ['PRIVATE WARNING EVIDENCE', 'SECRET_URL_TOKEN', 'PRIVATE JOB TITLE', 'PRIVATE QUERY', 'PRIVATE PROFILE', 'PRIVATE PROMPT', 'PRIVATE RESPONSE', 'PRIVATE ERROR BODY']) {
+          assert(!recovery.includes(secret), `terminal receipt must redact ${secret}`);
+        }
+
+        const base = {
+          description: 'Did the previous search complete?', nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        };
+        const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+        const focused = generateMarkdown({
+          ...base,
+          filterCode: 'RECOVERY', nodes: [],
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId],
+            omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+          },
+        }).markdown;
+        assert(full.includes('Last terminal run receipt: ✅ completed')
+          && focused.includes('Last terminal run receipt: ✅ completed')
+          && focused.includes('hub `receipt-hub` is present in this canvas'),
+        'FULL and RECOVERY retain the durable terminal receipt after a simulated restart');
+
+        fs.unlinkSync(receiptPath);
+        const absent = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(absent.includes('Last terminal run receipt: absent') && absent.includes('completion of any prior-process run is **unknown**'),
+          'missing durable receipt explicitly leaves prior-process completion unknown');
+      } finally {
+        telemetry.pipeline = savedPipeline;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { ok: true };
     },
   },
 {
@@ -1353,6 +1432,41 @@ export default [
           && await fs.promises.readFile(files.resume, 'utf8') === '%PDF-baseline resume',
         'a failed post-write verification also restores the prior visible artifacts');
 
+        // Sync reads Application.html before it renders a PDF. An external
+        // editor can save in the narrow interval before the transaction moves
+        // the old HTML to its backup; the backup itself must be compared to
+        // that snapshot before any new bytes are promoted, otherwise the
+        // editor's newer revision would be deleted as a "successful" backup.
+        await fs.promises.writeFile(files.html, 'snapshot before render');
+        let injectedExternalSave = false;
+        const staleSourceOps = {
+          lstat: (...args) => realOps.lstat(...args),
+          writeFile: (...args) => realOps.writeFile(...args),
+          readFile: (...args) => realOps.readFile(...args),
+          unlink: (...args) => realOps.unlink(...args),
+          rename: async (source, destination) => {
+            if (!injectedExternalSave && source === files.html && /\.bak$/.test(destination)) {
+              injectedExternalSave = true;
+              await realOps.writeFile(files.html, 'newer external editor revision');
+            }
+            return realOps.rename(source, destination);
+          },
+        };
+        let staleSourceRejected = false;
+        try {
+          await replaceApplicationBundleAtomically([
+            { destination: files.html, data: 'older rendered HTML', expectedCurrentData: 'snapshot before render' },
+          ], { fileOps: staleSourceOps });
+        } catch (error) {
+          staleSourceRejected = /source changed before promotion/.test(error.message);
+        }
+        assert(injectedExternalSave && staleSourceRejected
+          && await fs.promises.readFile(files.html, 'utf8') === 'newer external editor revision',
+        'a save between Sync precheck and backup rename must be restored and must block the older promotion');
+        // Subsequent duplicate-destination assertions intentionally use the
+        // original baseline fixture.
+        await fs.promises.writeFile(files.html, 'baseline html');
+
         let duplicateRejected = false;
         try {
           await replaceApplicationBundleAtomically([
@@ -1389,6 +1503,7 @@ export default [
           staleRemoved: 2,
           rollbackRestored: 4,
           readbackRollback: true,
+          staleSourceRejected,
           duplicateRejected,
           directoryRejected,
           symlinkTargetUntouched: true,
@@ -2528,9 +2643,9 @@ export default [
           && report.includes('`Camera Operator Toronto, ON jobs`')
           && report.includes('`Film Editor Toronto jobs`'),
         'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
-        assert(report.includes('Per source (provider returned → retained for pipeline): google=3 → 2')
+        assert(report.includes('Per source (provider returned → retained before target-role/history/evidence gates): google=3 → 2')
           && !report.includes('Per source (raw gathered)'),
-        'per-source counts distinguish provider-returned candidates from the rows retained for this pipeline');
+        'per-source counts distinguish provider-returned candidates from the pre-target-role/history/evidence-gate rows');
         assert(report.includes('Found (raw): 3 → title-relevance-dropped 1 → after dedup: 2 → age-dropped: 0 → history-dropped: 0 → **new: 2**')
           && !report.includes('→ deduped 2 → age-dropped 0 → already-seen/history 0'),
         'funnel labels make survivor counts and dropped counts unambiguous');
@@ -2578,6 +2693,47 @@ export default [
       return { ok: true };
   },
 },
+{
+    name: 'job pipeline report: RemoteOK whole-feed provenance explains an all-rejected feed',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'remoteok-feed-provenance-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 204, relevanceDropped: 204, deduped: 0,
+          ageDropped: 0, historyDropped: 0, kept: 0,
+          queryStrings: ['System Architect'],
+          bySource: {
+            remoteok: {
+              count: 0, providerGathered: 204, relevanceDropped: 204,
+              remoteFeedProvenance: [
+                { scope: 'bare', received: 100, added: 100 },
+                { scope: 'tag', tag: 'system', received: 4, added: 4 },
+                { scope: 'tag', tag: 'architect', received: 100, added: 100 },
+              ],
+              relevanceRejected: ['Architect CAD & Construction Documentation'],
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['remoteok-feed-provenance-diagnostics']), null, null);
+        assert(report.includes('RemoteOK feed scopes: bare 100 received/100 new; tag:system 4 received/4 new; tag:architect 100 received/100 new')
+          && report.includes('tag scopes are derived from the raw role queries above')
+          && !report.includes('api?tag='),
+        'RemoteOK source admission reports compact feed provenance without exposing additional query text');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { scopes: 3, providerRows: 204 };
+    },
+  },
 {
     name: 'job pipeline report identifies re-run provenance and completed duration',
     run: () => {
@@ -2669,8 +2825,8 @@ export default [
           }],
         }), 'utf8');
         const staleReport = buildJobsPipelineSnapshot(new Set(['snapshot-correlation-diagnostics']), null, null);
-        assert(staleReport.includes('Per source (provider returned → retained for pipeline): weworkremotely=100 → 0')
-          && !staleReport.includes('provider returned → retained for pipeline): (none)'),
+        assert(staleReport.includes('Per source (provider returned → retained before target-role/history/evidence gates): weworkremotely=100 → 0')
+          && !staleReport.includes('provider returned → retained before target-role/history/evidence gates): (none)'),
         'whole-feed provider rows remain visible even when title admission retains none');
         assert(staleReport.includes('Saved scrape snapshot does not match the current search run')
           && staleReport.includes('Snippet, salary, and field-quality checks were skipped')
@@ -2836,6 +2992,39 @@ export default [
           && report.includes('`Customer Service Coordinator` → [customer, service→support]/2 required')
           && report.includes('tags: customer-service, support'),
         'report records exact and synonym title evidence separately from RemoteOK tags');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: pinned target-role evidence does not masquerade as provider-only relevance',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search, resolves: telemetry.resolves };
+      Object.assign(telemetry, {
+        nodeId: 'pinned-target-role-audit', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1,
+          relevanceAudit: {
+            usajobs: {
+              mode: 'post-hoc-title-audit',
+              rows: [{
+                url: 'https://www.usajobs.gov/job/123', title: 'IT SPECIALIST (SYSTEMS ARCHITECTURE)', company: 'Agency',
+                matched: [], targetRoleTitleMatch: true, targetRoleTokens: ['system', 'architect'],
+                providerAcceptedWithoutLocalTitleMatch: false,
+              }],
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['pinned-target-role-audit']), null, null);
+        assert(report.includes('target-role title gate → [system + architect]')
+          && report.includes('separate exact/synonym matching')
+          && !report.includes('no local query-title match; accepted from provider ranking by design'),
+        'a row retained by the pinned title gate reports that local evidence instead of falsely claiming provider-only admission');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -3121,7 +3310,7 @@ export default [
       const resumeEnd = searchRenderer.indexOf('const handleDiscardResume', resumeStart);
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
       assert(resumePath.includes('const activeJobRunId = jobRunIdRef.current || data.jobRunId || null')
-        && resumePath.includes('completeJobRun?.({ canvasFilePath, runId: activeJobRunId })')
+        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero')")
         && resumePath.includes('jobRunId: activeJobRunId'),
       'same-tick source resolution scopes both empty completion and resumed scoring to the live run ref');
 
@@ -3705,7 +3894,32 @@ export default [
       assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
       const cleared = mergeSourceProgress(terminal, { status: 'done', count: 12, warning: null, url: null });
       assert(cleared.warning === null && cleared.url === null, 'Source progress merge: explicit null should clear sticky fields');
+
+      // The absence of a status-regression guard is DELIBERATE, not an oversight:
+      // jobs.js re-enters 'searching' for mid-run LinkedIn enrichment and for the
+      // LinkedIn Solve re-fetch, and marketplace.js does the same for the
+      // post-Solve comp rescrape — all on the same sourceId and the same card.
+      const reEntered = mergeSourceProgress(
+        { status: 'done', count: 12, detail: null, warning: null, url: null, completed: 1, total: 1 },
+        { status: 'searching', count: 12, detail: 'enriching descriptions' },
+      );
+      assert(reEntered.status === 'searching',
+        'a terminal source must be able to re-enter searching — a guard here would re-break the disappearing card');
+      const jobsSrc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(jobsSrc.includes("status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions'"),
+        'the producer that depends on the non-guard still exists, so the non-guard is not dead weight');
+      assert(isTerminalSourceStatus('done') && isTerminalSourceStatus('error') && isTerminalSourceStatus('skipped')
+        && !isTerminalSourceStatus('searching') && !isTerminalSourceStatus(undefined),
+      'the shared terminal-status predicate covers exactly the settled outcomes');
+
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      // A mid-solve 'searching' beat overwrites `detail`, so latching the restore
+      // on the optimistic 'Solving…' string stranded a failed Solve spinning with
+      // no warning and no Solve button.
+      assert(!sourceCard.includes("prev.detail !== 'Solving…'")
+        && !sourceCard.includes("prev.detail === 'Solving…'")
+        && sourceCard.includes('isTerminalSourceStatus(prev.status)'),
+      'the pre-Solve restore yields only to a newer TERMINAL event, not to a transient detail string');
       const restoresNativeVerificationOutcome = sourceCard.includes('const rawRestoreWarning = result?.warning || prevForRestore?.warning || null')
         && sourceCard.includes("resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel")
         && sourceCard.includes("? { shortLabel: 'Verification not confirmed' }")
@@ -6387,11 +6601,12 @@ export default [
       } }];
       assert(moduleFingerprint(assessed) !== moduleFingerprint(reassessed),
         'fingerprint: compensation verdict/explanation changes invalidate a board');
-      assert(moduleFingerprint(null).startsWith('4:0:'), 'fingerprint: nullish → v4 empty fingerprint');
+      assert(moduleFingerprint(null).startsWith('5:0:'), 'fingerprint: nullish → v5 empty fingerprint');
       // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
       assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
       assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe current baseline');
       assert(!isLegacyCombineSignature('hub-1=3:1:123'), 'v3 boards must be rechecked so compensation-aware v4 fingerprints can mark them stale');
+      assert(!isLegacyCombineSignature('hub-1=4:1:123'), 'v4 boards must be rechecked so fit-audit-aware v5 fingerprints can mark them stale');
       assert(!isLegacyCombineSignature(combineSignature([{ id: 'A', fingerprint: moduleFingerprint(a) }])),
         'current-format signature is not legacy');
       assert(!isLegacyCombineSignature('') && !isLegacyCombineSignature(null),
@@ -6478,6 +6693,18 @@ export default [
         'zero-result terminal module stays in the board signature instead of vanishing as a disconnect');
       assert(staleReason(previous, completedZero) === '1 updated',
         'zero-result terminal module is reported as updated, not disconnected');
+      const canSupplyTerminalBoardInput = (module) => (
+        module.hubState === 'done' && (module.count > 0 || (
+          !module.aiSkipped && !module.collectionOnly && !module.testMode
+          && module.resultDisposition === 'empty-complete'
+        ))
+      );
+      assert(!canSupplyTerminalBoardInput({ hubState: 'done', count: 0 })
+        && !canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'scored' })
+        && !canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'empty-complete', collectionOnly: true })
+        && canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'empty-complete' })
+        && canSupplyTerminalBoardInput({ hubState: 'done', count: 1 }),
+      'only an explicitly authoritative empty completion can replace stale results; legacy/recovery zeroes cannot, while positive scored jobs remain mergeable');
 
       // The component-level transition clears the prior cascade only after the
       // user explicitly accepts its empty terminal input. Lock that wiring in
@@ -6492,14 +6719,36 @@ export default [
         && boardSource.includes('const allConnectedModulesDone =')
         && boardSource.includes('staleReason(data.combineSignature, completedModules, connectedModules)')
         && boardSource.includes('if (nextStale) hideBoardChildren()')
-        && boardSource.includes('replaced stale results with empty completed inputs')
+        && boardSource.includes('function isExplicitlyUnscoredModule(data)')
+        && boardSource.includes('data?.aiSkipped || data?.collectionOnly || data?.testMode')
+        && boardSource.includes("m.resultDisposition === 'empty-complete'")
+        && boardSource.includes('m.hasPositiveResults || m.isAuthoritativeEmpty')
+        && boardSource.includes("n.data?.resultDisposition || ''")
+        && boardSource.includes('emptyReplacementPrompt')
+        && boardSource.includes('<ConfirmDialog')
+        && boardSource.includes('empty replacement confirmation requested')
+        && boardSource.includes('empty replacement cancelled')
+        && boardSource.includes('confirmed empty replacement')
+        && boardSource.includes("if (!canReplaceWithEmpty)")
+        && boardSource.includes("new CustomEvent('canvas-take-snapshot')")
         && boardSource.includes('const cancelled = epoch.start()')
         && boardSource.includes('if (cancelled() || !getNode(id))')
         && boardSource.includes('cancelNodeTask?.(id)')
         && boardSource.includes('combine cancelled before spawn'),
-      'board tracks terminal zero-result modules, accurately labels connected refreshes, reconciles stale children, and has an explicit empty replacement path');
+      'board tracks scored terminal zero-result modules, excludes explicitly unscored completions, and confirms an undoable empty replacement before deleting stale children');
       assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
         'stale zero-result boards expose a truthful action rather than a dead Re-combine button');
+      assert(jobSearchSource.includes("resultDisposition: 'scored'")
+        && (jobSearchSource.match(/resultDisposition: 'empty-complete'/g) || []).length >= 2
+        && jobSearchSource.includes("resultDisposition: 'collection-only'")
+        && jobSearchSource.includes("resultDisposition: 'incomplete'")
+        && jobSearchSource.includes('resultDisposition: null'),
+      'Job Search explicitly stamps scored, authoritative-empty, collection-only, and incomplete outcomes and clears provenance for a new/reset run');
+      assert(boardSource.includes('result card${emptyReplacementPrompt.resultCardCount === 1')
+        && boardSource.includes('group${emptyReplacementPrompt.resultGroupCount === 1')
+        && boardSource.includes('Undo restores them.')
+        && boardSource.includes('Keep stale results'),
+      'the empty replacement confirmation names its owned card/group impact, defaults to keeping stale children, and advertises Undo recovery');
       assert(bugReportSource.includes('staleReason:') && bugReportSource.includes('combineSignature:'),
         'FULL node diagnostics preserve board stale reason and signature evidence');
       const terminalZeroStart = jobSearchSource.indexOf('if (foundJobs.length === 0)');
@@ -7202,6 +7451,664 @@ export default [
       } finally {
         Object.assign(telemetry, saved);
       }
+    },
+  },
+
+  // ── Silent browser-walk regression (bug report: "processing stuck") ─────────
+  // A Glassdoor run sat at the `page-extract` phase for 28s with no telemetry,
+  // no log line and no UI change, because the per-card description walk emits a
+  // phase ONLY on failure. Healthy work and a wedged renderer were the same
+  // observation. These pin the signals that now separate them.
+  {
+    name: 'activity beat records liveness and inherits the current source',
+    run: () => {
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({ phase: 'source-start', sourceId: 'glassdoor', srcName: 'Glassdoor' });
+      setActivitySink(null);
+      const beat = recordActivityBeat({ srcName: 'Glassdoor', count: 7, status: 'Opening result card 7/30', queryIndex: 1, queryTotal: 1 });
+      assert(beat.sourceId === 'glassdoor', 'beat inherits sourceId from the last phase that named a source');
+      assert(beat.count === 7, 'beat carries the running job count');
+      const t = getManualScraperTelemetry();
+      assert(t.beat && t.beat.status === 'Opening result card 7/30', 'telemetry exposes the beat');
+      assert(Date.now() - t.beat.ts < 5_000, 'beat timestamp is fresh');
+    },
+  },
+  {
+    name: 'every distinct scrape step reaches the renderer; a same-status flood is throttled',
+    run: () => {
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({ phase: 'source-start', sourceId: 'glassdoor', srcName: 'Glassdoor' });
+      const seen = [];
+      setActivitySink(b => seen.push(b.status));
+      try {
+        for (let i = 1; i <= 5; i++) recordActivityBeat({ srcName: 'Glassdoor', count: i, status: `Opening result card ${i}/30` });
+        assert(seen.length === 5, `each card step must reach the UI (got ${seen.length})`);
+        const before = seen.length;
+        for (let i = 0; i < 200; i++) recordActivityBeat({ srcName: 'Glassdoor', count: 30, status: 'Loading jobs… 30' });
+        assert(seen.length - before === 1, `a repeated status must be throttled to one emit (got ${seen.length - before})`);
+      } finally { setActivitySink(null); }
+    },
+  },
+  {
+    name: 'a stable activity key throttles dynamic overlay copy without hiding later beats',
+    run: () => {
+      resetManualScraperTelemetry();
+      const originalNow = Date.now;
+      let now = 1_000_000;
+      const seen = [];
+      Date.now = () => now;
+      setActivitySink(b => seen.push(b));
+      try {
+        recordActivityBeat({ status: 'Loading jobs… 10', count: 10, activityKey: 'google-preload' });
+        now += 20;
+        recordActivityBeat({ status: 'Loading the full Google list — not selecting cards yet… 10', count: 10, activityKey: 'google-preload' });
+        now += 20;
+        recordActivityBeat({ status: 'Loading jobs… 20', count: 20, activityKey: 'google-preload' });
+        assert(seen.length === 1, `dynamic copy sharing one activity key must coalesce inside 1s (got ${seen.length})`);
+        assert(getManualScraperTelemetry().beat.status === 'Loading jobs… 20', 'local telemetry keeps the freshest overlay copy even when renderer IPC is coalesced');
+        now += 1_000;
+        recordActivityBeat({ status: 'Loading jobs… 30', count: 30, activityKey: 'google-preload' });
+        assert(seen.length === 2 && seen[1].count === 30, 'the same activity key emits again after the one-second interval');
+        now += 20;
+        recordActivityBeat({ status: 'Extracting jobs…', activityKey: 'extracting' });
+        assert(seen.length === 3, 'a new semantic activity key bypasses the ordinary cadence limiter');
+      } finally {
+        Date.now = originalNow;
+        setActivitySink(null);
+      }
+    },
+  },
+  {
+    name: 'an empty manual scrape clears its activity sink before returning',
+    run: async () => {
+      resetManualScraperTelemetry();
+      const seen = [];
+      await scrapeManualSources([], null, null, null, { onActivity: beat => seen.push(beat) });
+      recordActivityBeat({ status: 'after empty scrape' });
+      assert(seen.length === 0, 'an empty scrape must not leave its activity callback attached to a later beat');
+      setActivitySink(null);
+    },
+  },
+  {
+    name: 'a terminal browser scrape labels its retained beat as historical, not stalled',
+    run: async () => {
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({ phase: 'source-start', sourceId: 'glassdoor', srcName: 'Glassdoor' });
+      recordActivityBeat({ srcName: 'Glassdoor', status: 'Opening result card 1/30' });
+      await scrapeManualSources([], null, null, null, { resetDiagnostics: false });
+      const report = buildJobsPipelineSnapshot(new Set(['terminal-beat-diagnostics']), null, null);
+      assert(report.includes('Historical final beat only'), 'a finished/idle scrape must describe its retained beat as historical');
+      assert(!report.includes('a stale beat means it is genuinely stalled'), 'terminal beat age must never be presented as evidence of a hang');
+    },
+  },
+  {
+    name: 'clearing the activity sink stops renderer emits but keeps local beats',
+    run: () => {
+      resetManualScraperTelemetry();
+      const seen = [];
+      setActivitySink(b => seen.push(b));
+      recordActivityBeat({ status: 'first' });
+      setActivitySink(null);
+      recordActivityBeat({ status: 'after-clear' });
+      assert(seen.length === 1, 'a cleared sink must not receive further beats (stale-node safety)');
+      assert(getManualScraperTelemetry().beat.status === 'after-clear', 'beats are still recorded locally for the bug report');
+    },
+  },
+  {
+    name: 'a sink that throws cannot break the scrape',
+    run: () => {
+      resetManualScraperTelemetry();
+      setActivitySink(() => { throw new Error('renderer gone'); });
+      try {
+        recordActivityBeat({ status: 'still fine' });
+        assert(getManualScraperTelemetry().beat.status === 'still fine', 'beat recorded despite a throwing sink');
+      } finally { setActivitySink(null); }
+    },
+  },
+  {
+    name: 'run-origin phases survive eviction from the 30-slot recency ring',
+    run: () => {
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({ phase: 'source-start', sourceId: 'glassdoor', srcName: 'Glassdoor' });
+      recordManualScraperTelemetry({ phase: 'query-start', sourceId: 'glassdoor', url: 'https://www.glassdoor.com/Job/jobs.htm' });
+      recordManualScraperTelemetry({ phase: 'location-host-redirected', sourceId: 'glassdoor', intendedHost: 'www.glassdoor.com', landedHost: 'www.glassdoor.ca' });
+      // Flood well past the ring size with ordinary per-job chatter.
+      for (let i = 0; i < 60; i++) recordManualScraperTelemetry({ phase: 'desc-miss', sourceId: 'glassdoor', key: `job-${i}` });
+      const t = getManualScraperTelemetry();
+      assert(t.events.length === 30, 'recency ring stays bounded');
+      assert(!t.events.some(e => e.phase === 'source-start'), 'precondition: origin rows DO age out of the recency ring');
+      const originPhases = t.origins.map(e => e.phase);
+      for (const phase of ['source-start', 'query-start', 'location-host-redirected']) {
+        assert(originPhases.includes(phase), `${phase} must survive in the retained origin set`);
+      }
+      const redirect = t.origins.find(e => e.phase === 'location-host-redirected');
+      assert(redirect.landedHost === 'www.glassdoor.ca', 'the geo-redirect evidence survives with its hosts intact');
+    },
+  },
+  {
+    name: 'paused state is exposed so a deliberate pause is not reported as a hang',
+    run: () => {
+      resetManualScraperTelemetry();
+      const t = getManualScraperTelemetry();
+      assert('paused' in t, 'paused must be exposed by the accessor (it was tracked but dropped)');
+      assert(t.paused === false, 'a fresh run is not paused');
+    },
+  },
+  {
+    name: 'Glassdoor extractor absolutizes relative links against the landed host',
+    run: () => {
+      const doc = { querySelector: () => null, querySelectorAll: () => [], getElementById: () => null, title: '', body: { innerText: 'no jobs found' } };
+      const run = (origin, hostname) => new Function('document', 'location', `return (${GLASSDOOR_EXTRACTOR.trim()})`)(doc, { origin, hostname });
+      // Guard the zero-result contract on both hosts (the branch that reads gdOrigin
+      // is only reachable with cards, but a broken reference would throw here).
+      assert(Array.isArray(run('https://www.glassdoor.ca', 'www.glassdoor.ca')), 'extractor runs on the .ca host');
+      assert(Array.isArray(run('https://www.glassdoor.com', 'www.glassdoor.com')), 'extractor runs on the .com host');
+      assert(!/'https:\/\/www\.glassdoor\.com' \+ href/.test(GLASSDOOR_EXTRACTOR), 'card hrefs must not be hardcoded to .com');
+      assert(GLASSDOOR_EXTRACTOR.includes('gdOrigin'), 'extractor resolves an origin from the landed host');
+    },
+  },
+
+  {
+    name: 'STALL filter code scopes a "processing stuck" report without dropping its evidence',
+    run: () => {
+      const noise = [];
+      for (let i = 0; i < 40; i++) noise.push(`viewport changed source=interaction zoom=0.43 #${i}`);
+      const hit = '[BrowserScraper] still awaiting extractor evaluate (Glassdoor q1/1 p1) after 30s';
+      const logs = [...noise, hit];
+      for (let i = 0; i < 40; i++) logs.push(`node resized id=abc w=330 h=121 #${i}`);
+      const r = applyBugReportCode(logs, {}, 'STALL');
+      assert(r.matchedCodes.includes('STALL') && r.unknownCodes.length === 0, 'STALL is a known code');
+      assert(r.filteredLogs.includes(hit), 'the in-flight-await line must survive');
+      // Regression: an unanchored /hang/ matches "c-hang-ed", which kept every
+      // "viewport changed" line and made the code a no-op.
+      assert(r.filteredLogs.length < 12, `STALL must actually scope the log (kept ${r.filteredLogs.length} of ${logs.length})`);
+      assert(!/^viewport changed source=interaction zoom=0\.43 #0$/.test(r.filteredLogs[0] || ''), 'unrelated viewport noise is dropped, not merely reordered');
+    },
+  },
+  {
+    name: 'STALL keeps the job-pipeline lines a stuck-run report is diagnosed from',
+    run: () => {
+      const real = [
+        '[JobSearch][79eb] User clicked Try Again on error banner',
+        '[JobSearch][79eb] Pipeline failed — error banner raised (hubState → empty): boom',
+        '[Jobs][79eb] Searching with 1 queries across 1 selected source(s)',
+        '[BrowserScraper] Glassdoor: requested www.glassdoor.com but the session landed on www.glassdoor.ca',
+        '[IPC] Registered task for sender 1 node 79eb',
+      ];
+      const kept = applyBugReportCode(real, {}, 'STALL').filteredLogs;
+      for (const line of real) assert(kept.includes(line), `STALL must keep: ${line.slice(0, 50)}`);
+    },
+  },
+  {
+    name: 'FULL still includes everything STALL would have scoped',
+    run: () => {
+      const logs = ['a viewport changed', '[BrowserScraper] still awaiting extractor evaluate', 'node resized'];
+      const full = applyBugReportCode(logs, {}, 'FULL');
+      assert(full.filteredLogs.length === logs.length, 'FULL never reduces the event log');
+      assert(full.sectionExclusions.size === 0, 'FULL excludes no sections');
+    },
+  },
+  {
+    name: 'manual activity is bounded and cannot overwrite a terminal source result',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        sourceEvents: telemetry.sourceEvents,
+        sourceEventsT0: telemetry.sourceEventsT0,
+        pipeline: telemetry.pipeline,
+      };
+      try {
+        telemetry.nodeId = 'activity-ordering-test';
+        telemetry.sourceEvents = {};
+        telemetry.sourceEventsT0 = Date.now();
+        telemetry.pipeline = { phase: 'gathering-sources', active: true, pendingSources: [] };
+        for (let index = 0; index < 200; index++) {
+          recordJobSourceProgress({
+            sourceId: 'google', status: 'searching', detail: `Loading jobs… ${index}`,
+          });
+        }
+        const events = telemetry.sourceEvents.google;
+        assert(events.length === 1 && events[0].repeats === 200,
+          'repeated activity progress folds into one bounded main-process trail row');
+
+        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+        assert(scraperSource.includes("activityKey: 'google-preload'"),
+          'Google scroll-loop overlay paints use one stable activity key and are renderer-throttled');
+        assert(jobsSource.includes('const terminalManualSourceIds = new Set();')
+          && jobsSource.includes('terminalManualSourceIds.add(sourceId);')
+          && jobsSource.includes('if (terminalManualSourceIds.has(activitySourceId)) return;'),
+        'the IPC boundary drops a late activity beat after that source emitted its terminal result');
+      } finally {
+        telemetry.nodeId = saved.nodeId;
+        telemetry.sourceEvents = saved.sourceEvents;
+        telemetry.sourceEventsT0 = saved.sourceEventsT0;
+        telemetry.pipeline = saved.pipeline;
+      }
+    },
+  },
+{
+    // A bare .slice() cut this evidence mid-word ("…the scraper stopped befor"),
+    // which reads as a corrupted report rather than a truncated one, and the
+    // `suggestion` field — the only sentence stating what the run DID with the
+    // affected rows — was never rendered by any report path.
+    name: 'job pipeline report: a flagged productive source marks its truncated evidence and states its suggestion',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      const longEvidence = `Glassdoor returned HTTP 502 from its right-side panel endpoint for "${'Framing Layout Lead '.repeat(9)}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`;
+      Object.assign(telemetry, {
+        nodeId: 'warn-detail-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 782, deduped: 782, ageDropped: 463, historyDropped: 1, kept: 4,
+          bySource: {
+            glassdoor: {
+              count: 782, pagesWalked: 30, stopReason: 'completed',
+              warning: {
+                code: 'description-panel-http-error', severity: 'warn',
+                evidence: longEvidence,
+                suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
+              },
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['warn-detail-diagnostics']), null, null);
+        assert(report.includes('returned results BUT flagged'),
+          'a source that returned rows AND carried a warning is still surfaced');
+        assert(report.includes(`${longEvidence.slice(0, 219)}…`),
+          'over-length evidence is cut WITH a marker, so a mid-word ending reads as truncation and not corruption');
+        assert(report.includes('Suggested: Retry Glassdoor later.'),
+          'the warning suggestion reaches the report — it is the only line saying what happened to the affected rows');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    // The run that exposed this logged "country scope not enforced" at 04:00:03,
+    // then walked 30 pages. The once-per-source origin row was evicted from the
+    // 30-slot recency ring, so the caveat section never rendered and the location
+    // section went on asserting a verified filter with nothing to contradict it.
+    name: 'job pipeline report: a nation-tier location caveat survives the event ring and rides the line that claims a verified filter',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      const scrapeTelemetry = getManualScraperTelemetry();
+      const savedEvents = scrapeTelemetry.events;
+      Object.assign(telemetry, {
+        nodeId: 'nation-tier-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 4, deduped: 4, ageDropped: 0, historyDropped: 0, kept: 4,
+          location: {
+            canonical: 'United States',
+            perSource: { glassdoor: 'Verified location filter — param: locId=; skipped unless exact resolution succeeds' },
+          },
+          bySource: { glassdoor: { count: 4, pagesWalked: 30, stopReason: 'completed' } },
+        },
+      });
+      try {
+        resetManualScraperTelemetry();
+        recordManualScraperTelemetry({
+          phase: 'location-nation-tier-unenforced', sourceId: 'glassdoor', srcName: 'Glassdoor',
+          location: 'United States', locId: '1', locT: 'N',
+        });
+        for (let i = 0; i < 40; i += 1) {
+          recordManualScraperTelemetry({ phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor', pageNum: i });
+        }
+        assert(!(getManualScraperTelemetry().events || []).some(e => e.phase === 'location-nation-tier-unenforced'),
+          'precondition: a long walk really does evict the once-per-source origin row from the recency ring');
+
+        const report = buildJobsPipelineSnapshot(new Set(['nation-tier-diagnostics']), null, null);
+        assert(report.includes('Country scope not enforced'),
+          'the caveat section reads the retained origins ring, not the ring that evicts');
+        const locLine = (report.split('\n').find(l => l.includes('Verified location filter')) || '');
+        assert(locLine.includes('nation-tier locId'),
+          'the runtime caveat rides the same line as the static claim it contradicts, not a distant section');
+      } finally {
+        Object.assign(telemetry, saved);
+        resetManualScraperTelemetry();
+        scrapeTelemetry.events = savedEvents;
+      }
+      return { ok: true };
+    },
+  },
+{
+    // Eight retained batches x ~6 confirming lines was ~7k chars of a 50k
+    // clipboard budget, spent restating what `selection-mismatches 0` already
+    // says — on the run that exposed this it helped push six whole sections out
+    // of the export.
+    name: 'job pipeline report: an all-matching click-transition batch collapses, a mismatching batch stays itemised',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      const scrapeTelemetry = getManualScraperTelemetry();
+      const savedEvents = scrapeTelemetry.events;
+      const clean = Array.from({ length: 6 }, (_, i) => ({
+        itemIndex: i + 1, physicalIndex: 691 + i, physicalTotal: 720,
+        expectedKey: `k${i}`, hitKey: `k${i}`,
+        expectedTitle: `Role ${i}`, hitTitle: `Role ${i}`, lookup: 'primary',
+      }));
+      const dirty = clean.map((row, i) => (i === 2 ? { ...row, hitKey: 'WRONG' } : row));
+      Object.assign(telemetry, {
+        nodeId: 'transition-collapse-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1,
+          bySource: { glassdoor: { count: 1, pagesWalked: 24, stopReason: 'completed' } },
+        },
+      });
+      try {
+        resetManualScraperTelemetry();
+        recordManualScraperTelemetry({
+          phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor',
+          pageNum: 24, attempted: 6, expanded: 6, transitionSamples: clean,
+        });
+        const collapsed = buildJobsPipelineSnapshot(new Set(['transition-collapse-diagnostics']), null, null);
+        assert(collapsed.includes('all 6 sampled click(s) hit the expected card'),
+          'an all-confirming sample set collapses to one line');
+        assert(collapsed.includes('physical #691→#696'),
+          'the collapsed line still carries the first→last span the samples existed to prove');
+        assert(!collapsed.includes('Click transition samples (expected → hit):'),
+          'the itemised expected→hit block is not also emitted when nothing mismatched');
+
+        resetManualScraperTelemetry();
+        recordManualScraperTelemetry({
+          phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor',
+          pageNum: 24, attempted: 6, expanded: 6, transitionSamples: dirty,
+        });
+        const itemised = buildJobsPipelineSnapshot(new Set(['transition-collapse-diagnostics']), null, null);
+        assert(itemised.includes('Click transition samples (expected → hit):') && itemised.includes('[MISMATCH]'),
+          'a batch containing a wrong-card hit is never collapsed — that is the case the samples are for');
+      } finally {
+        Object.assign(telemetry, saved);
+        resetManualScraperTelemetry();
+        scrapeTelemetry.events = savedEvents;
+      }
+      return { ok: true };
+    },
+  },
+{
+    // A 30-page run lost 21 rows on page 29 and recovered on page 30. Because
+    // `skippedCards` only counts pages entered under an ALREADY-armed block, and
+    // recovery clears firstPage/reprobes, the line read "detail enrichment was
+    // blocked by a source throttle; enrichment resumed" — i.e. no loss at all.
+    name: 'job pipeline report: a recovered detail block still states the rows it cost and the in-scraper duplicate drop',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'block-cost-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 782, deduped: 782, ageDropped: 463, historyDropped: 1, kept: 4,
+          bySource: {
+            glassdoor: {
+              count: 782, pagesWalked: 30, stopReason: 'completed',
+              providerDuplicatesDropped: 118,
+              detailBlock: {
+                code: null, active: false, firstPage: null, everBlockedPage: 29,
+                arms: 1, reprobes: 0, reprobesTotal: 1, recovered: 1,
+                skippedCards: 0, unenrichedRows: 21,
+              },
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['block-cost-diagnostics']), null, null);
+        assert(report.includes('21 row(s) ended the walk with no description'),
+          'a recovered block reports what it cost instead of reading as a clean run');
+        assert(report.includes('from page 29'),
+          'the blocked page survives the recovery that clears firstPage');
+        assert(report.includes('1 cooldown re-probe(s), 1 recovered'),
+          'the re-probe episode survives the recovery that resets the per-episode counter');
+        assert(report.includes('118 duplicate card(s) dropped in-scraper'),
+          'the funnel raw count is post-scraper-dedup, so the layer it hides is stated where it happened');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    // A clean finish DELETES both sidecars (there is no 'done' stage), so
+    // "absent" is the success state — but printed bare it is indistinguishable
+    // from "staging silently never ran", which sends the next investigation at
+    // crash-recovery when nothing is wrong.
+    name: 'job recovery diagnostics: an absent sidecar after a clean finish is distinguished from staging never running',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const savedPipeline = telemetry.pipeline;
+      const savedNodeId = telemetry.nodeId;
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-staging-absent-'));
+      const canvas = path.join(dir, 'canvas.json');
+      try {
+        telemetry.nodeId = 'clean-finish-hub';
+        telemetry.pipeline = { phase: 'completed' };
+        const clean = buildJobRecoverySnapshot(canvas, new Set(['clean-finish-hub']));
+        assert(clean.includes('Run manifest: absent') && clean.includes('a clean finish deletes both sidecars'),
+          'after a completed run, absence is stated as the expected success state');
+        assert(clean.includes('Staging ledger: absent — expected after a clean finish'),
+          'the staging ledger gets the same attribution rather than a bare "absent"');
+
+        telemetry.pipeline = { phase: 'searching' };
+        const midRun = buildJobRecoverySnapshot(canvas, new Set(['clean-finish-hub']));
+        assert(midRun.includes('not `completed`'),
+          'when the last phase is not a clean finish, the same absence is flagged instead of reassuring');
+      } finally {
+        telemetry.pipeline = savedPipeline;
+        telemetry.nodeId = savedNodeId;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { ok: true };
+    },
+  },
+{
+    // The report tests above feed fabricated telemetry, so they would still pass
+    // if the scraper never populated these fields. Pin the producer and the
+    // merge that carry them, end to end.
+    name: 'browser scrape: the un-enriched row count and in-scraper duplicate drop are actually produced and merged, not just rendered',
+    run: () => {
+      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+
+      assert(scraperSource.includes("sourceDetailUnenriched += enhanced.filter(j => j?.descriptionDeferredReason).length;"),
+        'the scraper counts deferred rows from the rows themselves, so the page that TRIGGERS a block is counted too');
+      assert(scraperSource.includes('unenrichedRows: sourceDetailUnenriched,')
+        && scraperSource.includes('everBlockedPage: sourceDetailFirstBlockPg,')
+        && scraperSource.includes('reprobesTotal: sourceDetailReprobeTotal,'),
+      'the recovery-surviving block fields reach the per-source result');
+      assert(scraperSource.includes('providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),'),
+        'the shed-card count reaches the per-source result (its load-more semantics are pinned by its own test)');
+
+      assert(jobsSource.includes('unenrichedRows: (prior.unenrichedRows || 0) + (result.detailBlock.unenrichedRows || 0),')
+        && jobsSource.includes('reprobesTotal: (prior.reprobesTotal || 0) + (result.detailBlock.reprobesTotal || 0),')
+        && jobsSource.includes('everBlockedPage: prior.everBlockedPage ?? result.detailBlock.everBlockedPage,'),
+      'merging a source\'s query variants keeps the block cost instead of dropping it');
+      assert(jobsSource.includes('if (data.providerDuplicatesDropped) bySource[sid].providerDuplicatesDropped = data.providerDuplicatesDropped;'),
+        'the duplicate-drop count reaches the telemetry the bug report reads');
+      return { ok: true };
+    },
+  },
+{
+    // A load-more board re-serves its WHOLE accumulated list every iteration, so
+    // counting a duplicate per re-encounter measures re-scanning, not shed cards:
+    // over the observed 30-page walk that would have printed ~13,000 instead of 118.
+    name: 'browser scrape: the in-scraper duplicate count measures shed cards, not the load-more list being re-scanned',
+    run: () => {
+      const src = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(!src.includes('sourceDuplicateCards'),
+        'the per-re-encounter counter is gone — on a cumulative list it counted re-scans');
+      assert(src.includes('sourcePhysicalCards += loadMoreSelector')
+        && src.includes('? Math.max(0, extracted.length - loadMorePrevCount)')
+        && src.includes(': extracted.length;'),
+      'physical cards are counted as the per-iteration delta on a load-more source and per page otherwise');
+      assert(src.includes('providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),'),
+        'the reported drop is scanned-cards minus distinct provider keys');
+      assert(src.includes('if (!seen.has(key)) { seen.add(key); newJobs.push(job); }'),
+        'the cross-source dedup set still gates the push — counting must not change what is collected');
+
+      // The observed run's shape: a cumulative list growing 30 per page to 900,
+      // yielding 782 distinct provider keys.
+      let physical = 0;
+      let prev = 0;
+      for (let page = 1; page <= 30; page += 1) {
+        const cumulative = page * 30;
+        physical += Math.max(0, cumulative - prev);
+        prev = cumulative;
+      }
+      assert(physical === 900, `delta accumulation over a cumulative list yields the physical card total, got ${physical}`);
+      assert(Math.max(0, physical - 782) === 118,
+        'the observed 30-page Glassdoor walk reports 118 shed cards, not the ~13,000 a per-re-encounter counter would give');
+      return { ok: true };
+    },
+  },
+{
+    // `completed` is the fall-through of resolveManualSourceStopReason, not an
+    // observation. A board that stops rendering its show-more control at its own
+    // result ceiling ends exactly the same way as a genuinely exhausted source.
+    name: 'job pipeline report: a browser walk that stopped on "completed" is not presented as proof the source was exhausted',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'completed-claim-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 782, deduped: 782, ageDropped: 463, historyDropped: 1, kept: 4,
+          bySource: { ziprecruiter: {
+            count: 782, pagesWalked: 42, stopReason: 'completed', claimedTotal: 900,
+            directContinuation: { fromPage: 21, pages: 22, lastPage: 42, stop: 'completed' },
+          } },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['completed-claim-diagnostics']), null, null);
+        assert(report.includes('walked 42 pages → stopped: completed'),
+          'the stop reason is still reported verbatim');
+        assert(report.includes('NOT positive evidence the source was exhausted'),
+          'the report refuses to let "completed" read as full coverage');
+        assert(report.includes('result ceiling'),
+          'the reader is pointed at the board-cap reading that produces the identical stop reason');
+        assert(report.includes('Direct unlinked-page continuation: page 21→42')
+          && report.includes('22 page(s) reached'),
+        'the report proves that hidden numbered pages were reached after the visible pager ended');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    // The flag chain annotated 6 of 12 stopReasons. The unannotated ones included
+    // both the strongest "we got everything" evidence (end-of-results, empty-page)
+    // and the strongest "we did not" (user-done, detail-enrichment-failed) — the
+    // exact question a reader brings to this line.
+    name: 'job pipeline report: every stop reason that carries completeness meaning is annotated, in the right direction',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        search: telemetry.search, resolves: telemetry.resolves,
+      };
+      const render = (stopReason) => {
+        Object.assign(telemetry, {
+          nodeId: 'stopreason-diagnostics', windowId: null, resolves: {},
+          search: {
+            ts: Date.now(), queries: 1, raw: 10, deduped: 10, ageDropped: 0, historyDropped: 0, kept: 10,
+            bySource: { glassdoor: { count: 10, pagesWalked: 5, stopReason } },
+          },
+        });
+        const report = buildJobsPipelineSnapshot(new Set(['stopreason-diagnostics']), null, null);
+        return (report.split('\n').find(l => l.includes(`stopped: ${stopReason}`)) || '');
+      };
+      try {
+        // PROVES-INCOMPLETE — must say later results are missing.
+        for (const [reason, needle] of [
+          ['blocked', 'anti-bot wall ended the walk mid-source'],
+          ['user-done', 'NOT a user action'],
+          ['detail-enrichment-failed', 'stopped this source mid-walk'],
+          ['aborted', 'cancelled while this source was still walking'],
+          ['challenge-recovery-loop', 'bounced the walk back to page 1 twice'],
+          ['no-new-jobs', 'is NOT established'],
+          ['data-stop', 'coverage here is unknown'],
+        ]) {
+          const line = render(reason);
+          assert(line.includes(needle), `${reason} states what it cost: expected "${needle}" in: ${line}`);
+          assert(line.includes('⚠️'), `${reason} is flagged as a warning, not an aside`);
+        }
+        // PROVES-EXHAUSTED / DELIBERATE — informational, and must NOT be alarming.
+        for (const [reason, needle] of [
+          ['empty-page', 'end of this board'],
+          ['end-of-results', 'stale selectors are ruled out'],
+          ['age-window', 'NOT an exhausted board'],
+        ]) {
+          const line = render(reason);
+          assert(line.includes(needle), `${reason} explains itself: expected "${needle}" in: ${line}`);
+          assert(line.includes('ℹ️') && !line.includes('⚠️ ('),
+            `${reason} is informational, not a warning`);
+        }
+        // age-window must not claim deeper pages exist — nothing establishes that.
+        assert(!render('age-window').includes('Deeper pages exist'),
+          'age-window asserts only what the two-page evidence supports');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    // Two truncation idioms coexist in the report code. A bare .slice() cut a
+    // sentence mid-word ("…the scraper stopped befor"), which reads as a
+    // corrupted report rather than a clipped one.
+    name: 'bug report: prose truncation is marked, identifiers are not, and table cells clip before escaping',
+    run: () => {
+      assert(clipReportText('short', 40) === 'short',
+        'a value under the cap is returned untouched — no cosmetic marker');
+      const long = 'x'.repeat(100);
+      const clipped = clipReportText(long, 40);
+      assert(clipped.length === 40 && clipped.endsWith('…'),
+        'an over-length value is cut to the cap WITH a marker, so the cut is legible as truncation');
+      assert(clipReportText(null, 10) === '' && clipReportText(undefined, 10) === '',
+        'a missing value yields empty text rather than the string "null"');
+
+      // A cut landing between `\` and `|` leaves a dangling backslash that
+      // escapes the cell's closing pipe and breaks the markdown table, so the
+      // clip must happen BEFORE the pipe escape at every table-cell site.
+      const rollup = fs.readFileSync(path.resolve('electron/ipc/bugReport/marketplaceModuleRollup.js'), 'utf8');
+      const sellHub = fs.readFileSync(path.resolve('electron/ipc/bugReport/sellHubPriceDropRollup.js'), 'utf8');
+      const report = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(rollup.includes("clipReportText((r.summary || r.message || '').replace(/\\s+/g, ' ').trim(), 80).replace(/\\|/g, '\\\\|')"),
+        'the marketplace summary cell clips before escaping its pipes');
+      assert(sellHub.includes('escapeCell(clipReportText(productLabel(d), 70))'),
+        'the sell-hub item cell clips before escapeCell runs');
+      assert(report.includes("truncateDiagnosticText(redactReportUrlsInText(duration.error), 80).replace(/\\|/g, '\\\\|')")
+        && report.includes("truncateDiagnosticText(String(d.title || '—'), 80).replace(/\\|/g, '\\\\|')"),
+      'both bugReport.js table cells clip before escaping their pipes');
+
+      // Identifiers must NOT gain a marker — a URL, hash, selector or JSON blob
+      // with '…' appended is no longer a value anyone can match or copy.
+      const snap = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+      assert(snap.includes('JSON.stringify(e.pageState).slice(0, 240)')
+        && snap.includes('JSON.stringify(String(e.panelSelector).slice(0, 180))'),
+      'JSON blobs and selectors keep their bare slice — a marker would corrupt the value');
+      return { ok: true };
     },
   },
 ];

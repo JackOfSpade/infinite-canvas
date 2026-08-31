@@ -887,7 +887,15 @@ export const PLATFORM_COOKIE_DOMAINS = {
   // scrape preflight already queries (indeedBrowser.js: search host + www +
   // secure) rather than betting on one.
   indeed:        ['.indeed.com', 'www.indeed.com', 'secure.indeed.com'],
-  glassdoor:     ['.glassdoor.com'],
+  // Glassdoor geo-redirects a .com session onto a regional host mid-run
+  // (www.glassdoor.ca is routinely served to a Canadian egress even for a
+  // US-scoped search), and page.cookies(url) returns only the cookies that
+  // APPLY to the urls asked for. Checking .com alone therefore reads "auth
+  // cookie ABSENT" for a session that is perfectly logged in on the host the
+  // scrape is actually using — the same shape as the Indeed multi-host note
+  // above. Listing the regional hosts costs one extra url per lookup and
+  // removes a false logged-out verdict.
+  glassdoor:     ['.glassdoor.com', '.glassdoor.ca', '.glassdoor.co.uk', '.glassdoor.co.in', '.glassdoor.com.au', '.glassdoor.de', '.glassdoor.fr'],
   ziprecruiter:  ['.ziprecruiter.com'],
   dice:          ['.dice.com'],
   // Marketplace — selling + pricing

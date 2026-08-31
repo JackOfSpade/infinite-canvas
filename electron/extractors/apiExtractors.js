@@ -21,7 +21,7 @@ import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
-import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
+import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -1241,7 +1241,11 @@ export function filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms = EM
     // between the two role concepts and can fail the local-phrase guard. Keep
     // the source object intact — this normalized value is matcher/telemetry-only
     // and normal pipeline markup cleanup still owns the persisted job fields.
-    const title = decodeHtmlEntities(String(job?.title || ''));
+    // Keep the source object untouched, but make the admission decision and its
+    // diagnostic sample read the human title. RemoteOK occasionally returns
+    // UTF-8 mojibake (for example "MACAÃ"), and this boundary otherwise runs
+    // before the final kept-job cleanup where that text is normally repaired.
+    const title = decodeHtmlEntities(repairMojibake(String(job?.title || '')));
     const matched = roleQueries.length === 0
       ? []
       : roleQueries
@@ -1583,11 +1587,11 @@ export function formatRemoteOkSalary(min, max) {
  * Tags to request from RemoteOK in addition to the bare feed, derived from the
  * run's own queries.
  *
- * The bare /api response is a HARD 100-element cap (1 metadata object + 99
- * postings) — verified live: `?limit=200` and `?offset=100` are both ignored and
- * still return 101 elements. `?tag=` is the only server-side selector that
- * works, and it returns a DIFFERENT 99 postings, so it is the only way to reach
- * inventory the bare feed cannot show. A bogus tag returns metadata only, which
+ * The bare /api response is capped at roughly 100 postings (plus its metadata
+ * object) — verified live: `?limit=200` and `?offset=100` are ignored. `?tag=`
+ * is the only server-side selector that works, and it returns different
+ * inventory, so it reaches rows the bare feed cannot show. A bogus tag returns
+ * metadata only, which
  * is what proves the parameter is honoured server-side and also makes a wrong
  * guess harmless — it yields zero rows after the slice(1), never an error.
  *
@@ -1652,13 +1656,18 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   if (!r.ok) {
     if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
     else logger.warn(`[RemoteOK API] Returned ${r.status}`);
-    return { items: [], warning: r.warning };
+    return { items: [], warning: r.warning, sponsoredDropped: 0 };
   }
 
   const data = r.json;
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
-  // The bare feed is capped at 99 postings, so widen with a few tag-scoped
+  // Compact source provenance for the Jobs/FULL diagnostic report. These are
+  // feed scopes derived from the already-reported role queries, never posting
+  // payloads or descriptions; keeping this separately explains a historical
+  // all-rejected result without retaining rejected jobs themselves.
+  const feedProvenance = [{ scope: 'bare', received: jobs.length, added: jobs.length }];
+  // The bare feed is capped at roughly 100 postings, so widen with a few tag-scoped
   // fetches that return DIFFERENT inventory. Additive only: the bare feed is
   // always the base and is never replaced, and rows are deduped by id/url below.
   const seenFeedKeys = new Set(jobs.map(j => String(j?.id || j?.url || '')).filter(Boolean));
@@ -1666,6 +1675,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     if (signal?.aborted) break;
     const tagged = await fetchRemoteOkFeed(`https://remoteok.com/api?tag=${encodeURIComponent(tag)}`, signal);
     if (!tagged.ok || !Array.isArray(tagged.json)) continue;
+    const received = Math.max(0, tagged.json.length - 1);
     let added = 0;
     for (const job of tagged.json.slice(1)) {
       const key = String(job?.id || job?.url || '');
@@ -1674,6 +1684,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       jobs.push(job);
       added++;
     }
+    feedProvenance.push({ scope: 'tag', tag, received, added });
     logger.info(`[RemoteOK API] ?tag=${tag} added ${added} posting(s) beyond the bare feed`);
   }
 
@@ -1751,7 +1762,16 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   });
   const withDesc = items.filter(j => j.description).length;
   logger.info(`[RemoteOK API] ${items.length}/${admission.providerGathered} role-matched feed jobs, ${withDesc}/${items.length} have descriptions`);
-  return { ...admission, items, warning: r.warning };
+  // Keep sponsorship removal distinct from role-title admission. They are both
+  // expected exclusions, but conflating them makes an empty RemoteOK run look
+  // like the query matcher rejected postings that were actually product ads.
+  return {
+    ...admission,
+    items,
+    sponsoredDropped: sponsored.length,
+    remoteFeedProvenance: feedProvenance,
+    warning: r.warning,
+  };
 }
 
 

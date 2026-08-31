@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, generateMarkdown, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -701,7 +701,8 @@ export default [
           responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
-          batch: 2, batchTotal: 3, itemCount: 24, signal,
+          batch: 2, batchTotal: 3, itemCount: 24,
+          attemptKind: 'partial-recovery', rootBatchSize: 24, signal,
         }),
       }));
       const run = ipcMain.__getInvokeHandler('non-api-lifecycle-report-test')({ sender }, { nodeId: 'handoff-report-node' });
@@ -720,14 +721,17 @@ export default [
         '[Non-API AI] Rejected response for task job-taxonomy-classify',
         'viewport changed source=interaction',
       ], {}, 'JOBHANDOFF');
-      assert(rejected.accepted === false && replay.count === 1 && accepted.accepted === true
+      assert(request.attemptKind === 'partial-recovery' && request.rootBatchSize === 24
+        && rejected.accepted === false && replay.count === 1 && accepted.accepted === true
         && receipt?.deliveries === 3 && receipt?.rejected === 1 && receipt?.reissues === 1
+        && receipt?.attemptKind === 'partial-recovery' && receipt?.rootBatchSize === 24
         && receipt?.replays === 1 && receipt?.outcome === 'accepted' && receipt?.acceptedAt && receipt?.settledAt,
       'the lifecycle records initial delivery, validation rejection/reissue, remount replay, acceptance, and final settlement');
       assert(markdown.includes('Non-API AI Handoff Lifecycle')
         && markdown.includes('1 paste rejection(s)')
         && markdown.includes('1 reissued')
         && markdown.includes('1 replayed after dialog remount')
+        && markdown.includes('**partial-row recovery** from 24-item root batch')
         && markdown.includes('**accepted** in')
         && !markdown.includes('TOP_SECRET_PROMPT')
         && !markdown.includes('TOP_SECRET_RESPONSE')
@@ -738,7 +742,34 @@ export default [
         && focused.sectionExclusions.has('nodeInternals')
         && focused.sectionExclusions.has('nodes'),
       'JOBHANDOFF is a focused filter that keeps handoff evidence while dropping the heavy canvas payload');
-      return { deliveries: receipt.deliveries, replays: receipt.replays, filter: 'JOBHANDOFF' };
+
+      const taxonomyFilter = applyBugReportCode([], {}, 'TAXONOMY');
+      const taxonomyReport = generateMarkdown({
+        description: 'The taxonomy response appeared to be stuck.',
+        filterCode: 'TAXONOMY',
+        filterStats: {
+          eventsShown: 0,
+          eventsTotal: 0,
+          omittedSections: [...taxonomyFilter.sectionExclusions],
+          hasJobNodes: true,
+          hasSellNodes: false,
+          currentNodeIds: ['handoff-report-node'],
+        },
+        // Deliberately retain a sentinel despite the filter's exclusions: the
+        // formatter must obey the exclusion metadata, just as it does after the
+        // renderer removes the heavy node payload before IPC.
+        nodes: [{ id: 'taxonomy-heavy-node-must-not-render', type: 'jobcard', data: { title: 'TOP_SECRET_NODE' } }],
+        edges: [], drawings: [], nodeInternals: [], nodeComponentStates: [],
+        frontEndState: {}, eventLogs: [],
+      }, sender.id).markdown;
+      assert(taxonomyReport.includes('## Non-API AI Handoff Lifecycle')
+        && taxonomyReport.includes('job-taxonomy-classify')
+        && taxonomyReport.includes('**accepted** in')
+        && !taxonomyReport.includes('TOP_SECRET_PROMPT')
+        && !taxonomyReport.includes('TOP_SECRET_RESPONSE')
+        && !taxonomyReport.includes('TOP_SECRET_NODE'),
+      'TAXONOMY retains its redacted manual taxonomy-handoff receipt while honoring heavy-node exclusions');
+      return { deliveries: receipt.deliveries, replays: receipt.replays, filter: 'JOBHANDOFF+TAXONOMY' };
     },
   },
   {

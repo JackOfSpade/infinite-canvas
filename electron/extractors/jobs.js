@@ -97,6 +97,18 @@ export const GLASSDOOR_EXTRACTOR = `
 (function() {
   const jobs = [];
 
+  // Glassdoor geo-redirects: a US-scoped search built on www.glassdoor.com
+  // routinely LANDS on www.glassdoor.ca, and the scraper deliberately continues
+  // on the landed host because that is where the cleared session lives. Relative
+  // hrefs must therefore be absolutized against the host we are actually on —
+  // hardcoding .com minted cross-domain URLs for half the rows (absolute hrefs
+  // pass through unchanged, so the run produced a MIXED .com/.ca set) and each
+  // one costs an extra redirect on open and breaks URL-keyed dedup against a
+  // later run on the other host.
+  const gdOrigin = (location.origin && /glassdoor\\./i.test(location.hostname))
+    ? location.origin
+    : 'https://www.glassdoor.com';
+
   // Strategy 0: believe the board's own stated count.
   //
   // A Glassdoor search with genuinely zero matches still RENDERS about five
@@ -138,7 +150,7 @@ export const GLASSDOOR_EXTRACTOR = `
           location: value.locationName || value.location || '',
           salary: value.salarySource?.payRange ? String(value.salarySource.payRange) : (value.salaryEstimate || ''),
           snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
-          url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
+          url: value.seoJobLink ? (gdOrigin + value.seoJobLink) : (value.jobLink || ''),
           posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
           source: 'glassdoor'
         });
@@ -164,7 +176,7 @@ export const GLASSDOOR_EXTRACTOR = `
                     || titleEl?.closest('a')
                     || card.querySelector('a[href*=".htm"]');
         const href = linkEl?.getAttribute('href') || (jobId ? '/partner/jobListing.htm?jl=' + jobId : '');
-        const url = href.startsWith('http') ? href : (href ? 'https://www.glassdoor.com' + href : '');
+        const url = href.startsWith('http') ? href : (href ? gdOrigin + href : '');
 
         // Employer NAME only. The name-specific selectors come first because
         // [data-test="detailRecruiter"] is the wrapper that also holds the star

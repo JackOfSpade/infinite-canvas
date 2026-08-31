@@ -315,7 +315,7 @@ export const CODE_DEFINITIONS = {
 
   RECOVERY: {
     label: 'Job Recovery After Restart',
-    description: 'Interrupted Job Search recovery audit — saved run manifest/staging-ledger health plus current and last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste; never includes job contents or AI prompt/response text. Included automatically in FULL.',
+    description: 'Job Search restart/completion audit — durable last-run terminal receipt plus saved run manifest/staging-ledger health and current/last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste, or to establish whether a prior-process run completed; never includes job contents or AI prompt/response text. Included automatically in FULL.',
     logFilter: line =>
       /\[JobSearch\]|\[Jobs\]|job.?run|jobs?.(?:staging|run)|saved (?:AI prompt|scrape)|resume(?:d|ing)? (?:job|saved|search)|manual ai|non-api-ai|copy\/?paste|cancel.?node.?task/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
@@ -352,11 +352,22 @@ export const CODE_DEFINITIONS = {
       /status check|check.?all|checking .* status|Result: (live|sold|ended|unknown|needs.?login|error)|ListingStatusCheck|needs.?login|lastCheckTrace/i.test(line),
   },
 
+  STALL: {
+    label: 'Stuck / Not Progressing',
+    description: 'Liveness audit for a run that appears frozen — the browser scraper\'s activity beat (its on-screen per-card/per-page progress line, refreshed every few seconds), the operation currently being awaited and for how long, whether the scrape is user-PAUSED, whether a scrape Chrome is actually running, retained source/query origin phases, and the active IPC task ages. Use for "processing stuck", "stuck on searching", "nothing is happening", "frozen", or "it has been sitting there for ages". Answers the one question a phase timestamp cannot: is this working silently, or genuinely wedged? Included automatically in FULL; drops heavy canvas/media dumps.',
+    // Word-bounded on purpose: an unanchored `hang` matches "c-hang-ed", which
+    // made every "viewport changed" line survive the filter and defeated the
+    // point of scoping the report at all.
+    logFilter: line =>
+      /\[JobSearch\]|\[Jobs\]|\[BrowserScraper\]|\[BrowserPool\]|still awaiting|activity beat|page-extract|card.?walk|Registered task|cancel.?node.?task|\bstall(?:ed|ing)?\b|\bhang(?:s|ing|ung)?\b|\bpaus(?:e|ed|ing)\b|\bresum(?:e|ed|ing)\b|\bscrap(?:e|ed|ing|er)\b|\bextract(?:s|ed|ing|or|ion)?\b|\babort(?:s|ed|ing)?\b|\btimeouts?\b|\btimed out\b|\bheartbeat\b|\bfrozen\b|\bstuck\b/i.test(line),
+    excludeSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState'],
+  },
+
   // ── Presets ───────────────────────────────────────────────────────────────
 
   FULL: {
     label: 'Full Report',
-    description: 'All captured report sections and all event-log lines (for complex or unclear issues)',
+    description: 'All currently retained report sections and renderer event-log lines, without filter-code reduction (for complex or unclear issues). It cannot restore history from an earlier app process.',
     preset: 'full',
   },
 };

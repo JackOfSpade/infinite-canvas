@@ -43,7 +43,7 @@ import {
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun, computeResumeStartPage } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun, completeRunWithReceipt, computeResumeStartPage } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume, historyPathForCanvas } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import {
@@ -67,7 +67,7 @@ import { normalizeJobCollectionLimits, isUnlimitedPages, resolvePageCeiling, des
 import { getEnabledJobSourceIds, getRunnableJobSourceIds } from '../../src/utils/jobPlatformSelection.js';
 import { makeJobPageStop } from './jobPageStop.js';
 import { buildExactTargetRoleQueryBundle } from '../../src/utils/jobSearchQueries.js';
-import { filterJobsByTargetRole } from '../../src/utils/jobTitleMatch.js';
+import { filterJobsByTargetRole, tokenizeTargetRole, titleMatchesTargetRoleTokens } from '../../src/utils/jobTitleMatch.js';
 import { parseGuaranteedCashOffer, compensationAssessment, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource } from './jobCompensation.js';
 import { lazyStore } from '../utils/lazyStore.js';
 
@@ -1355,6 +1355,60 @@ function recordHistoryWrite(stage, input, result) {
 
 export function getJobsTelemetry() {
   return jobsTelemetry;
+}
+
+/**
+ * Build the only job-search data allowed into a durable post-run receipt.
+ * Telemetry is process-global, so never borrow it unless its search run token
+ * exactly matches the completion request.
+ */
+export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), terminal = null) {
+  const search = jobsTelemetry.search?.runId === runId ? jobsTelemetry.search : null;
+  const pipeline = jobsTelemetry.pipeline?.runId === runId ? jobsTelemetry.pipeline : null;
+  const sources = {};
+  if (search?.bySource && typeof search.bySource === 'object') {
+    for (const [sourceId, source] of Object.entries(search.bySource)) {
+      sources[sourceId] = {
+        count: source?.count,
+        providerGathered: source?.providerGathered ?? source?.gathered,
+        relevanceDropped: source?.relevanceDropped,
+        sponsoredDropped: source?.sponsoredDropped,
+        stopReason: source?.stopReason,
+        warning: source?.warning
+          ? { code: source.warning.code, severity: source.warning.severity }
+          : null,
+      };
+    }
+  }
+  return {
+    runId,
+    // These process-global identities are usable only with a matching search.
+    nodeId: search ? jobsTelemetry.nodeId : null,
+    startedAt: pipeline?.startedAt ?? (search ? search.ts : null),
+    completedAt,
+    terminal: {
+      status: ['completed', 'failed', 'aborted'].includes(terminal?.status)
+        ? terminal.status
+        : 'completed',
+      outcome: ['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(terminal?.outcome)
+        ? terminal.outcome
+        : search ? (Number(search.kept) > 0 ? 'populated' : 'zero') : 'unknown',
+    },
+    ...(search ? {
+      funnel: {
+        raw: search.raw,
+        relevanceDropped: search.relevanceDropped,
+        deduped: search.deduped,
+        ageDropped: search.ageDropped,
+        roleDropped: search.roleDropped,
+        historyDropped: search.historyDropped,
+        descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
+        kept: search.kept,
+      },
+    } : {}),
+    sources,
+    stagingStarted: pipeline?.stagingStarted === true,
+  };
 }
 
 /**
@@ -2849,6 +2903,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const gathered = Array.isArray(result) ? rawJobs.length : (result?.gathered ?? rawJobs.length);
       const providerGathered = Array.isArray(result) ? rawJobs.length : (result?.providerGathered ?? gathered);
       const relevanceDropped = Array.isArray(result) ? 0 : (result?.relevanceDropped ?? 0);
+      const sponsoredDropped = Array.isArray(result) ? 0 : (result?.sponsoredDropped ?? 0);
       // Whole-feed sources filter before this wrapper applies the persisted
       // per-platform cap. Preserve those early drops separately so the central
       // funnel can reconstruct provider rows rather than reporting only the
@@ -2858,6 +2913,10 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // never merged into jobs. See fetchUSAJobs for why the count alone is not
       // enough to tell a healthy gate from one that is starving the source.
       const relevanceRejected = Array.isArray(result) ? [] : (result?.relevanceRejected || []);
+      // RemoteOK's whole feed is widened with a bounded set of query-derived
+      // tag feeds. Carry only compact row counts/scopes so an all-rejected run
+      // can be reconstructed in JOBS/FULL without retaining discarded postings.
+      const remoteFeedProvenance = Array.isArray(result) ? [] : (result?.remoteFeedProvenance || []);
       // Provider-reported corpus size and walk outcomes. Carried through because
       // a source that WAS truncated and one that genuinely had this many rows are
       // otherwise byte-identical in the report: `providerGathered` is already the
@@ -2892,7 +2951,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       if (stageSource && jobs.length > 0) {
         await stageSource({ sourceId, jobs });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, stopReasons, sourceCap, relevanceDropped, preCapRelevanceDropped, relevanceRejected, relevanceTrace };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, stopReasons, sourceCap, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -4082,6 +4141,7 @@ Return a JSON object with four arrays of search query strings:
     // no-op without a canvas path. stageOnPage flushes each page as it completes;
     // HTTP sources are flushed per-source after they finish (below).
     const runStartedAt = Date.now();
+    let stagingStarted = false;
     if (resumeScope) {
       // Keep the recovered manifest/staging and its original run token intact.
       // A gathered-only recovery has no page work to record; changing its stage
@@ -4089,9 +4149,11 @@ Return a JSON object with four arrays of search query strings:
       if (!resumeGatheredOnly) {
         await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId });
       }
+      // A resume reached this branch only after readRunState found its manifest.
+      stagingStarted = !!canvasFilePath;
     } else {
       activeRunId = `${nodeId || 'job'}-${runStartedAt}`;
-      await startJobRun(canvasFilePath, {
+      const startedRun = await startJobRun(canvasFilePath, {
         runId: activeRunId,
         startedAt: runStartedAt,
         queries,
@@ -4107,11 +4169,28 @@ Return a JSON object with four arrays of search query strings:
         nodeId,
         sourceIds: activeSourceIds,
       });
+      stagingStarted = !!startedRun;
+      // A saved canvas must have a durable manifest before any source request.
+      // Continuing after a failed start used to allow an un-recoverable search to
+      // paint a terminal zero and replace prior board results with no forensic
+      // record. Unsaved canvases intentionally retain the no-sidecar behavior.
+      if (canvasFilePath && !startedRun) {
+        const error = 'Could not initialize durable job-run recovery for this saved canvas. No job sources were queried and existing results were left unchanged.';
+        retirePipeline('staging-start-failed', error);
+        logger.warn(`[Jobs][${nodeId}] ${error}`);
+        return { success: false, stagingStartFailed: true, error };
+      }
       // The run ID is also the correlation token for the in-memory funnel and
       // saved analysis snapshot. It deliberately survives a missing/failed
       // crash-recovery manifest: diagnostics still need to distinguish this
       // search from the prior one even when staging is unavailable.
     }
+    jobsTelemetry.pipeline = {
+      ...(jobsTelemetry.pipeline || {}),
+      runId: activeRunId,
+      stagingStarted,
+      ts: Date.now(),
+    };
     const stageOnPage = ({ sourceId, query, page, jobs }) =>
       recordSourcePage(canvasFilePath, {
         sourceId, query, page, jobs, now: Date.now(), expectedRunId: activeRunId,
@@ -4213,6 +4292,11 @@ Return a JSON object with four arrays of search query strings:
       return indeedResult;
     };
 
+    // A source result is terminal from the renderer's perspective. Normally
+    // manualScraper emits no overlay paints after onResult, but keep that
+    // ordering invariant at the IPC boundary too: a future teardown/retry paint
+    // must never turn a finished source card back into "Searching…".
+    const terminalManualSourceIds = new Set();
     const onManualResult = (res) => {
       const sourceId = res.id.replace(/-\d+$/, '');
       const count = Array.isArray(res.data) ? res.data.length : 0;
@@ -4243,6 +4327,7 @@ Return a JSON object with four arrays of search query strings:
         warning: res.warning || null,
         url: sourceFirstUrl[sourceId] || null,
       });
+      terminalManualSourceIds.add(sourceId);
     };
 
     const runBrowserSourcesInOrder = async () => {
@@ -4260,6 +4345,29 @@ Return a JSON object with four arrays of search query strings:
           if (!sourceTasks.length) continue;
           const r = await scrapeManualSources(sourceTasks, onManualResult, combinedSignal, stageOnPage, {
             resetDiagnostics: false, sourceIndexBase: i, sourceTotal: browserOrder.length,
+            // The manual browser sources were the only ones with no mid-flight
+            // progress channel: onManualResult fires once per finished task and
+            // stageOnPage only writes the crash-recovery sidecar, so a
+            // multi-minute Glassdoor walk delivered exactly one 'searching'
+            // event and then nothing. Indeed and LinkedIn already report this
+            // way; this closes the gap for the rest, and because emitProgress
+            // also restamps jobsTelemetry.pipeline.ts, it is what keeps the
+            // report's liveness clock ticking during a browser walk.
+            onActivity: (beat) => {
+              const activitySourceId = beat.sourceId || sid;
+              if (terminalManualSourceIds.has(activitySourceId)) return;
+              emitProgress({
+                nodeId,
+                sourceId: activitySourceId,
+                status: 'searching',
+                // Omitted (not zeroed) when the beat carries no total, so
+                // mergeSourceProgress keeps the last known count instead of
+                // blanking a card that already showed one.
+                ...(beat.count != null ? { count: beat.count } : {}),
+                detail: beat.status || null,
+                url: sourceFirstUrl[activitySourceId] || null,
+              });
+            },
           });
           manualResults.push(...r);
         }
@@ -4349,8 +4457,21 @@ Return a JSON object with four arrays of search query strings:
             reprobes: (prior.reprobes || 0) + (result.detailBlock.reprobes || 0),
             recovered: (prior.recovered || 0) + (result.detailBlock.recovered || 0),
             skippedCards: (prior.skippedCards || 0) + (result.detailBlock.skippedCards || 0),
+            // Recovery-surviving fields: the scraper resets firstPage/reprobes
+            // when a re-probe succeeds, and skippedCards never counted the page
+            // that TRIGGERED the block, so without these a recovered episode
+            // reported zero cost.
+            everBlockedPage: prior.everBlockedPage ?? result.detailBlock.everBlockedPage,
+            reprobesTotal: (prior.reprobesTotal || 0) + (result.detailBlock.reprobesTotal || 0),
+            unenrichedRows: (prior.unenrichedRows || 0) + (result.detailBlock.unenrichedRows || 0),
           }
           : { ...result.detailBlock };
+      }
+      // Physical cards this source dropped as same-source duplicates BEFORE the
+      // funnel's "Found (raw)" was computed from what it returned.
+      if (result.providerDuplicatesDropped != null) {
+        sourceResults[sourceId].providerDuplicatesDropped =
+          (sourceResults[sourceId].providerDuplicatesDropped || 0) + Number(result.providerDuplicatesDropped || 0);
       }
       if (result.success && Array.isArray(result.data)) {
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
@@ -4360,10 +4481,14 @@ Return a JSON object with four arrays of search query strings:
         // sources only; one-shot sources leave pagesWalked at 0). Aggregated
         // across a source's query variants: deepest walk + the set of reasons.
         // Board-advertised total, where the board publishes a trustworthy one.
-        // Observation only — it makes under-collection legible ("141 of ~587
-        // advertised") and must never gate, filter, or retry.
+        // It makes under-collection legible ("141 of ~587 advertised"). The
+        // manual scraper may also use it for ZipRecruiter's bounded hidden-page
+        // continuation; it never filters rows or drives another source.
         if (result.claimedTotal != null && sourceResults[sourceId].claimedTotal == null) {
           sourceResults[sourceId].claimedTotal = result.claimedTotal;
+        }
+        if (result.directContinuation) {
+          sourceResults[sourceId].directContinuation = { ...result.directContinuation };
         }
         if (result.pagesWalked != null) {
           sourceResults[sourceId].pagesWalked = Math.max(sourceResults[sourceId].pagesWalked, result.pagesWalked);
@@ -4434,6 +4559,7 @@ Return a JSON object with four arrays of search query strings:
       if (res.providerGathered != null) sourceResults[res.sourceId].providerGathered = res.providerGathered;
       if (res.relevanceDropped != null) sourceResults[res.sourceId].relevanceDropped = res.relevanceDropped;
       if (res.relevanceDropped != null) sourceResults[res.sourceId].admissionRelevanceDropped = res.relevanceDropped;
+      if (res.sponsoredDropped != null) sourceResults[res.sourceId].sponsoredDropped = res.sponsoredDropped;
       if (res.preCapRelevanceDropped != null) sourceResults[res.sourceId].preCapRelevanceDropped = res.preCapRelevanceDropped;
       // Truncation evidence for API sources. `providerTotal` is the provider's
       // OWN count for the query, so "gathered 150 of 973" becomes legible where
@@ -4451,6 +4577,9 @@ Return a JSON object with four arrays of search query strings:
       if (res.enrichment) sourceResults[res.sourceId].enrichment = res.enrichment;
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
         sourceResults[res.sourceId].relevanceRejected = res.relevanceRejected;
+      }
+      if (Array.isArray(res.remoteFeedProvenance) && res.remoteFeedProvenance.length > 0) {
+        sourceResults[res.sourceId].remoteFeedProvenance = res.remoteFeedProvenance;
       }
       if (Array.isArray(res.relevanceTrace) && res.relevanceTrace.length > 0) {
         sourceResults[res.sourceId].relevanceTrace = res.relevanceTrace;
@@ -4994,9 +5123,18 @@ Return a JSON object with four arrays of search query strings:
       // How deep the date-bounded walk went + why it stopped — only for the
       // paginating browser sources (one-shot / API sources leave it unset).
       if (data.claimedTotal != null) bySource[sid].claimedTotal = data.claimedTotal;
+      if (data.directContinuation) bySource[sid].directContinuation = data.directContinuation;
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
-        bySource[sid].stopReason = [...(data.stopReasons || [])].join('/') || null;
+        // Two shapes reach this field: the manual walker adds STRINGS to a Set
+        // (line 4412), while the API path assigns an ARRAY OF {query, stopReason}
+        // objects (line 4486). A bare join over the latter renders
+        // "[object Object]"; unreachable today only because API sources leave
+        // pagesWalked at 0 and never enter this guard.
+        bySource[sid].stopReason = [...(data.stopReasons || [])]
+          .map(r => (typeof r === 'string' ? r : r?.stopReason))
+          .filter(Boolean)
+          .join('/') || null;
         if ((data.stopReasons || new Set()).has('per-source-cap')) {
           // Browser sources cannot know how many additional matches exist without
           // issuing more pages. Preserve the actual enforced aggregate cap so the
@@ -5017,9 +5155,14 @@ Return a JSON object with four arrays of search query strings:
         }
       }
       if (data.detailBlock) bySource[sid].detailBlock = data.detailBlock;
+      if (data.providerDuplicatesDropped) bySource[sid].providerDuplicatesDropped = data.providerDuplicatesDropped;
       if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
       if (data.relevanceDropped > 0) bySource[sid].relevanceDropped = data.relevanceDropped;
+      if (data.sponsoredDropped > 0) bySource[sid].sponsoredDropped = data.sponsoredDropped;
       if (data.admissionRelevanceDropped > 0) bySource[sid].admissionRelevanceDropped = data.admissionRelevanceDropped;
+      if (Array.isArray(data.remoteFeedProvenance) && data.remoteFeedProvenance.length > 0) {
+        bySource[sid].remoteFeedProvenance = data.remoteFeedProvenance;
+      }
       if (Array.isArray(data.relevanceRejected) && data.relevanceRejected.length > 0) {
         bySource[sid].relevanceRejected = data.relevanceRejected;
       }
@@ -5074,6 +5217,12 @@ Return a JSON object with four arrays of search query strings:
     // searches, the post-hoc title audit is diagnostic only: no local title
     // mismatch is allowed to remove a platform-approved result.
     const relevanceAudit = {};
+    // This retrospective audit normally uses the keyword-less feed matcher,
+    // whose exact/synonym vocabulary is intentionally narrower than the
+    // pinned-role title gate. Preserve the gate's actual evidence too: without
+    // it, a valid `System Architect` → `SYSTEMS ARCHITECTURE` inflection match
+    // misleadingly looked like a provider-only admission in the bug report.
+    const targetRoleTokens = tokenizeTargetRole(targetRole);
     for (const sourceId of activeSourceIds) {
       const trace = sourceResults[sourceId]?.relevanceTrace;
       const keptUrls = new Set(kept.filter(job => job.source === sourceId).map(job => job.url).filter(Boolean));
@@ -5092,12 +5241,23 @@ Return a JSON object with four arrays of search query strings:
           const matched = (Array.isArray(queries) ? queries : [])
             .map(query => jobRelevanceEvidence(job.title, query))
             .filter(Boolean);
+          const targetRoleTitleMatch = targetRoleTokens.length > 0
+            && titleMatchesTargetRoleTokens(
+              decodeHtmlEntities(repairMojibake(String(job.title == null ? '' : job.title))),
+              targetRoleTokens,
+            );
           return {
             url: job.url,
             title: job.title,
             company: job.company,
             matched,
-            providerAcceptedWithoutLocalTitleMatch: matched.length === 0,
+            // A provider-ranked source may still legitimately return a row
+            // without local keyword-matcher evidence. Do not call it
+            // provider-only when the pinned title gate is the local evidence
+            // that kept it in this run.
+            targetRoleTitleMatch,
+            targetRoleTokens: targetRoleTitleMatch ? targetRoleTokens : [],
+            providerAcceptedWithoutLocalTitleMatch: matched.length === 0 && !targetRoleTitleMatch,
           };
         }),
       };
@@ -5279,7 +5439,12 @@ Return a JSON object with four arrays of search query strings:
     };
   });
 
-  handleSafe('complete-job-run', async (event, { canvasFilePath, runId = null } = {}) => {
+  handleSafe('complete-job-run', async (event, {
+    canvasFilePath,
+    runId = null,
+    terminalStatus = null,
+    terminalOutcome = null,
+  } = {}) => {
     // Clean finish (including a successful resume-on-crash that runs to
     // completion): the staged jobs + run manifest have served their purpose, so
     // move them to the OS Trash as recoverable cleanup. clearRun falls back to a
@@ -5287,12 +5452,15 @@ Return a JSON object with four arrays of search query strings:
     // No token means there is no safely attributable sidecar to clear (unsaved
     // canvases and legacy/snapshot-only scoring land here). Never turn an
     // unscoped completion into an unconditional delete of another hub's run.
-    if (!runId) return { ok: true, cleared: false };
-    const cleared = await clearRun(canvasFilePath, {
-      trashItem: (p) => shell.trashItem(p),
-      expectedRunId: runId,
+    if (!runId) return { ok: true, cleared: false, receipt: null };
+    const receipt = buildJobRunCompletionReceipt(runId, Date.now(), {
+      status: terminalStatus,
+      outcome: terminalOutcome,
     });
-    return { ok: true, cleared };
+    const completion = await completeRunWithReceipt(canvasFilePath, receipt, {
+      trashItem: (p) => shell.trashItem(p),
+    });
+    return completion;
   });
 
   handleSafe('discard-job-run', async (event, { canvasFilePath, runId = null } = {}) => {
@@ -5656,6 +5824,10 @@ Return a JSON object with four arrays of search query strings:
               itemCount: batch.length,
               batch: context.topLevelBatch,
               batchTotal: scoringBatches.length,
+              attemptKind: context.partialRecovery
+                ? 'partial-recovery'
+                : batch.length < (context.rootBatchSize || batch.length) ? 'split' : 'initial',
+              rootBatchSize: context.rootBatchSize || batch.length,
             },
             responseSchema: JOB_SCORING_SCHEMA,
             cachedPrefix: requestParts.cachedPrefix,

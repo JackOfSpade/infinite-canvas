@@ -4,7 +4,7 @@ import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'l
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
-import { mergeSourceProgress } from '../utils/sourceProgress';
+import { mergeSourceProgress, isTerminalSourceStatus } from '../utils/sourceProgress';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
@@ -340,7 +340,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // source-level resolve event so JobSearchNode can re-sync its blocking
           // warning list after onRetryStart's optimistic trim.
           setProgress(prev => {
-            if (!prev || prev.detail !== 'Solving…') return prev;
+            // Yield only to a newer TERMINAL backend event. The old latch tested
+            // for our optimistic detail 'Solving…', but a legitimate mid-solve
+            // 'searching' beat (jobs.js re-fetching descriptions) overwrites
+            // `detail`, so a failing Solve skipped the restore and stranded the
+            // card spinning with no warning and no Solve button.
+            if (!prev || isTerminalSourceStatus(prev.status)) return prev;
             const next = {
               ...prevForRestore,
               status: 'error',
@@ -365,10 +370,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           }));
         } else if (prevForRestore) {
           // Solve didn't complete. Restore the actionable warning so the card goes
-          // back to red — but only if our optimistic 'Solving…' state is still in
-          // place (a fresh backend event, e.g. LinkedIn's re-emitted error, would
-          // have replaced detail, and we must not clobber that newer state).
-          setProgress(prev => (prev && prev.detail === 'Solving…') ? prevForRestore : prev);
+          // back to red — unless a newer TERMINAL backend event already landed
+          // (e.g. LinkedIn's re-emitted error), which we must not clobber. Same
+          // predicate as the branch above so the two halves cannot drift apart.
+          setProgress(prev => (prev && !isTerminalSourceStatus(prev.status)) ? prevForRestore : prev);
         }
       }
     } finally {
@@ -445,7 +450,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const progressDone = progressTotal && Number.isFinite(liveProgress?.completed)
     ? Math.max(0, Math.min(liveProgress.completed, progressTotal))
     : null;
-  const hasMeasuredProgress = progressTotal != null && progressDone != null;
+  // A single-query source can only ever report 0/1 until it finishes, so the
+  // "measured" bar rendered a frozen 8% and the text "0/1" for the entire walk —
+  // an implied measurement that never moves reads as a stalled job, which is
+  // exactly the wrong signal. With more than one query the fraction is real and
+  // does advance, so keep it there; otherwise fall through to the indeterminate
+  // working state and let the live detail line carry the progress.
+  const hasMeasuredProgress = progressTotal != null && progressDone != null && progressTotal > 1;
   const progressPercent = (isDone || isSkipped || isError)
     ? 100
     : isSearching

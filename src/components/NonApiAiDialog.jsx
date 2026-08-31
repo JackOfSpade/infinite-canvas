@@ -15,14 +15,22 @@ const stringifyValidationError = (value) => {
 const requestLabel = (request) => {
   if (!request) return 'AI response';
   const task = request.task || 'AI response';
+  const attemptLabel = request.attemptKind === 'partial-recovery'
+    ? 'partial recovery for '
+    : request.attemptKind === 'split' ? 'split retry for ' : '';
   const itemLabel = Number.isFinite(request.itemCount)
     ? ` · ${request.itemCount} ${request.itemCount === 1 ? 'item' : 'items'}`
     : '';
+  const rootLabel = request.attemptKind !== 'initial'
+    && Number.isFinite(request.rootBatchSize)
+    && request.rootBatchSize !== request.itemCount
+    ? ` · ${request.rootBatchSize}-item root batch`
+    : '';
   if (Number.isFinite(request.batch) && Number.isFinite(request.batchTotal)) {
-    return `${task} · batch ${request.batch} of ${request.batchTotal}${itemLabel}`;
+    return `${task} · ${attemptLabel}batch ${request.batch} of ${request.batchTotal}${itemLabel}${rootLabel}`;
   }
-  if (Number.isFinite(request.batch)) return `${task} · batch ${request.batch}${itemLabel}`;
-  return `${task}${itemLabel}`;
+  if (Number.isFinite(request.batch)) return `${task} · ${attemptLabel}batch ${request.batch}${itemLabel}${rootLabel}`;
+  return `${task}${attemptLabel ? ` · ${attemptLabel.trim()}` : ''}${itemLabel}${rootLabel}`;
 };
 
 const attachmentName = (filePath) => String(filePath || '').split(/[/\\]/).filter(Boolean).pop() || 'Attachment';
@@ -418,7 +426,11 @@ export function NonApiAiDialog() {
                     || cancellingRequestIds.has(request.requestId)
                     || acceptedRequestIds.has(request.requestId);
                   const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
-                  const label = Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
+                  const label = request.attemptKind === 'partial-recovery'
+                    ? `Recovery ${request.batch}${count}`
+                    : request.attemptKind === 'split'
+                      ? `Split ${request.batch}${count}`
+                      : Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
                   return (
                     <button
                       key={request.requestId}

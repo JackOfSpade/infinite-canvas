@@ -55,7 +55,7 @@ export function isNonApiJobTask(task) {
   return NON_API_JOB_TASKS.has(task);
 }
 
-function createHandoffLifecycle({ requestId, sender, nodeId, task, batch, batchTotal, itemCount, materializedPrompt }) {
+function createHandoffLifecycle({ requestId, sender, nodeId, task, batch, batchTotal, itemCount, attemptKind, rootBatchSize, materializedPrompt }) {
   const issuedAt = Date.now();
   const lifecycle = {
     requestId: String(requestId || '').slice(0, 12),
@@ -65,6 +65,8 @@ function createHandoffLifecycle({ requestId, sender, nodeId, task, batch, batchT
     batch: batch ?? null,
     batchTotal: batchTotal ?? null,
     itemCount: itemCount ?? null,
+    attemptKind: attemptKind || 'initial',
+    rootBatchSize: rootBatchSize ?? null,
     // Size only, never content — enough to tell a 1-job prompt from a 15-job
     // one when the batch label itself is what is under suspicion.
     promptChars: typeof materializedPrompt === 'string' ? materializedPrompt.length : null,
@@ -171,6 +173,10 @@ function cleanBatchNumber(value) {
   return Number.isInteger(number) && number >= 1 && number <= 100_000 ? number : null;
 }
 
+function cleanAttemptKind(value) {
+  return ['initial', 'partial-recovery', 'split'].includes(value) ? value : 'initial';
+}
+
 function cleanBatchMetadata(batch, batchTotal) {
   const cleanBatch = cleanBatchNumber(batch);
   const cleanTotal = cleanBatchNumber(batchTotal);
@@ -231,6 +237,8 @@ function publicRequest(record, validationError = record.validationError || null)
     batch: record.batch,
     batchTotal: record.batchTotal,
     itemCount: record.itemCount,
+    attemptKind: record.attemptKind,
+    rootBatchSize: record.rootBatchSize,
     attachments: [...record.attachmentPaths],
     validationError,
   };
@@ -296,6 +304,8 @@ export function requestNonApiAi({
   batch,
   batchTotal,
   itemCount,
+  attemptKind,
+  rootBatchSize,
   retryOnTruncation,
   responseValidator,
   signal,
@@ -313,6 +323,8 @@ export function requestNonApiAi({
     nodeId: context.nodeId || null,
     ...cleanBatchMetadata(batch, batchTotal),
     itemCount: cleanBatchNumber(itemCount),
+    attemptKind: cleanAttemptKind(attemptKind),
+    rootBatchSize: cleanBatchNumber(rootBatchSize),
     task,
     responseSchema,
     responseValidator: typeof responseValidator === 'function' ? responseValidator : null,

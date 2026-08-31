@@ -39,7 +39,14 @@ function safeHttpUrl(value) {
   if (!raw) return '';
   try {
     const parsed = new URL(raw);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : '';
+    // Job URLs can originate in scraped markup. Never persist a URL containing
+    // credentials into the portable listing companion: it is both unnecessary
+    // for a public posting and can leak a source/session secret if the scraper
+    // was handed an authenticated redirect URL.
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:')
+      && parsed.hostname && !parsed.username && !parsed.password
+      ? parsed.href
+      : '';
   } catch { return ''; }
 }
 

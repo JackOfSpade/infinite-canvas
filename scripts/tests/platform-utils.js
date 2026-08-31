@@ -1,4 +1,4 @@
-import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
@@ -1753,7 +1753,31 @@ export default [
       return { ok: true };
     },
   },
-{
+  {
+    name: 'PDF render typography uses ATS-safe system fonts and rejects Type 3 font programs',
+    run: async () => {
+      const expression = atsSafePdfFontExpression();
+      assert(expression.includes('--ff-display') && expression.includes('Georgia')
+        && expression.includes('--ff-body') && expression.includes('Arial')
+        && expression.includes('--ff-mono') && expression.includes('Menlo'),
+      'the isolated PDF renderer replaces web-font tokens with extraction-safe system families');
+
+      const safePdf = await PDFDocument.create();
+      safePdf.addPage();
+      const safeBytes = await safePdf.save({ useObjectStreams: false });
+      assert(!(await pdfContainsType3Fonts(safeBytes)),
+        'an ordinary PDF without a Type 3 font passes the extractability font gate');
+
+      const unsafePdf = await PDFDocument.create();
+      unsafePdf.addPage();
+      unsafePdf.context.register(unsafePdf.context.obj({ Type: 'Font', Subtype: 'Type3' }));
+      const unsafeBytes = await unsafePdf.save({ useObjectStreams: false });
+      assert(await pdfContainsType3Fonts(unsafeBytes),
+        'a Type 3 font dictionary is detected even when it is not visible in a page screenshot');
+      return { atsSafe: true };
+    },
+  },
+  {
     // A single display-face probe can pass while an actual document face is
     // missing or a shell cascade overrides Inter/mono with a system fallback.
     // Conversely, Chromium does not fetch faces unused by this document, so

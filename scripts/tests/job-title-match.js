@@ -303,7 +303,7 @@ export default [
   {
     name: 'RemoteOK tag fan-out is derived, deduped and bounded',
     run: () => {
-      // The bare feed is a HARD 99-posting cap (limit/offset are ignored), and a
+      // The bare feed is capped at roughly 100 postings (limit/offset are ignored), and a
       // tag-scoped fetch returns DIFFERENT inventory — measured live, ?tag=react
       // returned 100 postings with ZERO overlap with the bare feed. Tags are the
       // only way to reach the rest, so they are derived from the run's queries.

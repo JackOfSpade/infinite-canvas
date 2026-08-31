@@ -38,9 +38,9 @@ export function buildFilterSummaryMarkdown(payload = {}) {
 
   let guidance;
   if (isFull && omittedSections.length > 0) {
-    guidance = 'FULL was combined with section exclusions; the event log is unfiltered. Use plain `FULL` or Save to file if omitted sections matter.';
+    guidance = 'FULL was combined with section exclusions; all currently retained event lines are selected. Use plain `FULL` or Save to file if omitted sections matter.';
   } else if (isFull) {
-    guidance = 'Full report requested — no filter-code event/section reduction was applied. Clipboard export may still truncate to fit the clipboard cap; use Save to file for the uncapped report.';
+    guidance = 'All currently retained report sections and event lines are selected — no filter-code reduction was applied. This does not restore history from an earlier app process. Clipboard export may still truncate to fit the clipboard cap; use Save to file for the uncapped currently retained report.';
   } else if (stats && Number(stats.eventsShown) === Number(stats.eventsTotal) && omittedSections.length === 0) {
     guidance = 'Filter code applied, but it did not remove any currently captured event lines.';
   } else {

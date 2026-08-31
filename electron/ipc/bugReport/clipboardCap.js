@@ -147,7 +147,7 @@ function truncateBaseForClipboard(baseMarkdown, room) {
   // original structure, not the truncated candidate.
   const headings = [...baseMarkdown.matchAll(/^## (.+)$/gm)].map((m) => ({ text: m[1], index: m.index }));
 
-  const note = '\n\n> ⚠️ Report content after this point was omitted by the clipboard cap. The recent logs and event timeline continue below; use "Save to file" for every uncapped section.\n';
+  const note = '\n\n> ⚠️ Report content after this point was omitted by the clipboard cap. The recent logs and event timeline continue below; use "Save to file" for every uncapped currently retained section.\n';
   const contentRoom = Math.max(0, room - note.length);
   if (contentRoom === 0) {
     return { text: note.slice(0, room), droppedSections: headings.map((h) => h.text), partialSection: null };
@@ -368,7 +368,7 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       // Folding alone can bring the report under the cap, so the drop clause is
       // omitted rather than left dangling when nothing was actually shed.
       const dropped = parts.length > 0 ? `; dropped ${parts.join(' and ')}` : '';
-      return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.length, allEvents.length, logs.length, allLogs.length, foldDetail)}${dropped}. Use "Save to file" for the full uncapped report.\n\n`;
+      return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.length, allEvents.length, logs.length, allLogs.length, foldDetail)}${dropped}. Use "Save to file" for the full uncapped currently retained report.\n\n`;
     };
     let notice = buildNotice();
     while (notice.length + cappedBase.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
@@ -430,7 +430,7 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   const omissionVerb = trimmedEventCount > 0 || trimmedLogCount > 0 ? 'were' : 'was';
   const cappedBase = clarifyCappedFilterSummary(baseMarkdown, tail.events.length, rawEvents.length);
   const buildBanner = (droppedSections = [], partialSection = null, droppedSubsections = []) =>
-    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection, droppedSubsections)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(tail.events.length, allEvents.length, tail.logs.length, allLogs.length, foldDetail)}). Use "Save to file" for the full uncapped report.\n\n`;
+    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection, droppedSubsections)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(tail.events.length, allEvents.length, tail.logs.length, allLogs.length, foldDetail)}). Use "Save to file" for the full uncapped currently retained report.\n\n`;
 
   const { banner, cutBase } = buildNamedStaticTruncation(cappedBase, tailMd, maxChars, buildBanner);
   let out = banner + cutBase + tailMd;

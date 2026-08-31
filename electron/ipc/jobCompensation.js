@@ -544,20 +544,19 @@ export function compensationCohortKey({ job, context, location, offer, experienc
 /** A verdict-driving market range must have a human-auditable web source. */
 export function isAuditableCompensationSource(source) {
   const title = String(source?.sourceName || source?.title || '').trim();
-  const url = String(source?.sourceUrl || source?.url || '').trim();
-  if (!title || !url) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
-  } catch {
-    return false;
-  }
+  return Boolean(title && canonicalHttpUrl(source?.sourceUrl || source?.url));
 }
 
 function canonicalHttpUrl(value) {
   try {
     const parsed = new URL(String(value || '').trim());
-    return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
+    // Grounded evidence is shown back to the user and may be persisted on a
+    // card. Credentials have no place in a public citation and can arrive via
+    // an authenticated redirect or an untrusted extraction response.
+    return /^https?:$/.test(parsed.protocol) && parsed.hostname
+      && !parsed.username && !parsed.password
+      ? parsed.href
+      : '';
   } catch { return ''; }
 }
 
@@ -610,7 +609,7 @@ export function selectComparableEvidence(ranges, maxSources = 5, expectedCurrenc
     // bounded display/verdict slots. The assessment code does not convert
     // currencies, so source evidence must already be in the offer currency.
     if (currency && String(range.currency || '').trim().toUpperCase() !== currency) return false;
-    const url = String(range.sourceUrl || range.url || '').trim();
+    const url = canonicalHttpUrl(range.sourceUrl || range.url);
     if (seenUrls.has(url)) return false;
     seenUrls.add(url);
     return true;
@@ -629,11 +628,8 @@ export function selectComparableEvidence(ranges, maxSources = 5, expectedCurrenc
 function sanitizeLinks(links) {
   return (Array.isArray(links) ? links : []).map((value) => {
     const source = value && typeof value === 'object' ? value : null;
-    const url = String(source?.url || source?.sourceUrl || value || '').trim();
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-    } catch { return null; }
+    const url = canonicalHttpUrl(source?.url || source?.sourceUrl || value);
+    if (!url) return null;
     if (!source) return url;
     const min = Number(source.min);
     const max = Number(source.max);

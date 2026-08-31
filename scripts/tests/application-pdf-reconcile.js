@@ -1,0 +1,361 @@
+import {
+  __applicationSyncStatePathForTests,
+  __reconcileApplicationSyncWorkspaceForTests,
+  __resetApplicationSyncWorkspacesForTests,
+  applyDualPdf,
+  applicationSyncConfig,
+  assert,
+  buildResumeDocument,
+  embedApplicationSyncConfig,
+  fs,
+  inspectGeneratedApplicationPdf,
+  JSDOM,
+  path,
+  PDFLib,
+  registerApplicationSyncWorkspace,
+} from '../test-dependencies.js';
+import {
+  extractPdfTextBlocks,
+  reconcileApplicationHtmlFromPdf,
+  reconcileApplicationHtmlFromPdfBlocks,
+} from '../../electron/ipc/applicationPdfReconcile.js';
+
+async function textPdf(lines) {
+  const pdf = await PDFLib.PDFDocument.create();
+  const page = pdf.addPage([612, 792]);
+  const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+  for (const { text, y, x = 56 } of lines) page.drawText(text, { x, y, size: 11, font });
+  return pdf.save();
+}
+
+function coverWorkspace(body) {
+  return `<!doctype html><html><head><meta data-shell="preserve"></head><body><section data-ic-document-panel="cover"><main class="page"><header class="resume-header letter-letterhead"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Engineer</span><span class="sep">·</span><span class="credential">B.S.</span></p><p class="contact">maya@example.test <span class="sep">·</span> 555-0100</p></header><div class="letter-meta"><p class="letter-date"><time datetime="2026-08">August 2026</time></p></div><div class="letter-body"><p class="salutation">Dear Hiring Team,</p><p>${body}</p></div><div class="letter-close"><p class="valediction">Sincerely,</p><p class="signature">Maya Chen</p></div></main></section><script data-shell="preserve">trusted()</script></body></html>`;
+}
+
+function combinedWorkspace(body) {
+  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><p>Resume baseline.</p></main></section><section data-ic-document-panel="cover"><main class="page"><header class="resume-header letter-letterhead"><h1 class="name">Maya Chen</h1><p class="tagline"><span class="subtitle-role">Engineer</span><span class="sep">·</span><span class="credential">B.S.</span></p><p class="contact">maya@example.test <span class="sep">·</span> 555-0100</p></header><div class="letter-meta"><p class="letter-date"><time datetime="2026-08">August 2026</time></p></div><div class="letter-body"><p class="salutation">Dear Hiring Team,</p><p>${body}</p></div><div class="letter-close"><p class="valediction">Sincerely,</p><p class="signature">Maya Chen</p></div></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
+}
+
+function resumeWorkspace(body) {
+  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><p class="role-summary">${body}</p></section><section class="section"><div class="section-head"><h2>Skills</h2></div><dl class="skills"><dt>Languages</dt><dd>Python<span class="sep">·</span>TypeScript</dd><dt>AI &amp; Data</dt><dd>MCP<span class="sep">·</span>ETL</dd></dl></section></main></section></body></html>`;
+}
+
+function visualResumeLines(body) {
+  return [
+    { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+    { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+    { page: 1, x: 56, y: 640, text: `• ${body}` },
+    { page: 1, x: 56, y: 600, text: 'S K I L L S' },
+    { page: 1, x: 56, y: 570, text: 'Python · TypeScriptLanguages' },
+    { page: 1, x: 56, y: 540, text: 'MCP · ETLAI & Data' },
+  ];
+}
+
+function resumeBulletWorkspace(firstBullet) {
+  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><ul class="highlights"><li>${firstBullet}</li><li>Kept the release process stable.</li></ul></section></main></section></body></html>`;
+}
+
+export default [
+  {
+    name: 'Application PDF reconcile: generated HTML checks sibling PDFs when opened',
+    run: async () => {
+      let source = buildResumeDocument({
+        docId: 'open-reconcile-test',
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Resume baseline.</p></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+      });
+      source = embedApplicationSyncConfig(source, {
+        endpoint: 'http://127.0.0.1:43192/application-sync', token: '8'.repeat(64), version: 2,
+      });
+      const calls = [];
+      const dom = new JSDOM(source, {
+        runScripts: 'dangerously', url: 'file:///tmp/Acme/Application.html',
+        beforeParse(window) {
+          window.fetch = async (endpoint, options) => {
+            calls.push({ endpoint, payload: JSON.parse(options.body) });
+            return { ok: true, json: async () => ({ success: true, importedDocuments: [], staleDocuments: [], conflicts: [] }) };
+          };
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        assert(calls.length === 1 && calls[0].endpoint === 'http://127.0.0.1:43192/application-sync'
+          && calls[0].payload.action === 'reconcile' && calls[0].payload.token === '8'.repeat(64),
+        `opening saved HTML must request capability-scoped PDF reconciliation, got ${JSON.stringify(calls)}`);
+        return { openCheck: calls[0].payload.action };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: open-time stale and bridge failures are visible instead of silent',
+    run: async () => {
+      const build = (fetchImpl, docId) => {
+        let source = buildResumeDocument({
+          docId,
+          resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Resume baseline.</p></main>',
+          coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+          downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+        });
+        source = embedApplicationSyncConfig(source, {
+          endpoint: 'http://127.0.0.1:43192/application-sync', token: '6'.repeat(64), version: 2,
+        });
+        return new JSDOM(source, {
+          runScripts: 'dangerously', url: `file:///tmp/Acme/${docId}.html`,
+          beforeParse(window) { window.fetch = fetchImpl; },
+        });
+      };
+      const staleDom = build(async () => ({
+        ok: true,
+        json: async () => ({ success: true, importedDocuments: [], staleDocuments: ['resume'], conflicts: [] }),
+      }), 'open-stale-visible');
+      const failedDom = build(async () => { throw new TypeError('Failed to fetch'); }, 'open-bridge-visible');
+      try {
+        await new Promise(resolve => staleDom.window.setTimeout(resolve, 0));
+        await new Promise(resolve => failedDom.window.setTimeout(resolve, 0));
+        const staleNote = staleDom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
+        const failedNote = failedDom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
+        assert(/changed since its PDF was written/i.test(staleNote),
+          `a stale response must update the active document notice immediately, got ${JSON.stringify(staleNote)}`);
+        assert(/could not reach Infinite Canvas/i.test(failedNote),
+          `a loopback bridge failure must be visible instead of swallowed, got ${JSON.stringify(failedNote)}`);
+        return { staleVisible: true, bridgeFailureVisible: true };
+      } finally {
+        staleDom.window.close();
+        failedDom.window.close();
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: ordered geometry and cover update preserve the trusted shell',
+    run: async () => {
+      const pdfBytes = await textPdf([
+        { text: 'Maya Chen', y: 700 },
+        { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 },
+        { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 },
+        { text: 'Maya ships reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 },
+        { text: 'Maya Chen', y: 490 },
+      ]);
+      const blocks = await extractPdfTextBlocks(pdfBytes);
+      assert(blocks.length === 8 && blocks[0].y > blocks[1].y && blocks[3].x > blocks[2].x,
+        `PDF blocks must retain reading order and geometry, got ${JSON.stringify(blocks)}`);
+      const source = coverWorkspace('Maya builds reliable systems.');
+      const result = await reconcileApplicationHtmlFromPdf({ html: source, pdfBytes, documentKind: 'cover' });
+      assert(result.success && result.changed && result.status === 'updated' && result.html.includes('Maya ships reliable systems.'),
+        `cover PDF update should reconcile its body text, got ${JSON.stringify(result)}`);
+      assert(result.html.replace('Maya ships reliable systems.', 'Maya builds reliable systems.') === source,
+        'only the selected cover main may change; the trusted outer shell must remain byte-for-byte intact');
+      return { blocks: blocks.length, changed: result.changed };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: export validation rejects a cream-layer PDF beside ink-only HTML',
+    run: async () => {
+      const inkOnlyHtml = coverWorkspace('Maya builds reliable systems.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const rawPdf = await textPdf([
+        { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 }, { text: 'Maya builds reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+      ]);
+      const valid = await inspectGeneratedApplicationPdf({ html: inkOnlyHtml, pdf: rawPdf, documentKind: 'cover' });
+      const creamPdf = await applyDualPdf(rawPdf);
+      const invalid = await inspectGeneratedApplicationPdf({ html: inkOnlyHtml, pdf: creamPdf, documentKind: 'cover' });
+      assert(valid.valid && valid.textMatches && valid.variantMatches,
+        `matching flat-white source pair should pass export validation, got ${JSON.stringify(valid)}`);
+      assert(!invalid.valid && invalid.textMatches && !invalid.variantMatches
+        && invalid.expectedVariant === 'ink-only' && invalid.actualVariant === 'dual-pdf',
+      `a text-identical cream PDF must not be blessed beside ink-only HTML, got ${JSON.stringify(invalid)}`);
+      return { valid: valid.valid, rejectedVariant: invalid.actualVariant };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: résumé insertion returns a conflict without mutating HTML',
+    run: async () => {
+      const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><p class="role-summary">Maya builds systems safely.</p></main></section></body></html>';
+      const replacement = await textPdf([{ text: 'Maya builds durable systems safely.', y: 700 }]);
+      const result = await reconcileApplicationHtmlFromPdf({ html: source, pdfBytes: replacement, documentKind: 'resume' });
+      assert(!result.success && result.status === 'conflict' && result.html === source && /inserted or removed/i.test(result.error || ''),
+        `insertions must refuse automatic résumé alignment, got ${JSON.stringify(result)}`);
+      return { conflict: result.error };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: printed résumé headings, bullets, and reversed skills normalize before conservative import',
+    run: () => {
+      const source = resumeWorkspace('Maya builds systems safely.');
+      const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya builds systems safely.') });
+      assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
+        `generated PDF-only presentation text must normalize to an unchanged résumé, got ${JSON.stringify(unchanged)}`);
+      const changed = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya ships systems safely.') });
+      assert(changed.success && changed.status === 'updated' && changed.changed && changed.html.includes('Maya ships systems safely.'),
+        `one semantic token change should retain conservative importability, got ${JSON.stringify(changed)}`);
+      return { headingsCollapsed: true, skillsReordered: true, changed: changed.changed };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a geometry-bound plain-text bullet accepts a longer replacement without adding bullets',
+    run: () => {
+      const source = resumeBulletWorkspace('Built reliable systems.');
+      const blocks = [
+        { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+        { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+        { page: 1, x: 56, y: 640, text: '• Built reliable and observable production systems.' },
+        { page: 1, x: 56, y: 620, text: '• Kept the release process stable.' },
+      ];
+      const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(result.success && result.status === 'updated' && result.changed
+        && result.html.includes('Built reliable and observable production systems.'),
+      `a longer edit inside one geometry-mapped list item should import safely, got ${JSON.stringify(result)}`);
+      return { mappedLeaves: result.mappedLeaves };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: registered workspace imports a one-sided PDF edit and advances both hashes',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-reconcile-'));
+      const stateFile = __applicationSyncStatePathForTests();
+      const token = '9'.repeat(64);
+      const applicationPath = path.join(root, 'Application.html');
+      const resumePath = path.join(root, 'Resume.pdf');
+      const coverPath = path.join(root, 'Cover Letter.pdf');
+      const resumePdf = await textPdf([{ text: 'Maya Chen Resume baseline.', y: 700 }]);
+      const coverPdf = await textPdf([
+        { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 }, { text: 'Maya builds reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+      ]);
+      const changedCoverPdf = await textPdf([
+        { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 }, { text: 'Maya ships reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+      ]);
+      try {
+        await __resetApplicationSyncWorkspacesForTests();
+        const source = combinedWorkspace('Maya builds reliable systems.')
+          .replace('<html>', '<html data-print="ink-only">')
+          .replace('<body>', '<body><!-- Embedded documentation may mention <html data-print="ink-only">. -->');
+        const config = applicationSyncConfig(token, { html: source, resumePdf, coverPdf });
+        const saved = embedApplicationSyncConfig(source, config);
+        await Promise.all([
+          fs.promises.writeFile(applicationPath, saved),
+          fs.promises.writeFile(resumePath, resumePdf),
+          fs.promises.writeFile(coverPath, changedCoverPdf),
+        ]);
+        await registerApplicationSyncWorkspace(root, token);
+        const result = await __reconcileApplicationSyncWorkspaceForTests({ token, action: 'reconcile' });
+        const updated = await fs.promises.readFile(applicationPath, 'utf8');
+        const bundle = JSON.parse(/<script id="ic-application-bundle-data" type="application\/json">([\s\S]*?)<\/script>/.exec(updated)?.[1] || '{}');
+        assert(result.importedDocuments.length === 1 && result.importedDocuments[0] === 'cover'
+          && updated.includes('Maya ships reliable systems.'),
+        `one-sided cover PDF edit must be imported, got ${JSON.stringify(result)}`);
+        assert(bundle.sync.version === 2 && /^[a-f0-9]{64}$/.test(bundle.sync.documents.cover.pdfSha256)
+          && bundle.sync.documents.cover.pdfSha256 !== config.documents.cover.pdfSha256
+          && /^[a-f0-9]{64}$/.test(bundle.sync.documents.cover.htmlSha256),
+        'successful PDF import must advance the selected PDF and HTML revision hashes');
+        return { imported: result.importedDocuments, hashVersion: bundle.sync.version };
+      } finally {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.unlink(stateFile).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: matching sibling PDFs import their shared paper variant into HTML',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-shared-variant-'));
+      const stateFile = __applicationSyncStatePathForTests();
+      const token = '5'.repeat(64);
+      const applicationPath = path.join(root, 'Application.html');
+      const resumePath = path.join(root, 'Resume.pdf');
+      const coverPath = path.join(root, 'Cover Letter.pdf');
+      const rawResumePdf = await textPdf([{ text: 'Maya Chen Resume baseline.', y: 700 }]);
+      const rawCoverPdf = await textPdf([
+        { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 }, { text: 'Maya builds reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+      ]);
+      const resumePdf = await applyDualPdf(rawResumePdf);
+      const coverPdf = await applyDualPdf(rawCoverPdf);
+      try {
+        await __resetApplicationSyncWorkspacesForTests();
+        const source = combinedWorkspace('Maya builds reliable systems.')
+          .replace('<html>', '<html data-print="ink-only">');
+        const config = applicationSyncConfig(token, { html: source, resumePdf, coverPdf });
+        const saved = embedApplicationSyncConfig(source, config);
+        await Promise.all([
+          fs.promises.writeFile(applicationPath, saved),
+          fs.promises.writeFile(resumePath, resumePdf),
+          fs.promises.writeFile(coverPath, coverPdf),
+        ]);
+        await registerApplicationSyncWorkspace(root, token);
+        const result = await __reconcileApplicationSyncWorkspaceForTests({ token, action: 'reconcile' });
+        const updated = await fs.promises.readFile(applicationPath, 'utf8');
+        assert(result.importedDocuments.join(',') === 'resume,cover'
+          && result.staleDocuments.length === 0
+          && result.variantMismatches.length === 0
+          && result.reloadRequired
+          && /<html\b[^>]*\bdata-print="dual-pdf"/i.test(updated),
+        `matching cream PDFs must update the shared HTML preview and request a reload, got ${JSON.stringify(result)}`);
+        return { imported: result.importedDocuments, displayVariant: 'dual-pdf' };
+      } finally {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.unlink(stateFile).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: registered workspace reports a hashed paper-variant mismatch as stale',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-variant-'));
+      const stateFile = __applicationSyncStatePathForTests();
+      const token = '7'.repeat(64);
+      const applicationPath = path.join(root, 'Application.html');
+      const resumePath = path.join(root, 'Resume.pdf');
+      const coverPath = path.join(root, 'Cover Letter.pdf');
+      const resumePdf = await textPdf([{ text: 'Maya Chen Resume baseline.', y: 700 }]);
+      const rawCoverPdf = await textPdf([
+        { text: 'Maya Chen', y: 700 }, { text: 'Engineer · B.S.', y: 680 },
+        { text: 'maya@example.test · 555-0100', y: 660 }, { text: 'August 2026', y: 620, x: 480 },
+        { text: 'Dear Hiring Team,', y: 590 }, { text: 'Maya builds reliable systems.', y: 550 },
+        { text: 'Sincerely,', y: 510 }, { text: 'Maya Chen', y: 490 },
+      ]);
+      const creamCoverPdf = await applyDualPdf(rawCoverPdf);
+      try {
+        await __resetApplicationSyncWorkspacesForTests();
+        const source = combinedWorkspace('Maya builds reliable systems.')
+          .replace('<html>', '<html data-print="ink-only">');
+        const config = applicationSyncConfig(token, { html: source, resumePdf, coverPdf: creamCoverPdf });
+        const saved = embedApplicationSyncConfig(source, config);
+        await Promise.all([
+          fs.promises.writeFile(applicationPath, saved),
+          fs.promises.writeFile(resumePath, resumePdf),
+          fs.promises.writeFile(coverPath, creamCoverPdf),
+        ]);
+        await registerApplicationSyncWorkspace(root, token);
+        const result = await __reconcileApplicationSyncWorkspaceForTests({ token, action: 'reconcile' });
+        assert(result.importedDocuments.length === 0 && result.staleDocuments.includes('cover')
+          && result.variantMismatches.length === 1
+          && result.variantMismatches[0].expected === 'ink-only'
+          && result.variantMismatches[0].actual === 'dual-pdf',
+        `a hash-equal but visually incompatible PDF must be surfaced as stale, got ${JSON.stringify(result)}`);
+        return { stale: result.staleDocuments, mismatch: result.variantMismatches[0] };
+      } finally {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.unlink(stateFile).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+];
