@@ -6586,8 +6586,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               hitPageTurnStalled = true;
               if (directAdvance) {
                 directContinuationStop = 'navigation-stalled';
-                pageNum -= 1; // attempted page was never reached
               }
+              pageNum -= 1; // attempted page was never reached — the click never navigated
               break;
             }
           }

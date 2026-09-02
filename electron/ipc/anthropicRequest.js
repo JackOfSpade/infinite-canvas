@@ -33,12 +33,11 @@ export function buildCachedUserContent(userContent, cachedPrefix) {
 }
 
 /**
- * The exact native Structured Outputs schema Anthropic receives.  Keep this
- * conversion public and pure so the manual-AI handoff can disclose the full
- * provider request configuration without sending a request or reimplementing
- * the SDK helper in a second place.
+ * The exact native Structured Outputs schema Anthropic receives. Local helper
+ * for buildAnthropicMessageParams below — kept pure and separate from the SDK
+ * call site so the transform is easy to unit-test in isolation.
  */
-export function toAnthropicResponseSchema(responseSchema) {
+function toAnthropicResponseSchema(responseSchema) {
   return jsonSchemaOutputFormat(responseSchema).schema;
 }
 

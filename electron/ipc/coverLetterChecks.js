@@ -1051,7 +1051,15 @@ export function checkAnchorRelevance(paragraphs = [], jobText = '', researchText
   // the technology, and the suffix is the flavour of it the letter names.
   const licensed = entry => {
     if (!licenses.has(entry)) {
-      licenses.set(entry, corpus.includes(normalized(entry)) || corpus.includes(normalized(entry.split(' ')[0])));
+      // Word-boundary-aware, like STACK_TOOL_PATTERN above: a raw substring
+      // test would let a corpus mentioning only “JavaScript” license the
+      // unrelated “Java”, or “GitHub Actions”/“GitLab” license “Git”.
+      const headToken = entry.split(' ')[0];
+      const alternatives = headToken === entry ? [entry] : [entry, headToken];
+      const pattern = new RegExp(
+        `(?<![\\p{L}\\p{N}])(?:${alternatives.map(alt => escapeRegExp(normalized(alt))).join('|')})(?![\\p{L}\\p{N}])`,
+        'u');
+      licenses.set(entry, pattern.test(corpus));
     }
     return licenses.get(entry);
   };

@@ -793,62 +793,7 @@ ${rows}
 `;
 }
 
-export function generateMarkdown(payload, reportWindowId = null, options = {}) {
-  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
-
-  // A filter code (e.g. LEAN) may have dropped whole sections before the payload
-  // reached us. Track that so the summary can say "omitted by filter" rather than
-  // mislabel an omitted section as empty ("Nodes: 0").
-  const sectionOmitted = (name) =>
-    Array.isArray(payload.filterStats?.omittedSections) &&
-    payload.filterStats.omittedSections.includes(name);
-
-  // Canvas-content guards — gate module-specific sections on whether this canvas
-  // actually has nodes of that type, so sell-side sections don't bleed into a
-  // job-only canvas and vice versa. Prefer the flags the renderer stamped into
-  // filterStats (computed before a filter code could drop the `nodes` section);
-  // fall back to scanning nodes when present (no-filter reports).
-  const { hasJobNodes, hasSellNodes } = resolveNodePresence(payload);
-  // FULL (or no code) must mean EVERYTHING — otherwise description-keyword-gated
-  // sections silently vanish on a FULL report. "window not opening" (a captcha/
-  // login window) doesn't match the auth keywords above, so without this the
-  // Auth Window Diagnostics section was dropped even under FULL.
-  const reportCode = String(payload.filterCode || '').trim().toUpperCase();
-  const isFullReport = !reportCode || codeIncludesFull(reportCode);
-  const reportCodes = new Set(reportCode.split(/[+\s,]+/).filter(Boolean));
-  // AUTH implies PERSIST. "I logged in but it still says logged out" is an AUTH-
-  // shaped question whose answer lives entirely in the persistence section: the
-  // close-lifecycle table's Store-checkpointed / Executable / Profile columns and
-  // the per-platform auth-cookie-on-disk line are what separate "the login never
-  // completed" from "the login completed and never reached the profile". Gating
-  // those behind a code the user has no reason to guess made an AUTH report look
-  // complete while omitting the deciding evidence.
-  const wantsPersistenceDiagnostics = isFullReport || reportCodes.has('PERSIST') || reportCodes.has('AUTH');
-  const wantsAuthDiagnostics = wantsPersistenceDiagnostics
-    || reportCodes.has('AUTH')
-    || /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
-
-  const systemInfo = {
-    platform: process.platform,
-    arch: process.arch,
-    osRelease: os.release(),
-    appVersion: app.getVersion(),
-    nodeVersion: process.versions.node,
-    electronVersion: process.versions.electron,
-    chromiumVersion: process.versions.chrome,
-    packaged: !!app.isPackaged,
-    generatedAt: new Date().toISOString(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
-    utcOffsetMinutes: -new Date().getTimezoneOffset(),
-    totalMemMB: Math.round(os.totalmem() / 1024 / 1024),
-    freeMemMB: Math.round(os.freemem() / 1024 / 1024),
-  };
-
-
-  // ── Diagnostic section: group node size fields ─────────────────────────────
-  // Shows style.width / measured.width / width prop separately.
-  // A mismatch here (e.g. measured growing while style stays constant) is
-  // the signature of the ReactFlow ResizeObserver race condition.
+function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted) {
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
@@ -865,11 +810,6 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   });
 
   let nodeDiagMarkdown = '';
-  // Wrapped: this section walks arbitrary/possibly-corrupted node `data` payloads
-  // (the exact kind of state a bug report is filed about), so it must never take
-  // down every other section if one node's shape throws (e.g. a non-numeric
-  // position/size field hitting `.toFixed`).
-  try {
   if (sectionOmitted('nodeInternals')) {
     // XNODES / LEAN / MARKET / JOBS / AUTH drop the heavy per-node payload. Render
     // an explicit marker (like Nodes/Edges/Drawings above) so the absence reads as
@@ -1215,11 +1155,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 ${rows}
 ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
-  } catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
+  return nodeDiagMarkdown;
+}
 
-  // ── Media player state section ────────────────────────────────────────────
+function buildMediaPlayerStateMarkdown(mediaState) {
   let mediaMarkdown = '';
-  try {
   if (mediaState && mediaState.length > 0) {
     const READY_STATE = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
     const NET_STATE = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
@@ -1253,14 +1193,11 @@ ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmit
 ${rows}
 `;
   }
-  } catch (err) { mediaMarkdown = diagnosticRenderFailureMarkdown('Media Player State', err); }
+  return mediaMarkdown;
+}
 
-  // ── Image element state section ───────────────────────────────────────────
-  // Captures <img> load state at report time. `broken: true` (complete=true,
-  // naturalWidth=0) means the protocol returned an error or an undisplayable
-  // payload — the primary signature of HEIC / unsupported-format failures.
+function buildImageElementStateMarkdown(imageState) {
   let imageMarkdown = '';
-  try {
   if (imageState && imageState.length > 0) {
     const rows = imageState.map((img, i) => {
       const srcShort = img.src ? img.src.replace(/^local-file:\/\//, '').slice(-60) : '(none)';
@@ -1280,14 +1217,11 @@ ${rows}
 ${rows}
 `;
   }
-  } catch (err) { imageMarkdown = diagnosticRenderFailureMarkdown('Image Element State', err); }
+  return imageMarkdown;
+}
 
-  // ── Active editable section ────────────────────────────────────────────────
-  // Captures the divergence between the focused contenteditable's live DOM
-  // text and the saved data.text on its node. A `divergent: true` here is the
-  // signature of a "saved while editing — lost my edit" report.
+function buildActiveEditableMarkdown(activeEditableText) {
   let activeEditableMarkdown = '';
-  try {
   if (activeEditableText) {
     const a = activeEditableText;
     activeEditableMarkdown = `
@@ -1298,14 +1232,11 @@ ${rows}
 - Saved data.text: \`${(a.savedText || '').replace(/`/g, '\\`')}\`
 `;
   }
-  } catch (err) { activeEditableMarkdown = diagnosticRenderFailureMarkdown('Active Editable At Report Time', err); }
+  return activeEditableMarkdown;
+}
 
-  // ── Last save error section ────────────────────────────────────────────────
-  // Save errors used to be lost: the toast was shown, the user dismissed it,
-  // and the bug report had no record of *why* the save failed. Surfacing this
-  // up front means a "Save Failed" report is actionable instead of a guess.
+function buildLastSaveErrorMarkdown(lastSaveError) {
   let lastSaveErrorMarkdown = '';
-  try {
   if (lastSaveError) {
     lastSaveErrorMarkdown = `
 ## Last Save Error
@@ -1314,16 +1245,11 @@ ${rows}
 - When: ${lastSaveError.timestamp || 'unknown'}
 `;
   }
-  } catch (err) { lastSaveErrorMarkdown = diagnosticRenderFailureMarkdown('Last Save Error', err); }
+  return lastSaveErrorMarkdown;
+}
 
-  // ── Active IPC tasks ──────────────────────────────────────────────────────
-  // Catches the "I clicked Cancel/X but the pipeline kept running" failure
-  // mode. The renderer can mark a node visually 'done' instantly, but if the
-  // backend AbortControllers weren't cancelled, the underlying tasks finish
-  // and overwrite the user's reset. This snapshot makes that immediately
-  // diagnosable in any report.
+function buildActiveTasksMarkdown(reportWindowId) {
   let activeTasksMarkdown = '';
-  try {
     const allTasks = snapshotActiveNodeTasks() || [];
     // Task ownership is sender-scoped, so reports can now select this canvas
     // directly instead of guessing from the most recent global telemetry row.
@@ -1432,118 +1358,11 @@ ${statusQueueLine}
 - ✅ None registered${foreignCount > 0 ? ` (${foreignCount} task(s) running in other canvas windows — expected, not shown here)` : ''}.${statusQueueLine}
 `;
     }
-  } catch { /* never break the report on diagnostic failure */ }
+  return activeTasksMarkdown;
+}
 
-  // Same guard as every other section builder: a malformed row in the renderer
-  // payload should cost this one section, not the whole report.
-  let sellHubResolveMarkdown = '';
-  try {
-    sellHubResolveMarkdown = buildSellHubResolveRollup(sellHubResolveStates || []);
-  } catch (err) { sellHubResolveMarkdown = diagnosticRenderFailureMarkdown('SellHub Source Resolve Queue', err); }
-
-  // ── Build freshness ───────────────────────────────────────────────────────
-  // Catches the "I edited a file but the running app still does the old thing"
-  // failure mode. Vite hot-reloads the renderer, but Electron main-process
-  // files (preload, IPC handlers, settings store) only reload on a full restart.
-  // If any tracked source is newer than the process start, the running build is
-  // stale — flag it loudly so the report doesn't waste time chasing a phantom.
-  const { src: mainSrcMs, srcDirFound: mainSrcDirFound, bundle: mainBundleMs } = getNewestMainProcessMtimes();
-  const uptimeMs = Math.round(process.uptime() * 1000);
-  const startedAt = new Date(PROCESS_START_MS).toISOString();
-  // A packaged app ships only dist-electron/ inside app.asar — `electron/`
-  // source genuinely isn't there, so mainSrcDirFound === false is EXPECTED
-  // (not a read failure). Say so explicitly instead of a bare "(unknown)"
-  // that reads like a failed lookup rather than "nothing to look at".
-  const mainSrcStr = mainSrcMs
-    ? new Date(mainSrcMs).toISOString()
-    : (mainSrcDirFound ? '(electron/ present but no matching source files)' : '(not on disk — packaged build, electron/ source not shipped)');
-  const mainBundleStr = mainBundleMs ? new Date(mainBundleMs).toISOString() : '(no dist-electron/ bundle found)';
-  const mainSrcStale = !!(mainSrcMs && mainSrcMs > PROCESS_START_MS);
-  const mainBundleAfterStart = !!(mainBundleMs && mainBundleMs > PROCESS_START_MS);
-  let stalenessLine;
-  if (mainSrcDirFound) {
-    // Dev run: the electron/ source tree is actually on disk and was scanned,
-    // so a verdict about SOURCE freshness is something this run can back up.
-    stalenessLine = !mainSrcMs
-      ? '⚠️ **Cannot determine build freshness** — electron/ was found but no source files matched inside it. If you have edited any Electron main-process files since starting the app, restart before treating this report as authoritative.'
-      : mainSrcStale
-        ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((mainSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
-        : '✅ Up to date — no tracked main-process source has been modified since the process started.';
-  } else {
-    // Packaged build: electron/ source is not shipped, so this run NEVER
-    // looked at a single source file — only the baked-in dist-electron/
-    // bundle exists to compare. State that plainly instead of asserting
-    // anything about source freshness this run has no way to verify.
-    stalenessLine = !mainBundleMs
-      ? '⚠️ **Cannot determine build freshness** — packaged build, electron/ source not shipped, and no dist-electron/ bundle mtime could be read either.'
-      : mainBundleAfterStart
-        ? `⚠️ **BUNDLE NEWER THAN PROCESS START**: the packaged dist-electron/ bundle has an mtime ${Math.round((mainBundleMs - PROCESS_START_MS) / 1000)}s after the process started, which is unexpected for an installed build. (Packaged build — the electron/ dev source tree was not scanned, so a source edit could not have been detected either way; this is a bundle-vs-process-start comparison only.)`
-        : 'ℹ️ Packaged build — the electron/ dev source tree was not scanned (not shipped inside app.asar), so a local source edit could not have been detected. The only known fact: the running dist-electron/ bundle predates process start.';
-  }
-
-  // Renderer freshness — the main-process check above never covers src/, but a
-  // stale renderer (edited src/ that wasn't re-bundled into dist/) silently runs
-  // old UI logic. With a Vite dev server, HMR keeps it current; with the built
-  // bundle (loadFile dist/index.html) only a `vite build` updates it.
-  const onDevServer = !!process.env.VITE_DEV_SERVER_URL;
-  const { src: rSrcMs, bundle: rBundleMs } = getNewestRendererMtimes();
-  // A packaged app ships only the built bundle inside app.asar — `src/` isn't on
-  // disk, so a null rSrcMs there is EXPECTED (not a read failure). Label it as
-  // such only when we DID find the bundle (otherwise we truly know nothing).
-  const rSrcStr = rSrcMs
-    ? new Date(rSrcMs).toISOString()
-    : (rBundleMs ? '(not on disk — packaged build, src/ not shipped)' : '(unknown)');
-  const rBundleStr = rBundleMs ? new Date(rBundleMs).toISOString() : '(no built bundle found under dist/)';
-  const rendererStale = !!(rSrcMs && rBundleMs && rSrcMs > rBundleMs);
-  const bundleAfterStart = !!(rBundleMs && rBundleMs > PROCESS_START_MS);
-  let rendererLine;
-  if (onDevServer) {
-    rendererLine = 'ℹ️ Renderer served by the Vite dev server (HMR) — `src/` edits apply live; the dist/ mtime check does not apply.';
-  } else if (rendererStale) {
-    rendererLine = `⚠️ **STALE RENDERER**: a \`src/\` file was modified ${Math.round((rSrcMs - rBundleMs) / 1000)}s after the renderer bundle was built. The app loads \`dist/index.html\`, so the running UI does NOT include the latest src/ — run \`vite build\` and reload before trusting renderer behavior (e.g. the AI-scoring / test-mode gate).`;
-  } else if (bundleAfterStart) {
-    rendererLine = `⚠️ **RENDERER REBUILT MID-SESSION**: dist/ was rebuilt ${Math.round((rBundleMs - PROCESS_START_MS) / 1000)}s after launch but the window may still hold the pre-rebuild bundle — reload the window (or restart) to pick it up.`;
-  } else if (rBundleMs) {
-    // Bundle present, not newer than src/, and not rebuilt after launch → the
-    // window loaded the current on-disk build. src/ being absent (packaged) or
-    // older (dev, already rebuilt) both land here — both are fresh.
-    rendererLine = rSrcMs
-      ? '✅ Renderer bundle (dist/) is at least as new as src/ — running UI matches source.'
-      : '✅ Renderer bundle predates process start and no newer src/ is on disk (packaged build) — running the current bundle.';
-  } else {
-    rendererLine = '⚠️ Cannot determine renderer freshness — no dist/ bundle mtime found.';
-  }
-
-  const buildFreshnessMarkdown = `
-## Build Freshness
-- Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)
-- Newest main-process source mtime (electron/): \`${mainSrcStr}\`
-- Main-process bundle built (dist-electron/ — what a packaged app actually runs): \`${mainBundleStr}\`
-- ${stalenessLine}
-- Newest renderer source mtime (src/): \`${rSrcStr}\`
-- Renderer bundle built (dist/ — what loadFile actually serves): \`${rBundleStr}\`
-- ${rendererLine}
-`;
-
-  // ── Persisted workspace snapshot ──────────────────────────────────────────
-  // Reads the on-disk auto-loaded workspace and flags transient hub state that
-  // should have been stripped before save. The decisive signal for any "stale
-  // state survives restart" report. Never break the report on diagnostic
-  // failure — the helper already returns markdown for every error path.
-  let persistedWorkspaceMarkdown = '';
-  try { persistedWorkspaceMarkdown = buildPersistedWorkspaceSnapshot(frontEndState); }
-  catch { /* never break the report on diagnostic failure */ }
-
-  let missingPreviewRelinkMarkdown = '';
-  try { missingPreviewRelinkMarkdown = buildMissingPreviewRelinkMarkdown(); }
-  catch { /* never break the report on diagnostic failure */ }
-
-  // ── Cross-restart session durability ──────────────────────────────────────
-  // Values are intentionally absent: file checkpoints, cache provenance, and
-  // cookie name/persistence metadata are sufficient to distinguish "detected in
-  // RAM but never flushed" from "restored and later rejected by the server."
+function buildSessionPersistenceMarkdown() {
   let sessionPersistenceMarkdown = '';
-  if (wantsPersistenceDiagnostics) try {
     const profile = getBrowserProfileDiagnostics?.() || {};
     const cache = getStatusCacheSync?.() || {};
     const authDiag = getAuthWindowDiagnostics?.() || {};
@@ -1642,16 +1461,11 @@ ${indeedPpidCrossReference}
 |---|---|---:|---:|---|---|---:|---|---|---|
 ${lifecycleRows || '| — | — | — | — | — | — | — | — | — | (no completed auth window this process) |'}
 `;
-  } catch (error) {
-    sessionPersistenceMarkdown = diagnosticRenderFailureMarkdown('Session Persistence Diagnostics', error);
-  }
+  return sessionPersistenceMarkdown;
+}
 
-  // ── Marketplace session snapshot ──────────────────────────────────────────
-  // In-memory session cache (populated by verifyAllPlatforms on startup and
-  // by writeStatusCache after each login flow). Truth source for the "Log in"
-  // vs "Logged in · refresh" pill in Settings → Marketplace Monitors.
+function buildMarketplaceSessionsMarkdown(sectionOmitted) {
   let marketplaceSessionsMarkdown = '';
-  if (hasSellNodes) try {
     const platforms = getSellMonitorPlatforms() || [];
     const cache = getStatusCacheSync();
 
@@ -1677,17 +1491,11 @@ ${lifecycleRows || '| — | — | — | — | — | — | — | — | — | (no 
 ${rows}
 
 ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by filter code — XSESS)_\n' : (traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : '')}`;
-  } catch { /* never break the report on diagnostic failure */ }
+  return marketplaceSessionsMarkdown;
+}
 
-  // ── Job platform session snapshot ─────────────────────────────────────────
-  // Same cache as sell-monitor; shown separately because job platforms have
-  // different UI context (Settings → Job Boards). A verify URL returning 404
-  // means the platform changed its URL structure — that's only visible here,
-  // not in the sell-monitor section above.
-  // Only include when this canvas actually has job nodes — don't bleed job
-  // login state into a marketplace-only report.
+function buildJobSessionsMarkdown(sectionOmitted) {
   let jobSessionsMarkdown = '';
-  if (hasJobNodes || wantsAuthDiagnostics || isFullReport) try {
     const platforms = getJobLoginPlatforms() || [];
     const cache = getStatusCacheSync();
 
@@ -1706,29 +1514,11 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
 ${rows}
 
 ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by filter code — XSESS)_\n' : (traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : '')}`;
-  } catch { /* never break the report on diagnostic failure */ }
+  return jobSessionsMarkdown;
+}
 
-  // ── Login verification timing ─────────────────────────────────────────────
-  // Answers "why is login verification slow?" directly, with explicit per-platform
-  // verify durations + wall-clock total captured by verifyAllPlatforms. Before
-  // this section the only timing signal was subtracting consecutive "Verifying X"
-  // / "Startup verify X" main-process log timestamps by hand — and the concurrent
-  // verify pool now interleaves those lines, so that method no longer works. This
-  // is the first-class replacement: included under FULL or any auth/automation report.
-  let verifyTimingMarkdown = '';
-  if (isFullReport || wantsAuthDiagnostics || hasSellNodes || hasJobNodes) try {
-    verifyTimingMarkdown = buildLoginVerificationTimingMarkdown(getVerifyTimingSummary?.());
-  } catch { /* never break the report on diagnostic failure */ }
-
-  // ── Active auth/login window snapshot ─────────────────────────────────────
-  // Login bugs can happen with zero canvas nodes. This captures the visible
-  // auth browser mode and current URL/title when the report is taken, which is
-  // the decisive signal for Google's "browser or app may not be secure" block.
+function buildAuthWindowMarkdown() {
   let authWindowMarkdown = '';
-  // Captcha-resolve windows are a marketplace concern AND a job concern, and a
-  // user may describe the failure without auth vocabulary ("window not opening").
-  // Include whenever there are automation nodes, or always under FULL.
-  if (wantsAuthDiagnostics || isFullReport || hasSellNodes || hasJobNodes) try {
     const diag = getAuthWindowDiagnostics?.();
     const profileReservation = getSharedProfileReservationInfo?.();
     const entries = [
@@ -1901,17 +1691,11 @@ ${nativePathLine}
 ${rows}
 ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${historySection}`;
     }
-  } catch (err) { authWindowMarkdown = diagnosticRenderFailureMarkdown('Auth Window Diagnostics', err); }
+  return authWindowMarkdown;
+}
 
-  // ── Recent main-process logs ──────────────────────────────────────────────
-  // Up to 200 main-process log lines, captured by the in-memory ring buffer
-  // in logger.js. Critical for diagnosing "the IPC silently failed" reports:
-  // the [Accounts] / [StealthBrowser] / etc. error lines that normally only
-  // hit stdout (which users never see) are surfaced here. Skip lines older
-  // than this process start so we don't drag in stale logs from a previous
-  // run that happened to share the ring buffer state.
+function buildRecentMainProcessLogLines() {
   let mainProcessLogLines = [];
-  try {
     const logs = (getRecentLogs(200) || []).filter(l => l.ts >= PROCESS_START_MS);
     if (logs.length > 0) {
       mainProcessLogLines = logs.map(l => {
@@ -1935,15 +1719,10 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
         return `[${t}] ${lvl} ${msg}`;
       });
     }
-  } catch { /* never break the report on diagnostic failure */ }
-  const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
+  return mainProcessLogLines;
+}
 
-  // ── AI configuration snapshot ─────────────────────────────────────────────
-  // Surfaces missing keys / wrong provider — the most common cause of
-  // "I clicked the AI button and nothing happened" reports.
-  // Learned token budgets — observed output (visible+thinking) tokens per task,
-  // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
-  // the 24576 hard cap means a task is truncating and the cap has grown to match.
+function buildTokenBudgetsMarkdown() {
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
   // The persisted budget store never prunes renamed/removed task keys. Split
   // current live API task ids from those ghosts; Local AI application handoff
@@ -1992,13 +1771,11 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 > their copied max-output guidance comes from the current bounded task formula.
 ${tokenBudgetLines.join('\n')}`
     : '';
+  return tokenBudgetMarkdown;
+}
 
-  // aiConfig pulls live provider/telemetry state (getGeminiTelemetry et al.) and
-  // is rendered unconditionally on every report — unlike almost every other
-  // section here, it was never guarded, so a throw anywhere in that chain took
-  // down the entire report instead of just this section.
+function buildAIConfigurationMarkdown(tokenBudgetMarkdown) {
   let aiConfigMarkdown = '';
-  try {
   const aiConfig = buildAIConfigSnapshot();
   aiConfigMarkdown = `
 ## AI Configuration
@@ -2033,7 +1810,295 @@ ${(aiConfig.geminiWarnings || []).length > 0
     : '- Model warnings: *(none)*'}
 ` : ''}${tokenBudgetMarkdown}
 `;
-  } catch (err) { aiConfigMarkdown = diagnosticRenderFailureMarkdown('AI Configuration', err); }
+  return aiConfigMarkdown;
+}
+
+export function generateMarkdown(payload, reportWindowId = null, options = {}) {
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
+
+  // A filter code (e.g. LEAN) may have dropped whole sections before the payload
+  // reached us. Track that so the summary can say "omitted by filter" rather than
+  // mislabel an omitted section as empty ("Nodes: 0").
+  const sectionOmitted = (name) =>
+    Array.isArray(payload.filterStats?.omittedSections) &&
+    payload.filterStats.omittedSections.includes(name);
+
+  // Canvas-content guards — gate module-specific sections on whether this canvas
+  // actually has nodes of that type, so sell-side sections don't bleed into a
+  // job-only canvas and vice versa. Prefer the flags the renderer stamped into
+  // filterStats (computed before a filter code could drop the `nodes` section);
+  // fall back to scanning nodes when present (no-filter reports).
+  const { hasJobNodes, hasSellNodes } = resolveNodePresence(payload);
+  // FULL (or no code) must mean EVERYTHING — otherwise description-keyword-gated
+  // sections silently vanish on a FULL report. "window not opening" (a captcha/
+  // login window) doesn't match the auth keywords above, so without this the
+  // Auth Window Diagnostics section was dropped even under FULL.
+  const reportCode = String(payload.filterCode || '').trim().toUpperCase();
+  const isFullReport = !reportCode || codeIncludesFull(reportCode);
+  const reportCodes = new Set(reportCode.split(/[+\s,]+/).filter(Boolean));
+  // AUTH implies PERSIST. "I logged in but it still says logged out" is an AUTH-
+  // shaped question whose answer lives entirely in the persistence section: the
+  // close-lifecycle table's Store-checkpointed / Executable / Profile columns and
+  // the per-platform auth-cookie-on-disk line are what separate "the login never
+  // completed" from "the login completed and never reached the profile". Gating
+  // those behind a code the user has no reason to guess made an AUTH report look
+  // complete while omitting the deciding evidence.
+  const wantsPersistenceDiagnostics = isFullReport || reportCodes.has('PERSIST') || reportCodes.has('AUTH');
+  const wantsAuthDiagnostics = wantsPersistenceDiagnostics
+    || reportCodes.has('AUTH')
+    || /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
+
+  const systemInfo = {
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: os.release(),
+    appVersion: app.getVersion(),
+    nodeVersion: process.versions.node,
+    electronVersion: process.versions.electron,
+    chromiumVersion: process.versions.chrome,
+    packaged: !!app.isPackaged,
+    generatedAt: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
+    utcOffsetMinutes: -new Date().getTimezoneOffset(),
+    totalMemMB: Math.round(os.totalmem() / 1024 / 1024),
+    freeMemMB: Math.round(os.freemem() / 1024 / 1024),
+  };
+
+
+  // ── Diagnostic section: group node size fields ─────────────────────────────
+  // Shows style.width / measured.width / width prop separately.
+  // A mismatch here (e.g. measured growing while style stays constant) is
+  // the signature of the ReactFlow ResizeObserver race condition.
+  let nodeDiagMarkdown = '';
+  // Wrapped: this section walks arbitrary/possibly-corrupted node `data` payloads
+  // (the exact kind of state a bug report is filed about), so it must never take
+  // down every other section if one node's shape throws (e.g. a non-numeric
+  // position/size field hitting `.toFixed`).
+  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted); }
+  catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
+
+  // ── Media player state section ────────────────────────────────────────────
+  let mediaMarkdown = '';
+  try { mediaMarkdown = buildMediaPlayerStateMarkdown(mediaState); }
+  catch (err) { mediaMarkdown = diagnosticRenderFailureMarkdown('Media Player State', err); }
+
+  // ── Image element state section ───────────────────────────────────────────
+  // Captures <img> load state at report time. `broken: true` (complete=true,
+  // naturalWidth=0) means the protocol returned an error or an undisplayable
+  // payload — the primary signature of HEIC / unsupported-format failures.
+  let imageMarkdown = '';
+  try { imageMarkdown = buildImageElementStateMarkdown(imageState); }
+  catch (err) { imageMarkdown = diagnosticRenderFailureMarkdown('Image Element State', err); }
+
+  // ── Active editable section ────────────────────────────────────────────────
+  // Captures the divergence between the focused contenteditable's live DOM
+  // text and the saved data.text on its node. A `divergent: true` here is the
+  // signature of a "saved while editing — lost my edit" report.
+  let activeEditableMarkdown = '';
+  try { activeEditableMarkdown = buildActiveEditableMarkdown(activeEditableText); }
+  catch (err) { activeEditableMarkdown = diagnosticRenderFailureMarkdown('Active Editable At Report Time', err); }
+
+  // ── Last save error section ────────────────────────────────────────────────
+  // Save errors used to be lost: the toast was shown, the user dismissed it,
+  // and the bug report had no record of *why* the save failed. Surfacing this
+  // up front means a "Save Failed" report is actionable instead of a guess.
+  let lastSaveErrorMarkdown = '';
+  try { lastSaveErrorMarkdown = buildLastSaveErrorMarkdown(lastSaveError); }
+  catch (err) { lastSaveErrorMarkdown = diagnosticRenderFailureMarkdown('Last Save Error', err); }
+
+  // ── Active IPC tasks ──────────────────────────────────────────────────────
+  // Catches the "I clicked Cancel/X but the pipeline kept running" failure
+  // mode. The renderer can mark a node visually 'done' instantly, but if the
+  // backend AbortControllers weren't cancelled, the underlying tasks finish
+  // and overwrite the user's reset. This snapshot makes that immediately
+  // diagnosable in any report.
+  let activeTasksMarkdown = '';
+  try { activeTasksMarkdown = buildActiveTasksMarkdown(reportWindowId); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  // Same guard as every other section builder: a malformed row in the renderer
+  // payload should cost this one section, not the whole report.
+  let sellHubResolveMarkdown = '';
+  try {
+    sellHubResolveMarkdown = buildSellHubResolveRollup(sellHubResolveStates || []);
+  } catch (err) { sellHubResolveMarkdown = diagnosticRenderFailureMarkdown('SellHub Source Resolve Queue', err); }
+
+  // ── Build freshness ───────────────────────────────────────────────────────
+  // Catches the "I edited a file but the running app still does the old thing"
+  // failure mode. Vite hot-reloads the renderer, but Electron main-process
+  // files (preload, IPC handlers, settings store) only reload on a full restart.
+  // If any tracked source is newer than the process start, the running build is
+  // stale — flag it loudly so the report doesn't waste time chasing a phantom.
+  const { src: mainSrcMs, srcDirFound: mainSrcDirFound, bundle: mainBundleMs } = getNewestMainProcessMtimes();
+  const uptimeMs = Math.round(process.uptime() * 1000);
+  const startedAt = new Date(PROCESS_START_MS).toISOString();
+  // A packaged app ships only dist-electron/ inside app.asar — `electron/`
+  // source genuinely isn't there, so mainSrcDirFound === false is EXPECTED
+  // (not a read failure). Say so explicitly instead of a bare "(unknown)"
+  // that reads like a failed lookup rather than "nothing to look at".
+  const mainSrcStr = mainSrcMs
+    ? new Date(mainSrcMs).toISOString()
+    : (mainSrcDirFound ? '(electron/ present but no matching source files)' : '(not on disk — packaged build, electron/ source not shipped)');
+  const mainBundleStr = mainBundleMs ? new Date(mainBundleMs).toISOString() : '(no dist-electron/ bundle found)';
+  const mainSrcStale = !!(mainSrcMs && mainSrcMs > PROCESS_START_MS);
+  const mainBundleAfterStart = !!(mainBundleMs && mainBundleMs > PROCESS_START_MS);
+  let stalenessLine;
+  if (mainSrcDirFound) {
+    // Dev run: the electron/ source tree is actually on disk and was scanned,
+    // so a verdict about SOURCE freshness is something this run can back up.
+    stalenessLine = !mainSrcMs
+      ? '⚠️ **Cannot determine build freshness** — electron/ was found but no source files matched inside it. If you have edited any Electron main-process files since starting the app, restart before treating this report as authoritative.'
+      : mainSrcStale
+        ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((mainSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
+        : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+  } else {
+    // Packaged build: electron/ source is not shipped, so this run NEVER
+    // looked at a single source file — only the baked-in dist-electron/
+    // bundle exists to compare. State that plainly instead of asserting
+    // anything about source freshness this run has no way to verify.
+    stalenessLine = !mainBundleMs
+      ? '⚠️ **Cannot determine build freshness** — packaged build, electron/ source not shipped, and no dist-electron/ bundle mtime could be read either.'
+      : mainBundleAfterStart
+        ? `⚠️ **BUNDLE NEWER THAN PROCESS START**: the packaged dist-electron/ bundle has an mtime ${Math.round((mainBundleMs - PROCESS_START_MS) / 1000)}s after the process started, which is unexpected for an installed build. (Packaged build — the electron/ dev source tree was not scanned, so a source edit could not have been detected either way; this is a bundle-vs-process-start comparison only.)`
+        : 'ℹ️ Packaged build — the electron/ dev source tree was not scanned (not shipped inside app.asar), so a local source edit could not have been detected. The only known fact: the running dist-electron/ bundle predates process start.';
+  }
+
+  // Renderer freshness — the main-process check above never covers src/, but a
+  // stale renderer (edited src/ that wasn't re-bundled into dist/) silently runs
+  // old UI logic. With a Vite dev server, HMR keeps it current; with the built
+  // bundle (loadFile dist/index.html) only a `vite build` updates it.
+  const onDevServer = !!process.env.VITE_DEV_SERVER_URL;
+  const { src: rSrcMs, bundle: rBundleMs } = getNewestRendererMtimes();
+  // A packaged app ships only the built bundle inside app.asar — `src/` isn't on
+  // disk, so a null rSrcMs there is EXPECTED (not a read failure). Label it as
+  // such only when we DID find the bundle (otherwise we truly know nothing).
+  const rSrcStr = rSrcMs
+    ? new Date(rSrcMs).toISOString()
+    : (rBundleMs ? '(not on disk — packaged build, src/ not shipped)' : '(unknown)');
+  const rBundleStr = rBundleMs ? new Date(rBundleMs).toISOString() : '(no built bundle found under dist/)';
+  const rendererStale = !!(rSrcMs && rBundleMs && rSrcMs > rBundleMs);
+  const bundleAfterStart = !!(rBundleMs && rBundleMs > PROCESS_START_MS);
+  let rendererLine;
+  if (onDevServer) {
+    rendererLine = 'ℹ️ Renderer served by the Vite dev server (HMR) — `src/` edits apply live; the dist/ mtime check does not apply.';
+  } else if (rendererStale) {
+    rendererLine = `⚠️ **STALE RENDERER**: a \`src/\` file was modified ${Math.round((rSrcMs - rBundleMs) / 1000)}s after the renderer bundle was built. The app loads \`dist/index.html\`, so the running UI does NOT include the latest src/ — run \`vite build\` and reload before trusting renderer behavior (e.g. the AI-scoring / test-mode gate).`;
+  } else if (bundleAfterStart) {
+    rendererLine = `⚠️ **RENDERER REBUILT MID-SESSION**: dist/ was rebuilt ${Math.round((rBundleMs - PROCESS_START_MS) / 1000)}s after launch but the window may still hold the pre-rebuild bundle — reload the window (or restart) to pick it up.`;
+  } else if (rBundleMs) {
+    // Bundle present, not newer than src/, and not rebuilt after launch → the
+    // window loaded the current on-disk build. src/ being absent (packaged) or
+    // older (dev, already rebuilt) both land here — both are fresh.
+    rendererLine = rSrcMs
+      ? '✅ Renderer bundle (dist/) is at least as new as src/ — running UI matches source.'
+      : '✅ Renderer bundle predates process start and no newer src/ is on disk (packaged build) — running the current bundle.';
+  } else {
+    rendererLine = '⚠️ Cannot determine renderer freshness — no dist/ bundle mtime found.';
+  }
+
+  const buildFreshnessMarkdown = `
+## Build Freshness
+- Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)
+- Newest main-process source mtime (electron/): \`${mainSrcStr}\`
+- Main-process bundle built (dist-electron/ — what a packaged app actually runs): \`${mainBundleStr}\`
+- ${stalenessLine}
+- Newest renderer source mtime (src/): \`${rSrcStr}\`
+- Renderer bundle built (dist/ — what loadFile actually serves): \`${rBundleStr}\`
+- ${rendererLine}
+`;
+
+  // ── Persisted workspace snapshot ──────────────────────────────────────────
+  // Reads the on-disk auto-loaded workspace and flags transient hub state that
+  // should have been stripped before save. The decisive signal for any "stale
+  // state survives restart" report. Never break the report on diagnostic
+  // failure — the helper already returns markdown for every error path.
+  let persistedWorkspaceMarkdown = '';
+  try { persistedWorkspaceMarkdown = buildPersistedWorkspaceSnapshot(frontEndState); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  let missingPreviewRelinkMarkdown = '';
+  try { missingPreviewRelinkMarkdown = buildMissingPreviewRelinkMarkdown(); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  // ── Cross-restart session durability ──────────────────────────────────────
+  // Values are intentionally absent: file checkpoints, cache provenance, and
+  // cookie name/persistence metadata are sufficient to distinguish "detected in
+  // RAM but never flushed" from "restored and later rejected by the server."
+  let sessionPersistenceMarkdown = '';
+  if (wantsPersistenceDiagnostics) try { sessionPersistenceMarkdown = buildSessionPersistenceMarkdown(); }
+  catch (error) {
+    sessionPersistenceMarkdown = diagnosticRenderFailureMarkdown('Session Persistence Diagnostics', error);
+  }
+
+  // ── Marketplace session snapshot ──────────────────────────────────────────
+  // In-memory session cache (populated by verifyAllPlatforms on startup and
+  // by writeStatusCache after each login flow). Truth source for the "Log in"
+  // vs "Logged in · refresh" pill in Settings → Marketplace Monitors.
+  let marketplaceSessionsMarkdown = '';
+  if (hasSellNodes) try { marketplaceSessionsMarkdown = buildMarketplaceSessionsMarkdown(sectionOmitted); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  // ── Job platform session snapshot ─────────────────────────────────────────
+  // Same cache as sell-monitor; shown separately because job platforms have
+  // different UI context (Settings → Job Boards). A verify URL returning 404
+  // means the platform changed its URL structure — that's only visible here,
+  // not in the sell-monitor section above.
+  // Only include when this canvas actually has job nodes — don't bleed job
+  // login state into a marketplace-only report.
+  let jobSessionsMarkdown = '';
+  if (hasJobNodes || wantsAuthDiagnostics || isFullReport) try { jobSessionsMarkdown = buildJobSessionsMarkdown(sectionOmitted); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  // ── Login verification timing ─────────────────────────────────────────────
+  // Answers "why is login verification slow?" directly, with explicit per-platform
+  // verify durations + wall-clock total captured by verifyAllPlatforms. Before
+  // this section the only timing signal was subtracting consecutive "Verifying X"
+  // / "Startup verify X" main-process log timestamps by hand — and the concurrent
+  // verify pool now interleaves those lines, so that method no longer works. This
+  // is the first-class replacement: included under FULL or any auth/automation report.
+  let verifyTimingMarkdown = '';
+  if (isFullReport || wantsAuthDiagnostics || hasSellNodes || hasJobNodes) try {
+    verifyTimingMarkdown = buildLoginVerificationTimingMarkdown(getVerifyTimingSummary?.());
+  } catch { /* never break the report on diagnostic failure */ }
+
+  // ── Active auth/login window snapshot ─────────────────────────────────────
+  // Login bugs can happen with zero canvas nodes. This captures the visible
+  // auth browser mode and current URL/title when the report is taken, which is
+  // the decisive signal for Google's "browser or app may not be secure" block.
+  let authWindowMarkdown = '';
+  // Captcha-resolve windows are a marketplace concern AND a job concern, and a
+  // user may describe the failure without auth vocabulary ("window not opening").
+  // Include whenever there are automation nodes, or always under FULL.
+  if (wantsAuthDiagnostics || isFullReport || hasSellNodes || hasJobNodes) try { authWindowMarkdown = buildAuthWindowMarkdown(); }
+  catch (err) { authWindowMarkdown = diagnosticRenderFailureMarkdown('Auth Window Diagnostics', err); }
+
+  // ── Recent main-process logs ──────────────────────────────────────────────
+  // Up to 200 main-process log lines, captured by the in-memory ring buffer
+  // in logger.js. Critical for diagnosing "the IPC silently failed" reports:
+  // the [Accounts] / [StealthBrowser] / etc. error lines that normally only
+  // hit stdout (which users never see) are surfaced here. Skip lines older
+  // than this process start so we don't drag in stale logs from a previous
+  // run that happened to share the ring buffer state.
+  let mainProcessLogLines = [];
+  try { mainProcessLogLines = buildRecentMainProcessLogLines(); }
+  catch { /* never break the report on diagnostic failure */ }
+  const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
+
+  // ── AI configuration snapshot ─────────────────────────────────────────────
+  // Surfaces missing keys / wrong provider — the most common cause of
+  // "I clicked the AI button and nothing happened" reports.
+  // Learned token budgets — observed output (visible+thinking) tokens per task,
+  // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
+  // the 24576 hard cap means a task is truncating and the cap has grown to match.
+  const tokenBudgetMarkdown = buildTokenBudgetsMarkdown();
+
+  // aiConfig pulls live provider/telemetry state (getGeminiTelemetry et al.) and
+  // is rendered unconditionally on every report — unlike almost every other
+  // section here, it was never guarded, so a throw anywhere in that chain took
+  // down the entire report instead of just this section.
+  let aiConfigMarkdown = '';
+  try { aiConfigMarkdown = buildAIConfigurationMarkdown(tokenBudgetMarkdown); }
+  catch (err) { aiConfigMarkdown = diagnosticRenderFailureMarkdown('AI Configuration', err); }
 
   // Cache counters live in their own small section so they remain visible even
   // when the general AI configuration snapshot has an unrelated render error.

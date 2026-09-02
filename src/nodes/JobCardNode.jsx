@@ -15,6 +15,7 @@ import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
+import { hubCardFilter } from '../utils/jobCardFilters';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import { ApplicationLaunchPromptDialog } from '../components/ApplicationLaunchPromptDialog';
 
@@ -285,10 +286,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     if (!shouldReflow) return;
     const frame = requestAnimationFrame(() => {
       const hubData = getNode(data.hubId)?.data || {};
-      setNodes((nodes) => computeJobTreeView(nodes, data.hubId, {
-        scoreThreshold: hubData.scoreThreshold ?? 0,
-        sourceFilter: hubData.sourceFilter ?? null,
-      }, undefined, true));
+      setNodes((nodes) => computeJobTreeView(nodes, data.hubId, hubCardFilter(hubData), undefined, true));
     });
     return () => cancelAnimationFrame(frame);
   }, [id, measuredHeight, data.hubId, getNode, setNodes]);
@@ -357,7 +355,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       return;
     }
     try {
-      await window.electronAPI.openExternal(url);
+      // handleSafe (electron/ipc/ipcUtils.js) always RESOLVES this invoke,
+      // even on failure, with { success: false, error }. Check the payload
+      // instead of relying on a rejection, or a failed open silently reads
+      // as dispatched.
+      const result = await window.electronAPI.openExternal(url);
+      if (!result?.success) throw new Error(result?.error || 'Could not open the job listing.');
       EventLogger.log(`[JobCard] external-link dispatched id=${id} target=${diagnostic.targetRoute}`);
     } catch (error) {
       const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
@@ -366,10 +369,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [id, data, addToast]);
 
-  const openResearchSource = useCallback((rawUrl) => {
+  const openResearchSource = useCallback(async (rawUrl) => {
     const url = normalizeExternalHttpUrl(rawUrl);
-    if (url && window.electronAPI?.openExternal) window.electronAPI.openExternal(url);
-  }, []);
+    if (!url || !window.electronAPI?.openExternal) return;
+    // Same handleSafe contract as openJobUrl: the invoke resolves even on
+    // failure, so a resolved { success: false } must be surfaced, not ignored.
+    const result = await window.electronAPI.openExternal(url);
+    if (!result?.success) addToast('Could not open that link. Please try again.', 'error');
+  }, [addToast]);
 
   // Dismiss = delete this card, then re-derive the tree view so the column
   // tightens and the role leaf's pagination window backfills the next matching
@@ -384,7 +391,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     cancelQueuedRunsForNode(id, 'Job card dismissed before generation started');
     await deleteElements({ nodes: [{ id }] });
     const hubData = getNode(data.hubId)?.data || {};
-    const filter = { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null };
+    const filter = hubCardFilter(hubData);
     setNodes((nodes) => computeJobTreeView(nodes, data.hubId, filter));
     const stats = deriveBoardCardStats(getNodes().filter((node) => node.id !== id), data.hubId, hubData);
     updateGlobal(data.hubId, stats);

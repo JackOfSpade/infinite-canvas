@@ -10,6 +10,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings, getGeminiModelRuntimeState, saveGeminiModelRuntimeState, tryGetStore } from './settings.js';
 import { probeClaude, claudeModelsInUse } from './claude.js';
+import { primeClaudeModels } from './modelResolver.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
@@ -33,7 +34,7 @@ import {
   gatedTiers,
   probeModelForTier,
 } from './geminiEntitlement.js';
-import { isSensitivePath } from '../utils/pathSafety.js';
+import { assertAttachmentPathSafe } from '../utils/pathSafety.js';
 import { parseAiJson } from './jsonRepair.js';
 import { appendGroundedSourceAppendix } from './groundedSourceAppendix.js';
 
@@ -50,16 +51,6 @@ export function formatGeminiGroundedResponse(prose, candidate) {
     return web ? [{ url: web.uri, title: web.title }] : [];
   });
   return appendGroundedSourceAppendix(prose, sources);
-}
-
-// A document/image node's filePath is sourced from loaded canvas JSON, which
-// (unlike the local-file:// preview protocol) had NO path check at all before
-// being read and uploaded to the Gemini API — see the matching guard in
-// claude.js for the full rationale.
-function assertAttachmentPathSafe(filePath) {
-  if (isSensitivePath(path.resolve(String(filePath || '')))) {
-    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
-  }
 }
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
@@ -1584,6 +1575,15 @@ export function registerGeminiHandlers() {
       if (!settings.anthropicApiKey) {
         result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Anthropic API key set.' }] };
       } else {
+        // Resolve the live family → model-id snapshot first. Without this, a
+        // process that hasn't yet made a real Claude call (or had the Settings
+        // panel's own fire-and-forget getClaudeModelMap() finish) still sits on
+        // MODEL_FLOOR, so this probe would test stale pinned ids instead of the
+        // model ids every real call path actually resolves to. No-ops when the
+        // snapshot is already fresh (modelResolver.js), so this costs nothing
+        // on the common already-primed path.
+        await primeClaudeModels({ apiKey: settings.anthropicApiKey });
+
         // Probe all models in parallel — each is a 1-token ping (~free).
         //
         // Pass the user's live per-group family picks so a NON-DEFAULT choice

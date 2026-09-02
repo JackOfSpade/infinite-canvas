@@ -51,20 +51,37 @@ function bareSalaryAmounts(text, cadence) {
 }
 
 function rangeSalaryAmounts(text, cadence) {
-  const match = String(text || '').match(
-    /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?\s*(?:[-–—]|\bto\b)\s*(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?/i,
-  );
-  if (!match) return [];
-  let leftSuffix = match[2] || '';
-  let rightSuffix = match[4] || '';
-  // Common shorthand: "$80–100k" or "$80k–100". A suffix on either side
-  // applies to both endpoints when the other endpoint is a small shorthand.
-  if (!leftSuffix && rightSuffix && Number(String(match[1]).replace(/,/g, '')) < 1000) leftSuffix = rightSuffix;
-  if (!rightSuffix && leftSuffix && Number(String(match[3]).replace(/,/g, '')) < 1000) rightSuffix = leftSuffix;
-  const values = [amount(match[1], leftSuffix), amount(match[3], rightSuffix)].filter(Boolean);
-  if (values.length !== 2) return [];
-  if (cadence === 'annual' && values.some(value => value < 10000)) return [];
-  return values;
+  const source = String(text || '');
+  const pattern = /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?\s*(?:[-–—]|\bto\b)\s*(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?/gi;
+  // A work-schedule range ("20-25 hrs/week") has the identical shape as a
+  // bare pay range and carries no currency symbol either, so the naive
+  // first-match scan below would report the hours as the rate whenever the
+  // schedule happens to appear before the real pay range in the text (see
+  // "20-25 hrs/week, $18-22/hr"). Annual cadence already guards against this
+  // via the >=10000 plausibility floor; hourly/weekly/monthly rates can be
+  // legitimately just as small as a schedule figure, so instead skip a
+  // symbol-less match that is immediately followed by its own schedule unit
+  // and keep scanning for the real, currency-anchored range later in the text.
+  for (const match of source.matchAll(pattern)) {
+    let leftSuffix = match[2] || '';
+    let rightSuffix = match[4] || '';
+    // Common shorthand: "$80–100k" or "$80k–100". A suffix on either side
+    // applies to both endpoints when the other endpoint is a small shorthand.
+    if (!leftSuffix && rightSuffix && Number(String(match[1]).replace(/,/g, '')) < 1000) leftSuffix = rightSuffix;
+    if (!rightSuffix && leftSuffix && Number(String(match[3]).replace(/,/g, '')) < 1000) rightSuffix = leftSuffix;
+    const values = [amount(match[1], leftSuffix), amount(match[3], rightSuffix)].filter(Boolean);
+    if (values.length !== 2) continue;
+    if (cadence === 'annual') {
+      if (values.some(value => value < 10000)) return [];
+      return values;
+    }
+    if (!leftSuffix && !rightSuffix && !/(?:US\$|C\$|CA\$|CAD|USD|\$|€|£)/i.test(match[0])) {
+      const after = source.slice(match.index + match[0].length, match.index + match[0].length + 20);
+      if (/^\s*(?:hours?|hrs?|h|days?|weeks?|wks?|months?|yrs?|years?)\b/i.test(after)) continue;
+    }
+    return values;
+  }
+  return [];
 }
 
 // Remove money values which belong to a non-guaranteed component without

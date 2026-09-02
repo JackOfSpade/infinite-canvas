@@ -2251,6 +2251,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const warnings = Array.isArray(searchResult?.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       const blockingWarnings = warnings.filter(isJobSourceWarningGating);
       // Same post-search disposition as runPipeline (block-gate pause / empty terminal).
+      // Computed once — `data` doesn't change between the two call sites below.
+      const locationSnapshot = data.locationSnapshot || {
+        searchLocation: getSearchLocation({
+          searchLocation: data.searchLocation,
+          preferredLocation: data.preferredLocation,
+          canonicalLocation: data.canonicalLocation,
+        }),
+        remoteResidences: normalizeRemoteResidences(data.remoteResidences),
+      };
       const shouldScore = await handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath: cfp,
@@ -2259,14 +2268,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? searchResult.descriptionRecoveryJobs
           : null,
         gatheredCount: visibleGatheredCount,
-        locationSnapshot: data.locationSnapshot || {
-          searchLocation: getSearchLocation({
-            searchLocation: data.searchLocation,
-            preferredLocation: data.preferredLocation,
-            canonicalLocation: data.canonicalLocation,
-          }),
-          remoteResidences: normalizeRemoteResidences(data.remoteResidences),
-        },
+        locationSnapshot,
         cancelled,
       });
       if (!shouldScore) return;
@@ -2275,14 +2277,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         gatheredCount: visibleGatheredCount,
         scrapeWarnings: warnings, activeTargetRole, originalPos,
         jobRunId: searchResult?.runId || null, cancelled,
-        locationSnapshot: data.locationSnapshot || {
-          searchLocation: getSearchLocation({
-            searchLocation: data.searchLocation,
-            preferredLocation: data.preferredLocation,
-            canonicalLocation: data.canonicalLocation,
-          }),
-          remoteResidences: normalizeRemoteResidences(data.remoteResidences),
-        },
+        locationSnapshot,
       });
     } catch (error) {
       if (cancelled() || isNodeDeletedAbort(error)) return;

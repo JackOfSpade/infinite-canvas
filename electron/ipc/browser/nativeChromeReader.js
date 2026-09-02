@@ -6,7 +6,7 @@ import { logger } from '../../logger.js';
 import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
-import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath } from './authWindows.js';
+import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
 
 const execFile = promisify(execFileCb);
 
@@ -59,6 +59,11 @@ const OSA_MAX_BUFFER = 64 * 1024 * 1024;
 // Swappa/Mercari this window IS the only login that works (non-CDP, passes the
 // Turnstile/anti-bot the headless/CDP login can't).
 const NATIVE_WINDOW_APPEAR_MS = 20000;
+// How long a visible window may sit in 'unknown' (title never settles on a login
+// screen or a real hub) before waitForHubLogin gives up and reports 'stuck'. Module
+// scope so readHubUrlsViaNativeChrome's stuck-window error message can reference it
+// instead of duplicating the literal.
+const UNKNOWN_SETTLE_MS = 30000;
 
 /**
  * True when an osascript failure is the "Allow JavaScript from Apple Events"
@@ -469,8 +474,8 @@ async function waitForHubLogin(matchHost, platformId, signal, getBailed) {
   // (an empty/loading title is no longer trusted as 'logged-in'). Bound continuous
   // 'unknown' time so such a page surfaces as a stuck error instead of polling
   // forever. A 'logged-out' (login/challenge = human present) RESETS this deadline,
-  // so the indefinite human-wait invariant is preserved.
-  const UNKNOWN_SETTLE_MS = 30000;
+  // so the indefinite human-wait invariant is preserved. (UNKNOWN_SETTLE_MS is
+  // module-scoped — see above — so the stuck-window error message below can cite it.)
   let unknownDeadline = 0;
   for (;;) {
     if (signal?.aborted) return 'aborted';
@@ -604,6 +609,12 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
         '--no-default-browser-check',
         '--window-size=1100,800',
         '--lang=en-US,en',
+        // See PUPPETEER_OSCRYPT_PARITY_ARGS in authWindows.js: without these, this
+        // raw-spawned Chrome derives its cookie OSCrypt key from the real macOS
+        // Keychain, while every Puppeteer-launched Chrome on this same userDataDir
+        // uses Chromium's static mock-keychain key — a login done IN this window
+        // would write cookies invisible to every later headless scrape/read.
+        ...PUPPETEER_OSCRYPT_PARITY_ARGS,
         `--app=${urls[0]}`,
       ], { stdio: 'ignore', detached: false });
 
@@ -633,7 +644,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
         } else if (loginState === 'window-closed') {
           error = `Native Chrome window was closed before ${platformId} sign-in completed — skipped. Re-run Check All and sign in (or stay logged in) to read this hub.`;
         } else if (loginState === 'stuck') {
-          error = `Native Chrome window for ${platformId} never settled on a hub or a login/verification screen within ${Math.round(30000 / 1000)}s (page may be wedged or its title unreadable). osascript sees: ${seen}`;
+          error = `Native Chrome window for ${platformId} never settled on a hub or a login/verification screen within ${Math.round(UNKNOWN_SETTLE_MS / 1000)}s (page may be wedged or its title unreadable). osascript sees: ${seen}`;
         } else if (childExited) {
           error = `Native Chrome exited right after spawn — it handed off to another Chrome already holding the profile (profile not free). osascript sees: ${seen}`;
         } else {

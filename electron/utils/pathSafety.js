@@ -9,6 +9,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 /**
  * True when `candidatePath` resolves to `rootDir` itself or a descendant of it.
@@ -96,6 +97,26 @@ export async function ensureDirectoryWithinRoot(rootDir, targetDir, { mode = 0o7
   return current;
 }
 
+// Write JSON to `targetPath` via a same-directory temp file + rename so a
+// reader never observes a partially-written file, and best-effort clean up
+// the temp file whether the rename succeeded or not. This exact shape (temp
+// write, rename, finally-unlink) used to be reimplemented independently at
+// several call sites with drifting details (mode, formatting, temp-name
+// entropy); options below let each caller keep its own prior behavior.
+export async function atomicWriteJson(targetPath, data, { mode = 0o600, pretty = true, ensureDir = false } = {}) {
+  if (ensureDir) {
+    await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  }
+  const temp = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.${crypto.randomUUID()}.tmp`);
+  const serialized = pretty ? `${JSON.stringify(data, null, 2)}\n` : JSON.stringify(data);
+  try {
+    await fs.promises.writeFile(temp, serialized, { encoding: 'utf8', mode });
+    await fs.promises.rename(temp, targetPath);
+  } finally {
+    await fs.promises.unlink(temp).catch(() => {});
+  }
+}
+
 /** True when `filePath` exists and is a regular file. */
 export function isExistingFile(filePath) {
   try {
@@ -142,4 +163,17 @@ export function isSensitivePath(resolvedPath) {
   if (isUnixRoot || isWindowsRoot) return true;
   if (SENSITIVE_EXACT_PATHS.has(exactPath)) return true;
   return SENSITIVE_PATH_PATTERNS.some(p => verificationPath.includes(p));
+}
+
+// A document/image node's filePath is sourced from loaded canvas JSON, which
+// (unlike the local-file:// preview protocol) had NO path check at all before
+// being read and uploaded to an AI provider — an untrusted/shared canvas
+// could point a node at e.g. ~/.aws/credentials and have it previewed AND,
+// via a normal "AI polish/analyze" action, exfiltrated to a third-party API.
+// Shared by every provider's attachment path (gemini.js, claude.js) so the
+// guard can't drift out of sync between them.
+export function assertAttachmentPathSafe(filePath) {
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
 }

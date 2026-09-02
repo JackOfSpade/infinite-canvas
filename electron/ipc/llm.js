@@ -688,7 +688,7 @@ export async function cancelLLMTextBatch(batchId) {
  * responseSchema — which is exactly why this path is free-text.
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  const { signal, task, hints, grounding, cachedPrefix, excludeModels, manualHandoff } = normalizeOpts(opts);
+  const { signal, task, hints, grounding, cachedPrefix, excludeModels, retryOnTruncation, manualHandoff } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   if (isNonApiJobTask(task)) {
     const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
@@ -737,7 +737,9 @@ export async function callLLMRaw(prompt, opts = {}) {
     try {
       return await attempt();
     } catch (err) {
-      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      const raised = retryOnTruncation && !retriedForCap
+        ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })
+        : null;
       if (!raised) throw enhanceLLMError(err, provider);
       logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
       retriedForCap = true;
@@ -748,7 +750,7 @@ export async function callLLMRaw(prompt, opts = {}) {
 }
 
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, excludeModels, responseValidator } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, excludeModels, retryOnTruncation, responseValidator } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMVision');
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   if (isNonApiJobTask(task)) {
@@ -794,7 +796,9 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     try {
       return await attempt();
     } catch (err) {
-      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      const raised = retryOnTruncation && !retriedForCap
+        ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })
+        : null;
       if (!raised) throw enhanceLLMError(err, provider);
       logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
       retriedForCap = true;
@@ -813,7 +817,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   if (isSensitivePath(path.resolve(String(filePath || '')))) {
     throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
   }
-  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, responseValidator } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, retryOnTruncation, responseValidator } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMDocument');
   if (isNonApiJobTask(task)) {
     // The live document request does not use a cached prefix, so do not add
@@ -866,7 +870,9 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
     try {
       return await attempt();
     } catch (err) {
-      const raised = retriedForCap ? null : raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model });
+      const raised = retryOnTruncation && !retriedForCap
+        ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })
+        : null;
       if (!raised) throw enhanceLLMError(err, provider);
       logger.info(`[LLM] Task '${task || 'unknown'}' truncated at its ${maxTok}-token output cap; retrying once at the raised cap ${raised.cap}.`);
       retriedForCap = true;

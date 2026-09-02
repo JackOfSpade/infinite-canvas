@@ -45,8 +45,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   useEffect(() => {
     // textRef is stable, but the text content inside the <textPath> changes.
     // Measuring here avoids triggering a layout reflow on every render.
+    // data.fontSize/data.fontFamily are included because they're independently
+    // customizable (nodeCustomization.js) and change the rendered glyph width
+    // that isInTitleArc's hit-test relies on via this cached value.
     setMeasuredTextLen(textRef.current?.getComputedTextLength?.() ?? 0);
-  }, [title, SIZE]);
+  }, [title, SIZE, data.fontSize, data.fontFamily]);
 
   // liveRef gives the stable native-listener useEffect access to values that
   // change between renders (isEditing, title, data, SIZE) without needing to

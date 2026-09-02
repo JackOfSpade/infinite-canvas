@@ -22,10 +22,6 @@ export function getEnabledJobSourceIds(sourceIds, availableIds = ALL_JOB_SOURCE_
   return available.filter(id => selected.has(id));
 }
 
-export function isJobSourceSelected(sourceId, sourceIds, availableIds = ALL_JOB_SOURCE_IDS) {
-  return getEnabledJobSourceIds(sourceIds, availableIds).includes(sourceId);
-}
-
 /**
  * UI-facing eligibility for a source toggle. The main-process preflight still
  * independently enforces this country policy; this merely prevents a user from

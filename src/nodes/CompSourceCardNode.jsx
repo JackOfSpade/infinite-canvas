@@ -152,7 +152,12 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
   // captcha solve only buys a short cookie window, so we want the retry
   // to fire immediately while it's still valid.
   const handleResolveCaptcha = async () => {
-    if (resolving || hubLocked || !progress?.url || !window.electronAPI?.resolveCaptcha) return;
+    // Also bail while the hub has already picked this source up for an active/queued
+    // rescrape (comp-source-resolve-state), same as the Retry button's guard — otherwise
+    // a second Solve click can fire once `resolving` flips back to false but the hub's
+    // drain of the first solve is still mid-flight, opening a redundant shared-profile
+    // browser window whose result gets silently discarded by enqueueUniqueSourceResolve.
+    if (resolving || hubLocked || resolveState !== 'idle' || !progress?.url || !window.electronAPI?.resolveCaptcha) return;
     setQueuedAhead(0);
     setResolving(true);
     try {
@@ -293,12 +298,20 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
             <button
               onClick={(e) => { e.stopPropagation(); handleResolveCaptcha(); }}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={resolving || hubLocked}
+              disabled={resolving || hubLocked || resolveState !== 'idle'}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
-              title={hubLocked ? 'Hub is locked' : 'Open the failed page so you can solve the captcha — cookies will carry over to the next refresh'}
+              title={hubLocked
+                ? 'Hub is locked'
+                : resolveState === 'active'
+                  ? 'Retrying this source now…'
+                  : resolveState === 'queued'
+                    ? 'Queued behind another source’s retry — it will run automatically'
+                    : 'Open the failed page so you can solve the captcha — cookies will carry over to the next refresh'}
             >
               <ExternalLink size={9} />
-              {resolving ? (queuedAhead > 0 ? `Queued behind ${queuedAhead}…` : 'Window open…') : 'Solve'}
+              {resolving
+                ? (queuedAhead > 0 ? `Queued behind ${queuedAhead}…` : 'Window open…')
+                : resolveState === 'active' ? 'Retrying…' : resolveState === 'queued' ? 'Queued…' : 'Solve'}
             </button>
           )}
           <button

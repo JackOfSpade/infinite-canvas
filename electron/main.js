@@ -236,24 +236,34 @@ function getTargetCanvasWindow() {
 }
 
 /**
- * Ask a window's renderer to save, and resolve once it reports back (or times
- * out). Shared by the per-window close handler and the app-wide quit handler.
+ * Ask a window's renderer to save, and resolve once it reports back. There is
+ * deliberately no fixed timeout: for a never-saved canvas the renderer's save
+ * routes through a native, human-paced Save dialog (filesystem.js's
+ * 'save-workspace' handler, `dialog.showSaveDialog`) whose duration is
+ * unbounded, and a short race here would abandon the close/quit while that
+ * dialog is still open on screen. The only thing that can make a reply
+ * genuinely impossible is the window itself going away, so that's the sole
+ * early-out. Shared by the per-window close handler and the app-wide quit
+ * handler.
  */
 function requestSaveAndWait(win) {
   return new Promise(resolve => {
-    let saveTimeoutId;
     const expectedSender = win.webContents;
+    let settled = false;
+    const finish = (success) => {
+      if (settled) return;
+      settled = true;
+      electronPkg.ipcMain.removeListener('save-response', saveHandler);
+      expectedSender.removeListener('destroyed', onDestroyed);
+      resolve(success);
+    };
     const saveHandler = (event, { success } = {}) => {
       if (event.sender !== expectedSender) return;
-      clearTimeout(saveTimeoutId);
-      electronPkg.ipcMain.removeListener('save-response', saveHandler);
-      resolve(Boolean(success));
+      finish(Boolean(success));
     };
+    const onDestroyed = () => finish(false);
     electronPkg.ipcMain.on('save-response', saveHandler);
-    saveTimeoutId = setTimeout(() => {
-      electronPkg.ipcMain.removeListener('save-response', saveHandler);
-      resolve(false);
-    }, 3000);
+    expectedSender.once('destroyed', onDestroyed);
     safeMenuSend(win, 'request-save-and-respond');
   });
 }

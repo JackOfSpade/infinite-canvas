@@ -953,8 +953,6 @@ export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/huma
 export {
   openLoginWindow,
   getSessionStatus,
-  getAllSessionStatuses,
-  getSupportedPlatforms,
   getLoginAutoCloseWaitReason,
   hasPlatformAuthCookie,
   readPlatformAuthCookieState,

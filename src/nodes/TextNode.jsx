@@ -3,6 +3,7 @@ import { NodeResizeControl } from '@xyflow/react';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
+import { pasteAsPlainText, blurOnEscape } from './_shared/textEditingHandlers';
 
 const RESIZE_CORNERS = [
   { position: 'top-left',     cursor: 'nwse-resize' },
@@ -42,7 +43,7 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
   }, [handleBlur]);
 
   const handleKeyDown = useCallback((e) => {
-    if (e.key === 'Escape') inputRef.current?.blur();
+    blurOnEscape(e, inputRef);
   }, []);
 
   const handleDoubleClick = useCallback((e) => {
@@ -58,9 +59,7 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
   }, [isEditing]);
 
   const handlePaste = useCallback((e) => {
-    e.preventDefault();
-    const text = e.clipboardData.getData('text/plain');
-    document.execCommand('insertText', false, text);
+    pasteAsPlainText(e);
   }, []);
 
   const fontSize = data.fontSize || 14;
@@ -81,8 +80,13 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
   }, [data.text, isEditing]);
 
   // Background for sticky notes: force opaque alpha if user picked a color, else default cream.
+  // Only rewrite a genuine 4-component rgba(...) alpha channel here -- a naive trailing
+  // "<number>)" match would also clobber the blue channel of a plain rgb(...) color.
   const stickyBg = data.backgroundColor
-    ? data.backgroundColor.replace(/[\d.]+\)$/, '1)')
+    ? data.backgroundColor.replace(
+      /^(rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,)\s*[\d.]+\s*\)$/,
+      '$1 1)',
+    )
     : '#fef3c7';
 
   const wrapperClassName = [

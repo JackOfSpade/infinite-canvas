@@ -137,7 +137,16 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
   const handleSpawnMarketplaceCard = useCallback((platformId) => {
     if (data.locked) return;
-    if (spawnedMarketplaceIds.includes(platformId)) return;
+    // Re-query live at click time instead of trusting the render-time
+    // spawnedMarketplaceIds closure — adding a sibling marketplacecard node
+    // doesn't change this hub's own node reference, so ReactFlow won't
+    // re-render SellHubNode and a rapid re-click could still see the
+    // pre-spawn snapshot (mirrors handleApplyPriceDropPlanToAll's live
+    // getNodes() re-query below).
+    const alreadySpawned = getNodes().some(n => (
+      n.type === 'marketplacecard' && n.data?.hubId === id && n.data?.platformId === platformId
+    ));
+    if (alreadySpawned) return;
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
     // Place the card in the first vertical slot not already occupied by a sibling
     // marketplace card. Using the live count instead collided after a deletion:
@@ -195,7 +204,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       addEdges([newEdge]);
     }
   }, [
-    data.locked, data.bundlePricing, data.bundleTotal, data.itemPricings, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
+    data.locked, data.bundlePricing, data.bundleTotal, data.itemPricings, id, getNode, getNodes, product, data.pricing?.recommended_price,
     addElementsGlobally, addNodes, addEdges,
   ]);
 

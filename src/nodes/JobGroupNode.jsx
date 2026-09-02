@@ -4,6 +4,7 @@ import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import { EventLogger } from '../utils/EventLogger';
 import { computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
+import { hubCardFilter } from '../utils/jobCardFilters';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
@@ -63,7 +64,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
       return countMatchingDescendantCards(
         data.childIds || [],
         (nid) => s.nodeLookup.get(nid),
-        { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null },
+        hubCardFilter(hubData),
       );
     }, [data.hubId, data.childIds])
   );
@@ -84,7 +85,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
   // expand under a filter only shows matching cards / non-empty branches.
   const hubFilter = () => {
     const d = getNode(data.hubId)?.data || {};
-    return { scoreThreshold: d.scoreThreshold ?? 0, sourceFilter: d.sourceFilter ?? null };
+    return hubCardFilter(d);
   };
 
   const toggle = (e) => {

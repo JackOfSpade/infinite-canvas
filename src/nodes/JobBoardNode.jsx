@@ -9,6 +9,7 @@ import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { EventLogger } from '../utils/EventLogger';
+import { hubCardFilter } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason } from './jobboard/mergeJobs';
@@ -187,9 +188,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // computeJobTreeView REMOVES non-matching cards and any branch with no matching
   // descendant (vs. just dimming) and reflows, composing with expand/collapse.
   const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st } = {}) => {
+    const base = hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold });
     const filter = {
-      sourceFilter: sf !== undefined ? sf : (data.sourceFilter || null),
-      scoreThreshold: st !== undefined ? st : (data.scoreThreshold ?? 0),
+      sourceFilter: sf !== undefined ? sf : base.sourceFilter,
+      scoreThreshold: st !== undefined ? st : base.scoreThreshold,
     };
     setNodes((nodes) => computeJobTreeView(nodes, id, filter));
   }, [data.sourceFilter, data.scoreThreshold, id, setNodes]);
@@ -236,10 +238,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // from each group's preserved `data.expanded` × the active filter, so the prior
   // expand/collapse + filter view comes back intact.
   const showBoardChildren = useCallback(() => {
-    setNodes((nodes) => computeJobTreeView(nodes, id, {
-      sourceFilter: data.sourceFilter || null,
-      scoreThreshold: data.scoreThreshold ?? 0,
-    }));
+    setNodes((nodes) => computeJobTreeView(nodes, id, hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold })));
   }, [id, setNodes, data.sourceFilter, data.scoreThreshold]);
 
   // Detect connection/data drift vs. the last Combine. A deleted connection (or a

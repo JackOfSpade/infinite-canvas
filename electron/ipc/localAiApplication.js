@@ -18,7 +18,7 @@ import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkRoleThesis, evaluateCoverLetterChecks, formatCoverLetterDate } from './coverLetterChecks.js';
-import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
+import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
 
 const { shell } = electronPkg;
@@ -361,14 +361,12 @@ async function readOwnedFile(root, candidate, { maxBytes = MAX_RESULT_BYTES } = 
   }
 }
 
+// Thin wrapper over the shared atomic-write helper: every call site here
+// relies on its target directory already having been created via
+// ensureDirectoryWithinRoot, so ensureDir stays off (mode/pretty match this
+// module's prior standalone implementation exactly).
 async function atomicJson(target, data) {
-  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
-  try {
-    await fs.promises.writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await fs.promises.rename(temp, target);
-  } finally {
-    await fs.promises.unlink(temp).catch(() => {});
-  }
+  await atomicWriteJson(target, data, { mode: 0o600, pretty: true, ensureDir: false });
 }
 
 async function ensureProjectRoutine(projectRoot) {

@@ -241,7 +241,14 @@ function leafTextNodes(element) {
 }
 
 function replaceTokenSequence(nodes, replacementTokens) {
-  const originals = nodes.flatMap(node => textTokens(node.nodeValue));
+  // The length gate must count matches the same way the substitution below
+  // does. textTokens() runs normalizePdfText() first (e.g. it rejoins a
+  // hyphen-then-space into one word), so a raw nodeValue containing such an
+  // artifact tokenizes to a different count here than PDF_TEXT_TOKEN finds
+  // when matched directly against that same raw nodeValue in the loop.
+  // Matching the raw string here keeps both counts in sync, so any mismatch
+  // is caught below instead of desyncing tokenIndex mid-substitution.
+  const originals = nodes.flatMap(node => String(node.nodeValue || '').match(PDF_TEXT_TOKEN) || []);
   if (originals.length !== replacementTokens.length) return false;
   let tokenIndex = 0;
   for (const node of nodes) {

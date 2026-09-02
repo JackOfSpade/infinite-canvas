@@ -220,6 +220,15 @@ export const US_ONLY_SOURCES = new Set(['usajobs']);
 // the remote check upstream claims it first.)
 const PLACELESS_LOCATION_RE = /negotiable after selection|(?:multiple|various)\s+locations?/i;
 
+// Escape a string for literal use inside a `new RegExp(...)` pattern. Hoisted
+// here because pickGlassdoorLocation / buildStateRegex / buildCountryRegex /
+// buildForeignRegexes below each build ad-hoc location-matching regexes and all
+// need this — a single copy keeps the escaped-character set from drifting out
+// of sync between them.
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Pick the right Glassdoor location from its autocomplete results
  * (findPopularLocationAjax.htm). Glassdoor's location FILTER is keyed by a numeric
@@ -243,8 +252,7 @@ export function pickGlassdoorLocation(results, canonical) {
     pick = results.find(r => String(r?.locationType || '').toUpperCase() === 'N' && text(r).includes(country));
   }
   if (!pick && (stateCode || stateName)) {
-    const esc = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const stateRe = new RegExp(`(?:\\b${esc(stateName)}\\b|(?:^|[,(/])\\s*${esc(stateCode)}(?=$|[, )]))`, 'i');
+    const stateRe = new RegExp(`(?:\\b${escapeRegExp(stateName)}\\b|(?:^|[,(/])\\s*${escapeRegExp(stateCode)}(?=$|[, )]))`, 'i');
     pick = results.find(r => stateRe.test(text(r)) && (!city || text(r).includes(city)))
         || results.find(r => stateRe.test(text(r)));
   }
@@ -476,12 +484,11 @@ function buildStateRegex(stateToken) {
       if (name.replace(/\s/g, '') === stateToken) { code = c; break; }
     }
   }
-  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (!code) return new RegExp(`\\b${esc(stateToken)}\\b`, 'i');
+  if (!code) return new RegExp(`\\b${escapeRegExp(stateToken)}\\b`, 'i');
   // Two-letter codes such as ON/IN/OR are ordinary English words. A code is
   // location evidence only when it occupies a structured subdivision slot
   // (", ON" / "(ON)"), not merely any word in the field.
-  return new RegExp(`(?:\\b${esc(SUBDIVISIONS[code])}\\b|(?:^|[,(/])\\s*${esc(code)}(?=$|[, )]))`, 'i');
+  return new RegExp(`(?:\\b${escapeRegExp(SUBDIVISIONS[code])}\\b|(?:^|[,(/])\\s*${escapeRegExp(code)}(?=$|[, )]))`, 'i');
 }
 
 // If a target SEGMENT is a US state or Canadian province — by 2-letter code
@@ -513,12 +520,11 @@ const COUNTRY_SUBDIVISIONS = {
 function buildCountryRegex(country) {
   const c = String(country || '').trim();
   if (!c) return null;
-  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const parts = [`\\b${esc(c.toLowerCase())}\\b`];
+  const parts = [`\\b${escapeRegExp(c.toLowerCase())}\\b`];
   const subs = COUNTRY_SUBDIVISIONS[c];
   if (subs) {
-    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${esc(code)}(?=$|[, )])`);
-    for (const name of Object.values(subs)) parts.push(`\\b${esc(name)}\\b`);
+    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${escapeRegExp(code)}(?=$|[, )])`);
+    for (const name of Object.values(subs)) parts.push(`\\b${escapeRegExp(name)}\\b`);
   }
   return new RegExp(`(?:${parts.join('|')})`, 'i');
 }
@@ -530,10 +536,9 @@ function buildForeignRegexes(targetCountry) {
   const out = [];
   for (const [country, subs] of Object.entries(COUNTRY_SUBDIVISIONS)) {
     if (country === targetCountry) continue;
-    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const parts = [`\\b${esc(country.toLowerCase())}\\b`];
-    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${esc(code)}(?=$|[, )])`);
-    for (const name of Object.values(subs)) parts.push(`\\b${esc(name)}\\b`);
+    const parts = [`\\b${escapeRegExp(country.toLowerCase())}\\b`];
+    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${escapeRegExp(code)}(?=$|[, )])`);
+    for (const name of Object.values(subs)) parts.push(`\\b${escapeRegExp(name)}\\b`);
     out.push({ country, re: new RegExp(`(?:${parts.join('|')})`, 'i') });
   }
   return out;

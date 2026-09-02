@@ -436,7 +436,11 @@ function send(record, channel, payload) {
 function settle(record, outcome) {
   if (!pendingRequests.delete(record.requestId)) return;
   if (record.abortListener) record.signal?.removeEventListener?.('abort', record.abortListener);
-  updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : 'failed' });
+  // `steppedBack` is a controlled, user-triggered rewind of the handoff (see
+  // the step-back handler's settle() call) — not a failure. Without its own
+  // branch it fell through to 'failed' and every navigational Back click was
+  // misreported as a genuine handoff failure in the bug-report lifecycle.
+  updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : outcome?.steppedBack ? 'stepped_back' : 'failed' });
   send(record, 'non-api-ai-settled', { requestId: record.requestId, ...outcome });
 }
 

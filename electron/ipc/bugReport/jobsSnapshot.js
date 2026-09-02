@@ -825,7 +825,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   const lines = [];
   if (t.careerParseCache) {
     const cache = t.careerParseCache;
-    const cacheScope = !cache.nodeId || !Array.isArray(currentNodeIds) || currentNodeIds.includes(cache.nodeId);
+    // currentNodeIds is a Set (see receiptHubCorrelation/recoveryHubCorrelation
+    // above) — this used to test Array.isArray/.includes, which is never true
+    // for a Set, so the scope check was a permanent no-op and every window's
+    // parse-cache stamp leaked into every other window's report.
+    const cacheScope = !cache.nodeId || currentNodeIds?.has?.(cache.nodeId);
     if (cacheScope) {
       const outcomes = {
         checking: 'checking',

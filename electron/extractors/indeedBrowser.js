@@ -1033,14 +1033,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: '⚠️ cf-blank-enrichment', challenge: true });
           const blankSignals = await getChallengeSignals(page);
           if (blankSignals.isChallenge) {
-            const cleared = await stopForIndeedChallenge({
+            // stopForIndeedChallenge always sets manualChallenge and returns false —
+            // it never clears a challenge in-place — so this always falls through
+            // to the `if (manualChallenge) { break outer; }` below.
+            await stopForIndeedChallenge({
               q, qi, p, reason: blankSignals.reason || 'cf-blank-enrichment', label: `Cloudflare description challenge q="${q}" p=${p + 1}`,
               stage: 'description-enrichment',
             });
-            if (cleared) {
-              p--;
-              continue;
-            }
           } else {
             totalChallenges++;
             perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;

@@ -312,7 +312,7 @@ export function useCanvasNavigation({
 
       const basePosX = parentX + (parentWidth / 2) - (clusterWidth / 2);
       // Ensure the bottom edge of the entire cluster rests cleanly above the parent container
-      const basePosY = (parentContainer?.position?.y || 100) - clusterHeight - 60;
+      const basePosY = (parentContainer?.position?.y ?? 100) - clusterHeight - 60;
 
       const newParentNodes = [...targetParent.nodes];
       nodesToExtract.forEach((nodeToExtract) => {

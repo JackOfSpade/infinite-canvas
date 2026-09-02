@@ -485,6 +485,15 @@ export function sanitizeNodesForSave(nodes) {
     const hasPersistedJobResults = isJobSearch
       && Array.isArray(n.data?.scoredJobs)
       && n.data.scoredJobs.length > 0;
+    // Same idea for SellHub: 'researching' (price research in flight) still
+    // has an already-confirmed data.product draft sitting on the node. Mirror
+    // resetHandler's own manual-cancel branch (SellHubNode.jsx) so an
+    // interrupted save reverts to 'draft', not 'empty' — losing that path
+    // would silently re-run the paid AI photo analysis on reload and discard
+    // the user's edited draft. 'analyzing'/'queued' never carry a product
+    // (that step runs before one exists), so this check alone distinguishes
+    // them without needing to inspect hubState directly.
+    const hasPersistedSellDraft = isSellHub && !!n.data?.product;
 
     // Hub-specific transient data fields. These are diagnostic / pending-flow
     // state generated within a single session — once the app restarts the
@@ -511,7 +520,7 @@ export function sanitizeNodesForSave(nodes) {
     let result = n;
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient) {
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
-      if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : 'empty';
+      if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';
       if (hasJobSearchTransient) {
         for (const k of JOBSEARCH_TRANSIENT_KEYS) delete cleanData[k];
       }

@@ -7344,11 +7344,12 @@ Return a JSON object with four arrays of search query strings:
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     // The mode a "Continue"/"Log in"/"Solve" click was showing when the user
     // acted, kept for the resumeAttempts trail below even once a branch clears
-    // it off effectiveResumeState. attemptRecorded guards against logging two
-    // entries for one invocation when a branch (e.g. a successful native login)
-    // falls through into the generic resume further down instead of returning.
+    // it off effectiveResumeState. Branches that fall through into the generic
+    // resume further down (e.g. a successful native login, see the comment at
+    // its recordResumeAttempt call below) deliberately let the final resume
+    // record its own trail entry too, so the trail reads e.g.
+    // "logged-in -> resolved" instead of collapsing to one line.
     const attemptMode = resumeState?.mode || 'resume';
-    let attemptRecorded = false;
     if (!getRunnableJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
       recordResumeAttempt(sourceId, attemptMode, 'blocked', 'source disabled');
       return { resolved: false, disabled: true, items: [] };
@@ -7475,12 +7476,12 @@ Return a JSON object with four arrays of search query strings:
           },
         };
       }
-      // Deliberately does NOT set attemptRecorded: a successful login is only
-      // half the story. The scrape that follows records its own entry, so the
-      // trail reads "logged-in → resolved" or the far more diagnostic
-      // "logged-in → blocked (warning: needs-login)" — a login that reports
-      // success and STILL leaves the scrape logged out is exactly the failure
-      // this whole change exists to make visible.
+      // This intentionally records a second trail entry below: a successful
+      // login is only half the story. The scrape that follows records its own
+      // entry, so the trail reads "logged-in → resolved" or the far more
+      // diagnostic "logged-in → blocked (warning: needs-login)" — a login
+      // that reports success and STILL leaves the scrape logged out is
+      // exactly the failure this whole change exists to make visible.
       recordResumeAttempt(sourceId, attemptMode, 'logged-in', loginResult?.reason || 'native login confirmed connected');
       lastIndeedLoginConfirmedAt = Date.now();
       effectiveResumeState = { ...effectiveResumeState, mode: null };
@@ -7664,9 +7665,7 @@ Return a JSON object with four arrays of search query strings:
       enrichment,
       warning: warning ? { code: warning.code, severity: warning.severity } : null,
     };
-    if (!attemptRecorded) {
-      recordResumeAttempt(sourceId, attemptMode, resolved ? 'resolved' : 'blocked', warning?.code ? `warning: ${warning.code}; ${funnelDetail}` : funnelDetail);
-    }
+    recordResumeAttempt(sourceId, attemptMode, resolved ? 'resolved' : 'blocked', warning?.code ? `warning: ${warning.code}; ${funnelDetail}` : funnelDetail);
     return {
       resolved,
       items,

@@ -6,6 +6,7 @@ import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { pasteAsPlainText, blurOnEscape } from './_shared/textEditingHandlers';
 
 const URL_LIKE = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i;
 
@@ -49,13 +50,11 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
   }, [data.url, handleBlur]);
 
   const handleKeyDown = useCallback((e) => {
-    if (e.key === 'Escape') inputRef.current?.blur();
+    blurOnEscape(e, inputRef);
   }, []);
 
   const handlePaste = useCallback((e) => {
-    e.preventDefault();
-    const text = e.clipboardData.getData('text/plain');
-    document.execCommand('insertText', false, text);
+    pasteAsPlainText(e);
   }, []);
 
   // Sync label content when data changes externally (undo/redo).

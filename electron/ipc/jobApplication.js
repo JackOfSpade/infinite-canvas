@@ -1058,24 +1058,6 @@ export function coverLetterCheckSummary(checks) {
   return `Cover-letter review required: ${failed.length} unmet deterministic ${noun}: ${visible.join('; ')}.${omitted ? ` ${omitted} additional ${omitted === 1 ? 'check' : 'checks'} omitted.` : ''} These checks are not a persuasive-quality score.`;
 }
 
-export function candidateLocationFromContact(contact) {
-  for (const raw of Array.isArray(contact) ? contact : []) {
-    const value = String(raw || '').trim();
-    if (!value || /@|https?:\/\//i.test(value)) continue;
-    if (/^[+()\d\s.-]{7,}$/.test(value)) continue;
-    if (/[A-Za-z]/.test(value) && (value.includes(',') || /\b[A-Z]{2}\b/.test(value))) return value;
-  }
-  return '';
-}
-
-export function applicationLocationReviewRequired(candidateLocation, jobLocation) {
-  const candidate = String(candidateLocation || '').trim();
-  const target = String(jobLocation || '').trim();
-  if (!candidate || !target || /\bremote\b/i.test(target)) return false;
-  const city = value => value.split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  return !!city(candidate) && !!city(target) && city(candidate) !== city(target);
-}
-
 function sanitizeFilePart(s, fallback) {
   return sanitizeApplicationBundlePart(s, fallback);
 }

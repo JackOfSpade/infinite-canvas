@@ -383,6 +383,18 @@ export const JOB_QUERY_GENERATION_SCHEMA = {
   },
 };
 
+// NOT WIRED TO A LIVE CALL — the eight schemas below (skill opportunities
+// through achievement refute) describe the target output shape for a
+// programmatic application-generation pipeline, but application generation
+// currently runs as a manual Local AI handoff: no production caller passes
+// any of them to callLLM*. The equivalent field-level decisions instead live
+// as prose instructions to that handoff and as deterministic checks in
+// coverLetterChecks.js. See docs/resume-achievement-mining-design.md ("Application
+// generation is now a Local AI handoff") and docs/cover-letter-argument-harness-design.md
+// ("Status: design approved, not implemented"). Keep these in sync with the
+// design docs if the live pipeline is ever built, but editing them today does
+// not change any running behavior.
+
 // ── Application skill opportunities: honest adjacent-skill analysis ────────
 // Runs before application generation. This is deliberately NOT résumé content:
 // `verify` items are small, evidence-adjacent inferences that need the

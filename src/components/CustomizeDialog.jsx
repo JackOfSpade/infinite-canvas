@@ -120,7 +120,9 @@ export function CustomizeDialog({
   const appliedFontSizeRef = useRef(initialSize || 14);
   const [fontFamily, setFontFamily] = useState(initialFamily || 'sans-serif');
   const [textColor, setTextColor] = useState(initialColor);
+  const appliedTextColorRef = useRef(initialColor);
   const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
+  const appliedBgColorRef = useRef(initialBgColor);
   const [staticGlowColor, setStaticGlowColor] = useState(() => normalizeStaticGlowColor(initialStaticGlowColor));
   const appliedStaticGlowColorRef = useRef(normalizeStaticGlowColor(initialStaticGlowColor));
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
@@ -186,6 +188,7 @@ export function CustomizeDialog({
 
   const handleColorSwatch = (c) => {
     setTextColor(c);
+    appliedTextColorRef.current = c;
     emit({ textColor: c });
   };
 
@@ -193,13 +196,24 @@ export function CustomizeDialog({
     setTextColor(val);
     // Support CSS named colors alongside hex/rgba
     if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
+      appliedTextColorRef.current = val;
       emit({ textColor: val });
     }
+  };
+
+  // Re-validate on blur instead of forwarding the raw string: an in-progress
+  // value that never matched the live-typing gate above (e.g. a half-typed
+  // hex code) must not be written into node data. Revert to the last value
+  // that DID pass validation rather than emit garbage CSS.
+  const handleColorBlur = (val) => {
+    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) return;
+    setTextColor(appliedTextColorRef.current);
   };
 
   const handleBgColorSwatch = (c) => {
     const finalColor = c === 'transparent' ? null : c;
     setBackgroundColor(finalColor);
+    appliedBgColorRef.current = finalColor;
     emit({ backgroundColor: finalColor });
   };
 
@@ -207,8 +221,15 @@ export function CustomizeDialog({
     const finalColor = val === '' ? null : val;
     setBackgroundColor(finalColor);
     if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
+      appliedBgColorRef.current = finalColor;
       emit({ backgroundColor: finalColor });
     }
+  };
+
+  // Same revert-on-invalid-blur behavior as the text color field above.
+  const handleBgColorBlur = (val) => {
+    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) return;
+    setBackgroundColor(appliedBgColorRef.current);
   };
 
   const handleStaticGlowSwatch = (c) => {
@@ -291,7 +312,7 @@ export function CustomizeDialog({
           value={textColor}
           onSwatchClick={handleColorSwatch}
           onInputChange={handleColorInput}
-          onInputBlur={(val) => emit({ textColor: val })}
+          onInputBlur={handleColorBlur}
         />
       )}
 
@@ -303,7 +324,7 @@ export function CustomizeDialog({
           value={backgroundColor}
           onSwatchClick={handleBgColorSwatch}
           onInputChange={handleBgColorInput}
-          onInputBlur={(val) => emit({ backgroundColor: val === '' ? null : val })}
+          onInputBlur={handleBgColorBlur}
         />
       )}
 

@@ -263,6 +263,59 @@ export async function enrichTimeoutError(page, error) {
 }
 
 /**
+ * Shared anti-bot check used by both executeScrape and executeScrapePaginated:
+ * bound-read the page body, run detectAntiBotSignal, log a warning on a hit,
+ * and otherwise feed the body-size baseline on a clean non-empty read. Kept
+ * as one function so a future tuning of the check (a new severity class, a
+ * new field passed to detectAntiBotSignal, a timing-window fix) can't land in
+ * one call site and not the other.
+ *
+ * @param {object} args
+ * @param {import('puppeteer').Page} args.page
+ * @param {number} args.startTs - this scrape/page's start time (Date.now() at nav)
+ * @param {number} args.budgetMs - resolved timeout budget, for the bounded read's clamp
+ * @param {string} args.url - the URL that was navigated to (for logging + fallback finalUrl)
+ * @param {*} args.pageResponse - puppeteer response from page.goto (nullable)
+ * @param {number|null} args.itemsExtracted - items counted so far; null for an opaque shape
+ * @param {number} args.expectedMinItems
+ * @param {string} args.sourceKey - budget/rate-limiter/label key
+ * @param {object|null} args.yieldStats
+ * @param {string} [args.logSuffix] - appended to the warning log line (paginated adds "(p0)")
+ * @returns {Promise<object|null>} the warning, or null on a clean read
+ */
+async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, itemsExtracted, expectedMinItems, sourceKey, yieldStats, logSuffix = '' }) {
+  let warning = null;
+  try {
+    // Clamp to what's left of the budget (minus a small margin) so a stuck
+    // page still yields a graceful classification instead of burning the
+    // remainder and tripping the outer hard timeout — see readPageContentBounded.
+    const html     = await readPageContentBounded(page, (startTs + budgetMs) - Date.now() - 1500);
+    const finalUrl = page.url() || url;
+    const status   = pageResponse?.status?.() ?? 0;
+    warning = detectAntiBotSignal({
+      status,
+      finalUrl,
+      html,
+      itemsExtracted,
+      expectedMinItems: expectedMinItems || 0,
+      expectedBodySize: getBodyBaseline(sourceKey),  // learned typical good-body size
+      sourceLabel: sourceKey,
+      yieldStats,
+    });
+    if (warning) {
+      logger.warn(`[BrowserPool] Anti-bot signal on ${url}${logSuffix}: ${warning.code} — ${warning.evidence}`);
+    } else if (itemsExtracted > 0 && html) {
+      // Clean response with real items — feed the body-size baseline so
+      // future suspicious-empty checks are judged against this source's norm.
+      recordBodySize(sourceKey, String(html).length);
+    }
+  } catch (e) {
+    logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
+  }
+  return warning;
+}
+
+/**
  * Internal — creates a stealth page, navigates, extracts data.
  *
  * Options:
@@ -512,38 +565,20 @@ async function executeScrape(url, extractorJS, options = {}) {
         // Run anti-bot detection on what we observed. Both the raw extractor
         // result and the warning (if any) flow back to the caller so the UI can
         // render a visible signal instead of silently accepting a blocked page.
-        let warning = null;
-        try {
-          // Clamp to what's left of THIS scrape's budget (minus a small margin)
-          // so a stuck page still yields a graceful classification instead of
-          // burning the remainder and tripping the outer hard timeout — see
-          // readPageContentBounded.
-          const html       = await readPageContentBounded(page, (scrapeStart + budgetMs) - Date.now() - 1500);
-          const finalUrl   = page.url() || url;
-          const status     = pageResponse?.status?.() ?? 0;
-          const itemCount  = __wrapped
-            ? extractorResult.items.length
-            : (Array.isArray(extractorResult) ? extractorResult.length : null);
-          warning = detectAntiBotSignal({
-            status,
-            finalUrl,
-            html,
-            itemsExtracted: itemCount,
-            expectedMinItems: options.expectedMinItems || 0,
-            expectedBodySize: getBodyBaseline(sourceKey),  // learned typical good-body size
-            sourceLabel: options.sourceLabel || domain,
-            yieldStats,
-          });
-          if (warning) {
-            logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
-          } else if (itemCount > 0 && html) {
-            // Clean response with real items — feed the body-size baseline so
-            // future suspicious-empty checks are judged against this source's norm.
-            recordBodySize(sourceKey, String(html).length);
-          }
-        } catch (e) {
-          logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
-        }
+        const itemCount = __wrapped
+          ? extractorResult.items.length
+          : (Array.isArray(extractorResult) ? extractorResult.length : null);
+        const warning = await runAntiBotCheck({
+          page,
+          startTs: scrapeStart,
+          budgetMs,
+          url,
+          pageResponse,
+          itemsExtracted: itemCount,
+          expectedMinItems: options.expectedMinItems,
+          sourceKey: options.sourceLabel || domain,
+          yieldStats,
+        });
 
         // Feed the budget learner: a positive-count stabilization that wasn't
         // flagged as a hard block is a clean "this is how long success takes"
@@ -782,6 +817,11 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       // See executeScrape's matching evalErrStreak — a persistently-throwing
       // extractor otherwise silently masquerades as "zero results, success."
       let evalErrStreak = 0, lastEvalErrMsg = null;
+      // See executeScrape's matching siteChangedError — a SITE_CHANGED throw is
+      // DEFERRED (kept out of the generic evalErrStreak path) so it can be
+      // reconciled against this page's anti-bot check below instead of being
+      // silently coerced into an empty page.
+      let siteChangedError = null;
       while (true) {
         // See executeScrape's matching check — a force-closed page during
         // shutdown would otherwise keep getting polled until the deadline.
@@ -789,6 +829,12 @@ async function executeScrapePaginated(extractorJS, options = {}) {
         let r = null;
         try { r = await page.evaluate(extractorJS); }
         catch (evalErr) {
+          if (/SITE_CHANGED/i.test(evalErr?.message || '')) {
+            siteChangedError = evalErr;
+            if (Date.now() >= readinessDeadline) break;
+            await new Promise(res => setTimeout(res, READINESS.POLL_MS));
+            continue;
+          }
           lastEvalErrMsg = evalErr?.message || String(evalErr);
           if (++evalErrStreak === READINESS.STABLE_READS) {
             logger.warn(`[BrowserPool] ${sourceKey} (paginated p${p}): extractor threw ${evalErrStreak}x in a row — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
@@ -796,6 +842,7 @@ async function executeScrapePaginated(extractorJS, options = {}) {
         }
         if (r != null) {
           evalErrStreak = 0;
+          siteChangedError = null;
           extractorResult = r;
           const count = countItems(r);
           if (count === -1) break;
@@ -809,7 +856,16 @@ async function executeScrapePaginated(extractorJS, options = {}) {
         await new Promise(res => setTimeout(res, READINESS.POLL_MS));
       }
       const stableElapsedMs = settledPositively ? Date.now() - pageStart : null;
-      if (extractorResult == null) { try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; } }
+      // Skip the re-run when a SITE_CHANGED is already deferred — re-running would
+      // just re-throw, and we want anti-bot detection below to run on the page we
+      // already have (see executeScrape's matching guard).
+      if (extractorResult == null && !siteChangedError) {
+        try { extractorResult = await page.evaluate(extractorJS); }
+        catch (evalErr) {
+          if (/SITE_CHANGED/i.test(evalErr?.message || '')) siteChangedError = evalErr;
+          else extractorResult = [];
+        }
+      }
       const allExtracted = Array.isArray(extractorResult)
         ? extractorResult
         : (Array.isArray(extractorResult?.items) ? extractorResult.items : []);
@@ -832,28 +888,30 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       // Anti-bot detection: load-more clicks are in-page XHR (no navigation, no
       // HTTP status, URL unchanged) — skip detector for those iterations and only
       // run it for real page loads.
-      let warning = null;
-      if (!useLoadMore) {
-        try {
-          // See readPageContentBounded — clamp to this page's remaining budget
-          // so an anti-bot reload loop can't hang past the outer hard timeout.
-          const html = await readPageContentBounded(page, (pageStart + budgetMs) - Date.now() - 1500);
-          const finalUrl = page.url() || url;
-          const status = pageResponse?.status?.() ?? 0;
-          warning = detectAntiBotSignal({
-            status, finalUrl, html,
-            itemsExtracted: allExtracted.length,
-            expectedMinItems,
-            expectedBodySize: getBodyBaseline(sourceKey),
-            sourceLabel: sourceKey,
-            // Per-page (not aggregated) stats so seen/itemsExtracted share a basis.
-            yieldStats: pageYieldStats,
-          });
-          if (warning) logger.warn(`[BrowserPool] Anti-bot signal on ${url} (p${p}): ${warning.code} — ${warning.evidence}`);
-          else if (allExtracted.length > 0 && html) recordBodySize(sourceKey, String(html).length);
-        } catch (e) {
-          logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
-        }
+      const warning = useLoadMore ? null : await runAntiBotCheck({
+        page,
+        startTs: pageStart,
+        budgetMs,
+        url,
+        pageResponse,
+        itemsExtracted: allExtracted.length,
+        expectedMinItems,
+        sourceKey,
+        // Per-page (not aggregated) stats so seen/itemsExtracted share a basis.
+        yieldStats: pageYieldStats,
+        logSuffix: ` (p${p})`,
+      });
+
+      // Resolve a deferred SITE_CHANGED throw now that this page's anti-bot
+      // detection (if any) has run — same reconciliation as executeScrape's
+      // single-page path (see the comment there). A high-confidence block is
+      // handled by the ordinary severity === 'block' branch below; anything
+      // else means this is real selector drift, so propagate the throw instead
+      // of silently recording the page as empty. Load-more clicks have no
+      // anti-bot check to consult (in-page XHR, no navigation) so a deferred
+      // SITE_CHANGED there always rethrows.
+      if (siteChangedError && warning?.severity !== 'block') {
+        throw siteChangedError;
       }
 
       // Load-more clicks are not separate HTTP requests — only feed the rate

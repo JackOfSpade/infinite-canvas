@@ -93,9 +93,12 @@ function rowsDuplicate(left, right) {
   const rightEvidence = quotes(right?.jobEvidence ?? right?.jobQuote ?? right?.postingEvidence ?? right?.requirementEvidence)
     .map(normalizeText).filter(Boolean);
   // The source evidence is the more stable identity. Only fall back to the
-  // requirement label if an evidence quote cannot distinguish the two rows.
+  // requirement label if an evidence quote cannot distinguish the two rows:
+  // once both sides carry evidence, that evidence is decisive either way, or
+  // two unrelated label-less rows would collide on the same synthesized
+  // placeholder (e.g. both falling back to "Requirement 1").
   if (leftEvidence.length && rightEvidence.length) {
-    if (leftEvidence.some(quote => rightEvidence.includes(quote))) return true;
+    return leftEvidence.some(quote => rightEvidence.includes(quote));
   }
   const leftLabel = normalizeText(rowLabel(left, 0));
   const rightLabel = normalizeText(rowLabel(right, 0));

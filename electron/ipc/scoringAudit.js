@@ -150,8 +150,14 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
 /** Reattach original batch numbers after reconciliation/sorting. */
 export function scoringAuditRowsFromBatches(batches, scoredJobs) {
   const remaining = Array.isArray(scoredJobs) ? [...scoredJobs] : [];
+  // Title/company/location alone can collide for two genuinely different
+  // postings (e.g. a company running near-duplicate reqs) when neither has a
+  // captured URL. `remaining` is seeded from scoredJobs sorted by score, so a
+  // collision on this key would bind the wrong batch's score to a lookalike
+  // posting. Fold in the description text — already read the same way below
+  // — so distinct postings keep distinct keys even without a URL.
   const keyFor = job => String(job?.url || '').trim()
-    || `${normalizedText(job?.title)}|${normalizedText(job?.company)}|${normalizedText(job?.location)}`;
+    || `${normalizedText(job?.title)}|${normalizedText(job?.company)}|${normalizedText(job?.location)}|${normalizedText(job?.snippet || job?.description || '')}`;
   return (Array.isArray(batches) ? batches : []).flatMap((batch, batchIndex) =>
     (Array.isArray(batch) ? batch : []).map(original => {
       const key = keyFor(original);

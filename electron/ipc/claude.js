@@ -5,22 +5,11 @@ import { logger } from '../logger.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 import { buildAnthropicMessageParams, buildAnthropicTokenCountParams } from './anthropicRequest.js';
-import { isSensitivePath } from '../utils/pathSafety.js';
+import { assertAttachmentPathSafe } from '../utils/pathSafety.js';
 import { claudeModelFor, claudeModelsInUse, CLAUDE_FAMILY } from './modelResolver.js';
 import { appendGroundedSourceAppendix } from './groundedSourceAppendix.js';
 import { recordClaudeCacheUsage } from './claudeCacheTelemetry.js';
 import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './schemaValidation.js';
-
-// A document/image node's filePath is sourced from loaded canvas JSON, which
-// (unlike the local-file:// preview protocol) had NO path check at all before
-// being read and uploaded to the Anthropic API — an untrusted/shared canvas
-// could point a node at e.g. ~/.aws/credentials and have it previewed AND,
-// via a normal "AI polish/analyze" action, exfiltrated to a third-party API.
-function assertAttachmentPathSafe(filePath) {
-  if (isSensitivePath(path.resolve(String(filePath || '')))) {
-    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
-  }
-}
 
 // Hard ceiling on the Anthropic SDK's built-in retries. The SDK already does
 // exactly what we'd hand-roll for Gemini: auto-retries 408/409/429/500/503/529

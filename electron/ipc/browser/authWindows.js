@@ -2838,23 +2838,3 @@ export async function getSessionStatus(platformId) {
     return { platform: platformId, connected: false };
   }
 }
-
-/**
- * Get connection status for all known platforms.
- */
-export async function getAllSessionStatuses() {
-  const platforms = Object.keys(PLATFORM_LOGIN_URLS);
-  const results = await Promise.all(platforms.map(p => getSessionStatus(p)));
-  return results;
-}
-
-/**
- * Get the list of supported platforms.
- */
-export function getSupportedPlatforms() {
-  return Object.keys(PLATFORM_LOGIN_URLS).map(id => ({
-    id,
-    name: id.charAt(0).toUpperCase() + id.slice(1),
-    loginUrl: PLATFORM_LOGIN_URLS[id],
-  }));
-}

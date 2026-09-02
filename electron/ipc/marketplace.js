@@ -524,6 +524,32 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
     }
   }
 
+  if (sourceId === 'pricecharting') {
+    // Same normalization fetchApiMarketplaceSources applies before calling this
+    // fetcher — PriceCharting's catalog search needs the canonical product name,
+    // not a seller-style title (see priceChartingQuery). No category option is
+    // passed: same reasoning as the aptdeco-active branch below — a manual
+    // rescrape of this card means the item IS worth a collectible-price lookup,
+    // so the category gate (isPriceChartingApplicable) would only get in the way.
+    send('searching', 0);
+    try {
+      const result = await fetchPriceChartingComps(priceChartingQuery(query), signal);
+      const items = Array.isArray(result?.items) ? result.items : [];
+      const warning = result?.warning || null;
+      send(warning ? 'error' : 'done', items.length, warning, result?.url || null);
+      // Matches the 'sold' bucket fetchApiMarketplaceSources's apiTasks table gives it.
+      return { sourceId, items, warning, category: 'sold' };
+    } catch (error) {
+      send('error', 0);
+      return {
+        sourceId,
+        items: [],
+        warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
+        category: 'sold',
+      };
+    }
+  }
+
   if (sourceId === 'aptdeco-active') {
     // A manual rescrape of an AptDeco card means the item IS furniture (a
     // non-furniture run auto-dismisses the card), so no category gate is needed.

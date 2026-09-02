@@ -3,12 +3,17 @@
  * submitted. Kept dependency-free so it's unit-testable without the Electron /
  * provider stack.
  *
- * The submit side groups jobs into batches and sends one request per batch with
+ * NOTE: the Batch-API scoring pipeline this reconciles was retired from
+ * production (jobs.js's real-time scoring loop and its 'poll-job-batch'
+ * handler no longer submit or poll batches). This function currently has no
+ * production caller — it is kept, and covered by its unit tests, in case
+ * batch scoring is re-enabled later. When it was live, the submit side
+ * grouped jobs into batches and sent one request per batch with
  * `custom_id = "b{i}"`; within a request the scorer returns `{ scores: [{ index,
  * matchScore, reasoning, careerDirection }, ...] }` where
  * `index` is the job's position WITHIN that batch. This mirrors the real-time
  * path's per-batch index matching, including the same placeholder fallbacks, so
- * a batch run produces the identical scoredJobs shape as a live run.
+ * a batch run would produce the identical scoredJobs shape as a live run.
  *
  * @param {object[][]} scoringBatches  the exact job groupings submitted (full job objects)
  * @param {Record<string, object|null>} resultsByCustomId  parsed result per `b{i}` (null = unusable)
