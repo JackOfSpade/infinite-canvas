@@ -22,6 +22,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 
 // "Already seen" retention window for suppressing re-shown jobs. Deliberately a
@@ -291,6 +292,23 @@ function withHistoryLock(filePath, fn) {
 }
 
 /**
+ * Atomically replace the private history sidecar without leaving a predictable
+ * or world-readable temporary copy beside it. The canvas directory is
+ * user-controlled, so a Date.now()-named temp can be pre-created or collided
+ * with by another process; exclusive creation plus an unguessable name avoids
+ * following such a path. Always remove a temp after a failed rename/write.
+ */
+async function atomicWriteHistory(filePath, content) {
+  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.promises.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    await fs.promises.rename(temporary, filePath);
+  } finally {
+    await fs.promises.unlink(temporary).catch(() => {});
+  }
+}
+
+/**
  * Append new rows to history while pruning entries older than MAX_AGE_DAYS.
  * Returns counts for diagnostics; never throws (logged + skipped on error).
  */
@@ -390,9 +408,7 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
       .join('\n');
     const content = `${HEADER}\n${body}\n`;
 
-    const tmp = `${filePath}.__ic_atomic_${Date.now()}.tmp`;
-    await fs.promises.writeFile(tmp, content, 'utf8');
-    await fs.promises.rename(tmp, filePath);
+    await atomicWriteHistory(filePath, content);
 
     return { written: newRows.length, pruned, unreadable, skips };
   } catch (err) {

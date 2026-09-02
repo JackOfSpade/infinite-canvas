@@ -9,6 +9,7 @@ export function JobSearchProcessingState({
   scoringProgress,
   resumeSummary,
   activeSourceId,
+  activeSourceDetail,
   onReset,
   chromeLaunchInfo,
   queuedRun,
@@ -80,6 +81,17 @@ export function JobSearchProcessingState({
       {hubState === 'queued' && (
         <p className="text-blue-400/60 text-[10px] mt-1">
           {(queuedRun?.label || 'Job search')} · Position {queuedRun?.position || 1}
+        </p>
+      )}
+      {/* The live step the scraper is on. Browser sources spend most of a run
+          inside a per-card description walk that produces no countable jobs for
+          minutes, so gating every signal behind `totalSourceJobs > 0` left the
+          hub showing nothing but a spinner — which is what "processing stuck"
+          reports were actually describing. This line changes every few seconds
+          for the whole walk. */}
+      {hubState === 'searching' && activeSourceDetail && (
+        <p className="text-white/35 text-[10px] mt-1 text-center px-2 leading-snug">
+          {activeSourceDetail}
         </p>
       )}
       {hubState === 'searching' && totalSourceJobs > 0 && (

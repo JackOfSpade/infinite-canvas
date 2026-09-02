@@ -4,7 +4,7 @@ import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'l
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
-import { mergeSourceProgress } from '../utils/sourceProgress';
+import { mergeSourceProgress, isTerminalSourceStatus } from '../utils/sourceProgress';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
@@ -40,11 +40,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // jobs every time the user re-solves a source.
   const nav = useContext(CanvasNavigationContext);
   const [progress, setProgress] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
-  // A Solve can finish after several intermediate progress events. Keep the
-  // latest displayed source count in a ref so the resolved event carries the
-  // exact card-total delta the hub needs for its aggregate counter.
-  const progressRef = useRef(progress);
-  progressRef.current = progress;
   const [resolving, setResolving] = useState(false);
   // `setResolving(true)` does not update this closure until React renders, so a
   // quick double-click could otherwise open two native Chrome verification
@@ -203,6 +198,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
+          // Rows recovered by a native-challenge resume go through the same
+          // pinned-role title gate as the main search (jobTitleMatch.js), or a
+          // solved source would be the one way off-role jobs reach the board.
+          targetRole: (hubData.targetRole || '').trim(),
           resumeState,
         });
       } else {
@@ -216,6 +215,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+          // Same gate as the main search — a captcha Solve re-extracts rows
+          // in-page, so without this the solved source could ship off-role jobs.
+          targetRole: (hubData.targetRole || '').trim(),
         });
       }
       // When the captcha-resolve window auto-detects the challenge as
@@ -231,19 +233,25 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         const replaceSourceItems = !!result.replaceSourceItems;
         const replaceMatchingItems = !!result.replaceMatchingItems;
         const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
-        const previousSourceCount = Number.isFinite(progressRef.current?.count)
-          ? Math.max(0, progressRef.current.count)
-          : 0;
-        const nextSourceCount = replaceSourceItems
-          ? resolvedCount
-          : replaceMatchingItems
-            ? (previousSourceCount || resolvedCount)
-            : previousSourceCount + resolvedCount;
-        const nextCount = (prev) => replaceSourceItems
-          ? resolvedCount
-          : replaceMatchingItems
-            ? (prev?.count || resolvedCount)
-            : (prev?.count || 0) + resolvedCount;
+        // `gatheredCount` describes listings newly collected from a source, not
+        // the card's changing description-ready/pending subset. A replacement
+        // Solve re-enriches or replaces rows already counted by the initial
+        // search, while an incremental recovery really did collect these rows.
+        const gatheredCountDelta = (replaceSourceItems || replaceMatchingItems)
+          ? 0
+          : resolvedCount;
+        const nextCount = (prev) => {
+          const priorCount = Number.isFinite(prev?.count) && prev.count >= 0
+            ? prev.count
+            : null;
+          // A replacement/re-enrichment Solve improves already-collected rows.
+          // Keep the card's collection count stable; its score-ready response
+          // count is not a new source collection total.
+          if (replaceSourceItems || replaceMatchingItems) {
+            return priorCount ?? resolvedCount;
+          }
+          return (priorCount ?? 0) + resolvedCount;
+        };
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
           // Carry the resolve's own warning (if any) so the hub can re-derive
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
@@ -251,7 +259,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // warm IP). Captcha/resume paths don't return a warning → stays null.
           detail: {
             hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, replaceMatchingItems, removedItemKeys,
-            sourceCountDelta: nextSourceCount - previousSourceCount,
+            gatheredCountDelta,
             warning: result.warning || null,
             jobRunId,
           },
@@ -273,7 +281,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
               },
             } : prev;
-            progressRef.current = next;
             return next;
           });
         } else if (result.warning) {
@@ -290,7 +297,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               warning: result.warning,
               count: nextCount(prev),
             } : prev;
-            progressRef.current = next;
             return next;
           });
         } else {
@@ -310,7 +316,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               warning: null,
               count: nextCount(prev),
             } : prev;
-            progressRef.current = next;
             return next;
           });
         }
@@ -335,7 +340,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // source-level resolve event so JobSearchNode can re-sync its blocking
           // warning list after onRetryStart's optimistic trim.
           setProgress(prev => {
-            if (!prev || prev.detail !== 'Solving…') return prev;
+            // Yield only to a newer TERMINAL backend event. The old latch tested
+            // for our optimistic detail 'Solving…', but a legitimate mid-solve
+            // 'searching' beat (jobs.js re-fetching descriptions) overwrites
+            // `detail`, so a failing Solve skipped the restore and stranded the
+            // card spinning with no warning and no Solve button.
+            if (!prev || isTerminalSourceStatus(prev.status)) return prev;
             const next = {
               ...prevForRestore,
               status: 'error',
@@ -343,7 +353,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               url: rawRestoreWarning.url || prev.url,
               warning: restoreWarning,
             };
-            progressRef.current = next;
             return next;
           });
           document.dispatchEvent(new CustomEvent('job-source-resolved', {
@@ -354,17 +363,17 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               replaceSourceItems: false,
               replaceMatchingItems: false,
               removedItemKeys: [],
-              sourceCountDelta: 0,
+              gatheredCountDelta: 0,
               warning: restoreWarning,
               jobRunId,
             },
           }));
         } else if (prevForRestore) {
           // Solve didn't complete. Restore the actionable warning so the card goes
-          // back to red — but only if our optimistic 'Solving…' state is still in
-          // place (a fresh backend event, e.g. LinkedIn's re-emitted error, would
-          // have replaced detail, and we must not clobber that newer state).
-          setProgress(prev => (prev && prev.detail === 'Solving…') ? prevForRestore : prev);
+          // back to red — unless a newer TERMINAL backend event already landed
+          // (e.g. LinkedIn's re-emitted error), which we must not clobber. Same
+          // predicate as the branch above so the two halves cannot drift apart.
+          setProgress(prev => (prev && !isTerminalSourceStatus(prev.status)) ? prevForRestore : prev);
         }
       }
     } finally {
@@ -441,7 +450,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const progressDone = progressTotal && Number.isFinite(liveProgress?.completed)
     ? Math.max(0, Math.min(liveProgress.completed, progressTotal))
     : null;
-  const hasMeasuredProgress = progressTotal != null && progressDone != null;
+  // A single-query source can only ever report 0/1 until it finishes, so the
+  // "measured" bar rendered a frozen 8% and the text "0/1" for the entire walk —
+  // an implied measurement that never moves reads as a stalled job, which is
+  // exactly the wrong signal. With more than one query the fraction is real and
+  // does advance, so keep it there; otherwise fall through to the indeterminate
+  // working state and let the live detail line carry the progress.
+  const hasMeasuredProgress = progressTotal != null && progressDone != null && progressTotal > 1;
   const progressPercent = (isDone || isSkipped || isError)
     ? 100
     : isSearching

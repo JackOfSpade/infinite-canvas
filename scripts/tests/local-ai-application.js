@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
@@ -302,6 +302,9 @@ export default [
         && localSource.includes('one controlling throughline')
         && localSource.includes('minimum-sufficient evidence')
         && localSource.includes('résumé owns breadth')
+        && localSource.includes('Give every paragraph one argumentative job')
+        && localSource.includes('last sentence of each non-final paragraph')
+        && localSource.includes('must not introduce a new decision frame or ask the employer to choose between initiatives')
         && localSource.includes('Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement')
         && localSource.includes('Each additional proof must have one explicit supporting role in the same argument')
         && localSource.includes('distinct systems or responsibilities side by side merely because they occurred in the same role or job')
@@ -332,9 +335,13 @@ export default [
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('target scope is stated as this role or the work itself')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-register')?.requirement.includes('direct present tense')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-register')?.requirement.includes('never asks the employer to choose between initiatives')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('restating a category')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shift between distinct systems or responsibilities')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shared role or job context alone is not a bridge')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('one argumentative job')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('identifies the branch it develops')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'resume-concision')?.requirement.includes('one principal achievement')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('word-boundary parse')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('role-accurate governing verb'),
       'Local AI version 2 keeps stable checklist IDs while making role-facing scope, direct closings, non-filler bridges, first-read parsing, and role-accurate technology verbs explicit');
@@ -354,6 +361,13 @@ export default [
         && normalizedRoutineSource.includes('merely restates a category')
         && normalizedRoutineSource.includes('distinct systems or responsibilities do not become connected merely because')
         && normalizedRoutineSource.includes('adjacency and “the same job” are not a bridge')
+        && normalizedRoutineSource.includes('Give every résumé highlight one principal achievement or action chain')
+        && normalizedRoutineSource.includes('Delete conventional runtime-topology detail that merely proves implementation')
+        && normalizedRoutineSource.includes('Give every paragraph one argumentative job')
+        && normalizedRoutineSource.includes('make each evidence paragraph identify the branch it develops')
+        && normalizedRoutineSource.includes('last sentence of every non-final paragraph')
+        && normalizedRoutineSource.includes('must not introduce a new organizing frame')
+        && normalizedRoutineSource.includes('ask the employer to choose between products, prototypes, or initiatives')
         && normalizedRoutineSource.includes('selected scope as `this role` or the work itself')
         && normalizedRoutineSource.includes('I welcome a conversation')
         && normalizedRoutineSource.includes('connect the candidate\'s relevant contribution to the specific')
@@ -849,6 +863,99 @@ export default [
       catch { unrelatedParagraphRejected = true; }
       assert(unrelatedParagraphRejected,
         'an exact but lexically unrelated career quote cannot be used to ground a cover-letter paragraph');
+      const aiWorkflowQuote = 'At Thomson School District, I worked across AI-assisted development workflows with model delegation and appropriate use cases.';
+      let unsupportedDailyRejected = false;
+      try {
+        assertSourceQuoteLinksFinalText(
+          'At Thomson School District, I worked across AI-assisted development workflows. Deciding what a model should own was a daily call at the district.',
+          [aiWorkflowQuote],
+          'coverLetterParagraphs',
+          0,
+          { identityTokens: ['thomson', 'district'] },
+        );
+      } catch (error) {
+        unsupportedDailyRejected = /unsupported daily frequency/u.test(String(error?.message || error));
+      }
+      assert(unsupportedDailyRejected,
+        'a candidate career sentence cannot borrow daily frequency from unrelated career data outside its bound quote');
+      let unsupportedSuperiorityRejected = false;
+      try {
+        assertSourceQuoteLinksFinalText(
+          'Used model delegation while deciding where agentic coding beat traditional workflows.',
+          ['Worked across agentic coding and traditional workflows with model delegation and appropriate use cases.'],
+          'resumeBullets',
+          0,
+        );
+      } catch (error) {
+        unsupportedSuperiorityRejected = /unsupported comparative superiority/u.test(String(error?.message || error));
+      }
+      assert(unsupportedSuperiorityRejected,
+        'a résumé bullet cannot turn supported workflow comparison into unsupported superiority');
+      const unsupportedSuperiorityResult = {
+        ...trustedResult,
+        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Used model delegation while deciding where agentic coding beat traditional workflows.</li></ul></article></section></main>',
+        coverLetterArgument: coverLetterArgumentForResumeEvidence(
+          'Used model delegation while deciding where agentic coding beat traditional workflows.',
+        ),
+        qualityReview: groundedQualityReview(sourceGroundingFor({
+          resumeBullets: ['Used model delegation while deciding where agentic coding beat traditional workflows.'],
+          resumeQuotes: ['Worked across agentic coding and traditional workflows with model delegation and appropriate use cases.'],
+        })),
+      };
+      let importerSuperiorityRejected = false;
+      try {
+        validateLocalApplicationResult(unsupportedSuperiorityResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+          careerData: 'Worked across agentic coding and traditional workflows with model delegation and appropriate use cases. A concise factual letter.',
+        });
+      } catch (error) {
+        importerSuperiorityRejected = /unsupported comparative superiority/u.test(String(error?.message || error));
+      }
+      assert(importerSuperiorityRejected,
+        'the production Local AI importer invokes unit-bound qualifier validation before accepting a result');
+      assertSourceQuoteLinksFinalText(
+        'Maintained Bash cron jobs that synchronized daily FAA API data into the local database.',
+        ['Maintained cron jobs that synced the FAA daily API data into the local database.'],
+        'resumeBullets',
+        0,
+      );
+      assertSourceQuoteLinksFinalText(
+        'Outperformed the legacy routing process in controlled tests.',
+        ['The revised routing process outperformed the legacy routing process in controlled tests.'],
+        'resumeBullets',
+        0,
+      );
+      let disconnectedSentenceRejected = false;
+      try {
+        assertSourceQuoteLinksFinalText(
+          'I built supported systems with clear outcomes. I cultivated rare orchids for regional shows.',
+          ['I built supported systems with clear outcomes.'],
+          'coverLetterParagraphs',
+          0,
+        );
+      } catch (error) {
+        disconnectedSentenceRejected = /sentence 2/u.test(String(error?.message || error));
+      }
+      assert(disconnectedSentenceRejected,
+        'each first-person career sentence in a cover-letter paragraph must link to that paragraph\'s bound quotes');
+      assertSourceQuoteLinksFinalText(
+        'I built supported systems with clear outcomes. Choosing what to build is the judgment I would bring to this role.',
+        ['I built supported systems with clear outcomes.'],
+        'coverLetterParagraphs',
+        0,
+      );
+      const oversizedQuote = `${'Built supported systems with clear outcomes and engineering judgment. '.repeat(40)}End.`;
+      const oversizedQuoteResult = structuredClone(trustedResult);
+      oversizedQuoteResult.qualityReview.sourceGrounding.resumeBullets[0].careerDataQuotes = [oversizedQuote];
+      let oversizedQuoteRejected = false;
+      try {
+        validateLocalApplicationResult(oversizedQuoteResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+          careerData: `${oversizedQuote} A concise factual letter.`,
+        });
+      } catch (error) {
+        oversizedQuoteRejected = /exceeds 2000 characters/u.test(String(error?.message || error));
+      }
+      assert(oversizedQuoteRejected,
+        'source grounding rejects whole-document-sized quotes instead of letting them bypass unit-level attribution');
       const threeBulletTexts = [
         'Built alpha services with verified controls.',
         'Delivered beta dashboards through documented reviews.',
@@ -901,6 +1008,27 @@ export default [
       const wrongRole = structuredClone(trustedResult);
       wrongRole.coverLetterArgument.primaryEvidence.evidenceRole = 'Engineer at Other Company';
       assertGroundingRejected('an argument proof assigned to the wrong résumé role', wrongRole, 'evidenceRole 1');
+      const projectWithoutCompany = {
+        ...trustedResult,
+        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">AI-Chalkboard</span><ul class="highlights"><li>Built a native macOS overlay for precise on-screen guidance.</li></ul></article></section></main>',
+        coverLetterArgument: coverLetterArgumentForResumeEvidence(
+          'Built a native macOS overlay for precise on-screen guidance.',
+          'AI-Chalkboard project',
+        ),
+        qualityReview: groundedQualityReview(sourceGroundingFor({
+          resumeBullets: ['Built a native macOS overlay for precise on-screen guidance.'],
+          resumeQuotes: ['Built a native macOS overlay for precise on-screen guidance.'],
+        })),
+      };
+      const groundedProjectWithoutCompany = validateLocalApplicationResult(
+        projectWithoutCompany,
+        id,
+        path.join(os.tmpdir(), 'local-ai-project'),
+        {},
+        { careerData: 'Built a native macOS overlay for precise on-screen guidance. A concise factual letter.' },
+      );
+      assert(groundedProjectWithoutCompany.coverLetterArgument.primaryEvidence.evidenceRole === 'AI-Chalkboard project',
+        'argument evidence can identify a company-less project by its résumé title without inventing an employer label');
       const logisticsParagraph = 'A concise factual letter. I am available to start in June.';
       const logisticsResult = {
         ...trustedResult,
@@ -965,6 +1093,8 @@ export default [
         ['conditionally deferential closing', 'I would welcome the chance to talk about that work.', 'direct-welcome-closing'],
         ['opaque responsibility pivot', 'Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.', 'responsibility-transition'],
         ['same-job responsibility opener', 'The same job also included assessing software before adoption.', 'responsibility-transition'],
+        ['employer-choice closing', 'I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'direct-welcome-closing'],
+        ['literalized decision frame', 'Model delegation and a purchased platform are two answers to one build-or-buy call.', 'claimed-equivalence'],
       ]) {
         let editorialRejected = false;
         try {
@@ -976,6 +1106,17 @@ export default [
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
         assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
       }
+      let topologyTailRejected = false;
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
+          coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence('Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.'),
+          qualityReview: draftedQualityReview(),
+        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      } catch (error) { topologyTailRejected = /resume-bullet-focus/.test(String(error?.message || error)); }
+      assert(topologyTailRejected,
+        'Local AI validation rejects a runtime-topology tail appended to an already complete containerization highlight');
       const uniformHighlightText = validateLocalApplicationResult({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
         outputBundleRoot: 'Applied Jobs',

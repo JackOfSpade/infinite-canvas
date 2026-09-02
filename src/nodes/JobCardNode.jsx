@@ -4,6 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles, ChevronDown } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { formatPostedForDisplay } from '../utils/jobPostedDate';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
@@ -873,7 +874,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             {data.language}
           </span>
         )}
-        {data.posted && <span className="text-white/20">{data.posted}</span>}
+        {data.posted && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
         {(data.url || data.googleCardUrl) && (
           <button
             onClick={(e) => { e.stopPropagation(); openJobUrl(); }}

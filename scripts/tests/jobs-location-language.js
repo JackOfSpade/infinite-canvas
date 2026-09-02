@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -43,10 +43,92 @@ export default [
       assert(validateGlassdoorLocationPick({ locId: '1002', locT: 'C' }, [denver], 'Denver, CO') === null, 'Denver/CO accepts a result spelling Colorado in full');
       assert(!!validateGlassdoorLocationPick({ locId: '1', locT: 'N' }, [usa], 'Canada'), 'a US result is rejected for Canada');
       assert(!!validateGlassdoorLocationPick({ locId: '1001', locT: 'C' }, [toronto], 'Canada'), 'country-only target rejects a city result');
+      // A remote-only search has no location FILTER but still pins a market via
+      // a nation-level locId. Reporting it as "unscoped" would contradict the URL
+      // the run actually issued.
+      // Glassdoor accepts a nation-tier locId and echoes the country in its
+      // header, but does NOT filter on it (measured: `_IN1` returned Ontario
+      // listings titled "United States jobs"; one province out-counted all of
+      // Canada). The report must not describe a filter the board never applied.
+      const nationLine = describeLocationTreatment('glassdoor', '', 'United States');
+      assert(nationLine.includes('nation tier'), 'the tier is named');
+      assert(/NOT enforced/i.test(nationLine), 'the report states the nation tier is not enforced');
+      assert(!/\bpins\b|\bpinned\b/i.test(nationLine), 'the report never claims the country was pinned');
+      assert(describeLocationTreatment('glassdoor', '', '') === 'no location param (unscoped)',
+        'with neither a filter nor a country, unscoped is still the honest answer');
+      assert(describeLocationTreatment('ziprecruiter', '', 'United States') === 'no location param (unscoped)',
+        'the country pin is Glassdoor-specific — no other source gains one');
+      assert(describeLocationTreatment('glassdoor', 'Denver, CO', 'United States').includes('Denver, CO'),
+        'an explicit location still reports the location, not the country');
       assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '3'), 'matching IN3 canonical route is accepted');
       assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/united-states-jobs-SRCH_IL.0,13_IN1_KO14,31.htm', '1'), 'matching IN1 canonical route is accepted');
       assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/jobs.htm?locId=3&locT=N', '3'), 'query-only locId is not proof that Glassdoor applied the location');
       assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1'), 'mismatched canonical route is rejected');
+      // City and state routes use _IC / _IS. Recognizing only _IN meant every
+      // city- or state-scoped search resolved and navigated correctly and was
+      // then discarded as "location not applied".
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170'), 'city route _IC is accepted');
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/colorado-jobs-SRCH_IL.0,8_IS1234_KO9,26.htm', '1234'), 'state route _IS is accepted');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '999'), 'a mismatched city id is still rejected');
+      // N/S/C are verified live; the letter class stays OPEN because the safety
+      // property is the numeric id, not the type letter. An unseen scope tier
+      // (a metro type is the known gap) must not be read as "location not
+      // applied" — that skips the whole source, the expensive failure.
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/metro-jobs-SRCH_IL.0,5_IM987654_KO6,23.htm', '987654'),
+        'an unseen scope letter is accepted when the resolved id matches');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/metro-jobs-SRCH_IL.0,5_IM987654_KO6,23.htm', '1148170'),
+        'an unseen scope letter with a DIFFERENT id is still rejected — the id is the proof');
+      // `_IL` brackets the LOCATION substring (not the keyword), so it must
+      // never be read as a type marker: the type is the letter before the digits.
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '0'),
+        'the _IL offset pair is not mistaken for a location id');
+
+      // Three-way proof: a query Glassdoor declines to slugify stays on
+      // /Job/jobs.htm, where the marker CANNOT appear — so its absence proves
+      // nothing and must not skip the whole source.
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170') === 'applied', 'canonical slug carrying the id reads applied');
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1') === 'missing', 'canonical slug with the WRONG id is a real failure');
+      assert(glassdoorLocationProof('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x&locId=1', '1') === 'unavailable', 'non-canonical route cannot prove or disprove the location');
+      // ZipRecruiter is the ONE board whose advertised total matched its
+      // reachable count when walked to the end (520 reachable, 520 in the
+      // header). Two shapes must never be read as a total: the path form's
+      // capped "1000+", and the "Showing results N-M" window.
+      // A scroll list must NOT stop on the first no-growth pass. Google's cards
+      // arrive in batches of ten and the count stalls for one full pass at every
+      // batch boundary, while a complete reveal takes 18-47 passes — so a
+      // first-plateau stop halts at a boundary and silently under-collects,
+      // which from outside looks exactly like the list virtualizing (it does
+      // not). This guards a regression back to 1.
+      assert(REVEAL_STABLE_PASSES > 1, 'a single no-growth pass must never end a scroll reveal');
+      assert(REVEAL_STABLE_PASSES >= 3, 'the streak must clear the observed one-pass batch-boundary stall with margin');
+      assert(parseClaimedResultTotal('521 Systems Architect Jobs in Denver, CO') === 521, 'a plain advertised total parses');
+      assert(parseClaimedResultTotal('12,431 Registered Nurse Jobs') === 12431, 'thousands separators parse');
+      assert(parseClaimedResultTotal('1000+ Sales Jobs') === null, 'a capped 1000+ is a ceiling, not a count');
+      assert(parseClaimedResultTotal('Showing results 501-520') === null, 'a result window is not a total');
+      assert(parseClaimedResultTotal('No jobs found') === null, 'no number means no total');
+      for (const junk of ['', null, undefined, '0 jobs']) {
+        assert(parseClaimedResultTotal(junk) === null, `"${junk}" yields no total`);
+      }
+      assert(zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobs-search?search=x') === 1
+        && zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobs-search/21?search=x') === 21
+        && zipRecruiterSearchPageNumber('https://www.ziprecruiter.com/jobseeker/home') === null,
+      'ZipRecruiter direct-continuation verification accepts only the exact numbered results route');
+      assert(shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }), 'an unlinked ZipRecruiter page below its advertised count probes the next direct page');
+      assert(!shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 20, hasNextUrl: true,
+      }) && !shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'glassdoor', claimedTotal: 581, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }) && !shouldTryZipRecruiterDirectContinuation({
+        sourceId: 'ziprecruiter', claimedTotal: 385, collected: 385,
+        pageNum: 20, maxPages: 1000, hasNextUrl: true,
+      }), 'direct continuation respects the user page ceiling and never broadens another source or a complete corpus');
+      assert(isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3.htm'), 'SRCH slug is canonical');
+      assert(!isGlassdoorCanonicalResultsUrl('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x'), 'jobs.htm is not canonical');
       return { ok: true };
     },
   },
@@ -620,6 +702,37 @@ export default [
       // English JD with a lone accented loanword must NOT be tagged.
       const enBody = 'Estimator II. About Us: Honeywell helps organizations solve the world\'s most complex challenges in automation and energy. You will prepare cost estimates, bids, and proposals. 5 years experience required.';
       assert(detectLanguage(enBody) === 'en', `English body → en, got ${detectLanguage(enBody)}`);
+      return { ok: true };
+  },
+},
+{
+    name: 'tagJobLanguage: refreshed English content clears a stale non-English card chip',
+    run: () => {
+      const job = {
+        title: 'Développeur logiciel',
+        snippet: 'Nous recherchons un développeur expérimenté pour concevoir des applications et collaborer avec notre équipe produit.',
+      };
+      tagJobLanguage(job);
+      assert(job.language === 'fr', `French initial scrape must be tagged, got ${job.language}`);
+
+      // Detail recovery can replace a localized teaser with the employer's
+      // English job description. A retained `fr` field would render a false
+      // language chip even though the latest, richer evidence is English.
+      job.title = 'Software Engineer';
+      job.snippet = 'Join our engineering team to build reliable software, improve developer workflows, and collaborate with product partners.';
+      job.description = 'You will design services, review code, ship product improvements, and work closely with a collaborative team of engineers and designers.';
+      tagJobLanguage(job);
+      assert(job.language === undefined, `English refresh must remove stale language, got ${job.language}`);
+
+      // A sparse post-detail state is inconclusive, not evidence that the old
+      // French label remains valid. The detector deliberately defaults weak
+      // signals to English, which means no chip should be rendered.
+      job.language = 'fr';
+      job.title = 'VP';
+      job.snippet = '';
+      job.description = '';
+      tagJobLanguage(job);
+      assert(job.language === undefined, `inconclusive refresh must remove stale language, got ${job.language}`);
       return { ok: true };
     },
   },

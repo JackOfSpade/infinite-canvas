@@ -887,7 +887,15 @@ export const PLATFORM_COOKIE_DOMAINS = {
   // scrape preflight already queries (indeedBrowser.js: search host + www +
   // secure) rather than betting on one.
   indeed:        ['.indeed.com', 'www.indeed.com', 'secure.indeed.com'],
-  glassdoor:     ['.glassdoor.com'],
+  // Glassdoor geo-redirects a .com session onto a regional host mid-run
+  // (www.glassdoor.ca is routinely served to a Canadian egress even for a
+  // US-scoped search), and page.cookies(url) returns only the cookies that
+  // APPLY to the urls asked for. Checking .com alone therefore reads "auth
+  // cookie ABSENT" for a session that is perfectly logged in on the host the
+  // scrape is actually using — the same shape as the Indeed multi-host note
+  // above. Listing the regional hosts costs one extra url per lookup and
+  // removes a false logged-out verdict.
+  glassdoor:     ['.glassdoor.com', '.glassdoor.ca', '.glassdoor.co.uk', '.glassdoor.co.in', '.glassdoor.com.au', '.glassdoor.de', '.glassdoor.fr'],
   ziprecruiter:  ['.ziprecruiter.com'],
   dice:          ['.dice.com'],
   // Marketplace — selling + pricing
@@ -1645,6 +1653,50 @@ export function isStrictIndeedHttpsUrl(url) {
   }
 }
 
+/**
+ * How long the KNOWN NON-INTERACTIVE Indeed wall may sit completely unchanged —
+ * same URL, same title — before we stop waiting for a solve that cannot happen.
+ *
+ * The measured wall ("Additional Verification Required") has no form, no iframe
+ * and no widget: nothing the user can act on. It matched the PENDING pattern, so
+ * every poll returned 'pending', the window was held for the full
+ * AUTH_WINDOW_AUTO_CLOSE_MS (5 minutes) and the user was then told to "complete
+ * the check, then click Continue again" — which is impossible. Each Continue
+ * burned five minutes WHILE HOLDING the shared browser profile lock, blocking
+ * every other browser source.
+ *
+ * TWO conditions are required, and the pairing is the safety property. Closing a
+ * window a user is actively working in is WORSE than waiting out the ceiling, so
+ * an unchanged page alone is deliberately not enough:
+ *   1. the title must match the specific non-interactive wall (below) — an
+ *      auto-progressing "Just a moment…" or an interactive checkbox/puzzle page
+ *      never qualifies, whatever it does with its DOM; and
+ *   2. two full minutes with no change to url or title, which no solve-in-
+ *      progress produces (any interaction navigates or re-titles).
+ */
+const NATIVE_CHALLENGE_STALL_MS = 120_000;
+
+/**
+ * The one Indeed wall observed to be terminal: rendered with no interactive
+ * element and unchanged across 40 minutes and a warm authenticated session.
+ * Deliberately narrow — every other challenge title stays solvable forever.
+ */
+const NATIVE_TERMINAL_WALL_TITLE = /additional verification required/i;
+
+/**
+ * Has the known non-interactive wall been frozen long enough to be terminal?
+ * Pure so the rule is unit-testable without driving Chrome.
+ *
+ * @param {{classification: string, unchangedForMs: number, title?: string}} state
+ * @returns {boolean}
+ */
+export function nativeIndeedChallengeIsStalled({ classification, unchangedForMs, title = '' } = {}) {
+  return classification === 'pending'
+    && NATIVE_TERMINAL_WALL_TITLE.test(String(title || ''))
+    && Number.isFinite(unchangedForMs)
+    && unchangedForMs >= NATIVE_CHALLENGE_STALL_MS;
+}
+
 export function isNativeIndeedChallengeHardBlock(url, title = '') {
   if (!isStrictIndeedHttpsUrl(url)) return false;
   return /security check|attention required|access denied|request blocked/i.test(String(title || ''));
@@ -1929,6 +1981,9 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           void settle({ result: 'closed', exitCode: code, signal, processExitObserved: true });
         });
       });
+      // Frozen-page tracking for the stall rule above.
+      let lastSeenSignature = null;
+      let signatureUnchangedSince = 0;
       const runPoll = createNonOverlappingRunner(async () => {
         if (settled || childExitObserved) return;
         const tabs = await getNativeChromeTabs();
@@ -1963,6 +2018,23 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           observedChallenge = true;
           cleanSince = 0;
           cleanObservation = null;
+          // A wall that never changes cannot be solved. Reclassify it rather
+          // than holding the shared profile lock for the full window and then
+          // telling the user to finish something that has no controls.
+          const signature = `${tab.url || ''}\u0000${tab.title || ''}`;
+          if (signature !== lastSeenSignature) {
+            lastSeenSignature = signature;
+            signatureUnchangedSince = Date.now();
+          }
+          const unchangedForMs = Date.now() - signatureUnchangedSince;
+          if (nativeIndeedChallengeIsStalled({ classification, unchangedForMs, title: tab.title })) {
+            // State only what was OBSERVED. We never inspected the DOM, so we
+            // cannot claim "no interactive element appeared" — only that this
+            // specific wall did not change for two minutes.
+            logger.warn(`[StealthBrowser] Native Indeed verification wall unchanged for ${Math.round(unchangedForMs / 1000)}s at ${tab.url} ("${tab.title || 'untitled'}") — closing rather than holding the shared browser profile for the full window.`);
+            updateNativeChallenge({ terminalSource: 'stalled', stalledForMs: unchangedForMs });
+            void requestNativeClose({ result: 'hard-block', currentUrl: tab.url, title: tab.title, stalled: true, stalledForMs: unchangedForMs });
+          }
           return;
         }
         if (observedChallenge && Date.now() - startedAt >= NATIVE_CHALLENGE_SETTLE_MS && classification === 'cleared') {

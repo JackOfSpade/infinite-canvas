@@ -13,6 +13,7 @@ import {
   checkCompanySpecificity,
   checkCompoundHyphenation,
   checkContainerizationTechnologyRoles,
+  checkDanglingParagraphTransition,
   checkDirectWelcomeClosing,
   checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
@@ -38,6 +39,7 @@ import {
   checkPriorEmployerOpening,
   checkPunctuationStyle,
   checkRedundancy,
+  checkResumeBulletFocus,
   checkReferenceClarity,
   checkResponsibilityTransition,
   checkSalientPhraseEcho,
@@ -935,7 +937,8 @@ export default [
       const conditionalConversation = checkDirectWelcomeClosing(['I would welcome a conversation about how that combination could support the WAVES rebuild.']);
       const conditionalDiscussion = checkDirectWelcomeClosing(['I’d welcome a discussion about the release path.']);
       const deferentialVariant = checkDirectWelcomeClosing(['I would be pleased to discuss the migration.']);
-      const directClose = checkDirectWelcomeClosing(['I welcome the opportunity to discuss how that work applies here.']);
+      const directClose = checkDirectWelcomeClosing(['I welcome a conversation about how my release-workflow experience could support the team’s deployment process.']);
+      const employerChoiceClose = checkDirectWelcomeClosing(['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.']);
       const nonClosingUse = checkDirectWelcomeClosing([
         'I would welcome the chance to review that question during discovery.',
         'The migration work is the contribution I want to continue here.',
@@ -961,6 +964,8 @@ export default [
         && !conditionalDiscussion.passed && conditionalDiscussion.detail.includes("I'd welcome a discussion")
         && !deferentialVariant.passed
         && directClose.passed
+        && !employerChoiceClose.passed
+        && employerChoiceClose.detail.includes('asks the employer to choose between initiatives')
         && nonClosingUse.passed
         && !selfDirectedClose.passed
         && selfDirectedClose.detail.includes('ends with conversation or learning intent')
@@ -1029,20 +1034,55 @@ export default [
         && accurateRoles.passed && coordinatedRoles.passed,
       'containerization claims cannot grammatically govern web or application servers, while separate role-accurate predicates pass');
 
+      const topologyTail = checkResumeBulletFocus('<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Example</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>');
+      const focusedContainerization = checkResumeBulletFocus('<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Example</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose.</li></ul></article></main>');
+      assert(!topologyTail.passed
+        && topologyTail.detail.includes('appends runtime topology to a containerization point')
+        && focusedContainerization.passed,
+      'résumé validation keeps a complete containerization highlight focused instead of appending routine server topology');
+
+      const literalizedFrame = checkClaimedEquivalence([
+        'Model delegation and a purchased platform are two answers to one build-or-buy call.',
+      ]);
+      const mechanismFirst = checkClaimedEquivalence([
+        'I compare model discretion, deterministic controls, and vendor capabilities against the constraints of each workflow.',
+      ]);
+      assert(!literalizedFrame.passed
+        && literalizedFrame.detail.includes('asserts a cross-domain equivalence')
+        && mechanismFirst.passed,
+      'a coined two-answers-to-one-decision frame cannot force nonparallel options into an equivalence');
+
+      const danglingTransition = checkDanglingParagraphTransition([
+        'The overlay preserved user control. The boundary between model-owned work and deterministic code also shaped how I used AI-assisted development at Northstar District.',
+        'I would bring careful architecture decisions to the target work.',
+      ]);
+      const developedTransition = checkDanglingParagraphTransition([
+        'The overlay preserved user control. At Northstar District, I applied the same boundary by routing model output through deterministic validation.',
+        'I would bring careful architecture decisions to the target work.',
+      ]);
+      assert(!danglingTransition.passed
+        && danglingTransition.detail.includes('launching an undeveloped topic')
+        && developedTransition.passed,
+      'a non-final paragraph cannot end by launching a broad workplace claim that the letter never develops');
+
       const combined = evaluateCoverLetterChecks({
         plan: { mappings: [{}], companyHook: { detail: '' } },
         paragraphs: [
           'Rebuilding a system without recreating every existing tool calls for clear evidence about which work belongs in a custom application.',
           'For tools that remained in-house, I built software.',
           'I containerized it with Docker Compose, Nginx, and Gunicorn so it could be deployed on different virtual-machine configurations.',
+          'The boundary between model work and deterministic code also shaped how I used AI-assisted development at Northstar District.',
+          'Model delegation and a purchased platform are two answers to one build-or-buy call.',
         ],
       });
       const failures = new Map(combined.filter(check => !check.passed).map(check => [check.id, check.detail]));
       assert(failures.has('tool-calls-garden-path')
         && failures.has('low-information-tool-build')
-        && failures.has('containerization-technology-roles'),
+        && failures.has('containerization-technology-roles')
+        && failures.has('dangling-paragraph-transition')
+        && failures.has('claimed-equivalence'),
       `each exact regression case is part of the single-revision prose evaluation: ${[...failures.keys()].join(', ')}`);
-      return { gardenPath: gardenPath.detail, fillerBridge: fillerBridge.detail, mismatchedRoles: mismatchedRoles.detail };
+      return { gardenPath: gardenPath.detail, fillerBridge: fillerBridge.detail, mismatchedRoles: mismatchedRoles.detail, danglingTransition: danglingTransition.detail };
     },
   },
   {
@@ -1405,9 +1445,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 31, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 32, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

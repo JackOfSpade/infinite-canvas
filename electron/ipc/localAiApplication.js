@@ -28,6 +28,7 @@ const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[
 const MAX_CAREER_DATA_CHARS = 240_000;
 const MAX_RESUME_HTML_CHARS = 220_000;
 const MAX_RESULT_BYTES = 1_000_000;
+const MAX_SOURCE_GROUNDING_QUOTE_CHARS = 2_000;
 // Allows one-time recovery of pre-ring manifests, after which append trims
 // them back to the compact bounded form. This is not a handoff-round limit.
 const MAX_LOCAL_AI_MANIFEST_BYTES = 8_000_000;
@@ -38,7 +39,7 @@ const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 // Keep enough recent observations to investigate a live handoff, while the
 // monotonic counter preserves the fact that older observations existed.
 const MAX_LOCAL_AI_HANDOFF_HISTORY = 32;
-const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Within a paragraph, do not place distinct systems or responsibilities side by side merely because they occurred in the same role or job. Before shifting to the new proof, name the shared responsibility, constraint, or outcome; adjacency and “the same job” are not a bridge. If the evidence supplies no relationship, split the paragraph or omit the weaker proof. Never delay the relevance of a background fact. On first mention, frame an unfamiliar prior employer with the candidate’s role or relationship, and frame an unfamiliar named project, product, or system as a concise artifact the candidate built, led, or maintained before relying on its name. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Exclude application logistics entirely: availability, start date, schedule, location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship belong in application fields, not a cover letter. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. Refer to the target scope as this role or the work itself; use job-listing attribution only when it establishes the provenance of an unverified employer or company assertion. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, category-restatement bridge sentences that add no decision, mechanism, constraint, or result, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
+const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Give every paragraph one argumentative job. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Within a paragraph, do not place distinct systems or responsibilities side by side merely because they occurred in the same role or job. Before shifting to the new proof, name the shared responsibility, constraint, or outcome; adjacency and “the same job” are not a bridge. If the evidence supplies no relationship, split the paragraph or omit the weaker proof. Never delay the relevance of a background fact. When the thesis names multiple decision branches, make each evidence paragraph identify the branch it develops; do not replace an established branch with a new abstraction at the transition. The last sentence of each non-final paragraph must conclude that paragraph or explicitly name the exact subject carried into the next one; otherwise develop, move, or delete it. On first mention, frame an unfamiliar prior employer with the candidate’s role or relationship, then use the shortest unambiguous reference; frame an unfamiliar named project, product, or system as a concise artifact the candidate built, led, or maintained before relying on its name. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Exclude application logistics entirely: availability, start date, schedule, location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship belong in application fields, not a cover letter. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. Refer to the target scope as this role or the work itself; use job-listing attribution only when it establishes the provenance of an unverified employer or company assertion. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, category-restatement bridge sentences that add no decision, mechanism, constraint, or result, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. The final paragraph may synthesize established evidence but must not introduce a new decision frame or ask the employer to choose between initiatives. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
 const COVER_LETTER_COPY_PRECISION_RULE = 'Punctuate introductory phrases so the transition into the main subject is immediately clear. Read every sentence once as a recruiter seeing it for the first time; reject idiom, figurative personification, or an implied actor, artifact, or action when the reader must translate it or reconstruct what it literally means. Also scan each clause boundary for an accidental familiar compound or alternate parse: if adjacent words can first read as a different unit, recast the sentence instead of using punctuation to force its intended grammar. In interface or ownership claims, name the concrete actor, artifact, and action instead. Keep communication verbs attached to an actual document or speaker rather than assigning them to the work or position being described. Give each named technology a governing verb that describes its actual role, and never group technologies with distinct roles under one operation. When describing interface guidance, distinguish metaphorical reference from visible on-screen indication and state only the literal limitation. When a closing invites further conversation, use direct present-tense language and connect the candidate’s relevant contribution to the specific target work; do not end solely on what the candidate wants to learn, hear, or discuss, and reject conditional or deferential boilerplate, including would welcome a conversation or discussion.';
 
 export const APPLICATION_QUALITY_CHECKLIST_VERSION = 2;
@@ -64,7 +65,7 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'resume-role-completeness', document: 'resume', requirement: 'Every documented role remains present with at least one factual highlight.' },
   { id: 'resume-evidence-quality', document: 'resume', requirement: 'Highlights prefer concrete actions, judgment, outcomes, scale, and differentiators over generic claims.' },
   { id: 'resume-bullet-independence', document: 'resume', requirement: 'Every highlight is understandable by itself and names its concrete referents.' },
-  { id: 'resume-concision', document: 'resume', requirement: 'Copy is concise, nonredundant, scannable, and free of raw career-note wording.' },
+  { id: 'resume-concision', document: 'resume', requirement: 'Copy is concise, nonredundant, scannable, and free of raw career-note wording; each bullet has one principal achievement, and trailing implementation detail remains only when it adds a material mechanism, constraint, scope, or result.' },
   { id: 'resume-copy-editing', document: 'resume', requirement: 'Grammar, parallel structure, modifier attachment, compounds, and reference clarity are correct.' },
   { id: 'resume-structure', document: 'resume', requirement: 'Markup uses exactly one bare design-system main and valid peer section and role structures.' },
   { id: 'resume-ats-safety', document: 'resume', requirement: 'The document contains no unsafe, hidden, decorative, or non-parseable content.' },
@@ -73,9 +74,9 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'cover-minimum-evidence', document: 'coverLetter', requirement: 'Only minimum-sufficient evidence is used; each additional proof has an explicit supporting role.' },
   { id: 'cover-priority-alignment', document: 'coverLetter', requirement: 'The argument connects distinctive candidate evidence to an emphasized employer need.' },
   { id: 'cover-opening', document: 'coverLetter', requirement: 'The first sentence adds substantive information and advances the argument immediately.' },
-  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance. Within a paragraph, a shift between distinct systems or responsibilities names its shared responsibility, constraint, or outcome before the new proof; shared role or job context alone is not a bridge. Bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
+  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph has one argumentative job and advances the same argument with clear transitions and no delayed relevance. Within a paragraph, a shift between distinct systems or responsibilities names its shared responsibility, constraint, or outcome before the new proof; shared role or job context alone is not a bridge. When the thesis names multiple decision branches, each evidence paragraph identifies the branch it develops instead of replacing it with a new abstraction. Each non-final paragraph ends by concluding its point or explicitly carrying the next subject forward, and bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
   { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; target scope is stated as this role or the work itself and the selected position is referenced proximally, while listing-only employer context is attributed only when provenance is necessary, with its source document—not the target position—as the reporting subject.' },
-  { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditional/deferential closing language; a final invitation uses direct present tense and connects the candidate’s contribution to target work.' },
+  { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditional/deferential closing language; a final invitation uses direct present tense, and the close synthesizes established evidence, introduces no new frame, never asks the employer to choose between initiatives, and connects the candidate’s contribution to target work.' },
   { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing; they pass a literal first-read and word-boundary parse, use concrete actors, artifacts, and actions where needed, give every named technology a role-accurate governing verb without grouping distinct roles under one operation, and contain no semicolon or dash clause splices.' },
   { id: 'cover-figure-discipline', document: 'coverLetter', requirement: 'Every figure is necessary and appears in the selected résumé evidence.' },
   { id: 'cover-legal-status', document: 'coverLetter', requirement: 'The letter contains no application logistics: availability, start date, schedule, work location, relocation, commute, travel willingness, citizenship, residency, visa, sponsorship, or work-authorization statement.' },
@@ -646,13 +647,83 @@ const SOURCE_GROUNDING_STOPWORDS = new Set([
   'use', 'used', 'using', 'provide', 'provided', 'help', 'helped', 'make', 'made',
 ]);
 
+const SOURCE_GROUNDING_IDENTITY_STOPWORDS = new Set([
+  ...SOURCE_GROUNDING_STOPWORDS,
+  'software', 'engineer', 'engineering', 'data', 'developer', 'development', 'project', 'personal',
+]);
+
+// These are deliberately high-precision rather than a general semantic
+// similarity model. They cover modifiers that materially broaden a career
+// claim and therefore need literal support in that unit's bound quotes.
+const SOURCE_GROUNDING_QUALIFIER_RULES = Object.freeze([
+  { label: 'daily frequency', claim: /\bdaily\b/iu, source: /\b(?:daily|each day|every day|day-to-day)\b/iu },
+  { label: 'weekly frequency', claim: /\bweekly\b/iu, source: /\b(?:weekly|each week|every week|week-to-week)\b/iu },
+  { label: 'monthly frequency', claim: /\bmonthly\b/iu, source: /\b(?:monthly|each month|every month|month-to-month)\b/iu },
+  { label: 'routine frequency', claim: /\b(?:routinely|regularly|repeatedly|consistently)\b/iu, source: /\b(?:routinely|regularly|repeatedly|consistently)\b/iu },
+  { label: 'absolute frequency', claim: /\b(?:always|never)\b/iu, source: /\b(?:always|never)\b/iu },
+  { label: 'comparative superiority', claim: /\b(?:beat|beats|beating|outperform(?:ed|s|ing)?|superior)\b/iu, source: /\b(?:beat|beats|beating|outperform(?:ed|s|ing)?|superior|better than)\b/iu },
+  { label: 'leadership ownership', claim: /\b(?:led|leading)\b/iu, source: /\b(?:led|lead|leading)\b/iu },
+  { label: 'direct ownership', claim: /\bown(?:ed|ing)?\b/iu, source: /\b(?:own|owned|owning|ownership|responsible for)\b/iu },
+  { label: 'management ownership', claim: /\bmanaged\b/iu, source: /\b(?:managed|managing|responsible for)\b/iu },
+  { label: 'decision authority', claim: /\b(?:decided|approved|authorized)\b/iu, source: /\b(?:decided|decision|approved|approval|authorized|authorization|chose|selected|made the call)\b/iu },
+  { label: 'production status', claim: /\bproduction(?:-grade)?\b/iu, source: /\bproduction(?:-grade)?\b/iu },
+  { label: 'at-scale status', claim: /\bat scale\b/iu, source: /\bat scale\b/iu },
+  { label: 'organization-wide scope', claim: /\b(?:district|company|organization|enterprise)-wide\b/iu, source: /\b(?:(?:district|company|organization|enterprise)-wide|(?:entire|whole) (?:district|company|organization|enterprise)|across the (?:district|company|organization|enterprise))\b/iu },
+  { label: 'improvement outcome', claim: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, source: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu },
+  { label: 'reduction outcome', claim: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu, source: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu },
+  { label: 'increase outcome', claim: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu, source: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu },
+  { label: 'savings outcome', claim: /\b(?:saved|savings)\b/iu, source: /\b(?:saved|savings)\b/iu },
+  { label: 'acceleration outcome', claim: /\b(?:accelerat(?:e|ed|es|ing|ion)|faster)\b/iu, source: /\b(?:accelerat(?:e|ed|es|ing|ion)|faster)\b/iu },
+  { label: 'optimization outcome', claim: /\boptimiz(?:e|ed|es|ing|ation)\b/iu, source: /\boptimiz(?:e|ed|es|ing|ation)\b/iu },
+  { label: 'guaranteed outcome', claim: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu, source: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu },
+]);
+
+const CAREER_ASSERTION_ACTION_RE = /\b(?:am|was|were|had|worked|built|created|developed|delivered|implemented|used|applied|evaluated|handled|ran|wrote|designed|maintained|migrated|automated|researched|tested|modified|packaged|containerized|integrated|led|managed|owned|decided|approved|authorized|improved|reduced|increased|saved|accelerated|optimized|ensured)\b/iu;
+const CAREER_ASSERTION_REGULAR_PAST_RE = /\b[\p{L}]{5,}(?:ed|ized|ised|ated)\b/iu;
+
 function meaningfulSourceTokens(value) {
   return [...new Set(normalizedTokens(value).filter(token =>
     !SOURCE_GROUNDING_STOPWORDS.has(token) && (token.length > 1 || /\d/u.test(token)),
   ))];
 }
 
-function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index) {
+function groundingSentences(value) {
+  const normalized = normalizeSourceGroundingText(value);
+  if (!normalized) return [];
+  if (typeof Intl?.Segmenter === 'function') {
+    return [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(normalized)]
+      .map(part => normalizeSourceGroundingText(part.segment)).filter(Boolean);
+  }
+  return normalized.match(/[^.!?]+(?:[.!?]+|$)/gu)?.map(part => part.trim()).filter(Boolean) || [normalized];
+}
+
+function careerIdentityTokens(resumeEvidence = {}) {
+  return [...new Set((Array.isArray(resumeEvidence.roles) ? resumeEvidence.roles : []).flatMap(role =>
+    normalizedTokens(`${role?.title || ''} ${role?.company || ''}`)
+      .filter(token => !SOURCE_GROUNDING_IDENTITY_STOPWORDS.has(token) && token.length > 2),
+  ))];
+}
+
+function isCandidateCareerSentence(sentence, identityTokens = []) {
+  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
+  if (!hasCareerAction) return false;
+  const firstPerson = /\b(?:i|we|my|our)\b/iu.test(sentence);
+  if (firstPerson) return true;
+  const tokens = new Set(normalizedTokens(sentence));
+  return identityTokens.some(token => tokens.has(token));
+}
+
+function assertSupportedSourceQualifiers(finalText, sourceQuotes, unit) {
+  const sourceText = sourceQuotes.join(' ');
+  for (const rule of SOURCE_GROUNDING_QUALIFIER_RULES) {
+    const match = finalText.match(rule.claim);
+    if (match && !rule.source.test(sourceText)) {
+      throw new Error(`${unit} uses unsupported ${rule.label} (\u201c${match[0]}\u201d); its bound career-data quotes must state that qualifier.`);
+    }
+  }
+}
+
+export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index, { identityTokens = [] } = {}) {
   const finalTokens = meaningfulSourceTokens(finalText);
   const quoteTokens = new Set(meaningfulSourceTokens(sourceQuotes.join(' ')));
   const shared = finalTokens.filter(token => quoteTokens.has(token));
@@ -662,6 +733,21 @@ function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index) 
     const ordinal = `${unit} ${index + 1}`;
     const detail = shared.length ? `shared meaningful token(s): ${shared.slice(0, 4).join(', ')}` : 'no shared meaningful tokens';
     throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] (${ordinal}) has career-data quotes unrelated to its final ${unit} (${detail}; need ${minimumShared}).`);
+  }
+  const unit = `${label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph'} ${index + 1}`;
+  if (label === 'resumeBullets') {
+    assertSupportedSourceQualifiers(finalText, sourceQuotes, unit);
+    return;
+  }
+  for (const [sentenceIndex, sentence] of groundingSentences(finalText).entries()) {
+    if (!isCandidateCareerSentence(sentence, identityTokens)) continue;
+    const sentenceTokens = meaningfulSourceTokens(sentence);
+    const sentenceShared = sentenceTokens.filter(token => quoteTokens.has(token));
+    const sentenceMinimum = sentenceTokens.length === 1 ? 1 : 2;
+    if (!sentenceTokens.length || sentenceShared.length < sentenceMinimum) {
+      throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] (${unit}, sentence ${sentenceIndex + 1}) is unrelated to its bound career-data quotes.`);
+    }
+    assertSupportedSourceQualifiers(sentence, sourceQuotes, `${unit}, sentence ${sentenceIndex + 1}`);
   }
 }
 
@@ -695,9 +781,13 @@ function argumentEvidenceMatchesBullet(evidence, bullet) {
 
 function argumentRoleMatchesResumeRole(evidenceRole, role) {
   const descriptor = normalizeSourceGroundingText(evidenceRole).toLowerCase();
-  if (!descriptor || !role?.title || !role?.company) return false;
-  return tokenCoverage(role.title, descriptor) >= 0.6
-    && tokenCoverage(role.company, descriptor) >= 1;
+  if (!descriptor || !role?.title) return false;
+  if (tokenCoverage(role.title, descriptor) < 0.6) return false;
+  // A personal or open-source project can be a valid résumé role without an
+  // employer. In that case the project title is the complete role identity;
+  // requiring a company forces the writer to invent a label merely to satisfy
+  // non-rendered provenance. Employment roles still require the full company.
+  return !role.company || tokenCoverage(role.company, descriptor) >= 1;
 }
 
 function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter, coverLetterArgument }) {
@@ -727,6 +817,9 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
         if (!sourceQuoteIsSpecific(quote)) {
           throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}].careerDataQuotes[${quoteIndex}] is not specific enough.`);
         }
+        if (quote.length > MAX_SOURCE_GROUNDING_QUOTE_CHARS) {
+          throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}].careerDataQuotes[${quoteIndex}] exceeds ${MAX_SOURCE_GROUNDING_QUOTE_CHARS} characters; cite the specific supporting passage.`);
+        }
         if (!trustedSource.includes(quote)) {
           throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}].careerDataQuotes[${quoteIndex}] is not an exact quote from trusted career data.`);
         }
@@ -735,7 +828,9 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
       if (new Set(sourceQuotes).size !== sourceQuotes.length) {
         throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] repeats a trusted career-data quote.`);
       }
-      assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index);
+      assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index, {
+        identityTokens: careerIdentityTokens(resumeEvidence),
+      });
       return { [finalField]: finalText, [quotesField]: sourceQuotes };
     });
   };
@@ -751,7 +846,8 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
       throw new Error(`Local AI coverLetterArgument evidence ${index + 1} does not match a final résumé bullet.`);
     }
     if (!argumentRoleMatchesResumeRole(argument.evidenceRole, matched)) {
-      throw new Error(`Local AI coverLetterArgument evidenceRole ${index + 1} must identify the matched résumé role (${matched.title} at ${matched.company}).`);
+      const matchedRole = matched.company ? `${matched.title} at ${matched.company}` : matched.title;
+      throw new Error(`Local AI coverLetterArgument evidenceRole ${index + 1} must identify the matched résumé role (${matchedRole}).`);
     }
   }
   return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };

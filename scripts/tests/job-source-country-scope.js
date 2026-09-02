@@ -84,13 +84,75 @@ export default [
         const glassdoor = tasks.find(task => task.sourceId === 'glassdoor');
         const google = tasks.find(task => task.sourceId === 'google');
         assert(new URL(zip.url).searchParams.get('location') === canonical, `${input}: ZipRecruiter receives canonical location`);
-        assert(new URL(glassdoor.url).searchParams.get('locKeyword') === canonical, `${input}: Glassdoor receives canonical resolver text`);
+        // locKeyword is deliberately NOT sent: Glassdoor ignores the location
+        // TEXT, and it was the measured trigger for the country redirect. The
+        // resolver scope below is the real carrier of location intent.
+        assert(new URL(glassdoor.url).searchParams.get('locKeyword') === null, `${input}: Glassdoor is not sent the ignored locKeyword text`);
         assert(new URL(glassdoor.url).hostname === (normalizeLocationInput(input).countryCode === 'CA' ? 'www.glassdoor.ca' : 'www.glassdoor.com'),
           `${input}: Glassdoor uses the verified country site`);
         assert(glassdoor.resolveGlassdoorLocation === canonical, `${input}: Glassdoor strict resolver receives the same canonical scope`);
-        assert(new URL(google.url).searchParams.get('q') === `Systems Architect ${canonical} jobs`, `${input}: Google receives canonical location as best-effort query text`);
+        assert(!glassdoor.glassdoorLocationSoftScope, `${input}: a location the user asked for is a HARD boundary — a failed locId lookup must skip the source, not widen it`);
+        // The location is always appended (Google parses a place name as a
+        // location SCOPE that overrides geolocation), but the vestigial " jobs"
+        // suffix is not — udm=8 is already the jobs vertical.
+        assert(new URL(google.url).searchParams.get('q') === `Systems Architect ${canonical}`,
+          `${input}: Google receives the canonical location as a scope`);
       }
       return { inputs: inputs.length };
+    },
+  },
+{
+    name: 'Glassdoor country scope on a remote-only search is a SOFT hint, not a boundary',
+    run: () => {
+      // A remote-only search flattens to no location filter (correct — "Remote,
+      // United States" must never reach a board's location field), which used to
+      // leave Glassdoor with no locId at all, so the geo-redirect silently chose
+      // the market. The country now pins the market — but because nationwide is
+      // ALREADY the right answer for a remote search, a failed locId lookup must
+      // continue unscoped rather than skip the source and return zero rows.
+      const remote = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['glassdoor']) },
+        '',            // no location filter — remote-only
+        null,
+        'United States', // country scope
+      ).find(task => task.sourceId === 'glassdoor');
+      assert(remote, 'a remote-only search still builds a Glassdoor task');
+      assert(remote.resolveGlassdoorLocation === 'United States', 'the country pins the market');
+      assert(remote.glassdoorLocationSoftScope === true, 'a country-only scope is soft — a failed lookup must not zero the source');
+      assert(new URL(remote.url).hostname === 'www.glassdoor.com', 'a US country scope selects the US host');
+
+      // Google pins the BARE template to the egress metro — measured from a
+      // Canadian exit, a bare query returned 0/159 US cards, all Toronto/Ontario.
+      // A remote search produces an empty location FILTER by design, so without
+      // the country it was answered with jobs near whatever IP the run left from.
+      // Remote IS nationwide, so the country is the correct scope exactly here.
+      const remoteGoogle = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, 'United States',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(remoteGoogle.url).searchParams.get('q') === 'Systems Architect United States',
+        'a remote search sends Google the country scope instead of a metro-pinned bare query');
+      const remoteGoogleCa = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, 'Canada',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(remoteGoogleCa.url).searchParams.get('q') === 'Systems Architect Canada',
+        'the remote country scope is not US-specific');
+      const noScopeGoogle = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['google']) }, '', null, '',
+      ).find(task => task.sourceId === 'google');
+      assert(new URL(noScopeGoogle.url).searchParams.get('q') === 'Systems Architect',
+        'with neither a location nor a country there is nothing to append');
+      assert(new URL(remote.url).searchParams.get('locKeyword') === null, 'the ignored locKeyword text is never sent');
+
+      const remoteCa = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['glassdoor']) }, '', null, 'Canada',
+      ).find(task => task.sourceId === 'glassdoor');
+      assert(new URL(remoteCa.url).hostname === 'www.glassdoor.ca', 'a Canadian country scope selects the Canadian host even with no location filter');
+
+      const noScope = buildJobTasks(
+        ['Systems Architect'], 21, { onlySources: new Set(['glassdoor']) }, '',
+      ).find(task => task.sourceId === 'glassdoor');
+      assert(!noScope.resolveGlassdoorLocation, 'with neither a location nor a country there is nothing to resolve');
+      return { softScope: true };
     },
   },
 ];

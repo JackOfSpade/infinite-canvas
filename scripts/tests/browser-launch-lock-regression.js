@@ -112,6 +112,37 @@ export default [
     },
   },
 {
+    name: 'startup verification releases only the idle shared-browser generation that it started',
+    run: () => {
+      // Startup verification's pages are individually closed by fetchHtmlClean.
+      // Pin the remaining ownership rule here, without requiring a real Chrome:
+      // it must yield the process-level profile lock only if its generation was
+      // created during this run, and must use the normal live-page/reservation
+      // blocker before closing.
+      const start = accountsSource.indexOf('export async function verifyAllPlatforms');
+      const end = accountsSource.indexOf('// ── Single-flight login dedup', start);
+      assert(start !== -1 && end !== -1 && end > start, 'verifyAllPlatforms must be bounded before login-flow code');
+      const fnSource = accountsSource.slice(start, end);
+
+      const before = fnSource.indexOf('const stealthBefore = getStealthBrowserInfo();');
+      const workers = fnSource.indexOf('await Promise.all(workers);');
+      const after = fnSource.indexOf('const stealthAfter = getStealthBrowserInfo();');
+      const blocker = fnSource.indexOf('await getBrowserSessionResetBlocker();', after);
+      const close = fnSource.indexOf('await closeStealthBrowser(false);', blocker);
+      assert(before >= 0 && workers > before && after > workers,
+        'startup verification must compare shared-browser identity from before the worker pool with identity after all verifier pages finish');
+      assert(/stealthAfter\.generation !== stealthBefore\.generation/.test(fnSource.slice(after)),
+        'startup release must compare generation, not a stale connected boolean');
+      assert(/!stealthBefore\.connected \|\|/.test(fnSource.slice(after)),
+        'startup release must cover the normal case where startup launched the singleton from stopped');
+      assert(blocker > after && close > blocker,
+        'startup release must check for live work/reservations before closing its idle browser');
+      assert(fnSource.includes("[Accounts] Released idle shared browser after startup verify"),
+        'startup profile release must be logged for future diagnostics');
+      return { ownership: 'generation-scoped', release: 'idle-only' };
+    },
+  },
+{
     name: 'bug report "Auth cookie present on disk" reads writeStatusCache\'s lastTrace field, not a stale trace key',
     run: () => {
       // accounts.js writes `{ connected, ts, ...extras }` — passing lastTrace as an

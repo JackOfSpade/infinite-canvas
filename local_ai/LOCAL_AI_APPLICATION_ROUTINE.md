@@ -184,6 +184,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    beside the action they modify. Say which experience, skills, or work the
    candidate would bring; capabilities are not themselves `the evidence`
    brought to a role.
+   Compare every final cover-letter paragraph with every final résumé bullet
+   after ordinary punctuation and whitespace normalization. They may present
+   the same supported fact, but they must not share a contiguous run of eight
+   or more words; recast the letter's explanation when they do.
    After each complete draft, evaluate every criterion in the canonical
    checklist below in order. Record only `pass` or `fail` plus a concise
    verification note; do not reveal hidden reasoning. If even one criterion
@@ -283,6 +287,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      noun phrase instead. A pronoun is allowed only when its antecedent is
      unambiguous inside the same bullet. Apply compound spelling across the
      whole résumé, including `in-house`.
+   - Give every résumé highlight one principal achievement or action chain.
+     A trailing clause belongs only when it materially adds a supported
+     mechanism, constraint, scope, or result to that same point. Delete
+     conventional runtime-topology detail that merely proves implementation;
+     in particular, do not append web-server, reverse-proxy, or application-
+     server topology to a complete containerization claim unless that topology
+     supplies the job-relevant result or constraint being argued.
    - Keep every `.highlights li` visually uniform: never use `<b>` or
      `<strong>` inside it. Technologies, tools,
      metrics, and outcomes remain plain text; front-load the most relevant
@@ -356,8 +367,17 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    evidence boundary in step 3. Write natural connected prose: select one
    load-bearing proof, summarize related implementation details, and use short
    causal sentences instead of an inventory unloaded after a colon, a
-   semicolon, or a dash. Prefer the
-   concrete system, data flow, responsibility, or decision to an abstract
+   semicolon, or a dash.
+   Give every paragraph one argumentative job. When a paragraph changes from
+   one implementation path, system, employer, or proof to another, state the
+   real relationship before the new details; a generic connective or a truism
+   does not create coherence. When the thesis names multiple decision branches,
+   make each evidence paragraph identify the branch it develops; do not replace
+   an established branch with a new abstraction at the transition. The last sentence of every non-final paragraph
+   must either conclude that paragraph's point or explicitly name the exact
+   subject carried into the next paragraph. If it merely launches a new topic,
+   develop it there, move it to the next paragraph, or delete it.
+   Prefer the concrete system, data flow, responsibility, or decision to an abstract
    metaphor, and never repeat a metaphor across paragraphs as connective
    tissue. Within a paragraph, do not place distinct systems or responsibilities
    side by side merely because they occurred in the same role or job. Before
@@ -425,7 +445,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    or discuss. Avoid conditional or deferential closing boilerplate: write `I
    welcome a conversation` rather than `I would welcome a conversation` or `I
    would welcome a discussion`. Apply this as a register rule, not as a
-   template for the closing sentence.
+   template for the closing sentence. The final paragraph may synthesize only
+   evidence and relationships already established in the letter. It must not
+   introduce a new organizing frame, force nonparallel choices into one
+   decision, or ask the employer to choose between products, prototypes, or
+   initiatives; close with the candidate's contribution to the work.
    Hyphenate compound modifiers (`in-house`, `end-to-end ownership`,
    `full-stack engineer`, `district-wide`, `third-party integrations`,
    `real-time data`, `open-source project`) and use one spelling of a compound
@@ -507,6 +531,9 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    measured revisions remains allowed. A HARD validation rejection writes a
    non-measured `invalid` record (see below). Keep this run active until a
    matching response arrives or the user explicitly interrupts it.
+   While the helper is still polling, report only that the handoff is waiting.
+   The absence of matching feedback does not prove that validation passed, a
+   render started, or any other particular app phase completed.
    - If matching `fit-feedback.json` has `status: "revision-required"`, use
      its measured feedback immediately in this same session, revise the
      affected document(s), overwrite only `result.json`, and wait again.
@@ -680,7 +707,22 @@ entry's non-empty `careerDataQuotes` list must contain only verbatim quotes
 from `context/career-data.txt` that support that unit; never use a paraphrase,
 the job listing, research, another final document, or a quote from the wrong
 employer/project. This provenance is part of the hard source-grounding gate,
-not a place for reasoning or a summary.
+not a place for reasoning or a summary. The final unit and its combined quotes
+must share at least two meaningful, non-generic tokens (or the sole meaningful
+token when the final unit contains only one); generic action verbs such as
+`built`, `developed`, or `used` do not establish this link by themselves. Keep
+each quote at or below 2,000 characters and cite the smallest complete passage
+that supplies the fact. Each candidate-career sentence in a cover-letter
+paragraph must link independently to that paragraph's bound quotes.
+High-risk factual qualifiers must be stated in those same unit-bound quotes or
+by a clear literal equivalent. This includes frequency (`daily`, `weekly`,
+`regularly`, `always`), comparative superiority (`beat`, `outperformed`,
+`superior`), leadership or decision authority (`led`, `owned`, `managed`,
+`decided`, `approved`), production or organization-wide scope, and claimed
+improvement, reduction, increase, savings, acceleration, optimization, or
+guaranteed outcomes. A matching word elsewhere in career data does not support
+the current unit. Remove or narrow an unsupported qualifier rather than citing
+an unrelated role or a whole-document quote.
 
 `coverLetterArgument` is a required, non-rendered argument contract. It is not
 letter copy: use it to state the single controlling thesis, its primary proof,
@@ -690,9 +732,15 @@ when it has a genuine narrative role
 its relationship to the primary proof. The cover-letter quality rationale must
 explicitly attest that the final letter preserves **one controlling argument**
 and **minimum-sufficient evidence**. Do not use the contract to add facts that
-are absent from the letter or career data. `logistics` is a compatibility
-object only: omit it, or leave its `statement` empty. Never use it to place
-availability, relocation, commute, schedule, work location, travel, start
-date, or legal-work-status facts in a letter; those belong in application
-fields and must not be inferred from the job location, employer, school,
-profile, or context.
+are absent from the letter or career data. Bind each argument `evidence` field
+to one final résumé bullet. Copying that bullet exactly is the safest binding;
+a paraphrase must contain at least five words and share at least 60% of its
+distinct normalized tokens with that single bullet. Its `evidenceRole` must
+identify the matched résumé role by title and, when the role has a company,
+the complete company name. A project with no company is identified by its
+project title alone; never invent a company label to satisfy this provenance
+field. `logistics` is a compatibility object only: omit it, or leave its
+`statement` empty. Never use it to place availability, relocation, commute,
+schedule, work location, travel, start date, or legal-work-status facts in a
+letter; those belong in application fields and must not be inferred from the
+job location, employer, school, profile, or context.

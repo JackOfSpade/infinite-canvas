@@ -3,6 +3,7 @@ import { useReactFlow, useStore } from '@xyflow/react';
 import { LayoutGrid, Plug, Briefcase, Combine as CombineIcon } from 'lucide-react';
 
 import { HubContainer } from '../components/HubContainer';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
@@ -10,7 +11,7 @@ import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { EventLogger } from '../utils/EventLogger';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from './jobboard/mergeJobs';
+import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 
@@ -25,6 +26,14 @@ function moduleLabel(d) {
   const loc = String(d?.preferredLocation || d?.canonicalLocation || '').trim();
   const role = String(d?.targetRole || '').trim();
   return [role, loc].filter(Boolean).join(' · ') || 'Job Search';
+}
+
+// A collection-only/test run deliberately finishes in the normal `done` state
+// with no `scoredJobs`: it has gathered listings but did not produce mergeable
+// hiring-fit results. It must never masquerade as a truthful scored-empty re-run
+// and authorize replacement of an existing board cascade.
+function isExplicitlyUnscoredModule(data) {
+  return !!(data?.aiSkipped || data?.collectionOnly || data?.testMode);
 }
 
 /**
@@ -61,6 +70,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // progress uses the same main-process event as a Job Search node, but the
   // node id below keeps concurrent boards/searches completely isolated.
   const [compensationProgress, setCompensationProgress] = useState(null);
+  const [emptyReplacementPrompt, setEmptyReplacementPrompt] = useState(null);
 
   useEffect(() => {
     if (!window.electronAPI?.onCompensationProgress) return undefined;
@@ -90,7 +100,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (n && n.type === 'jobhub') {
           // Fingerprint (not just length) so re-running a module — same count,
           // different jobs/scores — registers as changed data, not a no-op.
-          parts.push(`${nid}:${moduleFingerprint(n.data?.scoredJobs)}:${n.data?.hubState || ''}`);
+          // Include scoring provenance too. A collection-only completion has the
+          // same empty array/state shape as a real zero-result search, but it is
+          // not safe to use as a replacement input for an existing board.
+          parts.push(`${nid}:${moduleFingerprint(n.data?.scoredJobs)}:${n.data?.hubState || ''}:${n.data?.aiSkipped ? 1 : 0}:${n.data?.collectionOnly ? 1 : 0}:${n.data?.testMode ? 1 : 0}:${n.data?.resultDisposition || ''}`);
         }
       });
       parts.sort();
@@ -113,19 +126,36 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         count: Array.isArray(n.data?.scoredJobs) ? n.data.scoredJobs.length : 0,
         fingerprint: moduleFingerprint(n.data?.scoredJobs),
         hubState: n.data?.hubState || 'empty',
+        aiSkipped: !!n.data?.aiSkipped,
+        collectionOnly: !!n.data?.collectionOnly,
+        testMode: !!n.data?.testMode,
+        isScored: !isExplicitlyUnscoredModule(n.data),
+        resultDisposition: n.data?.resultDisposition || null,
       }));
     // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedSig, id]);
 
-  // Keep every terminal source in the staleness signature, INCLUDING a source
-  // that just completed with zero jobs. Otherwise a genuine empty re-run looks
-  // indistinguishable from disconnecting that source, and the board cannot
-  // explain or safely replace its old cascade. Only positive-result modules
+  // Positive scored jobs always remain mergeable, even from an older canvas
+  // that predates resultDisposition. A zero-result module is mergeable only
+  // when Job Search explicitly marked it `empty-complete`; recovery/error
+  // branches can also end in `done` with an empty array but must never erase a
+  // board. Collection-only/test completions are likewise never empty inputs.
+  const mergeableModules = useMemo(
+    () => connectedModules.map((m) => ({
+      ...m,
+      hasPositiveResults: m.count > 0,
+      isAuthoritativeEmpty: m.isScored && m.resultDisposition === 'empty-complete',
+    })),
+    [connectedModules],
+  );
+
+  // Keep every valid terminal input in the staleness signature, INCLUDING a
+  // genuinely completed zero-result re-run. Only positive-result modules
   // contribute jobs to the actual merge.
   const completedModules = useMemo(
-    () => connectedModules.filter((m) => m.hubState === 'done'),
-    [connectedModules],
+    () => mergeableModules.filter((m) => m.hubState === 'done' && (m.hasPositiveResults || m.isAuthoritativeEmpty)),
+    [mergeableModules],
   );
   const readyModules = useMemo(
     () => completedModules.filter((m) => m.count > 0),
@@ -146,7 +176,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     () => (stale ? (data.staleReason || staleReason(data.combineSignature, completedModules, connectedModules)) : ''),
     [stale, data.staleReason, data.combineSignature, completedModules, connectedModules]
   );
-  const canReplaceWithEmpty = stale && allConnectedModulesDone && readyModules.length === 0;
+  const emptyReplacementBlockReason = emptyReplacementIneligibilityReason({
+    stale,
+    allConnectedModulesDone,
+    readyModuleCount: readyModules.length,
+  });
+  const canReplaceWithEmpty = emptyReplacementBlockReason === null;
 
   // ── Cascade filters (score slider + per-source), scoped to THIS board's cards.
   // computeJobTreeView REMOVES non-matching cards and any branch with no matching
@@ -270,6 +305,48 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId: id, childTypes: ['jobcard', 'jobgroup'] });
   }, [id, getNodes, getEdges, deleteElements]);
 
+  const requestEmptyReplacement = useCallback(() => {
+    const owned = getNodes().filter((node) =>
+      (node.type === 'jobcard' || node.type === 'jobgroup') && node.data?.hubId === id
+    );
+    const resultCardCount = owned.filter((node) => node.type === 'jobcard').length;
+    const resultGroupCount = owned.filter((node) => node.type === 'jobgroup').length;
+    setEmptyReplacementPrompt({ resultCardCount, resultGroupCount });
+    EventLogger.log(`[JobBoard] empty replacement confirmation requested id=${id} cards=${resultCardCount} groups=${resultGroupCount}`);
+  }, [getNodes, id]);
+
+  const cancelEmptyReplacement = useCallback(() => {
+    const prompt = emptyReplacementPrompt;
+    EventLogger.log(`[JobBoard] empty replacement cancelled id=${id} cards=${prompt?.resultCardCount ?? 0} groups=${prompt?.resultGroupCount ?? 0}`);
+    setEmptyReplacementPrompt(null);
+  }, [emptyReplacementPrompt, id]);
+
+  const confirmEmptyReplacement = useCallback(() => {
+    setEmptyReplacementPrompt(null);
+    // The input state may have changed while the confirmation was open. Never
+    // delete the prior cascade unless every connected module is still a genuine
+    // scored terminal zero-result input.
+    if (!canReplaceWithEmpty) {
+      EventLogger.log(`[JobBoard] empty replacement confirmation ignored id=${id} reason=${emptyReplacementBlockReason}`);
+      return;
+    }
+    document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    clearBoardChildren();
+    const perModule = completedModules.map((m) => ({ label: m.label, count: m.count }));
+    updateGlobal(id, {
+      hubState: 'done', resultCount: 0, moduleCount: completedModules.length,
+      scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
+      sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
+      mergeStats: {
+        totalIncoming: 0, unique: 0, duplicatesRemoved: 0,
+        collisions: 0, collisionUpgrades: 0, collisionAssessmentUpgrades: 0, modules: completedModules.length, perModule,
+      },
+      combineSignature: combineSignature(completedModules), stale: false, staleReason: null,
+    });
+    EventLogger.log(`[JobBoard] confirmed empty replacement id=${id} modules=${completedModules.length}`);
+    addToast({ title: 'Board updated', description: 'The completed searches have no current jobs; old results were cleared. Undo restores them.', type: 'info' });
+  }, [addToast, canReplaceWithEmpty, emptyReplacementBlockReason, clearBoardChildren, completedModules, id, updateGlobal]);
+
   const cleanupBoard = useCallback(() => {
     epoch.bump();
     combineRunRef.current = null;
@@ -314,24 +391,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     if (combineRunRef.current) return;
     if (readyModules.length === 0 && allConnectedModulesDone) {
       // A source may legitimately complete with no matching/new jobs. Replace
-      // the hidden previous cascade with a truthful empty board instead of
-      // trapping the user behind a Re-combine button that cannot act.
-      document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-      clearBoardChildren();
-      const perModule = completedModules.map((m) => ({ label: m.label, count: m.count }));
-      updateGlobal(id, {
-        hubState: 'done', resultCount: 0, moduleCount: completedModules.length,
-        scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
-        sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
-        mergeStats: {
-          totalIncoming: 0, unique: 0, duplicatesRemoved: 0,
-          collisions: 0, collisionUpgrades: 0, collisionAssessmentUpgrades: 0, modules: completedModules.length, perModule,
-        },
-        combineSignature: combineSignature(completedModules), stale: false, staleReason: null,
-      });
-      completeManualAiRun(options?.manualAiRunId);
-      EventLogger.log(`[JobBoard] replaced stale results with empty completed inputs id=${id} modules=${completedModules.length}`);
-      addToast({ title: 'Board updated', description: 'The completed searches have no current jobs; old results were cleared.', type: 'info' });
+      // the hidden previous cascade only after an explicit confirmation. The
+      // prompt makes the affected board-owned node count visible and defaults to
+      // retaining the stale results.
+      if (canReplaceWithEmpty) {
+        requestEmptyReplacement();
+      } else {
+        addToast({
+          title: 'Board already current',
+          description: 'The completed searches have no jobs and this board already reflects that result.',
+          type: 'info',
+        });
+      }
       return;
     }
     if (readyModules.length === 0) {
@@ -389,7 +460,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       try {
         const compactJobs = union.map((j) => ({
           careerDirection: j.careerDirection || '',
-          matchScore: typeof j.matchScore === 'number' ? j.matchScore : 0,
+          matchScore: normalizeJobMatchScore(j.matchScore),
           salary: j.salary || '',
           title: j.title || '',
           source: j.source || '',
@@ -535,7 +606,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [completedModules, readyModules, allConnectedModulesDone, getNodes, getNode, id, clearBoardChildren, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun]);
+  }, [completedModules, readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getNode, id, clearBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun]);
 
   useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
@@ -578,7 +649,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [canvasFilePath, data.manualAiResume, data.locked, handleCombine, id, readyModules.length]);
 
   return (
-    <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dropsBlocked>
+    <>
+      <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dropsBlocked>
       {/* Header */}
       <div className="flex items-center gap-2 px-3 pt-3 pb-2">
         <div className="w-7 h-7 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">
@@ -659,6 +731,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           combining={combining}
         />
       )}
-    </HubContainer>
+      </HubContainer>
+
+      {emptyReplacementPrompt && (
+        <ConfirmDialog
+          title="Clear stale board results?"
+          message={`The completed scored searches have no current jobs. This will remove ${emptyReplacementPrompt.resultCardCount} board-owned result card${emptyReplacementPrompt.resultCardCount === 1 ? '' : 's'} and ${emptyReplacementPrompt.resultGroupCount} board-owned group${emptyReplacementPrompt.resultGroupCount === 1 ? '' : 's'}. Undo restores them.`}
+          confirmLabel="Clear stale results"
+          cancelLabel="Keep stale results"
+          variant="warning"
+          onConfirm={confirmEmptyReplacement}
+          onCancel={cancelEmptyReplacement}
+        />
+      )}
+    </>
   );
 });

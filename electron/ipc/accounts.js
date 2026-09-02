@@ -92,7 +92,19 @@ export function selectRestorableStatuses(stored, now = Date.now(), maxAgeMs = ST
     if (isLegacyIndeedPublicJobsVerdict(id, v.lastReason)) continue;
     const ts = Number(v.ts) || 0;
     if (!ts || (now - ts) >= maxAgeMs) continue;
-    out[id] = { connected: true, ts, lastReason: typeof v.lastReason === 'string' ? v.lastReason : undefined, restoredFromDisk: true };
+    out[id] = {
+      connected: true, ts,
+      lastReason: typeof v.lastReason === 'string' ? v.lastReason : undefined,
+      restoredFromDisk: true,
+      // Carry the last negative verdict's reason forward across the restart too
+      // (see writeStatusCache for why it's kept). A blob written by a build that
+      // predates this field simply has no `lastNegative` — the guard below reads
+      // that as "none recorded", the same as any other absent optional field,
+      // never as a malformed cache.
+      ...(v.lastNegative && typeof v.lastNegative === 'object' && typeof v.lastNegative.reason === 'string'
+        ? { lastNegative: { reason: v.lastNegative.reason, ts: Number(v.lastNegative.ts) || undefined } }
+        : {}),
+    };
   }
   return out;
 }
@@ -122,6 +134,14 @@ function persistStatusCache() {
         connected: !!v.connected,
         ts: Number(v.ts) || Date.now(),
         ...(typeof v.lastReason === 'string' ? { lastReason: v.lastReason.slice(0, 300) } : {}),
+        // Same 300-char bound as lastReason above, and — like this function's own
+        // lastTrace field — the trace body itself is never written to disk, only
+        // the reason text. Without a bound here the cache file would grow once
+        // per platform per restart forever; with it, this mirrors exactly how
+        // lastReason is already kept small enough to persist indefinitely.
+        ...(v.lastNegative && typeof v.lastNegative.reason === 'string'
+          ? { lastNegative: { reason: v.lastNegative.reason.slice(0, 300), ts: Number(v.lastNegative.ts) || Number(v.ts) || Date.now() } }
+          : {}),
       };
     }
     store.set(STATUS_CACHE_STORE_KEY, compact);
@@ -407,7 +427,30 @@ export function getSoftLoginWallMatch(visibleText, config = {}) {
 }
 
 export async function writeStatusCache(platformId, connected, extras = {}) {
-  _statusCache[platformId] = { connected, ts: Date.now(), ...extras };
+  // `lastReason`/`lastTrace` (via extras) are a SINGLE slot holding only the
+  // CURRENT verdict — a later write freely overwrites them, connected or not.
+  // That is exactly what destroyed the one diagnostic a bug report needed:
+  // Glassdoor's startup verify wrote a rich not-connected trace (HTTP status,
+  // body sniff, cookie check) at 23:39:38; a login window 5 minutes later
+  // auto-detected success and overwrote it with a bare `status: 'auto-detected'`
+  // trace, so by the time anyone looked, the evidence for the platform that
+  // actually misbehaved was gone. `lastNegative` is a SEPARATE slot that only a
+  // connected:false write ever touches — a connected:true write carries the
+  // existing value forward untouched — so the most recent genuine "not
+  // connected" reason/trace always survives however many positive verdicts
+  // land after it.
+  const priorNegative = _statusCache[platformId]?.lastNegative;
+  const lastNegative = connected
+    ? priorNegative
+    : (extras.lastReason !== undefined || extras.lastTrace !== undefined)
+      ? { reason: extras.lastReason, trace: extras.lastTrace, ts: Date.now() }
+      : priorNegative;
+  _statusCache[platformId] = {
+    connected,
+    ts: Date.now(),
+    ...extras,
+    ...(lastNegative ? { lastNegative } : {}),
+  };
   // Persist so the next launch can restore last-known-connected and survive an
   // intermittent anti-bot verify without forcing a re-login (see loadPersistedStatusCache).
   persistStatusCache();
@@ -703,6 +746,14 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   // across restarts instead of an empty cache → false "needs login" every launch.
   loadPersistedStatusCache();
 
+  // Startup verification uses short-lived pages in the retained singleton. It
+  // must not turn that implementation detail into a process-long ownership of
+  // the shared Chrome profile: a later native login/captcha window needs that
+  // same userDataDir. Snapshot identity rather than a boolean so a concurrent
+  // teardown/relaunch is correctly attributed to this verification only when
+  // it created the current generation.
+  const stealthBefore = getStealthBrowserInfo();
+
   const sellIds = getSellMonitorPlatforms().map(p => p.id);
   const jobIds  = getJobLoginPlatforms().map(p => p.id);
   const allIds  = [...sellIds, ...jobIds];
@@ -832,6 +883,26 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
     }
   });
   await Promise.all(workers);
+
+  // Every normal verifier page closes in fetchHtmlClean's finally block. Once
+  // its worker pool has drained, release an idle singleton that this startup
+  // run brought up. Never close a browser that predated the run, changed hands
+  // to a concurrent caller, or still has a live page/reservation/transition.
+  // This is the same ownership + safety rule used by the post-login cookie
+  // survival check above; without it a clean startup verify leaves Chrome
+  // holding browser-data's OS lock for the rest of the app session.
+  const stealthAfter = getStealthBrowserInfo();
+  const weStartedIt = stealthAfter.connected
+    && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
+  if (weStartedIt) {
+    const busy = await getBrowserSessionResetBlocker();
+    if (busy) {
+      logger.info(`[Accounts] Leaving the shared browser up after startup verify — ${busy}`);
+    } else {
+      await closeStealthBrowser(false);
+      logger.info('[Accounts] Released idle shared browser after startup verify');
+    }
+  }
 
   const finishedAt = Date.now();
   _lastVerifyRun = {
@@ -1043,6 +1114,11 @@ export function registerAccountsHandlers() {
       connected: !!cached?.connected,
       lastConfirmedAt: cached?.ts || null,
       lastReason: cached?.lastReason || null,
+      // The most recent connected:false verdict's reason/trace, kept alive
+      // through any later connected:true write (see writeStatusCache) — lets a
+      // "why did this ever say not connected" question be answered even when
+      // the platform currently reads connected.
+      lastNegative: cached?.lastNegative || null,
       name: config.name,
       sellerUrl: config.sellerUrl,
     };
@@ -1062,6 +1138,8 @@ export function registerAccountsHandlers() {
       connected: !!cached?.connected,
       lastConfirmedAt: cached?.ts || null,
       lastReason: cached?.lastReason || null,
+      // See check-sell-monitor-auth above — same preserved-negative-verdict field.
+      lastNegative: cached?.lastNegative || null,
       name: config.name,
     };
   });

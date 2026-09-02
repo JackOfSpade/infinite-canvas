@@ -24,7 +24,12 @@ const { dialog, BrowserWindow, safeStorage } = electronPkg;
 // through as-is.
 const ENC_PREFIX = 'safeStorage:v1:';
 const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
-const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
+const JOBS_SECRET_KEYS = ['usajobsApiKey', 'diceApiKey'];
+
+// Bootstrap Dice key: used until the app captures a live one from dice.com. It
+// is ALSO the settings-schema default, so its presence in the store proves
+// nothing — see hasStoredDiceApiKey.
+const DICE_BOOTSTRAP_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
 const GEMINI_MODEL_RUNTIME_STATE_KEY = 'geminiModelRuntimeState';
 
 // ── Claude live-group family selection ──────────────────────────────────────
@@ -187,12 +192,7 @@ function getStore() {
         // Dice's internal API key (extracted from their web app). Auto-refreshed
         // when the app detects a 500 from dhigroupinc.com — this default is the
         // bootstrap value used until a live key is captured from dice.com.
-        diceApiKey: '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8',
-        // Scrapfly API key for Indeed scraping. Indeed's anti-bot is too strong
-        // for Puppeteer alone; Scrapfly's ASP (anti-scraping protection) bypass
-        // proxies through residential IPs + fingerprint spoofing. Get a key at
-        // scrapfly.io — the Hobby plan is free for light usage.
-        scrapflyApiKey: '',
+        diceApiKey: DICE_BOOTSTRAP_API_KEY,
       },
     },
   });
@@ -394,8 +394,12 @@ export function getAISettings() {
 }
 
 /**
- * Per-source credentials for job-search APIs. USAJobs and Scrapfly/Indeed
- * require keys; the structure leaves room to add more sources without another getter.
+ * Per-source credentials for job-search APIs. USAJobs and Dice require keys;
+ * the structure leaves room to add more sources without another getter.
+ * Indeed needs none — it runs a real local Chrome (indeedBrowser.js), not a
+ * scraping proxy. A Scrapfly key used to live here for an Indeed REST path that
+ * no longer exists; it was removed because the bug report advertised it as a
+ * missing Indeed dependency and sent every Indeed investigation down a dead end.
  * Falls back to process.env for back-compat with users still using the old
  * .env-based config (purely additive — UI-configured values take precedence).
  */
@@ -404,13 +408,28 @@ export function getJobsSettings() {
   return {
     usajobsApiKey:  jobs.usajobsApiKey  || process.env.USAJOBS_API_KEY  || '',
     usajobsEmail:   jobs.usajobsEmail   || process.env.USAJOBS_EMAIL    || '',
-    scrapflyApiKey: jobs.scrapflyApiKey || process.env.SCRAPFLY_API_KEY || '',
   };
 }
 
 export function getDiceApiKey() {
   const stored = tryGetStore()?.get('jobs.diceApiKey');
-  return decryptSecret(stored) || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+  return decryptSecret(stored) || DICE_BOOTSTRAP_API_KEY;
+}
+
+/**
+ * Has a LIVE Dice key been captured from dice.com, as opposed to the bootstrap
+ * default baked in below?
+ *
+ * Two things make the obvious checks wrong, and both would put a falsehood in
+ * the bug report. getDiceApiKey never returns empty, so truthiness on it is
+ * always true. And the settings SCHEMA seeds `jobs.diceApiKey` with the
+ * bootstrap value, so a fresh install already has a stored key — meaning
+ * "is something stored?" is also always true. The only honest test is whether
+ * the effective key DIFFERS from the bootstrap constant.
+ */
+export function hasStoredDiceApiKey() {
+  const effective = decryptSecret(tryGetStore()?.get('jobs.diceApiKey'));
+  return !!effective && effective !== DICE_BOOTSTRAP_API_KEY;
 }
 
 export function saveDiceApiKey(key) {

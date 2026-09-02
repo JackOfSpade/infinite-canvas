@@ -44,6 +44,13 @@ let durableStatePromise = null;
 let durableMutationTail = Promise.resolve();
 let durableWriteTail = Promise.resolve();
 let durableDeferredWriteTimer = null;
+// A bug report must be able to distinguish a clean manual-AI round trip from
+// a request that was rejected, replayed after a dialog remount, or cancelled.
+// Keep only lifecycle metadata: prompts, pasted responses, attachments, and
+// validator error text may contain private career data and never enter this
+// bounded process-local trail.
+const HANDOFF_LIFECYCLE_LIMIT = 40;
+const handoffLifecycles = [];
 const NON_API_AI_HANDLER_CHANNELS = [
   'replay-pending-non-api-ai-requests',
   'submit-non-api-ai-response',
@@ -213,6 +220,75 @@ export function isNonApiJobTask(task) {
   return NON_API_JOB_TASKS.has(task);
 }
 
+function createHandoffLifecycle({ requestId, sender, nodeId, task, batch, batchTotal, itemCount, attemptKind, rootBatchSize, materializedPrompt }) {
+  const issuedAt = Date.now();
+  const lifecycle = {
+    requestId: String(requestId || '').slice(0, 12),
+    windowId: sender?.id ?? null,
+    nodeId: nodeId || null,
+    task: task || 'unknown',
+    batch: batch ?? null,
+    batchTotal: batchTotal ?? null,
+    itemCount: itemCount ?? null,
+    attemptKind: attemptKind || 'initial',
+    rootBatchSize: rootBatchSize ?? null,
+    // Size only, never content — enough to tell a 1-job prompt from a 15-job
+    // one when the batch label itself is what is under suspicion.
+    promptChars: typeof materializedPrompt === 'string' ? materializedPrompt.length : null,
+    issuedAt,
+    updatedAt: issuedAt,
+    deliveries: 0,
+    replays: 0,
+    reissues: 0,
+    rejected: 0,
+    acceptedAt: null,
+    settledAt: null,
+    outcome: 'pending',
+  };
+  handoffLifecycles.push(lifecycle);
+  if (handoffLifecycles.length > HANDOFF_LIFECYCLE_LIMIT) handoffLifecycles.shift();
+  return lifecycle;
+}
+
+function updateHandoffLifecycle(record, update) {
+  const lifecycle = record?.lifecycle;
+  if (!lifecycle) return;
+  const now = Date.now();
+  lifecycle.updatedAt = now;
+  if (update === 'delivered') lifecycle.deliveries += 1;
+  else if (update === 'replayed') {
+    lifecycle.replays += 1;
+    lifecycle.deliveries += 1;
+  } else if (update === 'reissued') {
+    lifecycle.reissues += 1;
+    lifecycle.deliveries += 1;
+  } else if (update === 'rejected') lifecycle.rejected += 1;
+  else if (update === 'accepted') lifecycle.acceptedAt = now;
+  else if (update?.settled) {
+    lifecycle.settledAt = now;
+    lifecycle.outcome = update.settled;
+  }
+}
+
+/**
+ * Redacted, bounded receipts for the current Electron process. This is
+ * intentionally separate from `pendingRequests`: completed requests must
+ * remain visible long enough for a bug report, while no prompt or answer is
+ * retained here.
+ */
+export function getNonApiAiHandoffLifecycle({ windowId = null } = {}) {
+  return handoffLifecycles
+    .filter(lifecycle => windowId == null || lifecycle.windowId === windowId)
+    .slice(-20)
+    .map(lifecycle => ({ ...lifecycle }));
+}
+
+// Test-only reset seam. Production never clears this timeline until the app
+// restarts, matching the process-local scope stated in the report.
+export function _resetNonApiAiHandoffLifecycle() {
+  handoffLifecycles.length = 0;
+}
+
 function cleanAttachmentPaths(paths) {
   if (!Array.isArray(paths)) return [];
   return [...new Set(paths
@@ -260,6 +336,10 @@ function safeHandoffSettings(value, seen = new WeakSet()) {
 function cleanBatchNumber(value) {
   const number = Number(value);
   return Number.isInteger(number) && number >= 1 && number <= 100_000 ? number : null;
+}
+
+function cleanAttemptKind(value) {
+  return ['initial', 'partial-recovery', 'split'].includes(value) ? value : 'initial';
 }
 
 function cleanBatchMetadata(batch, batchTotal) {
@@ -329,6 +409,8 @@ function publicRequest(record, validationError = record.validationError || null)
     batch: record.batch,
     batchTotal: record.batchTotal,
     itemCount: record.itemCount,
+    attemptKind: record.attemptKind,
+    rootBatchSize: record.rootBatchSize,
     attachments: [...record.attachmentPaths],
     canStepBack: record.canStepBack,
     stepBackLabel: record.stepBackLabel || null,
@@ -354,6 +436,7 @@ function send(record, channel, payload) {
 function settle(record, outcome) {
   if (!pendingRequests.delete(record.requestId)) return;
   if (record.abortListener) record.signal?.removeEventListener?.('abort', record.abortListener);
+  updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : 'failed' });
   send(record, 'non-api-ai-settled', { requestId: record.requestId, ...outcome });
 }
 
@@ -363,8 +446,13 @@ function abortPending(record, reason) {
   record.reject(error);
 }
 
-function sendRequest(record) {
-  if (send(record, 'non-api-ai-request', publicRequest(record))) return true;
+function sendRequest(record, deliveryKind = 'initial') {
+  if (send(record, 'non-api-ai-request', publicRequest(record))) {
+    updateHandoffLifecycle(record, deliveryKind === 'replay'
+      ? 'replayed'
+      : deliveryKind === 'reissue' ? 'reissued' : 'delivered');
+    return true;
+  }
   // A failed retry/replay delivery is just as terminal as a failed first
   // delivery. Leaving it in the map would create a handoff no renderer can
   // ever complete, particularly during a window-close race.
@@ -391,6 +479,8 @@ export async function requestNonApiAi({
   batch,
   batchTotal,
   itemCount,
+  attemptKind,
+  rootBatchSize,
   retryOnTruncation,
   responseValidator,
   canStepBack = false,
@@ -438,6 +528,8 @@ export async function requestNonApiAi({
     nodeId: context.nodeId || null,
     ...batchMeta,
     itemCount: cleanBatchNumber(itemCount),
+    attemptKind: cleanAttemptKind(attemptKind),
+    rootBatchSize: cleanBatchNumber(rootBatchSize),
     task,
     responseSchema,
     responseValidator: typeof responseValidator === 'function' ? responseValidator : null,
@@ -454,7 +546,9 @@ export async function requestNonApiAi({
     resolve: null,
     reject: null,
     abortListener: null,
+    lifecycle: null,
   };
+  record.lifecycle = createHandoffLifecycle(record);
 
   await updateDurableStep(record, { status: 'pending', draft: record.initialResponse || '', response: null });
   return new Promise((resolve, reject) => {
@@ -463,13 +557,33 @@ export async function requestNonApiAi({
     record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));
     pendingRequests.set(record.requestId, record);
     signal?.addEventListener?.('abort', record.abortListener, { once: true });
-    sendRequest(record);
+    sendRequest(record, 'initial');
   });
 }
 
 /** Pure validation seam shared by the IPC submit handler and focused tests. */
 export function validateNonApiAiSubmission({ response, responseSchema, responseValidator, task } = {}) {
   if (typeof response !== 'string' || !response.trim()) throw new Error('Paste a non-empty AI response before submitting.');
+  const trimmed = response.trim();
+  // Cheap plausibility gate BEFORE full schema validation. A real report: a
+  // 47-character paste arrived for an 11-job job-scoring request, and the
+  // schema-violation message below ("... is missing required property
+  // \"scores\". Please retry...") told the user to retry the MODEL — blaming
+  // its response shape, when a paste that short for 11 jobs is far more
+  // likely to be the wrong clipboard content than a model failure. That
+  // request settled 138 minutes after it was issued. (The paste's actual
+  // content is never retained, so which it was cannot be established after
+  // the fact — hence a message that names both possibilities rather than
+  // asserting one.) This check can only ever fire on a paste that is
+  // structurally incapable of ever satisfying this task's JSON schema, so it
+  // can never reject a response that would otherwise have been accepted:
+  // parseAiJson() (jsonRepair.js) can only ever extract JSON from a span
+  // anchored on a literal '{' or '[' in the raw text, so the total absence
+  // of both is not a guess — it is a hard precondition for any structured
+  // parse to succeed, for every current and future responseSchema.
+  if (responseSchema && !/[{[]/.test(trimmed)) {
+    throw new Error(`Non-API AI did not receive a JSON response for task '${task || 'unknown'}': the pasted text contains no '{' or '[' at all, so it cannot be the required structured reply. This usually means the wrong clipboard content was pasted, or the copy was cut off before the model's answer began. Copy the model's FULL response and paste it again; no partial result was used.`);
+  }
   let value = response;
   if (responseSchema) {
     const parsed = parseAiJson(response);
@@ -501,7 +615,7 @@ export function registerNonApiAiHandlers() {
     let count = 0;
     for (const record of pendingRequests.values()) {
       if (record.sender !== event.sender) continue;
-      if (sendRequest(record)) count += 1;
+      if (sendRequest(record, 'replay')) count += 1;
     }
     return { count };
   });
@@ -522,6 +636,7 @@ export function registerNonApiAiHandlers() {
       record.validationError = null;
       record.settling = true;
       await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
+      updateHandoffLifecycle(record, 'accepted');
       settle(record, { accepted: true });
       record.resolve(value);
       return { accepted: true };
@@ -529,8 +644,9 @@ export function registerNonApiAiHandlers() {
       record.settling = false;
       const message = error?.message || 'The pasted response could not be accepted.';
       record.validationError = message;
+      updateHandoffLifecycle(record, 'rejected');
       logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}': ${message}`);
-      sendRequest(record);
+      sendRequest(record, 'reissue');
       return { accepted: false, validationErrors: [message] };
     }
   });

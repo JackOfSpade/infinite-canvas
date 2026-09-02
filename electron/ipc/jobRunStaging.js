@@ -43,6 +43,11 @@ import { logger } from '../logger.js';
 const MANIFEST_VERSION = 1;
 const STAGING_SUFFIX = '.jobs-staging.jsonl';
 const MANIFEST_SUFFIX = '.jobs-run.json';
+// Unlike the manifest/staging pair, this compact receipt intentionally survives
+// a clean finish. It answers "did the prior-process run complete?" without
+// retaining listings, search queries, career data, URLs, or warning evidence.
+const LAST_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
+export const JOB_RUN_RECEIPT_VERSION = 1;
 // A manifest older than this is "stale" — not auto-offered for resume (the user
 // likely abandoned it). 24h; the renderer can still surface a manual choice.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -56,6 +61,14 @@ export function runFilesForCanvas(canvasFilePath) {
     staging:  path.join(dir, `${base}${STAGING_SUFFIX}`),
     manifest: path.join(dir, `${base}${MANIFEST_SUFFIX}`),
   };
+}
+
+/** Durable, redacted terminal receipt path for a saved canvas. */
+export function lastRunReceiptPathForCanvas(canvasFilePath) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
+  const dir = path.dirname(canvasFilePath);
+  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
+  return path.join(dir, `${base}${LAST_RUN_RECEIPT_SUFFIX}`);
 }
 
 let _tmpSeq = 0;
@@ -95,6 +108,142 @@ function withManifestLock(filePath, fn) {
   });
 }
 
+// Receipt writes are normally made from the manifest-locked completion
+// transaction below. Keep an independent path mutex for report/test callers
+// too, so an out-of-band read/update cannot tear a JSON receipt.
+const _receiptTails = new Map();
+function withReceiptLock(filePath, fn) {
+  const prev = _receiptTails.get(filePath) || Promise.resolve();
+  const result = prev.then(fn, fn);
+  const tail = result.then(() => {}, () => {});
+  _receiptTails.set(filePath, tail);
+  return result.finally(() => {
+    if (_receiptTails.get(filePath) === tail) _receiptTails.delete(filePath);
+  });
+}
+
+function receiptNumber(value, fallback = 0) {
+  if (value == null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+
+function receiptToken(value, max = 80) {
+  const text = String(value ?? '').trim();
+  // Source IDs, stop reasons, and warning codes are controlled identifiers.
+  // Still restrict their character set here so no provider body/error text can
+  // accidentally become durable report data through a future caller.
+  return /^[a-zA-Z0-9_.:/-]+$/.test(text) ? text.slice(0, max) : null;
+}
+
+function sanitizeReceiptSource(source = {}) {
+  const warning = source.warning && typeof source.warning === 'object'
+    ? {
+        ...(receiptToken(source.warning.code) ? { code: receiptToken(source.warning.code) } : {}),
+        ...(receiptToken(source.warning.severity, 24) ? { severity: receiptToken(source.warning.severity, 24) } : {}),
+      }
+    : null;
+  return {
+    count: receiptNumber(source.count),
+    providerGathered: receiptNumber(source.providerGathered),
+    relevanceDropped: receiptNumber(source.relevanceDropped),
+    ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),
+    ...(receiptToken(source.stopReason) ? { stopReason: receiptToken(source.stopReason) } : {}),
+    ...(warning && Object.keys(warning).length > 0 ? { warning } : {}),
+  };
+}
+
+/**
+ * Whitelist the completion receipt shape. Keep this boundary defensive: this
+ * artifact is read by support reports after restart, so it must never become a
+ * backdoor for jobs, queries, profile data, URLs, or provider error bodies.
+ */
+export function sanitizeLastRunReceipt(receipt = {}) {
+  const runId = String(receipt.runId || '').slice(0, 180);
+  const nodeId = String(receipt.nodeId || '').slice(0, 180);
+  const terminalStatus = ['completed', 'failed', 'aborted'].includes(receipt?.terminal?.status)
+    ? receipt.terminal.status
+    : 'completed';
+  const terminalOutcome = ['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
+    ? receipt.terminal.outcome
+    : 'unknown';
+  const sources = {};
+  for (const [sourceId, source] of Object.entries(receipt.sources || {}).slice(0, 20)) {
+    const safeId = receiptToken(sourceId, 60);
+    if (safeId) sources[safeId] = sanitizeReceiptSource(source);
+  }
+  const funnel = receipt.funnel && typeof receipt.funnel === 'object' ? {
+    raw: receiptNumber(receipt.funnel.raw),
+    relevanceDropped: receiptNumber(receipt.funnel.relevanceDropped),
+    deduped: receiptNumber(receipt.funnel.deduped),
+    ageDropped: receiptNumber(receipt.funnel.ageDropped),
+    roleDropped: receiptNumber(receipt.funnel.roleDropped),
+    historyDropped: receiptNumber(receipt.funnel.historyDropped),
+    descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
+    kept: receiptNumber(receipt.funnel.kept),
+  } : null;
+  return {
+    version: JOB_RUN_RECEIPT_VERSION,
+    runId,
+    nodeId,
+    startedAt: receiptNumber(receipt.startedAt, null),
+    completedAt: receiptNumber(receipt.completedAt, null),
+    updatedAt: receiptNumber(receipt.updatedAt ?? receipt.completedAt, null),
+    terminal: { status: terminalStatus, outcome: terminalOutcome },
+    ...(funnel ? { funnel } : {}),
+    sources,
+    stagingStarted: receipt.stagingStarted === true,
+    cleanup: {
+      attempted: receipt.cleanup?.attempted === true,
+      cleared: typeof receipt.cleanup?.cleared === 'boolean' ? receipt.cleanup.cleared : null,
+    },
+  };
+}
+
+export async function readLastRunReceipt(canvasFilePath) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+  if (!filePath) return null;
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Synchronous companion for bug-report assembly, which is intentionally sync. */
+export function readLastRunReceiptSync(canvasFilePath) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+  if (!filePath) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Direct, token-guarded receipt write for focused tests/support tooling. */
+export async function writeLastRunReceipt(canvasFilePath, receipt, { expectedRunId = null } = {}) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+  if (!filePath) return { written: false, receipt: null };
+  return withReceiptLock(filePath, async () => {
+    const current = await readLastRunReceipt(canvasFilePath);
+    if (expectedRunId != null && current?.runId !== expectedRunId) {
+      return { written: false, receipt: current, tokenMismatch: true };
+    }
+    const sanitized = sanitizeLastRunReceipt(receipt);
+    if (!sanitized.runId) return { written: false, receipt: current, invalid: true };
+    try {
+      await atomicWriteJson(filePath, sanitized);
+      return { written: true, receipt: sanitized };
+    } catch (error) {
+      logger.warn(`[JobRunStaging] writeLastRunReceipt failed: ${error?.message || error}`);
+      return { written: false, receipt: current, error: String(error?.message || error) };
+    }
+  });
+}
+
 async function readManifest(canvasFilePath) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return null;
@@ -124,11 +273,43 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     sources,
   };
   const ok = await withManifestLock(files.manifest, async () => {
+    // Do not truncate the prior recovery file until the replacement manifest
+    // has committed. A manifest write can fail (read-only volume, a path that
+    // was replaced by a directory, disk-full), and losing the old JSONL while
+    // its old manifest remains would turn a recoverable run into an empty one.
+    // This is a rollback guard for ordinary I/O failures; the two sidecars
+    // cannot be made one filesystem-atomic unit across a sudden power loss.
+    const stagingBackup = `${files.staging}.${process.pid}.${_tmpSeq++}.bak`;
+    let movedPriorStaging = false;
+    let createdFreshStaging = false;
     try {
-      await fs.promises.writeFile(files.staging, '', { encoding: 'utf8', mode: 0o600 }); // truncate prior staging
+      try {
+        await fs.promises.rename(files.staging, stagingBackup);
+        movedPriorStaging = true;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      // `wx` prevents a concurrent external writer from being silently
+      // truncated between the move above and this fresh-run initialization.
+      await fs.promises.writeFile(files.staging, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      createdFreshStaging = true;
       await atomicWriteJson(files.manifest, manifest);
+      if (movedPriorStaging) await fs.promises.unlink(stagingBackup).catch((error) => {
+        // The new run is already valid. Retain the backup for manual recovery
+        // rather than falsely reporting start failure after its commit.
+        logger.warn(`[JobRunStaging] could not remove prior staging backup: ${error?.message || error}`);
+      });
       return true;
     } catch (e) {
+      if (createdFreshStaging) await fs.promises.unlink(files.staging).catch(() => {});
+      if (movedPriorStaging) {
+        try { await fs.promises.rename(stagingBackup, files.staging); }
+        catch (restoreError) {
+          // Leave the backup in place rather than deleting the user's only
+          // recoverable copy. The warning gives support a concrete path.
+          logger.warn(`[JobRunStaging] could not restore prior staging from ${stagingBackup}: ${restoreError?.message || restoreError}`);
+        }
+      }
       logger.warn(`[JobRunStaging] startRun failed: ${e?.message || e}`);
       return false;
     }
@@ -280,21 +461,86 @@ export async function clearRun(canvasFilePath, { trashItem = null, expectedRunId
       const manifest = await readManifest(canvasFilePath);
       if (!manifest || manifest.runId !== expectedRunId) return false;
     }
-    for (const p of [files.staging, files.manifest]) {
-      // Skip a sidecar that isn't there (a run may have only one, or it was
-      // already cleared) so trashItem doesn't error on a missing path.
-      try { await fs.promises.access(p); } catch { continue; }
-      if (trashItem) {
-        try { await trashItem(p); continue; }
-        catch (err) {
-          // trashItem can fail on volumes without a Trash (network / exFAT). Fall
-          // back to a hard delete so "Start fresh" still clears the run rather
-          // than leaving a stale resumable manifest behind.
-          logger.warn(`[JobRunStaging] trashItem failed for ${p} (${err?.message || err}); hard-deleting instead`);
-        }
-      }
-      try { await fs.promises.unlink(p); } catch { /* already gone (race) */ }
-    }
-    return true;
+    return clearRunFiles(files, trashItem);
   });
+}
+
+async function clearRunFiles(files, trashItem = null) {
+  let cleared = true;
+  for (const p of [files.staging, files.manifest]) {
+    // Skip a sidecar that isn't there (a run may have only one, or it was
+    // already cleared) so trashItem doesn't error on a missing path.
+    try { await fs.promises.access(p); } catch { continue; }
+    if (trashItem) {
+      try {
+        await trashItem(p);
+      } catch (err) {
+        // trashItem can fail on volumes without a Trash (network / exFAT). Fall
+        // back to a hard delete so "Start fresh" still clears the run rather
+        // than leaving a stale resumable manifest behind.
+        logger.warn(`[JobRunStaging] trashItem failed for ${p} (${err?.message || err}); hard-deleting instead`);
+        try { await fs.promises.unlink(p); } catch { /* verified below */ }
+      }
+    } else {
+      try { await fs.promises.unlink(p); } catch { /* verified below */ }
+    }
+    try {
+      await fs.promises.access(p);
+      cleared = false;
+    } catch { /* absent = cleared */ }
+  }
+  return cleared;
+}
+
+/**
+ * Atomically records a redacted terminal receipt before removing recovery
+ * sidecars, then records the actual cleanup outcome. The manifest token is
+ * checked under the same lock as startRun/clearRun, so a delayed completion from
+ * an older hub run cannot overwrite a newer run's receipt or delete its files.
+ */
+export async function completeRunWithReceipt(canvasFilePath, receipt, { trashItem = null } = {}) {
+  const files = runFilesForCanvas(canvasFilePath);
+  const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath);
+  const expectedRunId = String(receipt?.runId || '');
+  if (!files || !receiptPath || !expectedRunId) {
+    return { ok: false, cleared: false, receipt: null, reason: 'missing-canvas-or-run-token' };
+  }
+  return withManifestLock(files.manifest, async () => withReceiptLock(receiptPath, async () => {
+    const manifest = await readManifest(canvasFilePath);
+    if (!manifest || manifest.runId !== expectedRunId) {
+      return { ok: false, cleared: false, receipt: null, tokenMismatch: true };
+    }
+    const initial = sanitizeLastRunReceipt({
+      ...receipt,
+      // Do not use process-global telemetry as a fallback here. The manifest is
+      // this run's durable owner and safely fills identity/timing only when the
+      // receipt builder could not match an in-memory search token.
+      nodeId: receipt?.nodeId || manifest.inputs?.nodeId || null,
+      startedAt: receipt?.startedAt ?? manifest.startedAt,
+      stagingStarted: true,
+      cleanup: { attempted: false, cleared: null },
+    });
+    try {
+      await atomicWriteJson(receiptPath, initial);
+    } catch (error) {
+      logger.warn(`[JobRunStaging] completion receipt write failed: ${error?.message || error}`);
+      return { ok: false, cleared: false, receipt: null, receiptWriteFailed: true };
+    }
+
+    const cleared = await clearRunFiles(files, trashItem);
+    const completed = sanitizeLastRunReceipt({
+      ...initial,
+      updatedAt: Date.now(),
+      cleanup: { attempted: true, cleared },
+    });
+    try {
+      await atomicWriteJson(receiptPath, completed);
+      return { ok: true, cleared, receipt: completed };
+    } catch (error) {
+      // The pre-cleanup receipt is still durable, explicitly showing that cleanup
+      // had not yet been confirmed. Do not falsely claim a fully recorded finish.
+      logger.warn(`[JobRunStaging] completion receipt cleanup update failed: ${error?.message || error}`);
+      return { ok: false, cleared, receipt: initial, receiptUpdateFailed: true };
+    }
+  }));
 }

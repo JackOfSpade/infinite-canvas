@@ -15,14 +15,22 @@ const stringifyValidationError = (value) => {
 const requestLabel = (request) => {
   if (!request) return 'AI response';
   const task = request.task || 'AI response';
+  const attemptLabel = request.attemptKind === 'partial-recovery'
+    ? 'partial recovery for '
+    : request.attemptKind === 'split' ? 'split retry for ' : '';
   const itemLabel = Number.isFinite(request.itemCount)
     ? ` · ${request.itemCount} ${request.itemCount === 1 ? 'item' : 'items'}`
     : '';
+  const rootLabel = request.attemptKind !== 'initial'
+    && Number.isFinite(request.rootBatchSize)
+    && request.rootBatchSize !== request.itemCount
+    ? ` · ${request.rootBatchSize}-item root batch`
+    : '';
   if (Number.isFinite(request.batch) && Number.isFinite(request.batchTotal)) {
-    return `${task} · batch ${request.batch} of ${request.batchTotal}${itemLabel}`;
+    return `${task} · ${attemptLabel}batch ${request.batch} of ${request.batchTotal}${itemLabel}${rootLabel}`;
   }
-  if (Number.isFinite(request.batch)) return `${task} · batch ${request.batch}${itemLabel}`;
-  return `${task}${itemLabel}`;
+  if (Number.isFinite(request.batch)) return `${task} · ${attemptLabel}batch ${request.batch}${itemLabel}${rootLabel}`;
+  return `${task}${attemptLabel ? ` · ${attemptLabel.trim()}` : ''}${itemLabel}${rootLabel}`;
 };
 
 const attachmentName = (filePath) => String(filePath || '').split(/[/\\]/).filter(Boolean).pop() || 'Attachment';
@@ -133,9 +141,33 @@ export function NonApiAiDialog() {
       const validationError = stringifyValidationError(incoming.validationError);
       setRequests(previous => {
         const index = previous.findIndex(request => request.requestId === incoming.requestId);
-        if (index === -1) return [...previous, incoming];
+        if (index >= 0) {
+          const next = [...previous];
+          next[index] = { ...next[index], ...incoming };
+          return next;
+        }
+        // Arrival order is NOT batch order. Every top-level scoring batch is
+        // dispatched in a single Promise.all pass (jobs.js), and only a batch
+        // holding MORE than one item awaits the context-window preflight first
+        // — so a 1-item batch issues its handoff inside that synchronous pass
+        // and lands here ahead of its lower-numbered siblings (61 jobs at 15/
+        // batch arrived 5,1,2,3,4). Insert by batch number rather than
+        // appending so the chip strip, the `requests[0]` default selection, and
+        // removeRequest's adjacency fallback all follow the order the person is
+        // asked to work through. Ordering is scoped to one owner (same node +
+        // task); unrelated or unnumbered handoffs keep arrival order by falling
+        // through to the end.
         const next = [...previous];
-        next[index] = { ...next[index], ...incoming };
+        let at = next.length;
+        for (let i = 0; i < next.length; i += 1) {
+          const queued = next[i];
+          if (queued.nodeId === incoming.nodeId
+            && queued.task === incoming.task
+            && Number.isFinite(queued.batch)
+            && Number.isFinite(incoming.batch)
+            && queued.batch > incoming.batch) { at = i; break; }
+        }
+        next.splice(at, 0, incoming);
         return next;
       });
       if (typeof incoming.initialResponse === 'string' && incoming.initialResponse) {
@@ -471,7 +503,11 @@ export function NonApiAiDialog() {
                     || cancellingRequestIds.has(request.requestId)
                     || acceptedRequestIds.has(request.requestId);
                   const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
-                  const label = Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
+                  const label = request.attemptKind === 'partial-recovery'
+                    ? `Recovery ${request.batch}${count}`
+                    : request.attemptKind === 'split'
+                      ? `Split ${request.batch}${count}`
+                      : Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
                   return (
                     <button
                       key={request.requestId}

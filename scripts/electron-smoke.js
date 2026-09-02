@@ -766,6 +766,40 @@ try {
   await page.keyboard.press('Space');
   await waitForCheckbox(indeedPlatform, true, 'toggling Indeed on should restore the hub allow-list');
 
+  step('Job Search target-role input warns about Boolean syntax without blocking it');
+  const roleInput = jobHub.locator('input[placeholder^="Target role"]');
+  await roleInput.waitFor();
+  // The advisory text is deliberately non-blocking: the typed role is always
+  // sent through unchanged. Operators are unsafe to broadcast — measured across
+  // the boards, negation is ignored on three, destructive on two, and on
+  // ZipRecruiter it INVERTS intent, none of which is visible in the run report.
+  const roleAdvisory = jobHub.getByText(/sent as ordinary words, not search operators/i);
+
+  await roleInput.fill('System Architect');
+  assert.equal(await roleAdvisory.count(), 0, 'a plain role must not raise the operator advisory');
+  assert.equal(await roleInput.inputValue(), 'System Architect', 'the typed role is written through to the hub');
+
+  // A HYPHENATED role must not trip the leading-minus rule — this is the most
+  // likely false positive and the one that would nag on an ordinary role.
+  await roleInput.fill('Full-Stack Engineer');
+  assert.equal(await roleAdvisory.count(), 0, 'a hyphenated role must not be mistaken for a -term operator');
+  await roleInput.fill('Sr. Data Engineer');
+  assert.equal(await roleAdvisory.count(), 0, 'an abbreviated seniority must not raise the advisory');
+
+  await roleInput.fill('Controller NOT carpenter');
+  await roleAdvisory.first().waitFor();
+  assert.ok(await roleAdvisory.count() > 0, 'a standalone NOT must raise the advisory');
+  assert.equal(
+    await roleInput.inputValue(), 'Controller NOT carpenter',
+    'the advisory is non-blocking — the typed text is never rewritten or rejected',
+  );
+
+  await roleInput.fill('Engineer -manager');
+  assert.ok(await roleAdvisory.count() > 0, 'a leading minus must raise the advisory');
+
+  await roleInput.fill('');
+  await waitForCount(roleAdvisory, (n) => n === 0, 'clearing the role should clear the advisory');
+
   await page.getByText('Job Board Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 120, y: 150 } },

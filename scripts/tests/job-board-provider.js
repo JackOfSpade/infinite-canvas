@@ -1,7 +1,7 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
 import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
-import { attachCompensationRemoteResidences, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
+import { attachCompensationRemoteResidences, emptyReplacementIneligibilityReason, moduleFingerprint, normalizeJobMatchScore, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
 
 export default [
   {
@@ -72,6 +72,128 @@ export default [
       assert(stats.collisions === 1 && stats.collisionUpgrades === 1,
         `only the linked duplicate should register as a score-upgrade collision, got ${JSON.stringify(stats)}`);
       return { jobs: merged.length, scoreUpgrades: stats.collisionUpgrades };
+    },
+  },
+  {
+    name: 'Job Board taxonomy score projection preserves legacy numeric score strings',
+    run() {
+      assert(normalizeJobMatchScore('80') === 80,
+        'a persisted numeric score string must reach taxonomy bucketing as 80, not a zero fallback');
+      assert(normalizeJobMatchScore(' 72.5 ') === 72.5,
+        'numeric strings retain fractional scores used by a legacy canvas');
+      assert(normalizeJobMatchScore('not-a-score') === 0 && normalizeJobMatchScore(Infinity) === 0,
+        'invalid/non-finite values still use the safe zero fallback');
+      const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      assert(board.includes('matchScore: normalizeJobMatchScore(j.matchScore)'),
+        'the IPC taxonomy projection must use the shared score normalization boundary');
+      return { numericString: normalizeJobMatchScore('80') };
+    },
+  },
+  {
+    name: 'Job Board fingerprint invalidates cards when their visible fit audit changes',
+    run() {
+      const base = {
+        title: 'Engineer', company: 'Acme', matchScore: 82,
+        fitAssessment: {
+          auditStatus: 'audited',
+          confidence: { effective: 'high', groundedRequirementCount: 2, requirementCount: 2 },
+          requirementRows: [{
+            requirement: 'Build services', effectiveStatus: 'direct', scoreImpact: 'scoring', materialGap: false,
+            grounding: { requirementGrounded: true, candidateClaimGrounded: true },
+          }],
+        },
+      };
+      const changedGap = {
+        ...base,
+        fitAssessment: {
+          ...base.fitAssessment,
+          requirementRows: [{
+            ...base.fitAssessment.requirementRows[0],
+            effectiveStatus: 'not_documented', materialGap: true,
+            grounding: { requirementGrounded: true, candidateClaimGrounded: false },
+          }],
+        },
+      };
+      assert(moduleFingerprint([base]) !== moduleFingerprint([changedGap]),
+        'a changed rendered fit-audit status/gap must mark the board stale for Re-combine');
+      assert(moduleFingerprint([base]).startsWith('5:'), 'fit-audit-aware fingerprints use the current v5 format');
+
+      const rejectedEvidenceCountOnly = {
+        ...base,
+        fitAssessment: {
+          ...base.fitAssessment,
+          requirementRows: [{
+            ...base.fitAssessment.requirementRows[0],
+            grounding: {
+              ...base.fitAssessment.requirementRows[0].grounding,
+              rejectedJobEvidence: ['first', 'second'],
+            },
+          }],
+        },
+      };
+      const rejectedEvidenceOneItem = {
+        ...rejectedEvidenceCountOnly,
+        fitAssessment: {
+          ...rejectedEvidenceCountOnly.fitAssessment,
+          requirementRows: [{
+            ...rejectedEvidenceCountOnly.fitAssessment.requirementRows[0],
+            grounding: {
+              ...rejectedEvidenceCountOnly.fitAssessment.requirementRows[0].grounding,
+              rejectedJobEvidence: ['first'],
+            },
+          }],
+        },
+      };
+      assert(moduleFingerprint([rejectedEvidenceCountOnly]) === moduleFingerprint([rejectedEvidenceOneItem]),
+        'the number of rejected evidence excerpts is not card-visible and must not stale a board');
+      const hiddenCoverageA = {
+        ...base,
+        fitAssessment: { ...base.fitAssessment, confidence: { effective: 'high', groundedRequirementCount: -1, requirementCount: 2 } },
+      };
+      const hiddenCoverageB = {
+        ...base,
+        fitAssessment: { ...base.fitAssessment, confidence: { effective: 'high', groundedRequirementCount: -99, requirementCount: 2 } },
+      };
+      assert(moduleFingerprint([hiddenCoverageA]) === moduleFingerprint([hiddenCoverageB]),
+        'malformed coverage values hidden by the card must not stale a board');
+      return { fingerprintChanged: true };
+    },
+  },
+  {
+    name: 'Job Board asks to replace only a stale authoritative empty result and rechecks it on confirm',
+    run() {
+      const staleEmpty = {
+        stale: true,
+        allConnectedModulesDone: true,
+        readyModuleCount: 0,
+      };
+      assert(emptyReplacementIneligibilityReason(staleEmpty) === null,
+        'a stale board fed only by terminal zero-result searches may request confirmation');
+      assert(emptyReplacementIneligibilityReason({ ...staleEmpty, stale: false }) === 'the board is no longer stale',
+        'a non-stale board with the same terminal zero result must not open a replacement confirmation');
+      assert(emptyReplacementIneligibilityReason({ ...staleEmpty, allConnectedModulesDone: false }) === 'one or more connected searches are no longer terminal',
+        'a search that changes state while the prompt is open must block the destructive replacement');
+      assert(emptyReplacementIneligibilityReason({ ...staleEmpty, readyModuleCount: 1 }) === 'one or more connected searches now have jobs',
+        'fresh positive jobs arriving while the prompt is open must block the destructive replacement');
+
+      // The full ReactFlow dialog is intentionally not unit-mounted here. Pin
+      // that both UI transition points use the shared predicate: the initial
+      // click must not open a doomed dialog and confirm must re-check current
+      // inputs rather than trusting the state that opened it.
+      const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const confirmStart = board.indexOf('const confirmEmptyReplacement');
+      const confirmEnd = board.indexOf('const cleanupBoard', confirmStart);
+      const confirm = board.slice(confirmStart, confirmEnd);
+      const combineStart = board.indexOf('const handleCombine');
+      const combineEnd = board.indexOf('\n  return (', combineStart);
+      const combine = board.slice(combineStart, combineEnd);
+      assert(combine.includes('if (canReplaceWithEmpty) {\n        requestEmptyReplacement();')
+        && combine.includes("title: 'Board already current'"),
+      'the non-stale terminal-zero path must show an informational result instead of opening a confirmation');
+      assert(confirm.includes('if (!canReplaceWithEmpty)')
+        && confirm.includes('reason=${emptyReplacementBlockReason}'),
+      'confirmation must re-check current eligibility and log the concrete reason it did not clear results');
+      return { staleEmptyPrompts: true, currentEmptyDoesNotPrompt: true, changedInputsBlocked: true };
     },
   },
   {

@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 
@@ -632,6 +632,32 @@ export default [
       assert(classifyNativeIndeedChallengeTab({ url: 'https://ca.indeed.com/jobs?q=x', title: 'Attention Required!' }) === 'hard-block'
         && classifyNativeIndeedChallengeTab({ url: 'https://ca.indeed.com/jobs?q=x', title: '' }) === 'unknown',
       'exit fallback only accepts an affirmative clean title, never an empty/loading or hard-block page');
+
+      // A TERMINAL Indeed wall ("Additional Verification Required") matches the
+      // pending pattern but has no form, no iframe and no widget. Left as
+      // 'pending' it held the visible window for the full 5-minute ceiling WHILE
+      // HOLDING the shared browser profile lock, then told the user to complete a
+      // check that has no controls. A page frozen at the same url+title is
+      // reclassified; an auto-progressing wall re-titles within seconds and is
+      // unaffected.
+      const WALL = 'Additional Verification Required';
+      assert(nativeIndeedChallengeIsStalled({ classification: 'pending', unchangedForMs: 130_000, title: WALL }),
+        'the known non-interactive wall, frozen past two minutes, is terminal');
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'pending', unchangedForMs: 60_000, title: WALL }),
+        'one minute is not yet enough — closing a window a user is working in is worse than waiting');
+      // The title requirement is the safety property: it is what stops this rule
+      // from ever closing a challenge the user could actually have solved.
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'pending', unchangedForMs: 600_000, title: 'Just a moment…' }),
+        'an auto-progressing wall is never reclassified, however long it sits');
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'pending', unchangedForMs: 600_000, title: 'Verify you are human' }),
+        'an interactive challenge is never reclassified — a user may be mid-solve with a static title');
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'pending', unchangedForMs: 600_000 }),
+        'no title means no evidence, so the rule cannot fire');
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'cleared', unchangedForMs: 600_000, title: WALL }),
+        'a CLEARED page is never reclassified as a block no matter how long it sits');
+      assert(!nativeIndeedChallengeIsStalled({ classification: 'pending', title: WALL }),
+        'a missing duration never trips the rule');
+      assert(!nativeIndeedChallengeIsStalled({}), 'an empty state never trips the rule');
       const cleanAtExit = { at: 3_100, url: 'https://secure.indeed.com/settings/account', title: 'Account settings' };
       const acceptedExit = nativeIndeedChallengeExitDisposition({
         cleanObservationAtExit: cleanAtExit,

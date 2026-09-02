@@ -92,13 +92,17 @@ function boardListingKey(job) {
   return originHubId ? `unlinked:${originHubId}|${jobTitleCompanyLocationKey(job)}` : job;
 }
 
-// Saved canvases and provider responses can outlive a renderer update. Treat a
-// numeric-looking legacy score exactly like the current numeric contract;
-// otherwise JavaScript's string comparison makes "9" outrank "80" during a
-// board merge. Invalid values retain the historic zero-score fallback.
-function jobMatchScore(job) {
-  const score = Number(job?.matchScore);
+// Saved canvases and provider responses can outlive a renderer update. Keep one
+// score boundary for both the merge and the taxonomy IPC projection: without it,
+// a legacy string score can win the merge correctly but be sent to bucketing as
+// zero, putting an 80-fit job in the wrong board branch.
+export function normalizeJobMatchScore(value) {
+  const score = Number(value);
   return Number.isFinite(score) ? score : 0;
+}
+
+function jobMatchScore(job) {
+  return normalizeJobMatchScore(job?.matchScore);
 }
 
 /**
@@ -160,19 +164,19 @@ function canSafelyPreferCompensationAssessment(candidate, existing) {
  * Cheap content fingerprint of one module's scored jobs. Changes when the set
  * changes size (re-scrape), any score changes (re-score), the order changes,
  * or any card-visible/origin-sensitive job field changes,
- * so it tells whether a connection carries the SAME data it did at the last
- * Combine. Deliberately O(n) + allocation-free so it can run inside the
+ * so it tells whether a connection carries the SAME card-visible data it did at
+ * the last Combine. Deliberately O(n) + allocation-free so it can run inside the
  * reactive store selector on every frame; not a cryptographic hash, but unlike
  * the old count+score-sum format it can't be fooled by a re-run whose score
  * deltas cancel out ([80,90] → [85,85]).
  *
- * The "4:" prefix versions the format: combineSignatures saved by the old
+ * The "5:" prefix versions the format: combineSignatures saved by older
  * fingerprint can't be recomputed, so the board treats a signature without the
  * marker as a legacy baseline to adopt rather than a staleness mismatch (see
  * isLegacyCombineSignature).
  *
  * @param {object[]} scoredJobs
- * @returns {string} e.g. "4:191:123456789" (version:length:fold)
+ * @returns {string} e.g. "5:191:123456789" (version:length:fold)
  */
 export function moduleFingerprint(scoredJobs) {
   const arr = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -189,6 +193,65 @@ export function moduleFingerprint(scoredJobs) {
     }
     // Field delimiter prevents e.g. ["ab", "c"] colliding with ["a", "bc"].
     h = Math.imul(h ^ 0xff, 0x01000193);
+  };
+  const foldFitAssessment = (assessment) => {
+    const value = assessment && typeof assessment === 'object' ? assessment : null;
+    // Mirror compactHiringFitAudit's display boundary. An unaudited saved card
+    // renders only its fixed continuity message, so internal provider fields
+    // below must not create a false board-staleness signal.
+    const isAudited = value?.auditStatus === 'audited';
+    fold(isAudited);
+    if (!isAudited) return;
+
+    const finiteNumber = (raw) => {
+      const number = Number(raw);
+      return Number.isFinite(number) ? number : null;
+    };
+    const auditStatus = (row) => {
+      const status = String(row?.effectiveStatus || row?.status || '').trim().toLowerCase().replace(/-/g, '_');
+      return ['direct', 'adjacent', 'not_documented', 'contradicted', 'unclear'].includes(status) ? status : '';
+    };
+    const requirementLabel = (row) => String(row?.requirement || row?.requirementText || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const confidence = String(value?.confidence?.effective || '').trim().toLowerCase();
+    fold(['high', 'medium', 'low', 'unknown'].includes(confidence) ? confidence : '');
+    const groundedRequirementCount = finiteNumber(value?.confidence?.groundedRequirementCount);
+    const requirementCount = finiteNumber(value?.confidence?.requirementCount);
+    // Coverage is rendered only when both counts are finite and non-negative.
+    // Normalize the whole hidden case to avoid treating different malformed
+    // provider values as a card-visible board update.
+    const hasCoverage = groundedRequirementCount !== null && requirementCount !== null
+      && groundedRequirementCount >= 0 && requirementCount >= 0;
+    fold(hasCoverage ? groundedRequirementCount : null);
+    fold(hasCoverage ? requirementCount : null);
+    fold(finiteNumber(value?.rawScore));
+    fold(finiteNumber(value?.adjustedScore));
+    const foldRows = (rows, rejectedOnly = false) => {
+      const list = Array.isArray(rows) ? rows : [];
+      // The explicit rejected-row list renders only its unique labels; its
+      // cardinality (including empty/duplicate rows) has no visible effect.
+      if (!rejectedOnly) fold(list.length);
+      for (const row of list) {
+        // rejectedRequirementRows are rendered solely as de-duplicated labels.
+        // Their original provider status/evidence payload is deliberately not
+        // surfaced, so hashing it would make a board stale for no visible
+        // change.
+        fold(requirementLabel(row));
+        if (rejectedOnly) continue;
+        fold(auditStatus(row));
+        fold(row?.scoreImpact === 'informational');
+        fold(row?.materialGap === true);
+        fold(row?.grounding?.requirementGrounded === true);
+        fold(row?.grounding?.candidateClaimGrounded === true);
+        // The card only asks whether rejected evidence exists; its count/text
+        // never reaches the compact audit.
+        fold(Array.isArray(row?.grounding?.rejectedJobEvidence) && row.grounding.rejectedJobEvidence.length > 0);
+        fold(Array.isArray(row?.grounding?.rejectedCandidateEvidence) && row.grounding.rejectedCandidateEvidence.length > 0);
+      }
+    };
+    foldRows(value?.requirementRows);
+    foldRows(value?.rejectedRequirementRows, true);
   };
   for (const j of arr) {
     if (!j || typeof j !== 'object') {
@@ -208,6 +271,11 @@ export function moduleFingerprint(scoredJobs) {
     fold(j.posted);
     fold(j.language);
     fold(j.originHubId);
+    // The card's expandable hiring-fit audit is derived from fitAssessment,
+    // not from the short top-level reasoning above. It must participate in
+    // staleness, or refreshed evidence/gaps can leave an old card disclosure
+    // visible while the board incorrectly claims its inputs are current.
+    foldFitAssessment(j.fitAssessment);
     // A compensation assessment controls the card's border, expandable
     // explanation, source list, and comparison metadata. It must participate
     // in board staleness just like visible match reasoning does, otherwise a
@@ -248,7 +316,7 @@ export function moduleFingerprint(scoredJobs) {
       fold(range?.period ?? range?.payPeriod ?? range?.unit);
     }
   }
-  return `4:${arr.length}:${h >>> 0}`;
+  return `5:${arr.length}:${h >>> 0}`;
 }
 
 /**
@@ -259,7 +327,12 @@ export function moduleFingerprint(scoredJobs) {
  */
 export function isLegacyCombineSignature(signature) {
   const s = String(signature || '');
-  return !!s && !/(?:^|\|)[^=]+=([34]):/.test(s);
+  // v3 introduced visible-data folding and v4 added compensation. Those
+  // signatures must still be compared (and therefore go stale) when v5 adds
+  // fit-audit fields; silently adopting them would leave an old card audit
+  // visible after its source module refreshed. Only the pre-v3 formats lack a
+  // safe enough baseline to compare and are adopted on load.
+  return !!s && !/(?:^|\|)[^=]+=[345]:/.test(s);
 }
 
 /**
@@ -317,6 +390,23 @@ export function combineSignature(modules) {
     .map(m => `${m.id}=${m.fingerprint}`)
     .sort()
     .join('|');
+}
+
+/**
+ * Returns the reason an empty search result cannot replace a board, or null
+ * when it is safe to ask the user to clear the stale cascade. Keeping this
+ * predicate pure lets the click path and the confirmation-time recheck use
+ * exactly the same preconditions.
+ */
+export function emptyReplacementIneligibilityReason({
+  stale = false,
+  allConnectedModulesDone = false,
+  readyModuleCount = 0,
+} = {}) {
+  if (!allConnectedModulesDone) return 'one or more connected searches are no longer terminal';
+  if (readyModuleCount > 0) return 'one or more connected searches now have jobs';
+  if (!stale) return 'the board is no longer stale';
+  return null;
 }
 
 /**

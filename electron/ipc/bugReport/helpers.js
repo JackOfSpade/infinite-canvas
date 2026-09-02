@@ -43,6 +43,12 @@ export const ago = (ts) => {
   return Number.isFinite(s) ? ` (${s}s ago)` : '';
 };
 
+/** Bounded free text with an explicit truncation marker — a silent cut reads as corrupted evidence rather than a clipped line. */
+export function clipReportText(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
+}
+
 // Human age ("32s ago" / "5m ago" / "2h14m ago" / "never") for a timestamp —
 // shared by the marketplace module/status rollups' check-recency columns.
 export function formatAge(ts) {
@@ -209,47 +215,101 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
 }).join('\n');
 
-/** Per-platform verify-trace blocks (only platforms with a recorded trace). */
+// A definitive connected:false verify is preserved in `lastNegative`
+// (accounts.js writeStatusCache) even after a later connected:true write
+// overwrites `lastTrace` with the positive verdict — otherwise the ONE
+// platform whose verify actually misbehaved (a real "not connected" silently
+// clobbered by an auto-detected login minutes later) is the one platform a
+// bug report can't diagnose. Only surface it here when it tells the reader
+// something the current verdict does not: the platform now reads connected,
+// but a prior DEFINITIVE not-connected verdict is on record. A currently
+// disconnected platform already prints its own reason/trace via `lastTrace`,
+// so repeating `lastNegative` there would just restate it. The disk-restored
+// shape (selectRestorableStatuses/persistStatusCache) keeps only
+// `{ reason, ts }` — never a `trace` — so this must tolerate a traceless
+// negative rather than assume the in-memory `{ reason, trace, ts }` shape.
+const preservedNegativeVerdict = (entry) => (
+  entry?.connected === true && entry?.lastNegative && typeof entry.lastNegative.reason === 'string'
+    ? entry.lastNegative
+    : null
+);
+
+/** Per-platform verify-trace blocks (only platforms with a recorded trace, or a preserved negative worth surfacing). */
 export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p => {
-  const t = cache[p.id]?.lastTrace;
-  if (!t) return '';
-  const lines = [
-    `**${p.name}** (\`${p.id}\`):`,
-    `  - target: \`${redactReportUrl(t.target) || '—'}\``,
-    t.finalUrl != null ? `  - finalUrl: \`${redactReportUrl(t.finalUrl)}\`` : null,
-    t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
-    t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
-    t.pageTitle ? `  - pageTitle: \`${String(t.pageTitle).replace(/`/g, "'").slice(0, 160)}\`` : null,
-    t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
-    t.error ? `  - error: \`${redactReportUrlsInText(t.error)}\`` : null,
-    typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
-    Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
-    t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
-    t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
-  ].filter(Boolean);
-  if (Array.isArray(t.checks) && t.checks.length > 0) {
-    lines.push('  - checks:');
-    for (const check of t.checks) {
-      const parts = [
-        redactReportUrl(check.target) || '—',
-        check.status != null ? `HTTP ${check.status}` : null,
-        check.finalUrl ? redactReportUrl(check.finalUrl) : null,
-        check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
-        check.antiBot ? `antiBot=${check.antiBot}` : null,
-        check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
-        check.error ? `error=${redactReportUrlsInText(check.error)}` : null,
+  const entry = cache[p.id];
+  const t = entry?.lastTrace;
+  const negative = preservedNegativeVerdict(entry);
+  if (!t && !negative) return '';
+  const lines = [`**${p.name}** (\`${p.id}\`):`];
+  if (t) {
+    lines.push(
+      ...[
+        `  - target: \`${redactReportUrl(t.target) || '—'}\``,
+        t.finalUrl != null ? `  - finalUrl: \`${redactReportUrl(t.finalUrl)}\`` : null,
+        t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
+        t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
+        t.pageTitle ? `  - pageTitle: \`${clipReportText(String(t.pageTitle).replace(/`/g, "'"), 160)}\`` : null,
+        t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
+        t.error ? `  - error: \`${redactReportUrlsInText(t.error)}\`` : null,
+        typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
+        Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
+        t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
+        t.bodyHead ? `  - bodyHead: \`${clipReportText(t.bodyHead.replace(/`/g, "'"), 240)}\`` : null,
+      ].filter(Boolean),
+    );
+    if (Array.isArray(t.checks) && t.checks.length > 0) {
+      lines.push('  - checks:');
+      for (const check of t.checks) {
+        const parts = [
+          redactReportUrl(check.target) || '—',
+          check.status != null ? `HTTP ${check.status}` : null,
+          check.finalUrl ? redactReportUrl(check.finalUrl) : null,
+          check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+          check.antiBot ? `antiBot=${check.antiBot}` : null,
+          check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
+          check.error ? `error=${redactReportUrlsInText(check.error)}` : null,
+        ].filter(Boolean);
+        lines.push(`    - ${clipReportText(parts.join(' | ').replace(/`/g, "'"), 320)}`);
+        // Surface the captured visible-text head per check. The top-level bodyHead
+        // is only set on the CONNECTED return path, so on a verify FAILURE
+        // (soft-wall match, redirect, 401/403) the page text was captured per-check
+        // but never rendered — leaving "logged out per body sniff" with no way to
+        // see WHAT the page actually said. That's the difference between "genuinely
+        // logged out (login form / sign-in shell)" and "logged in but the signal
+        // mis-fired / an SPA hadn't client-rendered the account UI yet". Only when
+        // the top-level bodyHead is absent, to avoid duplicating it for connected.
+        if (!t.bodyHead && check.bodyHead) {
+          lines.push(`      bodyHead: \`${clipReportText(String(check.bodyHead).replace(/`/g, "'"), 240)}\``);
+        }
+      }
+    }
+  }
+  if (negative) {
+    // Same absolute-ISO + relative-seconds style renderSessionRows uses for
+    // "Last confirmed" a few lines above in the same report section — keeps a
+    // three-week-old preserved negative from reading as if it happened this
+    // session, and keeps the two timestamp styles in this section consistent.
+    const negTs = Number(negative.ts) || null;
+    const negAge = negTs
+      ? `${new Date(negTs).toISOString()} (${Math.round((Date.now() - negTs) / 1000)}s ago)`
+      : 'time not recorded';
+    lines.push(`  - ⚠️ preserved prior NOT-CONNECTED verdict (${negAge}): ${redactReportUrlsInText(negative.reason)}`);
+    // The disk-restored shape never carries `trace` (persistStatusCache strips
+    // it) — only render this when the in-memory write kept it.
+    if (negative.trace && typeof negative.trace === 'object') {
+      const nt = negative.trace;
+      const negTraceParts = [
+        nt.finalUrl != null ? `finalUrl=${redactReportUrl(nt.finalUrl)}` : null,
+        nt.status != null ? `HTTP ${nt.status}` : null,
+        nt.htmlBytes != null ? `htmlBytes=${nt.htmlBytes}` : null,
+        nt.softWallMatch ? `softWall=${nt.softWallMatch}` : null,
+        nt.error ? `error=${redactReportUrlsInText(nt.error)}` : null,
       ].filter(Boolean);
-      lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
-      // Surface the captured visible-text head per check. The top-level bodyHead
-      // is only set on the CONNECTED return path, so on a verify FAILURE
-      // (soft-wall match, redirect, 401/403) the page text was captured per-check
-      // but never rendered — leaving "logged out per body sniff" with no way to
-      // see WHAT the page actually said. That's the difference between "genuinely
-      // logged out (login form / sign-in shell)" and "logged in but the signal
-      // mis-fired / an SPA hadn't client-rendered the account UI yet". Only when
-      // the top-level bodyHead is absent, to avoid duplicating it for connected.
-      if (!t.bodyHead && check.bodyHead) {
-        lines.push(`      bodyHead: \`${String(check.bodyHead).replace(/`/g, "'").slice(0, 240)}\``);
+      if (negTraceParts.length > 0) {
+        lines.push(`    - ${clipReportText(negTraceParts.join(' | ').replace(/`/g, "'"), 320)}`);
+      }
+      if (nt.bodyHead) {
+        lines.push(`    - bodyHead: \`${clipReportText(String(nt.bodyHead).replace(/`/g, "'"), 240)}\``);
       }
     }
   }

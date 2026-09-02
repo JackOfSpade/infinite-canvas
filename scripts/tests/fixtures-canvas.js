@@ -472,6 +472,71 @@ export default [
   },
 },
 {
+    // One panel 429 used to disable description enrichment for the WHOLE
+    // remaining source: 19 more pages were walked with no descriptions, 275 of
+    // 336 in-window rows were dropped by the scoring-evidence gate, and the run
+    // still reported `completed`. The block now has a bounded cooldown.
+    name: 'a source-wide detail block cools down and re-probes instead of lasting the whole source',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      const numeric = (name) => Number((source.match(new RegExp(`const ${name}\\s*=\\s*(\\d+)`)) || [])[1]);
+      const DETAIL_BLOCK_PROBE_CARDS_VALUE = numeric('DETAIL_BLOCK_PROBE_CARDS');
+      const DESC_STALE_THRESHOLD_VALUE = numeric('DESC_STALE_THRESHOLD');
+      assert(Number.isFinite(DETAIL_BLOCK_PROBE_CARDS_VALUE) && Number.isFinite(DESC_STALE_THRESHOLD_VALUE),
+        'both the probe size and the stale-timeout threshold are readable constants');
+      assert(source.includes('const DETAIL_BLOCK_COOLDOWN_MS = 120_000;')
+        && source.includes('const DETAIL_BLOCK_MAX_REPROBES = 3;')
+        && source.includes('sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES'),
+      'the detail block is time-bounded with a capped number of re-probes rather than latching for the rest of the source');
+
+      // Walking while blocked issues no panel requests, so a 19-page remainder
+      // finishes in ~40s and would never reach a 120s cooldown — the re-probe
+      // would be dead code. The walk must spend that time waiting instead.
+      assert(source.includes('const cooldownRemainingMs = DETAIL_BLOCK_COOLDOWN_MS - (Date.now() - sourceDetailBlockAt);')
+        && source.includes('await sleepUnlessAborted(cooldownRemainingMs, signal);')
+        && source.includes('function sleepUnlessAborted(ms, signal)'),
+      'a blocked walk waits out the remaining cooldown before the next page instead of racing to the end collecting unusable rows');
+
+      // An opportunistic re-probe must never leave the run worse than the skip
+      // it replaced: a descError would set earlyExit and truncate the source.
+      assert(source.includes('descWarning: detailResult.descWarning || detailResult.descError,')
+        && source.includes('descError: null,')
+        && source.includes('keeping the source block instead of ending the walk'),
+      'a failed re-probe is demoted to a warning so it cannot escalate a recoverable throttle into a truncated source walk');
+
+      // "Recovered" must mean the throttle actually lifted, and a recovery must
+      // hand a later, unrelated block a fresh budget.
+      assert(source.includes("const reBlocked = ['description-rate-limited', 'description-panel-http-error']")
+        && source.includes('if (detailResult.expandedCount > 0 && !detailResult.descError && !reBlocked) {')
+        && source.includes('sourceDetailReprobes = 0;')
+        && source.includes('sourceDetailBlockPage = null;'),
+      'only a genuinely cleared throttle counts as recovered, and it resets the re-probe budget and the reported block page');
+
+      assert(source.includes('} else if (reprobeFailedThisPage && !sourceDetailBlockCode) {'),
+        'a re-probe that fails with an unrecognised code still re-arms the block, so the next page cannot hammer a source we just watched fail');
+
+      // A throttle is not always a matched 429 — a suppressed XHR just times
+      // out, and DESC_STALE_THRESHOLD of those trips abortWithError. Probing a
+      // whole page would both hammer the throttled endpoint and manufacture a
+      // "stale selectors" error out of an external rate limit.
+      assert(source.includes('const DETAIL_BLOCK_PROBE_CARDS = 2;')
+        && source.includes('const probeJobs = jobsToExpand.slice(0, DETAIL_BLOCK_PROBE_CARDS);')
+        && source.includes('...restJobs.map(job => ({ ...job, descriptionDeferredReason: reprobeOfCode })),'),
+      'a cooldown re-probe touches only a couple of cards and leaves the remainder deferred, instead of walking a whole page against a throttled endpoint');
+      assert(DETAIL_BLOCK_PROBE_CARDS_VALUE < DESC_STALE_THRESHOLD_VALUE,
+        `the probe size (${DETAIL_BLOCK_PROBE_CARDS_VALUE}) must stay below the consecutive-timeout abort threshold (${DESC_STALE_THRESHOLD_VALUE})`);
+      assert(source.includes("phase: 'detail-block-reprobe-failed'")
+        && source.includes("'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'"),
+      'a failed re-probe records its own anomaly row — the source warning slot is already held by the original block, so its evidence would otherwise be lost');
+
+      // The skip branch must not masquerade as a selector failure.
+      assert(source.includes('enrichment skipped for ${jobsToExpand.length} card(s) — source blocked by')
+        && source.includes('no panel request issued'),
+      'a page whose enrichment was skipped says so, instead of logging "0/N expanded (sel: …)" like a broken selector');
+      return { cooldownMs: 120_000, maxReprobes: 3 };
+  },
+},
+{
     name: 'Glassdoor same-request JSON enriches its exact card without replacing authoritative panel or list fields',
     run: () => {
       const responseDescription = '<p>Build secure marine systems and lead architecture reviews.</p>'.repeat(12);
@@ -2250,6 +2315,37 @@ export default [
         && jobsSource.indexOf('await throwIfSearchAborted();\n    await setJobRunStage') >= 0,
       'a Reset during scrape discards only its token-scoped recovery run and cannot mark the cancelled manifest gathered');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
+  },
+},
+{
+    name: 'Legacy Job Search auto-start is one-shot per persisted path and keeps failure retry input',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const pipelineStart = source.indexOf('const runPipeline = useCallback');
+      const pipelineEnd = source.indexOf('const startProcessing = useCallback', pipelineStart);
+      const pipeline = source.slice(pipelineStart, pipelineEnd);
+      const autoStartStart = source.indexOf('// Auto-start legacy drop-created hubs once per mounted node/path');
+      const autoStartEnd = source.indexOf('// Handle file drops directly onto this node.', autoStartStart);
+      const autoStart = source.slice(autoStartStart, autoStartEnd);
+
+      assert(pipelineStart >= 0 && pipelineEnd > pipelineStart,
+        'the pipeline boundary was not found; this test must inspect the catch that resolves a failed job search');
+      assert(!pipeline.includes('filePath: null'),
+        'a pipeline failure must retain a legacy resume path so Try Again can re-parse it before a profile exists');
+      assert(source.includes('const autoStartedFilePathRef = useRef(null);'),
+        'legacy auto-start needs a mounted-session latch instead of clearing the retry input on failure');
+      assert(autoStart.includes("const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
+        && autoStart.includes('autoStartedFilePathRef.current === autoStartPath')
+        && autoStart.includes('autoStartedFilePathRef.current = autoStartPath')
+        && autoStart.includes('startProcessing(autoStartPath);'),
+      'auto-start must launch each exact persisted path once, while allowing a genuinely changed path to launch');
+
+      const rerunStart = source.indexOf('const handleRerun = useCallback');
+      const rerunEnd = source.indexOf('const handleClearCareerFiles', rerunStart);
+      const rerun = source.slice(rerunStart, rerunEnd);
+      assert(rerun.includes(': (data.filePath ? [data.filePath] : [])'),
+        'the retained legacy path must remain a valid explicit Re-run input after a pre-parse failure');
+      return { oneShotAutoStart: true, retainedLegacyRetryInput: true };
     },
   },
 {
@@ -2665,6 +2761,14 @@ export default [
         'manual scraper must report its aggregate source cap rather than a clean completion');
       assert(resolveManualSourceStopReason({ hitPageCap: true }) === 'page-cap',
         'manual scraper must distinguish a pagination ceiling from a clean completion');
+      // A page turn that never landed must NOT read as an exhausted source:
+      // `empty-page` is treated downstream as a clean, terminal, lossless finish.
+      assert(resolveManualSourceStopReason({ hitPageTurnStalled: true }) === 'page-turn-stalled',
+        'a stalled page turn reports its own reason, never empty-page');
+      assert(resolveManualSourceStopReason({ hitPageTurnStalled: true, hitEmptyPage: true }) === 'page-turn-stalled',
+        'the specific stall observation outranks the generic empty-page one');
+      assert(resolveManualSourceStopReason({ hitPageTurnStalled: true, sourceSkipped: true }) === 'blocked',
+        'a real block still outranks a stalled page turn');
       assert(resolveManualSourceStopReason({ hitEmptyPage: true }) === 'empty-page',
         'manual scraper must retain an exhausted-results terminal reason');
       assert(resolveManualSourceStopReason({ hitUnhandledPagination: true }) === 'pagination-unhandled',
@@ -2678,10 +2782,23 @@ export default [
         'a failed card-detail pass must not be reported as user-done');
       assert(resolveManualSourceStopReason({}) === 'completed',
         'manual scraper must reserve completed for a normal non-capped finish');
+      // An anti-bot challenge that bounced the walk back to page 1 twice used to
+      // break with no flag set, falling through to `completed` — reporting an
+      // abandoned walk identically to a clean finish.
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true }) === 'challenge-recovery-loop',
+        'a walk abandoned after two challenge bounces back to page 1 must not report a clean completion');
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true, dataStopReason: 'end-of-results' }) === 'challenge-recovery-loop',
+        'giving up after repeated challenge recovery outranks a data stop that reads as a clean finish');
+      assert(resolveManualSourceStopReason({ hitChallengeRecoveryLoop: true, sourceSkipped: true }) === 'blocked',
+        'a concrete block still outranks the challenge-recovery give-up');
+      assert(resolveManualSourceStopReason({ hitProviderResultWindow: true }) === 'provider-result-window',
+        'a direct continuation redirected or clamped by the provider must not report a clean completion');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
-        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);"),
-      'ZipRecruiter must use its verified Next Page anchor instead of stopping after the first scroll-loaded page');
+        && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);")
+        && manualScraperSource.includes("phase: 'direct-page-probe'")
+        && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({'),
+      'ZipRecruiter uses its verified Next Page anchor, then a bounded direct-page probe when the board hides that anchor early');
       assert(manualScraperSource.includes("description-card-unavailable")
         && manualScraperSource.includes("googlePanelRateLimit")
         && manualScraperSource.includes("page.off('response', googlePanelResponseListener)"),
@@ -2789,6 +2906,18 @@ export default [
         && wholeFeedAdmission.relevanceTrace.some(row => row.url === 'wwr-entity' && row.title === 'Customer Support Systems & Analytics Architect')
         && wholeFeedRows[2].title === 'Customer Support Systems &amp; Analytics Architect',
       'whole-feed relevance: decodes entity-encoded titles for admission/telemetry, keeps source rows intact, and ranks near-miss samples first');
+      // RemoteOK occasionally returns UTF-8 text mis-decoded as Latin-1. The
+      // matcher/report must show the repaired diagnostic title, while the
+      // source object remains raw for the pipeline's normal ownership rules.
+      const rawMojibakeTitle = `HIGIENIZADOR DE CARROS MACA${String.fromCharCode(0xc3, 0x89)} RJ`;
+      const mojibakeAdmission = filterWholeFeedJobsByTitleRelevance(
+        [{ title: rawMojibakeTitle, url: 'remoteok-mojibake' }],
+        ['System Architect'],
+      );
+      assert(mojibakeAdmission.items.length === 0
+        && mojibakeAdmission.relevanceRejected[0] === 'HIGIENIZADOR DE CARROS MACAÉ RJ'
+        && rawMojibakeTitle.includes(String.fromCharCode(0x89)),
+      'whole-feed relevance: repairs mojibake for matcher diagnostics without mutating the source title');
       const wholeFeedOrAdmission = filterWholeFeedJobsByTitleRelevance(wholeFeedRows, ['Systems Architect', 'Customer Success Engineer']);
       assert(wholeFeedOrAdmission.items.map(job => job.url).join('|') === 'wwr-1|wwr-2|wwr-entity|wwr-3',
         'whole-feed relevance: multiple generated role queries use OR admission');
@@ -3043,14 +3172,34 @@ export default [
         return new URL(task.url).searchParams.get('q');
       };
 
-      assert(googleTask('Camera Operator', 'Toronto, ON') === 'Camera Operator Toronto, ON jobs',
-        'canonical location is appended to Google’s keyword-only search');
-      assert(googleTask('Camera Operator Toronto, ON', 'Toronto, ON') === 'Camera Operator Toronto, ON jobs',
+      // udm=8 AND-requires every free-text token, so anything appended here is a
+      // FILTER every posting must satisfy — not a ranking hint. The vestigial
+      // " jobs" suffix is gone (udm=8 is already the jobs vertical) and a bare
+      // COUNTRY is never appended.
+      assert(googleTask('Camera Operator', 'Toronto, ON') === 'Camera Operator Toronto, ON',
+        'a city-level canonical location is appended to Google’s keyword-only search');
+      assert(googleTask('Camera Operator Toronto, ON', 'Toronto, ON') === 'Camera Operator Toronto, ON',
         'an exact canonical location already in the query is not repeated');
-      assert(googleTask('Camera Operator Toronto', 'Toronto, ON') === 'Camera Operator Toronto jobs',
+      assert(googleTask('Camera Operator Toronto', 'Toronto, ON') === 'Camera Operator Toronto',
         'a query that already names the location city is not awkwardly duplicated with the canonical suffix');
-      assert(googleTask('Camera Operator', '') === 'Camera Operator jobs',
-        'location-free searches preserve the existing Google keyword query');
+      assert(googleTask('Camera Operator', '') === 'Camera Operator',
+        'location-free searches send the query unchanged');
+      // MEASURED, and it inverted the earlier assumption: a place name is not a
+      // free-text term on udm=8 — Google lifts it out as a location scope that
+      // OVERRIDES browser geolocation. Without it, a Canadian egress returned
+      // 0/159 US postings; with it, 173/173. Appending it also RAISED reachable
+      // depth. Dropping the country hands the result set to the egress IP.
+      assert(googleTask('Camera Operator', 'United States') === 'Camera Operator United States',
+        'a bare country IS appended — it is a location scope, not a keyword');
+      assert(googleTask('Camera Operator', 'Canada') === 'Camera Operator Canada',
+        'the country scope is not US-specific');
+      // The " jobs" SUFFIX stays removed — measured separately from the country
+      // and with the opposite result: it never moved geography and cost up to
+      // 57% of reachable results on one role.
+      assert(googleTask('Registered Nurse jobs', '') === 'Registered Nurse jobs',
+        'no " jobs" suffix is added, so a query already ending in "jobs" is unchanged');
+      assert(!googleTask('Camera Operator', 'Denver, CO').endsWith(' jobs'),
+        'the vestigial " jobs" suffix is never appended alongside a location');
       return { ok: true };
   },
 },
@@ -3271,20 +3420,36 @@ export default [
         filterCode: 'FULL+ERR',
         filterStats: { eventsShown: logs.length, eventsTotal: logs.length, omittedSections: [] },
       });
-      assert(fullErrSummary.includes('Full report requested') && fullErrSummary.includes(`event log kept all ${logs.length} line(s)`),
-        'Bug report filter summary: FULL+ERR remains a truthful full event timeline');
+      assert(fullErrSummary.includes('currently retained') && fullErrSummary.includes(`event log kept all ${logs.length} line(s)`),
+        'Bug report filter summary: FULL+ERR remains truthful about the retained event timeline');
       // XSESS drops the verbose per-platform verify-trace blocks (bodyHead dumps).
       const xsess = applyBugReportCode(logs, {}, 'XSESS');
       assert(xsess.sectionExclusions.has('sessionTraces') && xsess.matchedCodes.includes('XSESS'),
         'Bug report code filtering: XSESS should exclude sessionTraces');
+      // XJOBAUDIT drops only the bulky per-job/per-location audit prose inside
+      // the Job Search Pipeline section (taxonomy placement, scoring evidence,
+      // role relevance, Glassdoor location cache) — the one exclusion no other
+      // code covers, needed because FULL alone still hit the clipboard cap on
+      // this content and dropped whole unrelated sections to make room.
+      const xjobaudit = applyBugReportCode(logs, {}, 'XJOBAUDIT');
+      assert(xjobaudit.sectionExclusions.has('jobAuditDetail') && xjobaudit.matchedCodes.includes('XJOBAUDIT'),
+        'Bug report code filtering: XJOBAUDIT should exclude jobAuditDetail');
+      const fullXjobaudit = applyBugReportCode(logs, {}, 'FULL+XJOBAUDIT');
+      assert(fullXjobaudit.sectionExclusions.has('jobAuditDetail')
+        && fullXjobaudit.filteredLogs.length === logs.length,
+      'Bug report code filtering: FULL+XJOBAUDIT keeps the full event timeline while still excluding jobAuditDetail');
+      assert(codeIncludesFull('FULL+XJOBAUDIT') === true,
+        'Bug report FULL detection: FULL+XJOBAUDIT is recognized as a FULL composition');
       const fullSummary = buildFilterSummaryMarkdown({
         filterCode: 'FULL',
         filterStats: { eventsShown: 69, eventsTotal: 69, omittedSections: [] },
       });
       assert(fullSummary.includes('event log kept all 69 line(s)'),
         'Bug report filter summary: FULL should say the event log was kept, not trimmed');
-      assert(fullSummary.includes('Full report requested') && !fullSummary.includes('This is a filtered view'),
-        'Bug report filter summary: plain FULL should not claim the report is filtered');
+      assert(fullSummary.includes('currently retained')
+        && fullSummary.includes('does not restore history from an earlier app process')
+        && !fullSummary.includes('This is a filtered view'),
+      'Bug report filter summary: plain FULL explains its current-process retention boundary');
       const fullXnodesSummary = buildFilterSummaryMarkdown({
         filterCode: 'FULL+XNODES',
         filterStats: { eventsShown: 10, eventsTotal: 10, omittedSections: ['nodeInternals'] },

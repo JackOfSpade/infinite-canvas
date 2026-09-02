@@ -21,7 +21,7 @@
  * Pure (no electron / IO imports) so it's unit-testable in the plain-node runner.
  * Returns '' when the canvas has no marketplacestatus node with results.
  */
-import { formatAge, visitCanvasNodes } from './helpers.js';
+import { formatAge, visitCanvasNodes, clipReportText } from './helpers.js';
 
 export function buildMarketplaceModuleRollup(nodes) {
   // Collect every marketplacestatus node's platformStatus, recursing into
@@ -78,7 +78,7 @@ export function buildMarketplaceModuleRollup(nodes) {
       const readCol = rsRead || rsUnread ? `${rsRead}r/${rsUnread}u` : '—';
       // Escape the markdown table delimiter — `summary` is free-form AI text
       // (often a quoted buyer message) that can contain a literal `|`.
-      const summary = (r.summary || r.message || '').replace(/\s+/g, ' ').trim().slice(0, 80).replace(/\|/g, '\\|');
+      const summary = clipReportText((r.summary || r.message || '').replace(/\s+/g, ' ').trim(), 80).replace(/\|/g, '\\|');
       rows.push(
         `| ${label} | ${status} | ${Number.isFinite(ts) && ts ? formatAge(ts) : 'never'} | ${attention.length} (${high}) | ${readCol} | ${sources.length} (${srcErr}/${srcBlocked}) | ${summary || '—'} |`,
       );
@@ -92,9 +92,9 @@ export function buildMarketplaceModuleRollup(nodes) {
         const CAP = 6;
         const itemLines = ordered.slice(0, CAP).map((a) => {
           const urgency = a?.urgency === 'high' ? '🔴 high' : '⚪ low';
-          const cat = a?.category ? ` ${String(a.category).replace(/\s+/g, ' ').trim().slice(0, 24)}` : '';
-          const headline = String(a?.headline || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-          const evidence = String(a?.evidence || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+          const cat = a?.category ? ` ${clipReportText(String(a.category).replace(/\s+/g, ' ').trim(), 24)}` : '';
+          const headline = clipReportText(String(a?.headline || '').replace(/\s+/g, ' ').trim(), 120);
+          const evidence = clipReportText(String(a?.evidence || '').replace(/\s+/g, ' ').trim(), 140);
           // WHICH watch URL this flag came from. A "(no source — link is dead)" row is
           // itself the answer to "the link did not take me to source": the model's
           // claimed sourceUrl didn't match a scanned hub URL so it was dropped, OR the
@@ -122,7 +122,7 @@ export function buildMarketplaceModuleRollup(nodes) {
       if (problemSources.length > 0) {
         const byReason = new Map(); // `${status}::${reason}` → { status, reason, count }
         for (const s of problemSources) {
-          const reason = String(s.message || s.warning || '(no reason captured)').replace(/\s+/g, ' ').trim().slice(0, 200);
+          const reason = clipReportText(String(s.message || s.warning || '(no reason captured)').replace(/\s+/g, ' ').trim(), 200);
           const key = `${s.status}::${reason}`;
           const prev = byReason.get(key);
           if (prev) prev.count += 1;
@@ -134,7 +134,7 @@ export function buildMarketplaceModuleRollup(nodes) {
           .filter(s => s?.title || s?.finalUrl)
           .slice(0, 4)
           .map((s) => {
-            const title = String(s.title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+            const title = clipReportText(String(s.title || '').replace(/\s+/g, ' ').trim(), 120);
             const finalUrl = String(s.finalUrl || '').replace(/\s+/g, ' ').trim().slice(0, 160);
             const flags = [
               s.appleEventsDisabled ? 'apple-events-off' : '',

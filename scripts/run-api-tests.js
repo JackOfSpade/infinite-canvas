@@ -4,8 +4,24 @@ import {
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
 } from '../electron/extractors/apiExtractors.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-async function run() {
+const DEFAULT_EXTRACTORS = {
+  fetchLinkedInJobs,
+  fetchRemoteOKJobs,
+  fetchWeWorkRemotelyJobs,
+  fetchDiceListings,
+};
+
+/**
+ * Run the independent live-provider checks and return their report.
+ *
+ * Extractors are injectable so the probe's completion/concurrency contract is
+ * deterministic under the unit runner; the executable path below always uses
+ * the production implementations.
+ */
+export async function runJobApiProbe(extractors = DEFAULT_EXTRACTORS) {
   console.log('Testing job API extractors...');
   const results = {};
 
@@ -31,21 +47,41 @@ async function run() {
     }
   };
 
-  await safeCall('LinkedIn', () => fetchLinkedInJobs(['software engineer'], null, 7));
-  await safeCall('RemoteOK', () => fetchRemoteOKJobs(['engineer', 'developer']));
-  // WWR filters against job titles. "engineer" is a broad representative role
-  // that keeps this live availability probe from failing simply because the
-  // rolling feed has no frontend-titled opening at the moment.
-  await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['engineer']));
-  await safeCall('Dice', () => fetchDiceListings('software engineer', '', null, 7));
+  // These are independent provider health checks. Starting them together keeps
+  // the probe bounded by the slowest provider rather than serially adding four
+  // transport timeouts — particularly important when a CI egress is blocked.
+  await Promise.all([
+    safeCall('LinkedIn', () => extractors.fetchLinkedInJobs(['software engineer'], null, 7)),
+    safeCall('RemoteOK', () => extractors.fetchRemoteOKJobs(['engineer', 'developer'])),
+    // WWR filters against job titles. "engineer" is a broad representative role
+    // that keeps this live availability probe from failing simply because the
+    // rolling feed has no frontend-titled opening at the moment.
+    safeCall('WeWorkRemotely', () => extractors.fetchWeWorkRemotelyJobs(['engineer'])),
+    safeCall('Dice', () => extractors.fetchDiceListings('software engineer', '', null, 7)),
+  ]);
 
   console.log(JSON.stringify(results, null, 2));
-  if (Object.values(results).some(r => !r.success)) {
-    process.exitCode = 1;
-  }
+  return { results, success: Object.values(results).every(result => result.success) };
 }
 
-run().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+// AbortSignal.timeout() deliberately uses an unref'ed timer. If a network stack
+// drops every outbound connection before it creates a referenced socket (a
+// common CI/sandbox failure mode), Node can therefore exit while `run()` is
+// still awaiting the fetch promises. That produced a false green probe with
+// only the opening banner and no source results. Keep one lightweight handle
+// alive until the probe has reported its outcome; the extractor timeouts still
+// bound the run, and the handle is always cleared before exit.
+const isDirectRun = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  const keepAlive = setInterval(() => {}, 60_000);
+  runJobApiProbe()
+    .then(({ success }) => {
+      if (!success) process.exitCode = 1;
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(() => clearInterval(keepAlive));
+}

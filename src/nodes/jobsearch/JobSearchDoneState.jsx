@@ -64,6 +64,19 @@ export function JobSearchDoneState({
   const skippedAi = aiSkipped || collectionOnly || testMode;
   const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
   const noNewResults = rerunOutcome === 'no-new-results';
+  const validCount = (value) => (
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+  );
+  // A completed search cannot have fewer found listings than score-ready or
+  // displayed results. New runs preserve that funnel; this reconciliation keeps
+  // older canvases with a previously-corrupted gathered count understandable.
+  const displayedGatheredCount = Math.max(
+    0,
+    ...[gatheredCount, scrapedCount, resultCount]
+      .map(validCount)
+      .filter((value) => value != null),
+  );
+  const scoreReadyCount = validCount(scrapedCount) ?? displayedGatheredCount;
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
@@ -74,15 +87,13 @@ export function JobSearchDoneState({
         {noNewResults ? 'new jobs' : skippedAi ? 'jobs collected' : 'jobs scored'}
       </p>
 
-      {/* Keep the current run's collection total visible even when no jobs
-          survive into the new result set. */}
-      {(gatheredCount > 0 || scrapedCount > 0) && (
+      {/* Keep the current run's found → score-ready funnel visible even when
+          no jobs survive into the new result set. */}
+      {(displayedGatheredCount > 0 || scoreReadyCount > 0) && (
         <p className="text-white/25 text-[10px] mt-0.5">
-          {noNewResults
-            ? `${gatheredCount || scrapedCount} scraped`
-            : gatheredCount > 0 && scrapedCount != null && gatheredCount !== scrapedCount
-            ? `${gatheredCount} scraped → ${scrapedCount} kept`
-            : `${gatheredCount || scrapedCount} scraped`}
+          {displayedGatheredCount !== scoreReadyCount
+            ? `${displayedGatheredCount} found → ${scoreReadyCount} score-ready`
+            : `${displayedGatheredCount} found`}
         </p>
       )}
 
