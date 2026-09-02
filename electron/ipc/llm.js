@@ -570,7 +570,7 @@ function assertStructuredResponseSchema(responseSchema, caller) {
 }
 
 export async function callLLMText(prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, retryOnTruncation, responseValidator } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, excludeModels, retryOnTruncation, responseValidator, manualHandoff } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMText');
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` (the model that actually served the call) for per-stage
@@ -586,6 +586,9 @@ export async function callLLMText(prompt, opts = {}) {
       prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
       formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
+      canStepBack: manualHandoff.canStepBack,
+      stepBackLabel: manualHandoff.stepBackLabel,
+      initialResponse: manualHandoff.initialResponse,
     });
     if (meta) meta.model = 'non-api-ai';
     return result;
@@ -684,7 +687,7 @@ export async function cancelLLMTextBatch(batchId) {
  * responseSchema — which is exactly why this path is free-text.
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  const { signal, task, hints, grounding, cachedPrefix, excludeModels } = normalizeOpts(opts);
+  const { signal, task, hints, grounding, cachedPrefix, excludeModels, manualHandoff } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   if (isNonApiJobTask(task)) {
     const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
@@ -695,6 +698,9 @@ export async function callLLMRaw(prompt, opts = {}) {
       prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
       formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
       requestKind: 'raw-text', signal,
+      canStepBack: manualHandoff.canStepBack,
+      stepBackLabel: manualHandoff.stepBackLabel,
+      initialResponse: manualHandoff.initialResponse,
     });
     if (meta) meta.model = 'non-api-ai';
     return result;
@@ -870,11 +876,19 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.responseValidator !== undefined || Object.keys(opts).length === 0)) {
-    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [], retryOnTruncation: opts.retryOnTruncation !== false, responseValidator: typeof opts.responseValidator === 'function' ? opts.responseValidator : null };
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.excludeModels !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.responseValidator !== undefined || opts.manualHandoff !== undefined || Object.keys(opts).length === 0)) {
+    const suppliedManualHandoff = opts.manualHandoff && typeof opts.manualHandoff === 'object'
+      ? opts.manualHandoff
+      : {};
+    const manualHandoff = {
+      canStepBack: suppliedManualHandoff.canStepBack === true,
+      stepBackLabel: typeof suppliedManualHandoff.stepBackLabel === 'string' ? suppliedManualHandoff.stepBackLabel : '',
+      initialResponse: typeof suppliedManualHandoff.initialResponse === 'string' ? suppliedManualHandoff.initialResponse : '',
+    };
+    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, excludeModels: Array.isArray(opts.excludeModels) ? opts.excludeModels : [], retryOnTruncation: opts.retryOnTruncation !== false, responseValidator: typeof opts.responseValidator === 'function' ? opts.responseValidator : null, manualHandoff };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.
-  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, excludeModels: [], retryOnTruncation: true, responseValidator: null };
+  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, excludeModels: [], retryOnTruncation: true, responseValidator: null, manualHandoff: { canStepBack: false, stepBackLabel: '', initialResponse: '' } };
 }
 
 /**

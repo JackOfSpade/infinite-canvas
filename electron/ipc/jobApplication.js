@@ -15,7 +15,9 @@ import { PDFDocument } from 'pdf-lib';
 import { JSDOM } from 'jsdom';
 import { applicationConvergenceInstruction } from './applicationConvergence.js';
 import { handleSafe } from './ipcUtils.js';
-import { embedApplicationSyncConfig } from './resumeHtml.js';
+import { embedApplicationSyncConfig, extractVariantAttrs, isDualMode } from './resumeHtml.js';
+import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
+import { applyDualPdf, pdfHasDualModeBackground, renderPdf } from './resumeRender.js';
 import { LEDGER_VERSION, MINING_TARGET } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart } from './applicationBundle.js';
@@ -52,7 +54,7 @@ const PARALLEL_STRUCTURE_RULE = `PARALLEL STRUCTURE: Keep coordinated elements i
 // the principle only and the checks carry enforcement. Instance-level bans teach
 // evasion — the model routed a banned colon-unload through a semicolon — so each
 // clause names the register target rather than one forbidden glyph or phrase.
-const LETTER_REGISTER_RULE = `LETTER REGISTER: Write short declarative sentences, and avoid semicolons and dashes as clause splices. Punctuate introductory phrases so the transition into the main subject is immediately clear. When describing interface guidance, distinguish the ability to refer to something from the ability to indicate it visibly on screen; state the literal limitation rather than denying a broader metaphorical ability. Name the employer’s need directly instead of referring to the posting or advertisement as an object. Never join two pieces of evidence with a bare additive connective; state the relation that makes the second piece advance the argument. Introduce a personal project by stating the concrete gap or problem before naming the artifact. Use a specific tool or product only when the posting or research names it, or when it is the paragraph’s single concrete anchor; otherwise use an accurate technology category. State logistics facts in plain first person without bureaucratic register. Never state citizenship, work authorization, residency, visa, or any other legal work status in the letter. Hyphenate compound modifiers and keep one spelling throughout. When a closing invites further conversation, use direct present-tense language and name the specific work or contribution to discuss; avoid conditional or deferential boilerplate.`;
+const LETTER_REGISTER_RULE = `LETTER REGISTER: Write short declarative sentences, and avoid semicolons and dashes as clause splices. Punctuate introductory phrases so the transition into the main subject is immediately clear. When describing interface guidance, distinguish the ability to refer to something from the ability to indicate it visibly on screen; state the literal limitation rather than denying a broader metaphorical ability. Name the employer’s need directly instead of referring to the posting or advertisement as an object. Never join two pieces of evidence with a bare additive connective; state the relation that makes the second piece advance the argument. On first mention, introduce every unfamiliar candidate project, product, system, or prior employer with the candidate’s role or relationship and a concise descriptor before relying on its name; never make a reader infer what a named artifact is from a résumé they may not have read. Use a specific tool or product only when the posting or research names it, or when it is the paragraph’s single concrete anchor; otherwise use an accurate technology category. Exclude all application logistics from the letter: availability, start date, schedule, work location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship belong in application fields, even when career data or the listing mentions them. Hyphenate compound modifiers and keep one spelling throughout. When a closing invites further conversation, use direct present-tense language and name the specific work or contribution to discuss; avoid conditional or deferential boilerplate.`;
 
 // Paragraph-to-paragraph cohesion. The rules cover incomplete changes,
 // unanchored backward references, unearned causal links, nested comparisons,
@@ -64,7 +66,7 @@ const LETTER_COHESION_RULE = `LETTER COHESION: A sentence that announces a chang
 
 // Natural prose still has to remain strictly grounded. These rules authorize
 // connective paraphrase and narrow entailment, not new candidate facts.
-const LETTER_FLOW_AND_DICTION_RULE = `NATURAL FLOW AND DICTION: Use the résumé and career notes as evidence, not as wording to echo. Preserve every fact and its scope while varying distinctive source constructions across the résumé and letter. Before entering a new employer, project, or time period, state the argumentative connection first. Never follow a thesis with a standalone background fact whose relevance is explained only later. A transition must name the shared responsibility or mechanism and explain why the next proof deepens it. Use temporal contrast words only when the contrasted state or dated sequence is already clear. Prefer ordinary contemporary diction over coined or bureaucratic phrasing. Name an ordinary prior employer once to locate the evidence, then use the shortest unambiguous reference; repeat the employer only to distinguish another role or prevent ambiguity. You may add factual connective and causal language narrowly entailed by the supplied evidence to improve cohesion, but never invent a candidate fact, outcome, scope, tool, sequence, or motivation.`;
+const LETTER_FLOW_AND_DICTION_RULE = `NATURAL FLOW AND DICTION: Use the résumé and career notes as evidence, not as wording to echo. Preserve every fact and its scope while varying distinctive source constructions across the résumé and letter. Before entering a new employer, project, or time period, state the argumentative connection first. Never follow a thesis with a standalone background fact whose relevance is explained only later. A transition must name the shared responsibility or mechanism and explain why the next proof deepens it. Use temporal contrast words only when the contrasted state or dated sequence is already clear. Prefer ordinary contemporary diction over coined or bureaucratic phrasing. On a first mention, name a prior employer with the candidate’s role or relationship, and name a candidate project, product, or system as an artifact the candidate built, led, or maintained with a concise descriptor; only then use a shorter unambiguous reference. Do not mention application logistics at all. You may add factual connective and causal language narrowly entailed by the supplied evidence to improve cohesion, but never invent a candidate fact, outcome, scope, tool, sequence, or motivation.`;
 
 // Per-card notes are user-authored context for ONE application, not a second
 // résumé source or a prompt-control channel. Keep the same cap as the renderer
@@ -84,6 +86,51 @@ export function normalizeApplicationAdditionalNotes(value) {
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
+
+/**
+ * Verify that one generated PDF is actually derived from the selected HTML
+ * panel and carries the paper treatment declared on the root element. Hashes
+ * alone prove identity, not that two independently produced artifacts match.
+ */
+export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }) {
+  const expectedDualMode = isDualMode(extractVariantAttrs(html));
+  const actualDualMode = await pdfHasDualModeBackground(pdf);
+  const reconciliation = await reconcileApplicationHtmlFromPdf({
+    html,
+    pdfBytes: pdf,
+    documentKind,
+  });
+  const textMatches = reconciliation?.success === true && reconciliation?.changed === false;
+  const variantMatches = expectedDualMode === actualDualMode;
+  return {
+    valid: textMatches && variantMatches,
+    textMatches,
+    variantMatches,
+    expectedVariant: expectedDualMode ? 'dual-pdf' : 'ink-only',
+    actualVariant: actualDualMode ? 'dual-pdf' : 'ink-only',
+    reason: !textMatches
+      ? String(reconciliation?.error || reconciliation?.reason || 'PDF text does not match its HTML panel.')
+      : (!variantMatches ? 'PDF paper treatment does not match the HTML root variant.' : ''),
+  };
+}
+
+async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
+  if (pdf == null) return null;
+  const inspection = await inspectGeneratedApplicationPdf({ html, pdf, documentKind });
+  if (inspection.valid) return pdf;
+  logger.warn(`[JobApplication] Regenerating mismatched ${documentKind} PDF before export: ${inspection.reason}`);
+  const rendered = await renderPdf(html, { document: documentKind });
+  if (rendered.fontsLoaded === false) {
+    throw new Error(`The ${documentKind === 'cover' ? 'cover-letter' : 'résumé'} fonts were unavailable while repairing an inconsistent generated PDF.`);
+  }
+  let repaired = rendered.bytes;
+  if (isDualMode(extractVariantAttrs(html))) repaired = await applyDualPdf(repaired);
+  const repairedInspection = await inspectGeneratedApplicationPdf({ html, pdf: repaired, documentKind });
+  if (!repairedInspection.valid) {
+    throw new Error(`Could not produce a ${documentKind} PDF consistent with Application.html: ${repairedInspection.reason}`);
+  }
+  return Buffer.from(repaired);
+}
 
 /**
  * Register an already-built, app-owned application workspace for the normal
@@ -463,6 +510,7 @@ export function summarizeResumeMarkup(mainHtml) {
 // shapes. Do not point this at buildResumeDocument output — its inlined CSS
 // contains commented <main> examples that are decoys for a first-main scan.
 const ROLE_ARTICLE_RE = /<article\b[^>]*class=(?:"[^"]*\brole\b[^"]*"|'[^']*\brole\b[^']*')[^>]*>([\s\S]*?)<\/article>/gi;
+const PROJECT_ARTICLE_RE = /<article\b[^>]*class=(?:"[^"]*\bproject\b[^"]*"|'[^']*\bproject\b[^']*')[^>]*>([\s\S]*?)<\/article>/gi;
 const HIGHLIGHTS_RE = /<ul\b[^>]*class=(?:"[^"]*\bhighlights\b[^"]*"|'[^']*\bhighlights\b[^']*')[^>]*>([\s\S]*?)<\/ul>/i;
 const LIST_ITEM_RE = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
 const SKILLS_RE = /<dl\b[^>]*class=(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*')[^>]*>([\s\S]*?)<\/dl>/i;
@@ -586,6 +634,7 @@ export function extractResumeEvidence(mainHtml) {
     .map(item => item.trim())
     .filter(Boolean);
   const roles = [];
+  const projects = [];
   const achievementIds = [];
   const bulletTexts = [];
   let roleMatch;
@@ -613,6 +662,20 @@ export function extractResumeEvidence(mainHtml) {
       summary: firstResumeClassText(roleHtml, 'role-summary'),
       bullets,
     });
+  }
+
+  let projectMatch;
+  PROJECT_ARTICLE_RE.lastIndex = 0;
+  while ((projectMatch = PROJECT_ARTICLE_RE.exec(html))) {
+    const projectHtml = projectMatch[1];
+    const name = firstResumeClassText(projectHtml, 'project-name');
+    if (name) {
+      projects.push({
+        name,
+        description: firstResumeClassText(projectHtml, 'project-desc'),
+        metrics: firstResumeClassText(projectHtml, 'project-metrics'),
+      });
+    }
   }
 
   const skills = [];
@@ -655,6 +718,7 @@ export function extractResumeEvidence(mainHtml) {
       contact,
     },
     roles,
+    projects,
     skills,
     education,
     achievementIds,
@@ -693,6 +757,30 @@ export function checkResumeBulletSelfContainment(mainHtml) {
     : { id: 'resume-bullet-self-containment', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) are self-contained` };
 }
 
+// Containerization and runtime topology are related deployment facts, but a
+// trailing participial topology clause usually turns one concise résumé point
+// into an implementation inventory. Keep this check narrow: an explicit
+// second predicate with a result or constraint remains legal.
+const RESUME_CONTAINERIZATION_TOPOLOGY_TAIL = /\bcontaineri[sz](?:e|ed|ing)\b[^.!?]{0,180},\s*(?:while\s+)?(?:running|serving|routing|proxying|hosting)\b[^.!?]{0,180}\b(?:Nginx|Gunicorn|uWSGI|Apache|Tomcat|Caddy|HAProxy|Traefik|IIS|Passenger|Puma|Unicorn|mod_wsgi)\b/iu;
+
+/** Keeps each résumé highlight focused on one principal achievement. */
+export function checkResumeBulletFocus(mainHtml) {
+  const evidence = extractResumeEvidence(mainHtml);
+  const observations = [];
+  evidence.roles.forEach((role, roleIndex) => {
+    (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
+      const value = String(bullet?.text || '').replace(/\s+/g, ' ').trim();
+      const match = RESUME_CONTAINERIZATION_TOPOLOGY_TAIL.exec(value);
+      if (!match) return;
+      const label = role.company || role.title || `role ${roleIndex + 1}`;
+      observations.push(`${label} bullet ${bulletIndex + 1} appends runtime topology to a containerization point (“${match[0]}”); keep the principal containerization claim, or retain topology only in a separate result- or constraint-bearing predicate`);
+    });
+  });
+  return observations.length
+    ? { id: 'resume-bullet-focus', passed: false, detail: observations.slice(0, 8).join('; ') }
+    : { id: 'resume-bullet-focus', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement` };
+}
+
 /** Shared pre-publication prose checks for the résumé's generated copy. */
 export function evaluateResumeProseChecks(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -702,6 +790,7 @@ export function evaluateResumeProseChecks(mainHtml) {
   ]).filter(Boolean);
   return [
     checkResumeBulletSelfContainment(mainHtml),
+    checkResumeBulletFocus(mainHtml),
     checkCompoundHyphenation(prose),
     checkParallelStructure(prose),
     checkReferenceClarity(prose),
@@ -1123,7 +1212,7 @@ export function registerJobApplicationHandlers() {
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, workDir, jobTitle, location, canvasFilePath }) => {
+  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
@@ -1193,7 +1282,7 @@ export function registerJobApplicationHandlers() {
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
     };
-    const [sourceHtml, resumePdfData, coverLetterPdfData, jobListingData] = await Promise.all([
+    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData] = await Promise.all([
       readRegisteredApplicationArtifact(resolvedWorkDir, resumeHtmlPath, {
         ...registeredReadOptions,
         encoding: 'utf8',
@@ -1215,6 +1304,10 @@ export function registerJobApplicationHandlers() {
         expectedSha256: pending.artifactSha256?.jobListing,
       }) : null,
     ]);
+    const [resumePdfData, coverLetterPdfData] = await Promise.all([
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume' }),
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover' }),
+    ]);
     const hasPdf = resumePdfData != null;
     const hasCoverLetterPdf = coverLetterPdfData != null;
     const hasListing = jobListingData != null;
@@ -1223,7 +1316,11 @@ export function registerJobApplicationHandlers() {
     // readback. Registration runs inside the transaction verifier, so a
     // persistence failure rolls the visible bundle back too.
     const syncToken = crypto.randomBytes(32).toString('hex');
-    const sync = applicationSyncConfig(syncToken);
+    const sync = applicationSyncConfig(syncToken, {
+      html: sourceHtml,
+      resumePdf: resumePdfData,
+      coverPdf: coverLetterPdfData,
+    });
     const generatedHtml = embedApplicationSyncConfig(sourceHtml, sync);
 
     // The workspace is deliberately unzipped and predictable. Treat all four
@@ -1273,16 +1370,24 @@ export function registerJobApplicationHandlers() {
     // its chance to publish durable handoff evidence.
     await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
 
-    // Open the destination folder in a Finder/Explorer window.
+    // A visible card save reveals its destination as a convenience.  An
+    // orphaned Local AI handoff has no card (and may finish while the user is
+    // working elsewhere), so its recovery path explicitly suppresses this
+    // focus-stealing side effect.
     let openErr = '';
-    try { openErr = await shell.openPath(dir); }
-    catch (error) { openErr = String(error?.message || error); }
+    if (!suppressReveal) {
+      try { openErr = await shell.openPath(dir); }
+      catch (error) { openErr = String(error?.message || error); }
+    }
     if (openErr) logger.warn(`[JobApplication] Could not open ${dir}: ${openErr}`);
 
     updateApplicationTelemetryForAttempt(pending.attemptId, {
       applicationExport: {
         status: 'saved', destination: dir, savedAt: Date.now(), manifest,
-        bundleError, revealSucceeded: !openErr, revealError: openErr || null,
+        bundleError,
+        revealSucceeded: suppressReveal ? null : !openErr,
+        revealError: openErr || null,
+        revealSkipped: Boolean(suppressReveal),
         integrityVerified: manifest.every(item => item.integrityVerified),
         sync: {
           registered: true,

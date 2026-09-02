@@ -6,6 +6,7 @@ import {
   LOCAL_AI_STATUS_ERROR_STREAK_LIMIT,
   isJobCardMounted,
   selectFallbackLocalAiJobs,
+  selectOrphanedLocalAiJobs,
 } from '../utils/localAiFallback';
 
 /**
@@ -94,26 +95,36 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       return true;
     };
 
-    const importJob = async (node, jobId, resultSha256) => {
+    const importJob = async (node, jobId, resultSha256, orphanJob = null) => {
       const { addToast: toast, getCurrentFile: currentFile } = ctxRef.current;
       const nodeId = node.id;
+      const isOrphan = Boolean(orphanJob);
       if (importBusyRef.current) return;
       // Liveness: the card may have been dismissed/deleted since this tick's
       // enumeration — never import (and auto-save into Applied Jobs) a job the
-      // user discarded.
+      // user discarded.  A discovered on-disk job deliberately has no card:
+      // its private folder remains app-owned and is its durable ownership
+      // record, so it must proceed without trying to recreate the deleted UI.
       const liveNode = findLiveJobNode(nodeId, jobId);
-      if (!liveNode || isJobCardMounted(nodeId)) return;
-      const local = liveNode.data.localApplication;
+      if (!isOrphan && (!liveNode || isJobCardMounted(nodeId))) return;
+      const local = isOrphan ? orphanJob : liveNode.data.localApplication;
       // The save writes the bundle beside the currently open canvas file, the
       // same way the card does; without one there is nowhere to save.
-      const saveCanvasFilePath = currentFile ? currentFile() : null;
+      const activeCanvasFilePath = currentFile ? currentFile() : null;
+      const saveCanvasFilePath = isOrphan ? local.canvasFilePath : activeCanvasFilePath;
       if (!saveCanvasFilePath) {
-        writeState(nodeId, jobId, { status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' });
+        if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' });
+        return;
+      }
+      // Do not let an orphan discovered for one canvas finish after this
+      // window switches to another file. It remains safely on disk and will
+      // be rediscovered if its owning canvas is reopened.
+      if (isOrphan && activeCanvasFilePath !== saveCanvasFilePath) {
         return;
       }
       importBusyRef.current = true;
-      writeState(nodeId, jobId, { status: 'importing', message: 'Local AI result found — importing…' });
-      EventLogger.log(`[LocalAI] fallback import start job=${jobId} card=${nodeId} (card unmounted)`);
+      if (!isOrphan) writeState(nodeId, jobId, { status: 'importing', message: 'Local AI result found — importing…' });
+      EventLogger.log(`[LocalAI] fallback import start job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId} (card unmounted)`}`);
       try {
         const imported = await window.electronAPI.importLocalApplication({
           jobId,
@@ -128,7 +139,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         const result = imported.localApplication;
         if (result.status === 'revision-required') {
-          writeState(nodeId, jobId, {
+          if (!isOrphan) writeState(nodeId, jobId, {
             ...result.localJob, status: 'revision-required',
             message: result.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.',
           });
@@ -141,7 +152,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (result.status === 'render-retry-required') {
-          writeState(nodeId, jobId, {
+          if (!isOrphan) writeState(nodeId, jobId, {
             ...result.localJob, status: 'render-retry-required',
             message: result.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.',
           });
@@ -154,7 +165,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (result.status === 'revision-exhausted') {
-          writeState(nodeId, jobId, {
+          if (!isOrphan) writeState(nodeId, jobId, {
             ...result.localJob, status: 'revision-exhausted',
             message: result.fitMessage || 'The overflowing document remained unchanged after an explicit diminishing-returns review. No bundle was saved.',
           });
@@ -174,7 +185,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         // Liveness AGAIN before the save: the measured import can take a
         // minute, and the user may have dismissed the card meanwhile — never
         // auto-save a bundle into Applied Jobs for a job the user discarded.
-        if (!findLiveJobNode(nodeId, jobId)) {
+        if (!isOrphan && !findLiveJobNode(nodeId, jobId)) {
           // importLocalApplication registered this exact workspace under this
           // renderer's sender id. Dispose of that capability-bound workspace
           // now; otherwise a deleted card leaves its private Local AI job
@@ -191,9 +202,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           workDir: result.workDir,
           company: result.company,
           candidateName: result.candidateName,
-          jobTitle: liveNode.data?.title,
-          location: liveNode.data?.location,
+          jobTitle: isOrphan ? local.job?.title : liveNode.data?.title,
+          location: isOrphan ? local.job?.location : liveNode.data?.location,
           canvasFilePath: saveCanvasFilePath,
+          // An automatic recovery must not steal focus from the work the user
+          // is doing merely because its deleted card's handoff completed.
+          suppressReveal: isOrphan,
         });
         if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
         const savedPatch = {
@@ -206,9 +220,11 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           missingArtifacts,
           intermediateCleaned: !missingArtifacts.length,
         };
-        savedTerminalRef.current.set(jobId, savedPatch);
-        writeState(nodeId, jobId, savedPatch, { terminal: true });
-        EventLogger.log(`[LocalAI] fallback saved job=${jobId} card=${nodeId} dir=${saved.dir}`);
+        if (!isOrphan) {
+          savedTerminalRef.current.set(jobId, savedPatch);
+          writeState(nodeId, jobId, savedPatch, { terminal: true });
+        }
+        EventLogger.log(`[LocalAI] fallback saved job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`} dir=${saved.dir}`);
         toast?.({
           title: missingArtifacts.length ? 'Local AI Bundle Saved with Missing PDFs' : resumeOverflow ? 'Local AI Application Saved with Length Warning' : 'Local AI Application Saved',
           description: missingArtifacts.length
@@ -222,15 +238,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         if (disposed) return;
         if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
           settlingRef.current.delete(jobId);
-          writeState(nodeId, jobId, { status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
+          if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
           return;
         }
         if (error?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT') {
-          writeState(nodeId, jobId, { status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' });
+          if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' });
           return;
         }
-        writeState(nodeId, jobId, { status: 'completed', message: error?.message || String(error) });
-        EventLogger.log(`[LocalAI] fallback import failed job=${jobId} card=${nodeId}: ${error?.message || error}`);
+        if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: error?.message || String(error) });
+        EventLogger.log(`[LocalAI] fallback import failed job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`}: ${error?.message || error}`);
         ctxRef.current.addToast?.({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
       } finally {
         importBusyRef.current = false;
@@ -238,11 +254,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       }
     };
 
-    const driveJob = async (node) => {
+    const driveJob = async (node, orphanJob = null) => {
       const { getCurrentFile: currentFile } = ctxRef.current;
       const local = node.data.localApplication;
       const jobId = local.id;
       const nodeId = node.id;
+      const isOrphan = Boolean(orphanJob);
       // A terminal 'saved' this manager already committed may have been lost
       // from state (same-flush navigation swap). Re-assert it rather than
       // polling the save-deleted job dir and misdiagnosing the outcome.
@@ -292,15 +309,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (now - settled.observedAt < LOCAL_AI_RESULT_SETTLE_MS) return;
-        await importJob(node, jobId, resultSha256);
+        await importJob(node, jobId, resultSha256, orphanJob);
       } catch (error) {
         if (disposed) return;
         const streak = (statusErrorStreakRef.current.get(jobId) || 0) + 1;
         statusErrorStreakRef.current.set(jobId, streak);
         if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
         statusErrorStreakRef.current.delete(jobId);
-        EventLogger.log(`[LocalAI] fallback poll failed ${LOCAL_AI_STATUS_ERROR_STREAK_LIMIT}x job=${jobId} card=${nodeId}; retrying: ${error?.message || error}`);
-        writeState(nodeId, jobId, { status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` });
+        EventLogger.log(`[LocalAI] fallback poll failed ${LOCAL_AI_STATUS_ERROR_STREAK_LIMIT}x job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`}; retrying: ${error?.message || error}`);
+        if (!isOrphan) writeState(nodeId, jobId, { status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` });
       }
     };
 
@@ -310,10 +327,36 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       if (!nav?.enumerateAllNodes || !window.electronAPI?.getLocalApplicationStatus || !window.electronAPI?.importLocalApplication) return;
       tickBusyRef.current = true;
       try {
-        const pending = selectFallbackLocalAiJobs(nav.enumerateAllNodes());
+        const allNodes = nav.enumerateAllNodes();
+        const pending = selectFallbackLocalAiJobs(allNodes);
         for (const node of pending) {
           if (disposed) return;
           await driveJob(node);
+        }
+        const canvasFilePath = ctxRef.current.getCurrentFile?.();
+        if (!canvasFilePath || !window.electronAPI?.discoverLocalApplications) return;
+        let discovery;
+        try {
+          discovery = await window.electronAPI.discoverLocalApplications({ canvasFilePath });
+        } catch (error) {
+          EventLogger.log(`[LocalAI] fallback orphan discovery failed: ${error?.message || error}`);
+          return;
+        }
+        if (!discovery?.success || !Array.isArray(discovery.localJobs)) {
+          EventLogger.log(`[LocalAI] fallback orphan discovery failed: ${discovery?.error || 'unknown error'}`);
+          return;
+        }
+        // Any card in the full graph owns its exact job, whether mounted or
+        // hidden. Only folders with no canvas owner are eligible for automatic
+        // recovery; this preserves an explicit card dismissal as a dismissal,
+        // not an instruction to recreate UI state.
+        const knownJobIds = new Set(allNodes
+          .map((node) => node?.data?.localApplication?.id)
+          .filter(Boolean));
+        const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);
+        for (const orphanJob of orphaned) {
+          if (disposed) return;
+          await driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob);
         }
       } finally {
         tickBusyRef.current = false;

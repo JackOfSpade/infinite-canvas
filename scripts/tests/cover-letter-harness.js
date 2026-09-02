@@ -22,10 +22,12 @@ import {
   checkIntroductoryWorkplaceComma,
   checkLegalStatus,
   checkLogisticsContainment,
+  checkLogisticsExclusion,
   checkLogisticsGrounding,
   checkLogisticsLegalStatus,
   checkLowInformationToolBuild,
   checkModifierAttachment,
+  checkNamedArtifactIntroduction,
   checkNeedGrounding,
   checkNeedsPortfolio,
   checkOpeningDemonstrative,
@@ -37,6 +39,7 @@ import {
   checkPunctuationStyle,
   checkRedundancy,
   checkReferenceClarity,
+  checkResponsibilityTransition,
   checkSalientPhraseEcho,
   checkRequestedWorkSampleLink,
   checkRoleThesis,
@@ -462,13 +465,13 @@ export default [
       });
       const generic = checks.find(check => check.id === 'generic-phrases');
       const figures = checks.find(check => check.id === 'figure-discipline');
-      const logistics = checks.find(check => check.id === 'logistics-containment');
+      const logistics = checks.find(check => check.id === 'logistics-exclusion');
       assert(!generic.passed && generic.detail.includes('paragraph 1 contains banned generic pattern “proven … track record”')
         && generic.detail.includes('paragraph 2 contains banned generic pattern “primary line of defense”')
         && !figures.passed && figures.detail.includes('“three-year”'),
       'the Hendrick regression must trigger both modifier-resistant generic and spelled-duration grounding checks');
-      assert(!logistics.passed && logistics.detail.includes('round-the-clock coverage'),
-        'Hendrick-style round-the-clock coverage cannot be inferred from an empty/named-shift-only logistics plan');
+      assert(logistics.passed,
+        'impersonal coverage language is not mistaken for a candidate-specific application logistics promise');
       return { generic: generic.detail, figures: figures.detail, logistics: logistics.detail };
     },
   },
@@ -626,7 +629,7 @@ export default [
         ['In my previous software engineering role at Thomson School District, I evaluated third-party products before district-wide adoption.'],
         ['Thomson School District'],
       );
-      assert(!abrupt.passed && abrupt.detail.includes('introduce the candidate\'s prior role or relationship')
+      assert(!abrupt.passed && abrupt.detail.includes('without the candidate\'s role or relationship')
         && framed.passed,
       'a prior employer in the opening is contextualized for a reader who does not know the organization');
 
@@ -749,6 +752,29 @@ export default [
       ]);
       assert(connective.passed,
         `an additive opener without adjacent build evidence, build evidence without a seam, a build verb buried in a subordinate clause, a degree “too” followed by the word it modifies, and a mid-sentence “as well as” comparative are ordinary connective prose: ${connective.detail}`);
+      const opaqueResponsibilityPivot = checkResponsibilityTransition([
+        'The ticketing system I extended needed role-restricted access so staff saw only what their role allowed. Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.',
+        'The same job also included assessing software the district would adopt instead of build.',
+      ]);
+      assert(!opaqueResponsibilityPivot.passed && opaqueResponsibilityPivot.id === 'responsibility-transition'
+        && opaqueResponsibilityPivot.detail.includes('paragraph 1 shifts from “Keeping the district data consistent across its tools …”')
+        && opaqueResponsibilityPivot.detail.includes('through an opaque problem label')
+        && opaqueResponsibilityPivot.detail.includes('paragraph 2 opens with “The same job also included assessing software the …”')
+        && opaqueResponsibilityPivot.detail.includes('shared job scope is not a bridge between responsibilities'),
+      'opaque problem-to-solution pivots and same-job paragraph openers require a substantive responsibility bridge');
+      const bridgedResponsibilityPivot = checkResponsibilityTransition([
+        'The ticketing system I extended needed role-restricted access so staff saw only what their role allowed. Alongside that access-control work, I kept the district data consistent across its tools with Python integration jobs.',
+        'That role also required me to assess software the district would adopt instead of build.',
+      ]);
+      assert(bridgedResponsibilityPivot.passed,
+        `a supported access-control bridge and a role-responsibility opener avoid the opaque-transition constructions: ${bridgedResponsibilityPivot.detail}`);
+      const evaluatedResponsibilityPivot = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: ['Keeping the district data consistent across its tools was a separate challenge. I addressed it with Python integration jobs.'],
+        evidence, researchText: '',
+      }).find(check => check.id === 'responsibility-transition');
+      assert(evaluatedResponsibilityPivot && !evaluatedResponsibilityPivot.passed,
+        'the complete cover-letter evaluator enforces opaque responsibility-transition repairs, not only the direct helper');
       const posting = checkPostingReference([
         'Owning the rollout end-to-end is what your posting wants sped up.',
         'The job ad asks for the same repair work, as advertised.',
@@ -1101,8 +1127,29 @@ export default [
       assert(!planLegal.passed && planLegal.id === 'logistics-legal-status'
         && planLegal.detail.includes('plan logistics states citizenship'),
       'the plan-side twin catches the fact before prose exists');
-      const planClean = checkLogisticsLegalStatus({ logistics: 'Based in Toronto and available from June.' });
-      assert(planClean.passed, `availability and location logistics stay in the plan lane: ${planClean.detail}`);
+      const logisticsExcluded = checkLogisticsExclusion(
+        { logistics: 'I am willing to work anywhere.' },
+        ['I am willing to work anywhere.', 'I can work hybrid or remotely and travel as needed.'],
+      );
+      assert(!logisticsExcluded.passed && logisticsExcluded.id === 'logistics-exclusion'
+        && logisticsExcluded.detail.includes('argument plan contains logistics'),
+      'availability and work-location intent are rejected from the argument plan and letter rather than rephrased');
+      const proseOnlyLogistics = checkLogisticsExclusion({}, [
+        'I am willing to work anywhere.',
+        'I can work hybrid or remotely and travel as needed.',
+        'I can start June 1.',
+        'I am open to working on-site in Austin.',
+      ]);
+      assert(!proseOnlyLogistics.passed && proseOnlyLogistics.detail.includes('work-location willingness')
+        && proseOnlyLogistics.detail.includes('travel willingness')
+        && proseOnlyLogistics.detail.includes('start date'),
+      'the exact willing-to-work-anywhere regression and hybrid/remote/travel/start-date promises are rejected in prose');
+      const logisticsPositiveControls = checkLogisticsExclusion({}, [
+        'I maintained a highly available service that handled travel-booking records for a Toronto team.',
+        'In a prior role, I traveled between customer sites while resolving incidents.',
+      ]);
+      assert(logisticsPositiveControls.passed,
+        `system availability, historical travel duties, and neutral locations are not current logistics promises: ${logisticsPositiveControls.detail}`);
       const legalGate = checkPlanGate({ ...groundedPlan, logistics: 'I am a Canadian citizen.' }, evidence, needs,
         'The role must manage incident escalation.', '', 'Logistics: I am a Canadian citizen.');
       assert(legalGate.shouldRetry && legalGate.checks.some(check => check.id === 'logistics-legal-status' && !check.passed),
@@ -1127,7 +1174,41 @@ export default [
       assert(fixedPhrase.passed, `pronoun and fixed-phrase demonstratives are out of scope: ${fixedPhrase.detail}`);
       const firstParagraph = checkOpeningDemonstrative(['That evaluation practice is the subject of this letter and needs no anchor.']);
       assert(firstParagraph.passed, 'the first paragraph has no previous paragraph to anchor to and is never flagged');
-      return { flagged: flagged.detail, planGate: legalGate.checks.find(check => check.id === 'logistics-legal-status').detail, unanchored: unanchored.detail };
+      return { flagged: flagged.detail, logistics: proseOnlyLogistics.detail, planGate: legalGate.checks.find(check => check.id === 'logistics-legal-status').detail, unanchored: unanchored.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: known résumé projects receive a standalone first mention',
+    run: () => {
+      const abrupt = checkNamedArtifactIntroduction(
+        ['AI-Chalkboard addressed a concrete interface gap because a screen assistant could describe a control but not indicate it.'],
+        ['AI-Chalkboard'],
+      );
+      assert(!abrupt.passed && abrupt.detail.includes('first names AI-Chalkboard'),
+        'a named résumé project cannot begin its proof before the reader learns what it is or the candidate relationship');
+      const structuredEvidence = extractResumeEvidence('<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built a native macOS MCP server.</li></ul></article><div class="projects"><article class="project"><span class="project-name">AI-Chalkboard</span><span class="project-desc">A native macOS MCP server.</span></article></div></main>');
+      const hostChecks = evaluateCoverLetterChecks({
+        plan: { mappings: [{ evidence: 'Built a native macOS MCP server.' }], companyHook: { detail: '' } },
+        paragraphs: ['AI-Chalkboard addressed a concrete interface gap because a screen assistant could describe a control but not visibly indicate it.'],
+        evidence: structuredEvidence,
+      });
+      assert(!hostChecks.find(check => check.id === 'named-artifact-introduction').passed,
+        'host-side enforcement derives known project names from the structured résumé project markup');
+      const introduced = checkNamedArtifactIntroduction(
+        ['I built AI-Chalkboard, a native macOS MCP server, to address the interface gap between describing a control and visibly indicating it.'],
+        ['AI-Chalkboard'],
+      );
+      const introducedAsOverlay = checkNamedArtifactIntroduction(
+        ['I built AI-Chalkboard, a click-through overlay, to visibly indicate the control a screen assistant means.'],
+        ['AI-Chalkboard'],
+      );
+      assert(introduced.passed && introducedAsOverlay.passed,
+        `a same-sentence candidate relationship plus concise artifact descriptor introduces the project: ${introduced.detail}; ${introducedAsOverlay.detail}`);
+      const bareEmployer = checkPriorEmployerOpening(['At Acme, I built the incident workflow.'], ['Acme']);
+      const framedEmployer = checkPriorEmployerOpening(['In my software engineering role at Acme, I built the incident workflow.'], ['Acme']);
+      assert(!bareEmployer.passed && framedEmployer.passed,
+        'a prior employer needs an explicit candidate role or relationship; bare “At Acme, I …” is not sufficient context');
+      return { abrupt: abrupt.detail, introduced: introduced.detail, employer: bareEmployer.detail };
     },
   },
   {
@@ -1210,28 +1291,27 @@ export default [
         { logistics: 'Available weekends locally.' },
         'Available weekends. Current location: Memphis, TN.',
       );
-      assert(sourcedLogistics.passed && !inventedLogistics.passed && !scatteredShortLogistics.passed,
-        'the career-data logistics lane permits stated shift availability but rejects Hendrick-style coverage inflation');
-      assert(scatteredShortLogistics.detail.includes('contiguous source match'),
-        'a short logistics phrase cannot pass by assembling scattered career-data words');
+      assert(!sourcedLogistics.passed && !inventedLogistics.passed && !scatteredShortLogistics.passed
+        && sourcedLogistics.id === 'logistics-exclusion',
+      'even career-data-supported availability and schedules are excluded from the letter argument');
       const containedSchedule = checkLogisticsContainment(
         { logistics: 'Available for full-time, evening, overnight, and weekend shifts.' },
         ['I am available for full-time, evening, overnight, and weekend shifts.'],
       );
       const inflatedCoverage = checkLogisticsContainment(
-        { logistics: 'Available for full-time, evening, overnight, and weekend shifts.' },
-        ['I can provide continuous, round-the-clock coverage for the facility.'],
+        { logistics: '' },
+        ['Continuous, round-the-clock coverage kept the facility open.'],
       );
       const containmentOverflow = checkLogisticsContainment(
         { logistics: '' },
         Array.from({ length: 20 }, () => 'I am available for full-time, evening, overnight, weekend, on-call, round-the-clock, 24/7 coverage and can relocate locally or commute.'),
       );
-      assert(containedSchedule.passed && !inflatedCoverage.passed
-        && inflatedCoverage.detail.includes('continuous coverage') && inflatedCoverage.detail.includes('round-the-clock coverage'),
-      'prose may reuse named shift availability but cannot upgrade it to continuous coverage');
+      assert(!containedSchedule.passed && containedSchedule.id === 'logistics-exclusion'
+        && inflatedCoverage.passed,
+      'legacy containment rejects candidate schedule promises and does not misread impersonal coverage as a candidate promise');
       assert(!containmentOverflow.passed && containmentOverflow.detail.includes('additional observation(s) omitted')
         && containmentOverflow.detail.length < 2400 && MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS === 8,
-      'logistics-containment detail remains bounded for hostile multi-paragraph output');
+      'logistics-exclusion detail remains bounded for hostile multi-paragraph output');
       const credentialHeavyNeeds = [
         { kind: 'credential' }, { kind: 'logistics' }, { kind: 'credential' },
         { kind: 'capability' }, { kind: 'disposition' },
@@ -1325,9 +1405,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 29, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 31, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

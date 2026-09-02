@@ -1,10 +1,12 @@
-import { assert, COMPENSATION_MIN_FIT_SCORE } from '../test-dependencies.js';
+import { assert, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationResearchFingerprint } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
 import {
   classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
   mergeCompetitiveRanges,
   compensationAssessment,
+  compensationMarketCurrency,
+  resolveCompensationMarketCurrency,
   resolveCompensationLocation,
   compensationResidencesForJob,
   canonicalizeCompensationLocation,
@@ -20,14 +22,16 @@ import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js
 import { ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
-  name: 'classifyCompensationFitEligibility: the 75 boundary is inclusive and an unscored job is not a low-scoring job',
+  name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
     const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
-    // Boundary. The user asked for "75% match or above", so 75 must be
-    // INCLUSIVE — an off-by-one here silently denies the check to exactly the
-    // jobs sitting on the bar they named.
-    assert(classifyCompensationFitEligibility(75, opts) === 'eligible', '75 must be eligible (threshold is inclusive)');
-    assert(classifyCompensationFitEligibility(74, opts) === 'below-threshold', '74 must be below the threshold');
+    const justBelowThreshold = COMPENSATION_MIN_FIT_SCORE - 1;
+    // The configured boundary must be INCLUSIVE — an off-by-one here silently
+    // denies the check to exactly the jobs sitting on the bar.
+    assert(classifyCompensationFitEligibility(COMPENSATION_MIN_FIT_SCORE, opts) === 'eligible',
+      `${COMPENSATION_MIN_FIT_SCORE} must be eligible (threshold is inclusive)`);
+    assert(classifyCompensationFitEligibility(justBelowThreshold, opts) === 'below-threshold',
+      `${justBelowThreshold} must be below the threshold`);
     assert(classifyCompensationFitEligibility(100, opts) === 'eligible', '100 must be eligible');
     assert(classifyCompensationFitEligibility(0, opts) === 'below-threshold', '0 must be below the threshold');
     // An unscored job must NEVER be reported as a weak match. The scorer's
@@ -83,6 +87,23 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     ).length === 0,
     'a present but malformed provider appendix fails closed instead of falling back to model prose');
     return { retained: retained.length, salaryRanges: salaryRanges.length, metadataOnly: metadataOnly.length };
+  },
+}, {
+  name: 'Compensation extraction cache is bound to its exact grounded research',
+  run: () => {
+    const originalResearch = 'Source A: https://example.test/pay — USD 100,000–120,000';
+    const correctedResearch = 'Source A: https://example.test/pay — USD 120,000–140,000';
+    const cached = {
+      researchFingerprint: compensationResearchFingerprint(originalResearch),
+      entries: [{ index: 0 }],
+    };
+    assert(compensationAssessmentCacheMatchesResearch(cached, originalResearch),
+      'an extraction remains reusable with the exact raw evidence it parsed');
+    assert(!compensationAssessmentCacheMatchesResearch(cached, correctedResearch)
+      && !compensationAssessmentCacheMatchesResearch({ entries: cached.entries }, originalResearch)
+      && !compensationAssessmentCacheMatchesResearch(cached, ''),
+    'corrected, legacy-unbound, or missing research cannot reuse an older extraction even when source URLs overlap');
+    return { exactMatch: true, correctedRejected: true };
   },
 }, {
   name: 'Role-family experience-band lookup keeps grounded research separate from schema extraction',
@@ -186,6 +207,40 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       sourceLinks: [{ title: 'Salary survey', url: 'https://example.test/pay', min: 85000, max: 130000, currency: 'CAD', note: 'Senior role in Toronto.' }],
     });
     assert(withEvidence.sourceLinks[0]?.note === 'Senior role in Toronto.' && withEvidence.justification.includes('reaches or exceeds'), 'auditable source details and deterministic verdict must be retained');
+    const missingOfferRecommendation = compensationAssessment({
+      offer: parseGuaranteedCashOffer({ salary: '' }),
+      competitiveRanges: [merged],
+      marketCurrency: 'CAD',
+      comparisonLocation: { display: 'Toronto, Ontario, Canada' },
+      justification: 'Current comparable base-pay evidence supports this range.',
+    });
+    assert(missingOfferRecommendation.status === 'market_recommendation'
+      && missingOfferRecommendation.offered === null
+      && missingOfferRecommendation.competitiveRange.min === 85000
+      && missingOfferRecommendation.competitiveRange.currency === 'CAD'
+      && missingOfferRecommendation.reasonCode === 'market_range_recommended'
+      && missingOfferRecommendation.justification.includes('researched CAD market range')
+      && missingOfferRecommendation.justification.includes('no listing comparison was made'),
+    'a listing without usable salary must retain researched market evidence as a neutral recommendation without fabricating an offer comparison');
+    assert(compensationAssessment({
+      offer: parseGuaranteedCashOffer({ salary: '' }),
+      competitiveRanges: [{ min: 85_000, max: 110_000, currency: 'CAD' }],
+    }).status === 'not_evaluated',
+    'market-only ranges without an established target currency must not be unioned into a recommendation');
+    assert(compensationMarketCurrency({ display: 'Toronto, Ontario, Canada' }) === 'CAD'
+      && compensationMarketCurrency({ display: 'Austin, Texas, United States' }) === 'USD',
+    'market-only recommendations infer their target currency from the same resolved compensation location');
+    const locationFallbackCurrency = resolveCompensationMarketCurrency(
+      { salary: 'Competitive salary' },
+      { display: 'Toronto, Ontario, Canada' },
+    );
+    const explicitListingCurrency = resolveCompensationMarketCurrency(
+      { compensation: 'Variable compensation paid in USD' },
+      { display: 'Toronto, Ontario, Canada' },
+    );
+    assert(locationFallbackCurrency.currency === 'CAD' && locationFallbackCurrency.inferredFromLocation
+      && explicitListingCurrency.currency === 'USD' && !explicitListingCurrency.inferredFromLocation,
+    'an explicit listing currency wins, while absent or ambiguous currency falls back to the job location currency');
     const loc = resolveCompensationLocation({}, { workMode: 'remote', remoteRegion: 'canada' }, { canada: { city: 'Toronto', subdivision: 'Ontario', country: 'Canada' } });
     assert(loc?.display === 'Toronto, Ontario, Canada', 'remote Canada work uses Canada residence');
     const inferredRemote = resolveCompensationLocation(
@@ -386,7 +441,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   // researched verdict via reasonCode.
   name: 'Compensation fit gate: threshold constant and below_fit_threshold skip shape',
   run: () => {
-    assert(COMPENSATION_MIN_FIT_SCORE === 75, `COMPENSATION_MIN_FIT_SCORE must be 75 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
+    const justBelowThreshold = COMPENSATION_MIN_FIT_SCORE - 1;
 
     // Mirrors jobs.js's compensationFallback(job, 'below_fit_threshold', ...)
     // for a job that DOES have a real, parseable salary but scored below the
@@ -397,11 +452,11 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const knownLowScoreSkip = compensationAssessment({
       offer: knownLowOffer,
       reasonCode: 'below_fit_threshold',
-      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored 69.`,
+      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored ${justBelowThreshold}.`,
     });
     assert(knownLowScoreSkip.reasonCode === 'below_fit_threshold' && knownLowScoreSkip.offered?.max === 90000,
       'a known below-threshold score must be skipped with reasonCode below_fit_threshold while still carrying the real parsed offer');
-    assert(knownLowScoreSkip.justification.includes('69'),
+    assert(knownLowScoreSkip.justification.includes(String(justBelowThreshold)),
       'a known below-threshold score justification must name the actual score so it reads as a real assessment, not a missing one');
 
     // Mirrors the sibling branch for a job whose score is unknown/null
@@ -421,12 +476,15 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(knownLowScoreSkip.justification !== unknownScoreSkip.justification,
       'a known-low-score skip and an unscored skip must never render identical text on the card — that would erase the only signal that distinguishes them');
 
-    // A boundary-inclusive pass (score === 75) never reaches this fallback path
-    // at all in jobs.js; it is asserted here only as the documented contract on
-    // the constant itself, since the real branch is not independently callable
-    // (see the risk note above).
-    assert(75 >= COMPENSATION_MIN_FIT_SCORE && 74 < COMPENSATION_MIN_FIT_SCORE,
-      'the fit gate must be boundary-inclusive: 75 eligible, 74 not — pinned against the real constant');
+    // Pin this fallback-shape test to the same importable gate used by the
+    // pipeline instead of restating the configured numeric boundary here.
+    assert(classifyCompensationFitEligibility(COMPENSATION_MIN_FIT_SCORE, {
+      minScore: COMPENSATION_MIN_FIT_SCORE,
+    }) === 'eligible'
+      && classifyCompensationFitEligibility(justBelowThreshold, {
+        minScore: COMPENSATION_MIN_FIT_SCORE,
+      }) === 'below-threshold',
+    'the fit gate must be boundary-inclusive at the shared threshold and reject one point below it');
 
     return { minFitScore: COMPENSATION_MIN_FIT_SCORE };
   },

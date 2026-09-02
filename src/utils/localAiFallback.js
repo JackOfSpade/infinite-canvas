@@ -74,3 +74,21 @@ export function selectFallbackLocalAiJobs(allNodes, isMounted = isJobCardMounted
   }
   return out;
 }
+
+/**
+ * App-owned Local AI folders can outlive their result card: a user may delete
+ * the card while the local coding agent is still writing result.json.  The
+ * canvas manager discovers those folders from the current saved canvas and
+ * drives them without recreating a card.  A live card always wins ownership,
+ * including one that is currently hidden or otherwise unmounted.
+ */
+export function selectOrphanedLocalAiJobs(discoveredJobs, knownJobIds) {
+  const known = knownJobIds instanceof Set ? knownJobIds : new Set(knownJobIds || []);
+  const seen = new Set();
+  return (Array.isArray(discoveredJobs) ? discoveredJobs : []).filter((job) => {
+    const id = String(job?.id || '');
+    if (!id || seen.has(id) || known.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}

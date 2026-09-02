@@ -31,9 +31,10 @@ const COMPENSATION_BORDER_COLORS = {
   below_market: '#ef4444',
 };
 
-function compensationLabel(status) {
+function compensationLabel(status, currency = '') {
   if (status === 'competitive') return 'Competitive cash pay';
   if (status === 'below_market') return 'Likely below-market cash pay';
+  if (status === 'market_recommendation') return `Recommended salary range${currency ? ` (${currency})` : ''}`;
   if (status === 'uncertain') return 'Cash-pay comparison uncertain';
   return 'Cash pay not evaluated';
 }
@@ -907,7 +908,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           aria-expanded={showCompensationDetails}
           title={showCompensationDetails ? 'Hide cash-pay research' : 'Show cash-pay research'}
         >
-          <span className="min-w-0 truncate">{compensationLabel(compensationAssessment.status)}</span>
+          <span className="min-w-0 truncate">{compensationLabel(
+            compensationAssessment.status,
+            compensationAssessment.competitiveRange.currency || compensationAssessment.offered.currency,
+          )}</span>
           <ChevronDown size={13} className={`shrink-0 transition-transform ${showCompensationDetails ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
 
@@ -918,10 +922,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || data.salary}</div>
             )}
             {cashRangeLabel(compensationAssessment.competitiveRange) && (
-              <div><span className="text-white/35">Competitive cash range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
+              <div><span className="text-white/35">{compensationAssessment.status === 'market_recommendation' ? 'Recommended cash range:' : 'Competitive cash range:'}</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
+            )}
+            {compensationAssessment.status === 'market_recommendation' && compensationAssessment.competitiveRange.currency && (
+              <div><span className="text-white/35">Currency:</span> {compensationAssessment.competitiveRange.currency}{compensationAssessment.currencyInferredFromLocation ? ' (inferred from job location)' : ''}</div>
             )}
             {compensationAssessment.comparisonLocation && (
-              <div><span className="text-white/35">Compared for:</span> {compensationAssessment.comparisonLocation}</div>
+              <div><span className="text-white/35">{compensationAssessment.status === 'market_recommendation' ? 'Researched for:' : 'Compared for:'}</span> {compensationAssessment.comparisonLocation}</div>
             )}
             {researchedDateLabel(compensationAssessment.researchedAt) && (
               <div><span className="text-white/35">Researched:</span> {researchedDateLabel(compensationAssessment.researchedAt)}</div>

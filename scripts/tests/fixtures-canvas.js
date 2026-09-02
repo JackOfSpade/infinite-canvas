@@ -785,7 +785,7 @@ export default [
     name: 'Serialization sanitizes transient state',
     run: () => {
       const nodes = [
-        { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old', rerunOutcome: 'no-new-results', rerunNotice: 'old notice' } },
+        { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old', rerunOutcome: 'no-new-results', rerunNotice: 'old notice', manualAiResume: { runId: 'resume-run', task: 'job-scoring' } } },
         { id: 'reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 3 }, data: { hubState: 'scoring', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], scoredJobs: [{ title: 'Saved result' }], resultCount: 1 } },
         { id: 'job', type: 'jobcard', position: { x: 1, y: 1 }, style: { opacity: 0.3, width: 180 }, data: { title: 'A', isDropTarget: true } },
         { id: 'paused-hub', type: 'jobhub', position: { x: 9, y: 9 }, data: { hubState: 'sources-ready', pendingJobs: [1], scrapeWarnings: [{ sourceId: 'indeed' }] } },
@@ -809,6 +809,8 @@ export default [
       const job = sanitized.find(n => n.id === 'job');
       assert(hub.data.hubState === 'empty', 'Serialization sanitizes transient state: active jobhub should reset to empty');
       assert(!('pendingJobs' in hub.data) && !('scrapeWarnings' in hub.data) && !('queuedModuleRun' in hub.data) && !('rerunOutcome' in hub.data) && !('rerunNotice' in hub.data), 'Serialization sanitizes transient state: jobhub transient buffers/notices should be stripped');
+      assert(hub.data.manualAiResume?.runId === 'resume-run',
+        'Serialization keeps the bounded manual-AI restart marker while resetting non-restorable processing state');
       assert(reanalyzingHub.data.hubState === 'done' && reanalyzingHub.data.scoredJobs.length === 1
         && !('pendingJobs' in reanalyzingHub.data) && !('scrapeWarnings' in reanalyzingHub.data) && !('queuedModuleRun' in reanalyzingHub.data),
       'Serialization restores interrupted re-analysis to done while stripping its transient buffers');

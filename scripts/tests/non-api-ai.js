@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { assert, callLLMText, checkPromptFits, fs, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { assert, callLLMText, checkPromptFits, fs, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -92,11 +92,19 @@ export default [
     run: () => {
       const preloadSource = readFileSync(new URL('../../electron/preload.js', import.meta.url), 'utf8');
       const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const persistenceSource = readFileSync(new URL('../../src/hooks/useCanvasPersistence.js', import.meta.url), 'utf8');
       const appSource = readFileSync(new URL('../../src/App.jsx', import.meta.url), 'utf8');
+      const mainSource = readFileSync(new URL('../../electron/main.js', import.meta.url), 'utf8');
       const transportSource = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
       assert(preloadSource.includes("cancelNonApiAiRequest: (requestId) => ipcRenderer.invoke('cancel-non-api-ai-request', { requestId })"),
         'the preload bridge exposes only a request-id-bound manual AI cancellation IPC');
+      assert(preloadSource.includes("stepBackNonApiAiRequest: (requestId) => ipcRenderer.invoke('step-back-non-api-ai-request', { requestId })")
+        && dialogSource.includes('activeRequest.canStepBack')
+        && dialogSource.includes('Back one step')
+        && dialogSource.includes('initialResponse'),
+      'a rewindable follow-up exposes a request-bound Back action and restores the prior accepted paste for editing');
       const jobSearchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const jobBoardSource = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       assert(dialogSource.includes("new CustomEvent('non-api-ai-node-cancelled'")
         && dialogSource.includes('result.nodeCancelled && activeNodeId')
         && jobSearchSource.includes("document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled)")
@@ -129,6 +137,30 @@ export default [
       assert(transportSource.includes('NON_API_AI_HANDLER_CHANNELS')
         && transportSource.includes('ipcMain.removeHandler?.(channel)'),
       'manual-AI handlers can be safely re-registered by a controlled development reload without duplicate Electron IPC registrations');
+      assert(mainSource.includes('hasPendingNonApiAiRequestsForSender(expectedSender)')
+        && mainSource.includes("return { action: 'save' }")
+        && mainSource.includes('await flushNonApiAiPersistence()')
+        && dialogSource.includes("new CustomEvent('non-api-ai-node-pending'")
+        && jobSearchSource.includes('Auto-resuming manual AI run'),
+      'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, and auto-resumes after reload');
+      const closeCheck = mainSource.slice(mainSource.indexOf('async function checkUnsavedChanges'), mainSource.indexOf('// ── Window creation'));
+      assert(closeCheck.indexOf('hasPendingNonApiAiRequestsForSender(expectedSender)')
+          < closeCheck.indexOf('if (rendererState.hasUnsavedChanges)')
+        && preloadSource.includes('const pendingNonApiAiDraftWrites = new Set()')
+        && preloadSource.includes('await Promise.allSettled([...pendingNonApiAiDraftWrites])')
+        && persistenceSource.indexOf('await window.electronAPI?.flushNonApiAiPersistence?.()')
+          < persistenceSource.indexOf('window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current)'),
+      'pending handoffs force a save independently of the dirty flag, and shutdown waits for every draft write before replying');
+      assert(!dialogSource.includes("new CustomEvent('non-api-ai-node-settled'")
+        && !jobSearchSource.includes("document.addEventListener('non-api-ai-node-settled'")
+        && !jobBoardSource.includes("document.addEventListener('non-api-ai-node-settled'")
+        && jobSearchSource.includes('completeManualAiRun(effectiveManualAiRunId)')
+        && jobBoardSource.includes('completeManualAiRun(manualAiRunId)'),
+      'a prompt settlement no longer clears restart state; only committed workflow completion or cancellation does');
+      assert(jobSearchSource.includes("manualAiRecoveryMode: 'append-scored-jobs'")
+        && jobSearchSource.includes("resultMode === 'append'")
+        && jobSearchSource.includes('recoveryMode: resume.recoveryMode'),
+      'background scoring marks append recovery and consumes that mode again after restart');
       return { bridge: 'request-id-bound', replay: 'listener-first', registration: 'idempotent' };
     },
   },
@@ -485,6 +517,81 @@ export default [
     },
   },
   {
+    name: 'non-API AI: Back one step replaces accepted research with the corrected paste',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 709, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-step-back-test', async (_event, _args, signal) => {
+        const pair = await runRewindableGroundedHandoff({
+          research: ({ initialResponse }) => requestNonApiAi({
+            prompt: 'RESEARCH STEP',
+            task: 'job-compensation-research',
+            initialResponse,
+            signal,
+          }),
+          extract: (research, manualHandoff) => requestNonApiAi({
+            prompt: `EXTRACTION STEP\n${research}`,
+            task: 'job-compensation-assessment',
+            responseSchema: {
+              type: 'object', required: ['answer'], properties: { answer: { type: 'string' } },
+            },
+            ...manualHandoff,
+            signal,
+          }),
+        });
+        return { research: pair.groundedResearch, answer: pair.result.answer };
+      });
+
+      const run = ipcMain.__getInvokeHandler('non-api-step-back-test')({ sender }, { nodeId: 'node-step-back-test' });
+      await new Promise(resolve => setImmediate(resolve));
+      const requests = () => sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const stepBackRequest = ipcMain.__getInvokeHandler('step-back-non-api-ai-request');
+      const firstResearch = requests()[0];
+      assert(firstResearch?.prompt.includes('RESEARCH STEP') && firstResearch.canStepBack === false,
+        'the first handoff has no imaginary predecessor');
+      const unavailable = await stepBackRequest({ sender }, { requestId: firstResearch.requestId });
+      assert(unavailable.steppedBack === false,
+        'the main process rejects Back when the active handoff has no real preceding step');
+      await submit({ sender }, { requestId: firstResearch.requestId, response: 'WRONG RESEARCH' });
+      await new Promise(resolve => setImmediate(resolve));
+
+      const firstExtraction = requests()[1];
+      assert(firstExtraction?.canStepBack === true
+        && firstExtraction.stepBackLabel === 'Back to research'
+        && firstExtraction.prompt.includes('WRONG RESEARCH'),
+      'the extraction gate identifies its real preceding research handoff');
+      const foreign = await stepBackRequest({ sender: { ...sender, id: 710 } }, { requestId: firstExtraction.requestId });
+      assert(foreign.steppedBack === false,
+        'a different renderer cannot rewind a sensitive pending handoff');
+      const steppedBack = await stepBackRequest({ sender }, { requestId: firstExtraction.requestId });
+      await new Promise(resolve => setImmediate(resolve));
+
+      const replacementResearch = requests()[2];
+      assert(steppedBack.steppedBack === true
+        && replacementResearch?.prompt.includes('RESEARCH STEP')
+        && replacementResearch.initialResponse === 'WRONG RESEARCH',
+      'Back reissues the previous prompt with the accepted paste restored as an editable draft');
+      await submit({ sender }, { requestId: replacementResearch.requestId, response: 'CORRECT RESEARCH' });
+      await new Promise(resolve => setImmediate(resolve));
+
+      const replacementExtraction = requests()[3];
+      assert(replacementExtraction?.prompt.includes('CORRECT RESEARCH')
+        && !replacementExtraction.prompt.includes('WRONG RESEARCH'),
+      'the downstream prompt is rebuilt from the corrected response, not the already-resolved wrong value');
+      await submit({ sender }, { requestId: replacementExtraction.requestId, response: '{"answer":"accepted"}' });
+      const result = await run;
+      assert(result.success === true && result.research === 'CORRECT RESEARCH' && result.answer === 'accepted',
+        'the owning operation continues and returns only the corrected research result');
+      return { rewound: true, corrected: true };
+    },
+  },
+  {
     name: 'non-API AI: dialog cancellation is sender-owned and aborts the whole node task',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
@@ -612,6 +719,131 @@ export default [
       assert(results.every(result => result.success === false && result.error === 'Manual AI job cancelled'),
         'replayed test requests settle cleanly when their owner cancels them');
       return { replayed: own.count };
+    },
+  },
+  {
+    name: 'non-API AI: accepted steps and the active draft resume under the same workflow id',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `durable-resume-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      handleSafe('non-api-durable-resume-test', async (_event, _args, signal) => {
+        const first = await requestNonApiAi({ prompt: 'DURABLE STEP ONE', task: 'job-scoring', responseSchema: schema, signal });
+        const second = await requestNonApiAi({ prompt: `DURABLE STEP TWO\n${first.answer}`, task: 'job-scoring', responseSchema: schema, signal });
+        return { first: first.answer, second: second.answer };
+      });
+
+      const firstSent = [];
+      const firstSender = new EventEmitter();
+      firstSender.id = 801;
+      firstSender.isDestroyed = () => false;
+      firstSender.send = (channel, payload) => firstSent.push({ channel, payload });
+      const waitForRequestCount = async (sent, count) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request');
+          if (requests.length >= count) return requests;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request');
+      };
+      const invoke = ipcMain.__getInvokeHandler('non-api-durable-resume-test');
+      const firstRun = invoke({ sender: firstSender }, { nodeId: 'durable-node', manualAiRunId: runId });
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const firstRequest = (await waitForRequestCount(firstSent, 1))[0]?.payload;
+      await submit({ sender: firstSender }, { requestId: firstRequest.requestId, response: '{"answer":"first accepted"}' });
+      const secondRequest = (await waitForRequestCount(firstSent, 2))[1]?.payload;
+      assert(secondRequest?.runId === runId && secondRequest?.stepKey,
+        'durable requests expose their workflow and deterministic step identity to the renderer');
+      await ipcMain.__getInvokeHandler('update-non-api-ai-draft')(
+        { sender: firstSender },
+        { requestId: secondRequest.requestId, response: '{"answer":"draft survives"}' },
+      );
+      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      const interrupted = await firstRun;
+      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
+        'the original process-local continuation is allowed to terminate after its checkpoint is durable');
+
+      const resumedSent = [];
+      const resumedSender = new EventEmitter();
+      resumedSender.id = 802;
+      resumedSender.isDestroyed = () => false;
+      resumedSender.send = (channel, payload) => resumedSent.push({ channel, payload });
+      const resumedRun = invoke({ sender: resumedSender }, { nodeId: 'durable-node', manualAiRunId: runId });
+      const resumedRequests = (await waitForRequestCount(resumedSent, 1)).map(item => item.payload);
+      assert(resumedRequests.length === 1
+        && resumedRequests[0].prompt.includes('DURABLE STEP TWO')
+        && resumedRequests[0].initialResponse === '{"answer":"draft survives"}',
+      'restart replays the accepted first step silently and restores the exact unfinished-step draft');
+      await submit({ sender: resumedSender }, { requestId: resumedRequests[0].requestId, response: '{"answer":"second accepted"}' });
+      const completed = await resumedRun;
+      assert(completed.success === true
+        && completed.first === 'first accepted'
+        && completed.second === 'second accepted',
+      'the restarted workflow continues from the checkpoint and completes with both accepted values');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
+      return { resumedAt: 'step-two', draftRestored: true };
+    },
+  },
+  {
+    name: 'non-API AI: identical document prompts keep attachment-specific durable steps',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `durable-attachments-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      handleSafe('non-api-durable-attachment-test', async (_event, _args, signal) => {
+        const first = await requestNonApiAi({
+          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'career-file-extract',
+          responseSchema: schema, attachmentPaths: ['/tmp/career-file-one.pdf'], signal,
+        });
+        const second = await requestNonApiAi({
+          prompt: 'IDENTICAL DOCUMENT EXTRACTION PROMPT', task: 'career-file-extract',
+          responseSchema: schema, attachmentPaths: ['/tmp/career-file-two.pdf'], signal,
+        });
+        return { first: first.answer, second: second.answer };
+      });
+
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 803;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const waitForRequests = async (count) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request');
+          if (requests.length >= count) return requests.map(item => item.payload);
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      };
+
+      const invoke = ipcMain.__getInvokeHandler('non-api-durable-attachment-test');
+      const pending = invoke({ sender }, {
+        nodeId: 'durable-attachment-node', runId, manualAiRunId: runId,
+        manualAiRecoveryMode: 'append-scored-jobs',
+      });
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const firstRequest = (await waitForRequests(1))[0];
+      await submit({ sender }, { requestId: firstRequest.requestId, response: '{"answer":"file one"}' });
+      const requests = await waitForRequests(2);
+      assert(requests.length === 2
+        && requests[0].stepKey !== requests[1].stepKey
+        && requests[0].attachments[0] !== requests[1].attachments[0]
+        && requests[1].recoveryMode === 'append-scored-jobs',
+      'same-prompt document handoffs have distinct opaque identities and retain their workflow recovery mode');
+      await submit({ sender }, { requestId: requests[1].requestId, response: '{"answer":"file two"}' });
+      const completed = await pending;
+      assert(completed.success === true && completed.first === 'file one' && completed.second === 'file two',
+        'the second attachment receives its own response instead of silently replaying the first file response');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+      return { attachmentSteps: requests.length, distinct: true };
     },
   },
   {

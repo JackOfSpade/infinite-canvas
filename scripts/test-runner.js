@@ -33,6 +33,7 @@ import claude_structured_outputs from './tests/claude-structured-outputs.js';
 import job_resume_ingestion from './tests/job-resume-ingestion.js';
 import non_api_ai from './tests/non-api-ai.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
+import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -71,6 +72,7 @@ const testGroups = [
   ['job-resume-ingestion.js', job_resume_ingestion],
   ['non-api-ai.js', non_api_ai],
   ['job-workflow-documentation.js', job_workflow_documentation],
+  ['application-pdf-reconcile.js', application_pdf_reconcile],
 ];
 
 function validateTestRegistry(groups) {

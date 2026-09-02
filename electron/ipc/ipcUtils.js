@@ -218,7 +218,21 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
 
     try {
       const result = await ipcRequestContext.run(
-        { sender: event.sender, nodeId: nodeId || null, channel },
+        {
+          sender: event.sender,
+          nodeId: nodeId || null,
+          channel,
+          // A renderer-created id spanning every manual AI step in one logical
+          // workflow. nonApiAi uses it to replay accepted copy/paste steps after
+          // a process restart without ever confusing two runs of the same node.
+          manualAiRunId: typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
+          // Recovery semantics are workflow-owned renderer state. In particular,
+          // a late background source refresh appends its scored rows while a
+          // normal search/re-analysis replaces the prior result set.
+          manualAiRecoveryMode: typeof args?.manualAiRecoveryMode === 'string'
+            ? args.manualAiRecoveryMode.trim().slice(0, 80)
+            : null,
+        },
         () => handler(event, args, signal),
       );
       

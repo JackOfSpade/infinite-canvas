@@ -53,6 +53,18 @@ import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger
 
 const { app } = electronPkg;
 
+// Sync's PDF renderer substitutes common system fonts so Chromium's macOS PDF
+// output keeps an ATS-readable Unicode text layer. The screen pagination guide
+// must measure with those same metrics; otherwise it can advertise a phantom
+// page boundary that Sync will never generate. Kept here (rather than in
+// resumeRender.js) because this module owns the generated guide script and
+// resumeRender already depends on it.
+export const ATS_SAFE_PDF_FONT_TOKENS = Object.freeze({
+  '--ff-display': 'Georgia, "Times New Roman", serif',
+  '--ff-body': 'Arial, "Helvetica Neue", sans-serif',
+  '--ff-mono': 'Menlo, Consolas, "Courier New", monospace',
+});
+
 export function escapeHtml(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
@@ -1155,10 +1167,29 @@ export function normaliseResumeDownloadBundle(raw = {}) {
   const coverLetterPdfBase64 = validPdfBase64(raw.coverLetterPdfBase64);
   const syncEndpoint = String(raw.sync?.endpoint || '');
   const syncToken = String(raw.sync?.token || '');
+  const syncDocument = (value) => {
+    const pdfSha256 = String(value?.pdfSha256 || '').toLowerCase();
+    const htmlSha256 = String(value?.htmlSha256 || '').toLowerCase();
+    return {
+      pdfSha256: /^[a-f0-9]{64}$/.test(pdfSha256) ? pdfSha256 : '',
+      htmlSha256: /^[a-f0-9]{64}$/.test(htmlSha256) ? htmlSha256 : '',
+    };
+  };
   const sync = /^http:\/\/127\.0\.0\.1:43192\/application-sync$/.test(syncEndpoint)
     && /^[a-f0-9]{64}$/i.test(syncToken)
-    ? { endpoint: syncEndpoint, token: syncToken, version: 1 }
-    : { endpoint: '', token: '', version: 1 };
+    ? {
+      endpoint: syncEndpoint,
+      token: syncToken,
+      version: 2,
+      documents: {
+        resume: syncDocument(raw.sync?.documents?.resume),
+        cover: syncDocument(raw.sync?.documents?.cover),
+      },
+    }
+    : {
+      endpoint: '', token: '', version: 2,
+      documents: { resume: syncDocument(null), cover: syncDocument(null) },
+    };
   const rawAudit = raw.coverLetterAudit && typeof raw.coverLetterAudit === 'object'
     && !Array.isArray(raw.coverLetterAudit) ? raw.coverLetterAudit : null;
   const boundedIndex = (value) => Number.isInteger(value) && value >= 0 && value <= 999 ? value : null;
@@ -1675,7 +1706,17 @@ ${editableRuntimeSanitizerSource()}
   // Each document has its own exported companion. A résumé edit must never
   // invalidate a still-current cover-letter PDF (and vice versa).
   var pdfStale = { resume: false, cover: false };
+  // A same-generation browser autosave can outlive the PDF it was meant to
+  // replace. Track which panels were restored so the open-time bridge can
+  // prefer a verified, current HTML/PDF pair without destroying the old
+  // browser-only draft.
+  var restoredAutosave = { resume: false, cover: false };
   var syncMessage = '';
+  var reconcileNoticeKey = 'ic-pdf-reconcile:' + DOC_ID;
+  try {
+    syncMessage = sessionStorage.getItem(reconcileNoticeKey) || '';
+    sessionStorage.removeItem(reconcileNoticeKey);
+  } catch (e) {}
   // Keystrokes, skill-decision clicks, and tab switches all funnel into
   // updateSync(). Without this flag one of those firing mid-fetch re-enables
   // the button and overwrites the 'Syncing…' state while the POST is still
@@ -1731,6 +1772,15 @@ ${editableRuntimeSanitizerSource()}
     try {
       localStorage.setItem(key, markup);
       localStorage.setItem(key + ':fingerprint', fingerprint);
+    } catch (e) {}
+  }
+  function icQuarantineAutosave(kind) {
+    var key = kind === 'cover' ? STORAGE_KEY + ':cover' : STORAGE_KEY;
+    try {
+      var saved = localStorage.getItem(key);
+      if (saved) localStorage.setItem(key + ':superseded', saved);
+      localStorage.removeItem(key);
+      localStorage.removeItem(key + ':fingerprint');
     } catch (e) {}
   }
   var trustedResumeDerivations = icTrustedDerivationMap(resumeMain);
@@ -1948,6 +1998,76 @@ ${editableRuntimeSanitizerSource()}
   updateSkillReviewStatus();
   selectDocument('resume');
 
+  // A file:// page has no authority to read its sibling PDFs. Ask the same
+  // capability-scoped loopback bridge used by Sync to compare the fixed
+  // Resume.pdf and Cover Letter.pdf paths with the revision hashes embedded in
+  // this file. If an otherwise-unmodified PDF has newer text, the bridge
+  // imports that text into the trusted editable panel and atomically saves the
+  // HTML before this page reloads. Ambiguous two-sided edits are reported as a
+  // conflict instead of silently choosing a winner.
+  function reconcileExternalPdfsOnOpen() {
+    if (!HAS_APPLICATION_BUNDLE) return;
+    if (typeof fetch !== 'function') return;
+    var sync = BUNDLE_DATA.sync || {};
+    if (!sync.endpoint || !sync.token) return;
+    fetch(sync.endpoint, {
+      method: 'POST', mode: 'cors', credentials: 'omit',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sync.token, action: 'reconcile' })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not compare the sibling PDFs.');
+        var imported = Array.isArray(body.importedDocuments) ? body.importedDocuments : [];
+        var stale = Array.isArray(body.staleDocuments) ? body.staleDocuments : [];
+        var conflicts = Array.isArray(body.conflicts) ? body.conflicts : [];
+        var variantMismatches = Array.isArray(body.variantMismatches) ? body.variantMismatches : [];
+        stale.forEach(function (kind) { if (kind === 'resume' || kind === 'cover') pdfStale[kind] = true; });
+        if (variantMismatches.length) {
+          syncMessage = variantMismatches.map(function (item) {
+            var label = item.document === 'cover' ? 'Cover letter' : 'Résumé';
+            return label + ' PDF uses ' + (item.actual === 'dual-pdf' ? 'a cream viewer background' : 'a flat white background')
+              + ', but this application selected ' + (item.expected === 'dual-pdf' ? 'dual-mode cream' : 'flat white') + '. Sync to repair it.';
+          }).join(' ');
+        }
+        if (conflicts.length) {
+          var conflictMessage = conflicts.map(function (item) {
+            return (item.document === 'cover' ? 'Cover letter' : 'Résumé') + ' PDF and HTML both changed; automatic import was paused to protect both revisions.';
+          }).join(' ');
+          syncMessage = [syncMessage, conflictMessage].filter(Boolean).join(' ');
+        }
+        if (stale.length || variantMismatches.length || conflicts.length) updateSync();
+        var blockedKinds = stale.concat(
+          conflicts.map(function (item) { return item.document; }),
+          variantMismatches.map(function (item) { return item.document; })
+        );
+        // If disk HTML and its sibling PDF are still the verified shared
+        // revision, a restored localStorage draft is necessarily browser-only
+        // and must not mask what is actually in the PDF. Preserve it in the
+        // existing superseded recovery slot, clear the active slot, and reload
+        // the trusted file. A real disk conflict remains visible and untouched.
+        var realigned = ['resume', 'cover'].filter(function (kind) {
+          return restoredAutosave[kind] && blockedKinds.indexOf(kind) < 0;
+        });
+        var reloaded = imported.concat(realigned.filter(function (kind) { return imported.indexOf(kind) < 0; }));
+        if (!reloaded.length) return;
+        reloaded.forEach(icQuarantineAutosave);
+        var labels = reloaded.map(documentLabel).join(' and ');
+        var notice = imported.length
+          ? 'Imported the updated ' + labels + ' PDF contents into this HTML workspace.'
+          : 'Restored the current ' + labels + ' from its verified PDF revision; the previous browser-only draft was preserved for recovery.';
+        try { sessionStorage.setItem(reconcileNoticeKey, notice); } catch (e) {}
+        window.location.reload();
+      });
+    }).catch(function (error) {
+      var message = error && error.message ? error.message : '';
+      syncMessage = !message || /fetch|network|load failed/i.test(message)
+        ? 'Automatic PDF comparison could not reach Infinite Canvas. Keep the app running, then reopen this file.'
+        : message;
+      updateSync();
+    });
+  }
+  reconcileExternalPdfsOnOpen();
+
   var histogramSelector = document.getElementById('ic-hist-role');
   if (histogramSelector) histogramSelector.addEventListener('change', function () {
     Array.prototype.slice.call(document.querySelectorAll('[data-ic-hist-panel]')).forEach(function (panel) {
@@ -1966,6 +2086,7 @@ ${editableRuntimeSanitizerSource()}
         // HTML directly to a connected main can fire an image/event payload
         // before any later cleanup gets a chance to run.
         main.innerHTML = icSanitizeEditableMarkup(saved, MAIN_SANITIZE_KIND, trustedResumeDerivations);
+        restoredAutosave.resume = true;
         if (restoreNote) restoreNote.hidden = false;
         markPdfStale('resume');
       }
@@ -1991,6 +2112,7 @@ ${editableRuntimeSanitizerSource()}
       var savedCover = icReadAutosave(STORAGE_KEY + ':cover', COVER_MARKUP_FINGERPRINT);
       if (savedCover) {
         coverMain.innerHTML = icSanitizeEditableMarkup(savedCover, 'cover');
+        restoredAutosave.cover = true;
         // Same disclosure the resume path makes. Swapping the letter out from
         // under the reader with no notice is how a stale draft passes for the
         // generated one.
@@ -2247,6 +2369,11 @@ ${chrome}
     // is redundant anyway: its paired dt already reports that row's column
     // correctly from the left edge.
     var CANDIDATE_SELECTOR = 'li, p:not(.role-dates):not(.role-location), dt, header, hr, h1, h2, h3, .role-header, .role-meta, .project, .letter-close';
+    // Sync applies these ATS-safe font tokens immediately before Electron
+    // prints. Give the off-screen pagination clone the same metrics so its
+    // seam reflects the PDF the user will actually receive, not editorial
+    // web-font layout in the visible workspace.
+    var PAGE_GUIDE_FONT_TOKENS = ${JSON.stringify(ATS_SAFE_PDF_FONT_TOKENS)};
 
     function pxFromVar(varValue) {
       var probe = document.createElement('div');
@@ -2285,6 +2412,13 @@ ${chrome}
         // each successive column begins exactly one outer paper width later —
         // the same advance columnIndexOf() measures below.
         + 'column-width:' + geometry.outerWidthPx + 'px;column-gap:' + (geometry.marginSidePx * 2) + 'px;column-fill:auto;overflow:visible;';
+      Object.keys(PAGE_GUIDE_FONT_TOKENS).forEach(function (property) {
+        clone.style.setProperty(property, PAGE_GUIDE_FONT_TOKENS[property]);
+      });
+      // The real render changes these tokens on the document root, so body
+      // text inherits the ATS-safe --ff-body stack. A detached page clone
+      // instead inherits from the live editorial body; establish that default.
+      clone.style.setProperty('font-family', 'var(--ff-body)');
       host.appendChild(clone);
       document.body.appendChild(host);
       void clone.getBoundingClientRect();

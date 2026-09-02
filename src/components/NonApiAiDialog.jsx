@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
+import { ArrowLeft, Check, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 import { updateModalCount } from './modalStack';
 
 const stringifyValidationError = (value) => {
@@ -39,6 +39,7 @@ export function NonApiAiDialog() {
   const [drafts, setDrafts] = useState({});
   const [errors, setErrors] = useState({});
   const [submittingRequestIds, setSubmittingRequestIds] = useState(() => new Set());
+  const [steppingBackRequestIds, setSteppingBackRequestIds] = useState(() => new Set());
   const [cancellingRequestIds, setCancellingRequestIds] = useState(() => new Set());
   const [acceptedRequestIds, setAcceptedRequestIds] = useState(() => new Set());
   const [copiedRequestId, setCopiedRequestId] = useState(null);
@@ -59,6 +60,7 @@ export function NonApiAiDialog() {
   const activeResponse = activeRequestId ? (drafts[activeRequestId] || '') : '';
   const activeError = activeRequestId ? (errors[activeRequestId] || '') : '';
   const isSubmitting = activeRequestId ? submittingRequestIds.has(activeRequestId) : false;
+  const isSteppingBack = activeRequestId ? steppingBackRequestIds.has(activeRequestId) : false;
   const isCancelling = activeRequestId ? cancellingRequestIds.has(activeRequestId) : false;
   const isAccepted = activeRequestId ? acceptedRequestIds.has(activeRequestId) : false;
   const isCopied = copiedRequestId === activeRequestId;
@@ -94,6 +96,12 @@ export function NonApiAiDialog() {
         next.delete(requestId);
         return next;
       });
+      setSteppingBackRequestIds(previous => {
+        if (!previous.has(requestId)) return previous;
+        const next = new Set(previous);
+        next.delete(requestId);
+        return next;
+      });
       setCancellingRequestIds(previous => {
         if (!previous.has(requestId)) return previous;
         const next = new Set(previous);
@@ -111,6 +119,17 @@ export function NonApiAiDialog() {
 
     const receiveRequest = (incoming) => {
       if (!incoming?.requestId || typeof incoming.prompt !== 'string') return;
+      if (incoming.nodeId && incoming.runId) {
+        document.dispatchEvent(new CustomEvent('non-api-ai-node-pending', {
+          detail: {
+            nodeId: incoming.nodeId,
+            runId: incoming.runId,
+            task: incoming.task || null,
+            stepKey: incoming.stepKey || null,
+            recoveryMode: incoming.recoveryMode || null,
+          },
+        }));
+      }
       const validationError = stringifyValidationError(incoming.validationError);
       setRequests(previous => {
         const index = previous.findIndex(request => request.requestId === incoming.requestId);
@@ -119,6 +138,17 @@ export function NonApiAiDialog() {
         next[index] = { ...next[index], ...incoming };
         return next;
       });
+      if (typeof incoming.initialResponse === 'string' && incoming.initialResponse) {
+        setDrafts(previous => (
+          previous[incoming.requestId] === undefined
+            ? { ...previous, [incoming.requestId]: incoming.initialResponse }
+            : previous
+        ));
+        // A non-empty initial response is emitted only by a genuine rewind.
+        // Bring that reissued predecessor to the front even if unrelated
+        // handoffs are also queued in the global dialog.
+        setSelectedRequestId(incoming.requestId);
+      }
       if (validationError) {
         setErrors(previous => ({ ...previous, [incoming.requestId]: validationError }));
         setAcceptedRequestIds(previous => {
@@ -193,6 +223,10 @@ export function NonApiAiDialog() {
   const setActiveResponse = useCallback((response) => {
     if (!activeRequestId) return;
     setDrafts(previous => ({ ...previous, [activeRequestId]: response }));
+    // Queue every edit in the main process. Writes are serialized there, and
+    // the window-close handshake waits for that queue before destroying the
+    // renderer, so even a close immediately after Paste retains the draft.
+    void window.electronAPI?.updateNonApiAiDraft?.(activeRequestId, response).catch(() => {});
     setErrors(previous => {
       if (!previous[activeRequestId]) return previous;
       const { [activeRequestId]: _cleared, ...remaining } = previous;
@@ -238,7 +272,7 @@ export function NonApiAiDialog() {
 
   const submit = useCallback(async (event) => {
     event?.preventDefault();
-    if (!activeRequestId || !activeResponse.trim() || isSubmitting || isCancelling || isAccepted) return;
+    if (!activeRequestId || !activeResponse.trim() || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
     if (actionRequestIdsRef.current.has(activeRequestId)) return;
     if (!window.electronAPI?.submitNonApiAiResponse) {
       setErrors(previous => ({ ...previous, [activeRequestId]: 'Manual AI response submission is unavailable.' }));
@@ -281,10 +315,52 @@ export function NonApiAiDialog() {
         return next;
       });
     }
-  }, [activeRequestId, activeResponse, isAccepted, isCancelling, isSubmitting]);
+  }, [activeRequestId, activeResponse, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
+
+  const stepBack = useCallback(async () => {
+    if (!activeRequestId || !activeRequest?.canStepBack || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
+    if (actionRequestIdsRef.current.has(activeRequestId)) return;
+    if (!window.electronAPI?.stepBackNonApiAiRequest) {
+      setErrors(previous => ({ ...previous, [activeRequestId]: 'Returning to the previous AI step is unavailable.' }));
+      return;
+    }
+
+    const requestId = activeRequestId;
+    actionRequestIdsRef.current.add(requestId);
+    setSteppingBackRequestIds(previous => new Set(previous).add(requestId));
+    setErrors(previous => {
+      const { [requestId]: _cleared, ...remaining } = previous;
+      return remaining;
+    });
+    try {
+      const result = await window.electronAPI.stepBackNonApiAiRequest(requestId);
+      if (!result?.steppedBack) {
+        setErrors(previous => ({
+          ...previous,
+          [requestId]: result?.error || 'Could not return to the previous AI step.',
+        }));
+      }
+      // The settled event removes this request; its owning workflow then
+      // emits the preceding prompt as a new request with the accepted paste
+      // restored for editing.
+    } catch (error) {
+      setErrors(previous => ({
+        ...previous,
+        [requestId]: error?.message || 'Could not return to the previous AI step.',
+      }));
+    } finally {
+      actionRequestIdsRef.current.delete(requestId);
+      setSteppingBackRequestIds(previous => {
+        if (!previous.has(requestId)) return previous;
+        const next = new Set(previous);
+        next.delete(requestId);
+        return next;
+      });
+    }
+  }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
   const cancelTask = useCallback(async () => {
-    if (!activeRequestId || isSubmitting || isCancelling || isAccepted) return;
+    if (!activeRequestId || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
     if (actionRequestIdsRef.current.has(activeRequestId)) return;
     if (!window.electronAPI?.cancelNonApiAiRequest) {
       setErrors(previous => ({ ...previous, [activeRequestId]: 'Manual AI task cancellation is unavailable.' }));
@@ -326,7 +402,7 @@ export function NonApiAiDialog() {
         return next;
       });
     }
-  }, [activeRequestId, activeNodeId, isAccepted, isCancelling, isSubmitting]);
+  }, [activeRequestId, activeNodeId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
   const trapFocus = useCallback((event) => {
     if (event.key === 'Escape') {
@@ -367,7 +443,7 @@ export function NonApiAiDialog() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="non-api-ai-dialog-title"
-        aria-busy={isSubmitting || isCancelling || isAccepted}
+        aria-busy={isSubmitting || isSteppingBack || isCancelling || isAccepted}
         className="w-full max-w-4xl max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
       >
         <header className="shrink-0 px-5 py-4 border-b border-white/10">
@@ -391,6 +467,7 @@ export function NonApiAiDialog() {
                   const hasDraft = Boolean(drafts[request.requestId]?.trim());
                   const hasError = Boolean(errors[request.requestId]);
                   const isWorking = submittingRequestIds.has(request.requestId)
+                    || steppingBackRequestIds.has(request.requestId)
                     || cancellingRequestIds.has(request.requestId)
                     || acceptedRequestIds.has(request.requestId);
                   const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
@@ -483,7 +560,7 @@ export function NonApiAiDialog() {
               id="non-api-ai-response"
               value={activeResponse}
               onChange={(event) => setActiveResponse(event.target.value)}
-              disabled={isSubmitting || isCancelling || isAccepted}
+              disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
               placeholder="Paste the full response here…"
               className="h-44 w-full resize-y rounded-lg border border-white/15 bg-black/45 p-3 font-mono text-xs leading-relaxed text-white placeholder:text-white/30 outline-none focus:border-violet-400/60 disabled:opacity-60"
               aria-describedby={activeError ? 'non-api-ai-validation-error' : undefined}
@@ -498,15 +575,27 @@ export function NonApiAiDialog() {
             </div>
           )}
 
-          <div className="shrink-0 flex items-center justify-between gap-3 pt-1">
-            <span className="text-xs text-white/40" aria-live="polite">
-              {isAccepted ? 'Response accepted — continuing task…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. You can retry as many times as needed.'}
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 pt-1">
+            <span className="min-w-48 flex-1 text-xs text-white/40" aria-live="polite">
+              {isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. You can retry as many times as needed.'}
             </span>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {activeRequest.canStepBack && (
+                <button
+                  type="button"
+                  onClick={stepBack}
+                  disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-white/20 px-3 py-2 text-sm font-medium text-white/75 transition-colors hover:border-violet-300/40 hover:bg-violet-500/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Return to the previous AI prompt and edit its accepted response"
+                >
+                  {isSteppingBack ? <LoaderCircle size={15} className="animate-spin" aria-hidden="true" /> : <ArrowLeft size={15} aria-hidden="true" />}
+                  {isSteppingBack ? 'Going back…' : (activeRequest.stepBackLabel || 'Back one step')}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={cancelTask}
-                disabled={isSubmitting || isCancelling || isAccepted}
+                disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
                 className="rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
                 title="Cancel the job operation waiting for this AI response"
               >
@@ -514,7 +603,7 @@ export function NonApiAiDialog() {
               </button>
               <button
                 type="submit"
-                disabled={!activeResponse.trim() || isSubmitting || isCancelling || isAccepted}
+                disabled={!activeResponse.trim() || isSubmitting || isSteppingBack || isCancelling || isAccepted}
                 className="inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isSubmitting ? <LoaderCircle size={15} className="animate-spin" aria-hidden="true" /> : <Send size={15} aria-hidden="true" />}

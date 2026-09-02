@@ -171,7 +171,16 @@ export function useCanvasPersistence({
   useEffect(() => {
     // ── Quit Handshake ──────────────────────────────────────────────────────
     // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
-    const unlistenQuit = window.electronAPI?.onQuitRequest?.(() => {
+    const unlistenQuit = window.electronAPI?.onQuitRequest?.(async () => {
+      // A paste can be followed immediately by Cmd+Q. Wait for preload's
+      // outstanding draft invokes and main's disk barrier before answering the
+      // close handshake, otherwise the last edit can trail window destruction.
+      try {
+        await window.electronAPI?.flushNonApiAiPersistence?.();
+      } catch {
+        // Main performs the same barrier before destruction; keep the standard
+        // close handshake available if this renderer-side optimization fails.
+      }
       window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
     });
 

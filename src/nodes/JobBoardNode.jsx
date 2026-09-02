@@ -14,6 +14,12 @@ import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint,
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 
+function createManualAiRunId(nodeId) {
+  const entropy = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `job-board:${nodeId}:${entropy}`;
+}
+
 // Human label for a connected Job Search Module, from its search params.
 function moduleLabel(d) {
   const loc = String(d?.preferredLocation || d?.canonicalLocation || '').trim();
@@ -289,11 +295,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
       combineSignature: null, stale: false, staleReason: null,
+      manualAiResume: null,
     });
     EventLogger.log(`[JobBoard] cleared id=${id}`);
   }, [id, clearBoardChildren, updateGlobal, epoch]);
 
-  const handleCombine = useCallback(async () => {
+  const completeManualAiRun = useCallback((runId) => {
+    if (!runId) return;
+    if (getNode(id)?.data?.manualAiResume?.runId === runId) {
+      updateGlobal(id, { manualAiResume: null });
+    }
+    void window.electronAPI?.completeNonApiAiRun?.(runId).catch(() => {});
+  }, [getNode, id, updateGlobal]);
+
+  const handleCombine = useCallback(async (options = {}) => {
     // State alone cannot make this atomic: React applies setState after the
     // handler returns, so two calls in one event turn both see combining=false.
     if (combineRunRef.current) return;
@@ -314,6 +329,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         },
         combineSignature: combineSignature(completedModules), stale: false, staleReason: null,
       });
+      completeManualAiRun(options?.manualAiRunId);
       EventLogger.log(`[JobBoard] replaced stale results with empty completed inputs id=${id} modules=${completedModules.length}`);
       addToast({ title: 'Board updated', description: 'The completed searches have no current jobs; old results were cleared.', type: 'info' });
       return;
@@ -328,6 +344,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const entropy = globalThis.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${++compensationRequestSequenceRef.current}-${Math.random().toString(36).slice(2)}`;
     const compensationRequestId = `board-compensation:${id}:${entropy}`;
+    const manualAiRunId = options?.manualAiRunId || createManualAiRunId(id);
     combineRunRef.current = combineToken;
     compensationRequestIdRef.current = compensationRequestId;
     setCombining(true);
@@ -377,7 +394,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           title: j.title || '',
           source: j.source || '',
         }));
-        const res = await window.electronAPI.bucketJobs({ jobs: compactJobs, nodeId: id });
+        const res = await window.electronAPI.bucketJobs({ jobs: compactJobs, nodeId: id, manualAiRunId });
         if (cancelled() || !getNode(id)) {
           EventLogger.log(`[JobBoard] combine cancelled before spawn id=${id}`);
           return;
@@ -422,6 +439,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           jobs: union,
           nodeId: id,
           requestId: compensationRequestId,
+          manualAiRunId,
         });
         if (cancelled() || !getNode(id)) {
           EventLogger.log(`[JobBoard] combine cancelled during compensation research id=${id}`);
@@ -501,6 +519,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
       }
       EventLogger.log(`[JobBoard] combine completed id=${id} signature=${sigAtCombine} results=${union.length} children=${newNodes.length}`);
+      completeManualAiRun(manualAiRunId);
     } catch (err) {
       if (cancelled() || !getNode(id)) return;
       EventLogger.error('[JobBoard] Combine failed:', err);
@@ -516,7 +535,47 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [completedModules, readyModules, allConnectedModulesDone, getNodes, getNode, id, clearBoardChildren, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath]);
+  }, [completedModules, readyModules, allConnectedModulesDone, getNodes, getNode, id, clearBoardChildren, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun]);
+
+  useEffect(() => {
+    const onManualAiNodeCancelled = (event) => {
+      if (event.detail?.nodeId !== id) return;
+      updateGlobal(id, { manualAiResume: null });
+    };
+    document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled);
+    return () => document.removeEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled);
+  }, [id, updateGlobal]);
+
+  useEffect(() => {
+    const onPending = (event) => {
+      const detail = event.detail || {};
+      if (detail.nodeId !== id || !detail.runId) return;
+      updateGlobal(id, {
+        manualAiResume: {
+          runId: detail.runId,
+          task: detail.task || null,
+          stepKey: detail.stepKey || null,
+          recoveryMode: detail.recoveryMode || null,
+          updatedAt: Date.now(),
+        },
+      });
+    };
+    document.addEventListener('non-api-ai-node-pending', onPending);
+    return () => {
+      document.removeEventListener('non-api-ai-node-pending', onPending);
+    };
+  }, [id, updateGlobal]);
+
+  const autoResumedManualAiRunRef = useRef(null);
+  useEffect(() => {
+    const resume = data.manualAiResume;
+    if (!resume?.runId || autoResumedManualAiRunRef.current === resume.runId) return;
+    if (!canvasFilePath) return;
+    if (combineRunRef.current || data.locked || readyModules.length === 0) return;
+    autoResumedManualAiRunRef.current = resume.runId;
+    EventLogger.log(`[JobBoard] Auto-resuming manual AI run id=${id} task=${resume.task || 'pending step'}`);
+    void handleCombine({ manualAiRunId: resume.runId });
+  }, [canvasFilePath, data.manualAiResume, data.locked, handleCombine, id, readyModules.length]);
 
   return (
     <HubContainer hubState={hubState} theme="blue" width={260} minHeight={hubState === 'empty' ? 150 : 100} dropsBlocked>

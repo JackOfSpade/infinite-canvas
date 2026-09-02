@@ -1,8 +1,11 @@
 import {
   assert,
+  __applicationSyncStatePathForTests,
   __captureApplicationSyncWorkspaceIdentityForTests,
+  __loadApplicationSyncWorkspacesForTests,
   __normaliseApplicationSyncWorkspaceForTests,
   __readApplicationSyncWorkspaceHtmlForTests,
+  __resetApplicationSyncWorkspacesForTests,
   __verifyApplicationSyncWorkspaceIdentityForTests,
   __withApplicationSyncWorkspaceLockForTests,
   buildResumeDocument,
@@ -18,6 +21,7 @@ import {
   PDFLib,
   sanitizeApplicationBundlePart,
 } from '../test-dependencies.js';
+import { __assertApplicationSyncWorkspaceSnapshotForTests } from '../../electron/ipc/applicationSync.js';
 
 export default [
   {
@@ -38,6 +42,11 @@ export default [
       assert(!markdown.includes('Listing URL'), 'unsafe non-HTTP URL must not become a Markdown link');
       assert(markdown.includes(scraped), 'captured listing text must remain byte-for-byte present');
       assert(markdown.includes('````text'), 'description fence must exceed the longest backtick run in source text');
+      const credentialUrl = formatOriginalJobListingMarkdown({
+        title: 'Platform Engineer', company: 'Acme', url: 'https://session-token@jobs.example.test/opening',
+      });
+      assert(!credentialUrl.includes('Listing URL') && !credentialUrl.includes('session-token'),
+        'credential-bearing scraped URLs must never be persisted into the portable job-listing companion');
       return { markdownBytes: Buffer.byteLength(markdown) };
     },
   },
@@ -585,6 +594,7 @@ export default [
           'an unchanged regular workspace must retain its captured directory identity');
         assert(await __readApplicationSyncWorkspaceHtmlForTests(captured) === '<!doctype html>',
           'Sync must read an unchanged workspace through its identity-bound file handle');
+        await __assertApplicationSyncWorkspaceSnapshotForTests(captured, '<!doctype html>');
 
         const applicationPath = path.join(workspaceDir, 'Application.html');
         const originalApplicationPath = path.join(workspaceDir, 'Application.original.html');
@@ -599,6 +609,13 @@ export default [
         await fs.promises.unlink(applicationPath);
         await fs.promises.rename(originalApplicationPath, applicationPath);
 
+        await fs.promises.writeFile(applicationPath, '<!doctype html>newer editor revision');
+        let staleSnapshotRejected = false;
+        try { await __assertApplicationSyncWorkspaceSnapshotForTests(captured, '<!doctype html>'); }
+        catch (error) { staleSnapshotRejected = /changed while the PDF was rendering/.test(error.message); }
+        assert(staleSnapshotRejected,
+          'Sync must refuse to overwrite an Application.html revision saved after it read the render source');
+
         await fs.promises.rename(trustedParent, movedParent);
         await fs.promises.mkdir(path.join(redirectParent, 'application'), { recursive: true });
         await fs.promises.writeFile(path.join(redirectParent, 'application', 'Application.html'), '<!doctype html>attacker replacement');
@@ -608,9 +625,44 @@ export default [
         catch (error) { redirectRejected = /symbolic link|replaced/.test(error.message); }
         assert(redirectRejected,
           'replacing an ancestor with a symlink must revoke Sync before it reads or writes canonical sibling names');
-        return { fixedWorkspacePaths: true, identityBound: true, linkedHtmlRejected, redirectRejected };
+        return { fixedWorkspacePaths: true, identityBound: true, linkedHtmlRejected, staleSnapshotRejected, redirectRejected };
       } finally {
         await fs.promises.unlink(trustedParent).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application Sync startup prunes a user-deleted saved workspace capability',
+    run: async () => {
+      const tempRoot = await fs.promises.mkdtemp('/tmp/infinite-canvas-sync-restore-');
+      const root = await fs.promises.realpath(tempRoot);
+      const validWorkspace = path.join(root, 'still-present');
+      const missingWorkspace = path.join(root, 'deleted-after-generation');
+      const stateFile = __applicationSyncStatePathForTests();
+      try {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.mkdir(validWorkspace, { recursive: true });
+        await fs.promises.writeFile(path.join(validWorkspace, 'Application.html'), '<!doctype html>');
+        await fs.promises.mkdir(path.dirname(stateFile), { recursive: true });
+        await fs.promises.writeFile(stateFile, JSON.stringify({
+          version: 2,
+          workspaces: [
+            { token: 'a'.repeat(64), workspaceDir: validWorkspace },
+            { token: 'b'.repeat(64), workspaceDir: missingWorkspace },
+          ],
+        }));
+
+        await __loadApplicationSyncWorkspacesForTests();
+        const restored = JSON.parse(await fs.promises.readFile(stateFile, 'utf8'));
+        assert(restored.workspaces.length === 1, 'a missing generated folder must be removed from saved Sync capabilities');
+        assert(restored.workspaces[0].token === 'a'.repeat(64), 'a still-valid workspace capability must survive stale-state pruning');
+        assert(restored.workspaces[0].identity?.realWorkspaceDir === validWorkspace,
+          'restoring a legacy valid capability must persist its captured directory identity with the cleaned state');
+        return { staleCapabilityPruned: true, validCapabilityRetained: true };
+      } finally {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.unlink(stateFile).catch(() => {});
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

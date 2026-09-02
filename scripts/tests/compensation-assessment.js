@@ -77,6 +77,28 @@ export default [
       assert(boundedEvidence.sourceLinks.length === 5 && boundedEvidence.sourceLinks.every((source) => source.label.length <= 240),
         'legacy/untrusted evidence must be capped before a disclosure can make a card unbounded');
 
+      const recommendation = normalizeCompensationAssessment({
+        schemaVersion: 1,
+        status: 'market_recommendation',
+        reasonCode: 'market_range_recommended',
+        competitiveRange: { min: 90_000, max: 120_000, currency: 'CAD', period: 'annual' },
+        comparisonLocation: 'Toronto, Ontario, Canada',
+        currencyInferredFromLocation: true,
+      });
+      assert(recommendation.status === 'market_recommendation'
+        && recommendation.offered.min === null
+        && recommendation.competitiveRange.min === 90_000
+        && recommendation.currencyInferredFromLocation,
+      'a market-only recommendation remains neutral and renderable without a fabricated advertised offer');
+      const incompleteRecommendation = normalizeCompensationAssessment({
+        schemaVersion: 1,
+        status: 'market_recommendation',
+        competitiveRange: { min: 90_000, max: 120_000, currency: 'CAD' },
+      });
+      assert(incompleteRecommendation.status === 'uncertain'
+        && incompleteRecommendation.reasonCode === 'incomplete_market_recommendation',
+      'an incomplete saved recommendation must fail open rather than display an unsupported answer range');
+
       const normalized = normalizeCompensationAssessment(assessment);
       assert(normalized.status === 'below_market'
         && normalized.offered.max === 85000

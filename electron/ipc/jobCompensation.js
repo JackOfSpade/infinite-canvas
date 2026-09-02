@@ -182,13 +182,25 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   const comparisonDisplay = typeof comparisonLocation === 'string'
     ? comparisonLocation
     : comparisonLocation?.display || '';
+  const suppliedCurrency = String(job.currency || '').trim().toUpperCase();
+  const statedCurrency = currencyFor(text, suppliedCurrency);
   const inferred = inferSalaryCurrency(text, comparisonDisplay || job.location || '');
-  const currency = currencyFor(text, String(job.currency || '').toUpperCase()) || inferred?.currency || '';
+  const currency = statedCurrency || inferred?.currency || '';
   if (!currency) return { usable: false, reasonCode: 'currency_unclear' };
   if (/\bstarting\s+(?:at|from)\b/i.test(text) && !/\b(?:to|–|—|-)\b/.test(text)) {
     return { usable: false, reasonCode: 'salary_maximum_unstated' };
   }
-  return { usable: true, min, max, fixed, currency, period: 'annual', annualized, raw: text.slice(0, 500) };
+  return {
+    usable: true,
+    min,
+    max,
+    fixed,
+    currency,
+    currencyInferredFromLocation: !statedCurrency && Boolean(inferred?.inferred),
+    period: 'annual',
+    annualized,
+    raw: text.slice(0, 500),
+  };
 }
 
 export function mergeCompetitiveRanges(ranges, currency = '') {
@@ -212,7 +224,32 @@ export function mergeCompetitiveRanges(ranges, currency = '') {
   };
 }
 
-export function compensationAssessment({ offer, competitiveRanges, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '' } = {}) {
+/**
+ * Resolve a recommendation currency with listing evidence first, then the
+ * resolved job market. Bare "$" text is intentionally not explicit; Toronto
+ * resolves it to CAD while Austin resolves it to USD.
+ */
+export function resolveCompensationMarketCurrency(job = {}, comparisonLocation = null) {
+  const display = typeof comparisonLocation === 'string'
+    ? comparisonLocation
+    : comparisonLocation?.display || comparisonLocation?.value || '';
+  const listingCurrencyText = [job.salary, job.compensation, job.currency]
+    .map(value => String(value ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+  const resolved = inferSalaryCurrency(listingCurrencyText, display || job.location || '');
+  return {
+    currency: resolved?.currency || '',
+    inferredFromLocation: Boolean(resolved?.inferred),
+  };
+}
+
+/** Infer the local cash-pay currency for callers that only have a market. */
+export function compensationMarketCurrency(comparisonLocation = null) {
+  return resolveCompensationMarketCurrency({}, comparisonLocation).currency;
+}
+
+export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '' } = {}) {
   const base = {
     schemaVersion: 1,
     status: 'not_evaluated',
@@ -223,12 +260,30 @@ export function compensationAssessment({ offer, competitiveRanges, comparisonLoc
     justification: String(justification || '').slice(0, 2400),
     sourceLinks: sanitizeLinks(sourceLinks),
     researchedAt,
+    currencyInferredFromLocation: Boolean(currencyInferredFromLocation || offer?.currencyInferredFromLocation),
   };
+  const currency = String(marketCurrency || offer?.currency || '').trim().toUpperCase();
+  // Market-only evidence still needs one explicit target currency. Otherwise
+  // two locally valid ranges in different currencies could be numerically
+  // unioned into a meaningless recommendation.
+  const merged = currency ? mergeCompetitiveRanges(competitiveRanges, currency) : null;
   if (!offer?.usable) {
+    if (merged) {
+      const explanation = [
+        base.justification,
+        `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${merged.currency} market range is the recommended competitive salary range to use when an application asks for minimum or expected pay.`,
+      ].filter(Boolean).join(' ').slice(0, 2400);
+      return {
+        ...base,
+        status: 'market_recommendation',
+        reasonCode: 'market_range_recommended',
+        competitiveRange: merged,
+        justification: explanation,
+      };
+    }
     if (!base.justification) base.justification = 'No stated guaranteed recurring cash salary was available to compare.';
     return base;
   }
-  const merged = mergeCompetitiveRanges(competitiveRanges, offer.currency);
   if (!merged) {
     return { ...base, status: 'uncertain', reasonCode: reasonCode || 'market_range_unavailable', justification: base.justification || 'A comparable competitive cash-salary range could not be established.' };
   }

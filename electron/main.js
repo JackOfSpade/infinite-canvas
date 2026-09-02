@@ -22,7 +22,7 @@ import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { registerLlmHandlers } from './ipc/llm.js';
-import { registerNonApiAiHandlers } from './ipc/nonApiAi.js';
+import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import fs from 'fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -307,6 +307,12 @@ async function checkUnsavedChanges(win, actionType = 'close') {
     safeMenuSend(win, 'quit-request');
   });
 
+  // Pending manual handoffs always require a canvas checkpoint. The renderer's
+  // dirty flag can lag the just-delivered prompt marker by one commit; gating
+  // this on that flag creates an immediate-close window where the durable
+  // response ledger survives but the node marker needed to resume does not.
+  if (hasPendingNonApiAiRequestsForSender(expectedSender)) return { action: 'save' };
+
   if (rendererState.hasUnsavedChanges) {
     const verbButton = actionType === 'quit' ? 'Quit' : 'Close';
     const verbPhrase = actionType === 'quit' ? 'quit' : 'close this window';
@@ -418,6 +424,8 @@ function createWindow(initSpec = { mode: 'auto' }) {
         const saved = await requestSaveAndWait(win);
         if (!saved) return;
       }
+
+      await flushNonApiAiPersistence();
 
       win.destroy(); // Safe to destroy now
     } finally {
@@ -925,6 +933,7 @@ app.on('before-quit', async (event) => {
         const saved = await requestSaveAndWait(win);
         if (!saved) return;
       }
+      await flushNonApiAiPersistence();
     }
 
     isQuitting = true;

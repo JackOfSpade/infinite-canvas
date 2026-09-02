@@ -5,6 +5,15 @@ import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { buildResumeDocument } from '../electron/ipc/resumeHtml.js';
 
+// `applicationPdfReconcile` must leave pdf.js to Electron main's Node resolver.
+// If Vite inlines it, pdf.js selects the browser worker path and PDF import
+// fails at runtime with a fake-worker `window is not defined` error.
+const mainBundle = await fs.readFile(path.resolve('dist-electron/main.cjs'), 'utf8');
+assert.match(mainBundle, /pdfjs-dist\/legacy\/build\/pdf\.mjs/,
+  'the Electron main bundle must retain the native pdf.js runtime specifier');
+assert.doesNotMatch(mainBundle, /Setting up fake worker/,
+  'the Electron main bundle must not inline pdf.js browser-worker implementation');
+
 const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-e2e-'));
 const previewFixtureRoot = await fs.mkdtemp(path.join(
   process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(),

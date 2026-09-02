@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
@@ -25,12 +25,12 @@ const QUALITY_NOTES = Object.freeze({
   'cover-minimum-evidence': 'Kept only the proof necessary to establish the argument and removed unrelated stack or background inventory.',
   'cover-priority-alignment': 'Connected the selected proof directly to an emphasized employer need rather than merely naming the job.',
   'cover-opening': 'Confirmed the first sentence adds a substantive evidence-to-need connection instead of application administration.',
-  'cover-continuity': 'Checked that each paragraph advances the same claim with relevance stated before supporting detail.',
+  'cover-continuity': 'Checked that each paragraph advances the same claim with relevance stated before detail and that each within-paragraph responsibility shift names its shared responsibility, constraint, or outcome.',
   'cover-reference-clarity': 'Named employers, systems, actors, causal links, and time references, used a proximal target-position reference, and attached reporting verbs to source documents.',
   'cover-register': 'Used direct contemporary language, removed generic enthusiasm, bureaucratic phrasing, and advertisement-facing copy, and connected the final invitation to target work.',
   'cover-sentence-craft': 'Reviewed first-read literal clarity, concrete actors, artifacts, and actions, sentence length, grammar, parallel structure, and punctuation without semicolon or dash clause splices.',
   'cover-figure-discipline': 'Confirmed each retained figure is necessary and appears in the selected résumé evidence.',
-  'cover-legal-status': 'Confirmed no citizenship, residency, visa, sponsorship, or work-authorization assertion appears in the letter.',
+  'cover-legal-status': 'Confirmed no application logistics or legal-work-status assertion appears in the letter.',
   'cover-envelope': 'Verified the host-owned name, contact, salutation, and closing fields contain no inferred envelope facts.',
   'cross-document-consistency': 'Compared résumé, letter, and argument contract for matching identity, terminology, scope, and factual claims.',
   'requirement-coverage': 'Accounted for each high-priority requirement with direct evidence or an honest evidence-bound omission.',
@@ -304,6 +304,8 @@ export default [
         && localSource.includes('résumé owns breadth')
         && localSource.includes('Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement')
         && localSource.includes('Each additional proof must have one explicit supporting role in the same argument')
+        && localSource.includes('distinct systems or responsibilities side by side merely because they occurred in the same role or job')
+        && localSource.includes('adjacency and “the same job” are not a bridge')
         && localSource.includes('Name actors and referents explicitly wherever pronouns would be ambiguous')
         && localSource.includes('keep general domain principles distinct from personal experience')
         && localSource.includes('listing’s description rather than independently verified fact')
@@ -331,6 +333,8 @@ export default [
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-register')?.requirement.includes('direct present tense')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('restating a category')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shift between distinct systems or responsibilities')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shared role or job context alone is not a bridge')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('word-boundary parse')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-sentence-craft')?.requirement.includes('role-accurate governing verb'),
       'Local AI version 2 keeps stable checklist IDs while making role-facing scope, direct closings, non-filler bridges, first-read parsing, and role-accurate technology verbs explicit');
@@ -348,6 +352,8 @@ export default [
         && normalizedRoutineSource.includes('adjacent words form a familiar compound or alternate parse')
         && normalizedRoutineSource.includes('governing verb that describes its actual role')
         && normalizedRoutineSource.includes('merely restates a category')
+        && normalizedRoutineSource.includes('distinct systems or responsibilities do not become connected merely because')
+        && normalizedRoutineSource.includes('adjacency and “the same job” are not a bridge')
         && normalizedRoutineSource.includes('selected scope as `this role` or the work itself')
         && normalizedRoutineSource.includes('I welcome a conversation')
         && normalizedRoutineSource.includes('connect the candidate\'s relevant contribution to the specific')
@@ -911,21 +917,17 @@ export default [
           coverLetterQuotes: ['I am available to start in June.'],
         })),
       };
-      const groundedLogistics = validateLocalApplicationResult(logisticsResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, trustedOptions);
-      assert(groundedLogistics.coverLetterArgument.logistics.statement === 'I am available to start in June.',
-        'a stated availability fact with an exact career-data quote remains an allowed logistics claim');
-      const ungroundedLogistics = structuredClone(logisticsResult);
-      const careerWithoutLogistics = 'Built supported systems. A concise factual letter.';
-      let ungroundedLogisticsRejected = false;
-      try { validateLocalApplicationResult(ungroundedLogistics, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: careerWithoutLogistics }); }
-      catch (error) { ungroundedLogisticsRejected = /logistics/i.test(String(error?.message || error)); }
-      assert(ungroundedLogisticsRejected, 'a logistics claim without supplied-career support is rejected');
+      let declaredLogisticsRejected = false;
+      try { validateLocalApplicationResult(logisticsResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, trustedOptions); }
+      catch (error) { declaredLogisticsRejected = /logistics.*(?:empty|application fields)/i.test(String(error?.message || error)); }
+      assert(declaredLogisticsRejected,
+        'a legacy argument-contract logistics claim is rejected even when exact career data supports it');
       const undeclaredLogistics = structuredClone(logisticsResult);
       delete undeclaredLogistics.coverLetterArgument.logistics;
       let undeclaredLogisticsRejected = false;
       try { validateLocalApplicationResult(undeclaredLogistics, id, path.join(os.tmpdir(), 'local-ai-project'), {}, trustedOptions); }
-      catch (error) { undeclaredLogisticsRejected = /logistics-containment/i.test(String(error?.message || error)); }
-      assert(undeclaredLogisticsRejected, 'visible logistics must be declared in the argument contract instead of appearing as free prose');
+      catch (error) { undeclaredLogisticsRejected = /logistics-exclusion/i.test(String(error?.message || error)); }
+      assert(undeclaredLogisticsRejected, 'visible application logistics are rejected rather than admitted through the argument contract');
       for (const [label, bullet, expected] of [
         ['backward platform reference', 'Built Python ETL integrations between the district information system and those platforms.', 'resume-bullet-self-containment'],
         ['backward database reference', 'Exposed that database through Python REST APIs for controlled access.', 'resume-bullet-self-containment'],
@@ -961,6 +963,8 @@ export default [
         ['missing workplace-introduction comma', 'At the district I delivered software through traditional and AI-assisted workflows.', 'introductory-workplace-comma'],
         ['metaphorically ambiguous UI pointing', 'An agent walking someone through an on-screen task cannot point at the control it means.', 'visual-reference-precision'],
         ['conditionally deferential closing', 'I would welcome the chance to talk about that work.', 'direct-welcome-closing'],
+        ['opaque responsibility pivot', 'Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.', 'responsibility-transition'],
+        ['same-job responsibility opener', 'The same job also included assessing software before adoption.', 'responsibility-transition'],
       ]) {
         let editorialRejected = false;
         try {
@@ -1490,6 +1494,52 @@ export default [
       assert(applied.updated === true && applied.nodes[0] !== nodes[0] && applied.nodes[0].data.touched === true,
         'a returned patch still applies normally with a fresh identity');
       return { skippedGhost: true, identityPreserved: true };
+    },
+  },
+  {
+    name: 'Local AI fallback: deleted-card handoffs are discovered only from the current canvas and save without revealing Finder',
+    run: async () => {
+      const project = await createCanvasProject();
+      const otherProject = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Platform Engineer', company: 'Acme', location: 'Austin, TX' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+        // A UUID-looking but malformed sibling is not app-owned and must not
+        // be offered to the automatic recovery path.
+        const forged = path.join(project.root, '.local-ai', 'jobs', '11111111-1111-4111-8111-111111111111');
+        await fs.promises.mkdir(forged, { recursive: true });
+        await fs.promises.writeFile(path.join(forged, 'manifest.json'), '{}', 'utf8');
+
+        const discovered = await discoverLocalApplicationJobs(project.canvasFilePath);
+        assert(discovered.length === 1 && discovered[0].id === queued.id
+          && discovered[0].canvasFilePath === queued.canvasFilePath
+          && discovered[0].job.title === 'Platform Engineer',
+        'discovery returns only a regular, manifest/input-verified Local AI job owned by this saved canvas');
+        assert((await discoverLocalApplicationJobs(otherProject.canvasFilePath)).length === 0,
+          'a different saved canvas cannot discover or import this handoff');
+
+        assert(selectOrphanedLocalAiJobs(discovered, new Set([queued.id])).length === 0,
+          'any job still represented anywhere in canvas state remains card-owned');
+        const orphaned = selectOrphanedLocalAiJobs(discovered, new Set());
+        assert(orphaned.length === 1 && orphaned[0].id === queued.id,
+          'once its card has been deleted, the app-owned folder becomes an automatic recovery candidate without recreating the card');
+
+        const fallbackSource = await fs.promises.readFile(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+        const saveSource = await fs.promises.readFile(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
+        assert(fallbackSource.includes('discoverLocalApplications')
+          && fallbackSource.includes('selectOrphanedLocalAiJobs')
+          && fallbackSource.includes('suppressReveal: isOrphan'),
+        'the mounted canvas manager discovers deleted-card jobs and marks their automatic save as non-revealing');
+        assert(saveSource.includes('if (!suppressReveal)') && saveSource.includes('await shell.openPath(dir)'),
+          'save-application skips the Finder/Explorer reveal when recovery requests it, while preserving normal explicit-save reveals');
+        return { discovered: discovered.map((job) => job.id), orphaned: orphaned.map((job) => job.id) };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+        await fs.promises.rm(otherProject.root, { recursive: true, force: true });
+      }
     },
   },
   {

@@ -32,7 +32,7 @@ import electronPkg from 'electron';
 import * as PDFLib from 'pdf-lib';
 import { PDFDocument } from 'pdf-lib';
 import { logger } from '../logger.js';
-import { getDesignSystemDir, webFontFacesReadyExpression } from './resumeHtml.js';
+import { ATS_SAFE_PDF_FONT_TOKENS, getDesignSystemDir, webFontFacesReadyExpression } from './resumeHtml.js';
 
 const { BrowserWindow } = electronPkg;
 
@@ -42,10 +42,69 @@ const { BrowserWindow } = electronPkg;
 // extension, the user's Generate click indefinitely. Same failure shape
 // REFRESH_TIMEOUT_MS guards against in browserViewMonitor.js; not imported
 // from there — that timeout is tuned for a LIVE network page reload, this one
-// for a local document with a bounded web-font dependency, so the values (and
-// what a
-// timeout here actually diagnoses) don't share enough to be worth coupling.
+// for a local document with a bounded font-readiness dependency, so the values
+// (and what a timeout here actually diagnoses) don't share enough to be worth
+// coupling.
 const RENDER_TIMEOUT_MS = 20_000;
+
+// Chromium converts downloaded web fonts to Type 3 glyph programs in printed
+// PDFs on macOS. They look correct, but PDFKit and ATS-style extractors can
+// split ordinary words into reordered single glyphs. Keep the editable HTML's
+// editorial web typography, then switch only the isolated PDF render to common
+// system fonts that Chromium embeds with usable Unicode maps.
+const ATS_SAFE_PDF_FONT_BY_WEB_FAMILY = Object.freeze({
+  'source serif 4': ATS_SAFE_PDF_FONT_TOKENS['--ff-display'],
+  inter: ATS_SAFE_PDF_FONT_TOKENS['--ff-body'],
+  'ibm plex mono': ATS_SAFE_PDF_FONT_TOKENS['--ff-mono'],
+});
+
+// `@page` margin boxes cannot inherit the root custom properties in Chromium.
+// The design system deliberately spells the running-footer family out in its
+// four named-page rules, so changing --ff-mono alone leaves those boxes on
+// IBM Plex Mono. Add a later rule for each named page in the disposable PDF
+// document so *all* printed text uses the ATS-safe family before font
+// readiness is assessed. Keep this here instead of changing the design-system
+// literals: the editable document should retain its editorial typography.
+const ATS_SAFE_PDF_PAGE_FONT_OVERRIDE_CSS = [
+  'letter',
+  'a4',
+  'letter-compact',
+  'a4-compact',
+].map((pageName) => `@page ${pageName} { @bottom-right { font-family: ${ATS_SAFE_PDF_FONT_TOKENS['--ff-mono']}; } }`).join('\n');
+
+export function atsSafePdfFontExpression() {
+  return `(function () {
+    var root = document.documentElement;
+    ${Object.entries(ATS_SAFE_PDF_FONT_TOKENS)
+      .map(([property, value]) => `root.style.setProperty(${JSON.stringify(property)}, ${JSON.stringify(value)});`)
+      .join(' ')}
+    var safeFamilyByWebFamily = ${JSON.stringify(ATS_SAFE_PDF_FONT_BY_WEB_FAMILY)};
+    var firstFamily = function (value) {
+      return (String(value || '').split(',')[0] || '').trim().replace(/^["']|["']$/g, '').toLowerCase();
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('*'), function (element) {
+      var replacement = safeFamilyByWebFamily[firstFamily(getComputedStyle(element).fontFamily)];
+      if (replacement) element.style.setProperty('font-family', replacement);
+    });
+    var override = document.getElementById('ic-ats-safe-pdf-page-fonts');
+    if (!override) {
+      override = document.createElement('style');
+      override.id = 'ic-ats-safe-pdf-page-fonts';
+      (document.head || root).appendChild(override);
+    }
+    override.textContent = ${JSON.stringify(ATS_SAFE_PDF_PAGE_FONT_OVERRIDE_CSS)};
+    return true;
+  })()`;
+}
+
+/** Detect font programs that render visually but routinely break text extraction. */
+export async function pdfContainsType3Fonts(bytes) {
+  const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  const type3 = PDFLib.PDFName.of('Type3');
+  const subtype = PDFLib.PDFName.of('Subtype');
+  return pdf.context.enumerateIndirectObjects().some(([, object]) =>
+    object instanceof PDFLib.PDFDict && object.get(subtype) === type3);
+}
 
 // The screen-preview `.page` box has a fixed minimum paper height, but it
 // expands when its contents overflow. Fit telemetry must compare text against
@@ -142,7 +201,7 @@ function withTimeout(promise, ms, label, signal) {
 
 /**
  * Render one single-file HTML document to PDF bytes + page count. Its CSS and
- * scripts are inline, while its typefaces load from Google Fonts.
+ * scripts and design-system typefaces are inline.
  *
  * Loads from a TEMP FILE, not a `data:` URL. The résumé/cover-letter HTML
  * already inlines the whole design-system CSS (colors_and_type.css +
@@ -208,7 +267,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     // did-finish-load AND document.fonts.ready — the design system's own
     // font-load check (resumeHtml.js's injected `ic-font-warning` banner)
     // exists precisely because fonts loading late RESIZES the page (fallback
-    // metrics differ from Source Serif 4 / Inter / IBM Plex Mono), which
+    // metrics can differ across font families), which
     // changes what fits on a page. Printing before fonts settle would size —
     // and page-count — the résumé against fallback-font metrics, giving a
     // pass/fail verdict that doesn't match what the user's own screen (or a
@@ -236,33 +295,38 @@ export async function renderPdf(html, { signal, document = null } = {}) {
       throwIfAborted(signal);
     }
 
+    await withTimeout(
+      wc.executeJavaScript(atsSafePdfFontExpression()),
+      RENDER_TIMEOUT_MS,
+      'renderPdf: apply ATS-safe PDF typography',
+      signal,
+    );
+    throwIfAborted(signal);
+
     // `document.fonts.ready` is NOT a success signal — per spec it resolves
-    // when font loading FINISHES, including when every @font-face failed. The
-    // design system requests Source Serif 4 / Inter / IBM Plex Mono from the
-    // Google Fonts CDN. `ready` can still settle after a CDN/content-blocker
-    // failure, leaving SYSTEM FALLBACK metrics. Page count
-    // measured there is measured against the wrong typography — which would
+    // when font loading FINISHES, including when a requested face is
+    // unavailable. The isolated render has already switched the document to
+    // ATS-safe system families, but `ready` can still settle with a different
+    // fallback metric. Page count measured there is measured against the wrong
+    // typography — which would
     // drive the compact-density decision (and potentially an LLM revision that
     // cuts real content) off a number the user will never see.
     //
-    // So: force the design system's complete, pinned face set to load before
-    // `ready`, then walk actual document text and verify its exact
+    // So: force the document's computed face set to load before `ready`, then
+    // walk actual document text and verify its exact
     // display/body/mono face+weight set. Application.html keeps the cover
     // panel hidden while the résumé is printed; `document.fonts.ready` does
     // not necessarily fetch a face used exclusively in display:none content.
     // Without these explicit loads, the shared all-panel predicate could
     // report a valid hidden cover face as missing and incorrectly withhold a
-    // perfectly valid baseline résumé PDF. Loading all seven requested faces
-    // up front also ensures a later Sync cannot inherit an
-    // unchecked fallback. The detailed predicate remains the single source of
-    // truth for which faces the emitted document actually requires.
+    // perfectly valid baseline résumé PDF. Loading every computed face up front
+    // also ensures a later Sync cannot inherit an unchecked fallback. The
+    // detailed predicate remains the single source of truth for which faces the
+    // emitted document actually requires.
     const fontReadiness = await withTimeout(
       wc.executeJavaScript(`(async function () {
-        var faceDescriptors = [
-          '400 12px "Source Serif 4"', '600 12px "Source Serif 4"',
-          '400 12px "Inter"', '500 12px "Inter"', '600 12px "Inter"',
-          '400 12px "IBM Plex Mono"', '500 12px "IBM Plex Mono"'
-        ];
+        var initial = ${webFontFacesReadyExpression({ details: true })};
+        var faceDescriptors = Array.isArray(initial.requiredFaces) ? initial.requiredFaces : [];
         await Promise.all(faceDescriptors.map(function (descriptor) {
           return document.fonts.load(descriptor, 'A').catch(function () { return []; });
         }));
@@ -312,9 +376,12 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     throwIfAborted(signal);
     const pageCount = pdfDoc.getPageCount();
+    if (await pdfContainsType3Fonts(pdfBuffer)) {
+      throw new Error('renderPdf produced Type 3 fonts that are not safe for ATS/PDF text extraction.');
+    }
     if (!fontsLoaded) {
       logger.warn(
-        '[ResumeRender] Web fonts did not load in the render window (Google Fonts unavailable, blocked, or browser font-load failure). '
+        '[ResumeRender] Required PDF fonts did not load in the render window. '
         + `Missing face(s): ${missingFontFaces.join(', ') || 'unavailable face detail'}. `
         + `Page count ${pageCount} was measured against fallback typefaces and does NOT reflect the real document — the fit loop will not act on it.`,
       );
@@ -403,4 +470,28 @@ function getDualModePdf() {
 export async function applyDualPdf(bytes) {
   const { addOcgBackground } = getDualModePdf();
   return await addOcgBackground(bytes);
+}
+
+/**
+ * Return whether a PDF already carries the design system's view-only cream
+ * Optional Content Group.  The root HTML variant and this layer are one
+ * logical decision; checking only byte hashes can accidentally bless an old
+ * dual-mode PDF beside a newly generated ink-only Application.html.
+ */
+export async function pdfHasDualModeBackground(bytes) {
+  const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  const ocProperties = pdf.catalog.lookup(PDFLib.PDFName.of('OCProperties'));
+  if (!(ocProperties instanceof PDFLib.PDFDict)) return false;
+  const groups = ocProperties.lookup(PDFLib.PDFName.of('OCGs'));
+  if (!(groups instanceof PDFLib.PDFArray)) return false;
+  const expectedName = 'Editorial cream background';
+  for (let index = 0; index < groups.size(); index += 1) {
+    const group = pdf.context.lookup(groups.get(index));
+    const name = group instanceof PDFLib.PDFDict
+      ? group.lookup(PDFLib.PDFName.of('Name'))
+      : null;
+    const value = typeof name?.asString === 'function' ? name.asString() : String(name || '');
+    if (value === expectedName) return true;
+  }
+  return false;
 }

@@ -12,6 +12,27 @@ function createListener(channel) {
   };
 }
 
+// Draft updates are intentionally non-blocking while the user types. Keep the
+// promises in preload (which also owns the quit bridge) so shutdown can await
+// every update before asking main to flush its deferred disk checkpoint.
+const pendingNonApiAiDraftWrites = new Set();
+function updateNonApiAiDraft(requestId, response) {
+  const write = ipcRenderer.invoke('update-non-api-ai-draft', { requestId, response });
+  pendingNonApiAiDraftWrites.add(write);
+  void write.then(
+    () => pendingNonApiAiDraftWrites.delete(write),
+    () => pendingNonApiAiDraftWrites.delete(write),
+  );
+  return write;
+}
+
+async function flushNonApiAiPersistence() {
+  while (pendingNonApiAiDraftWrites.size > 0) {
+    await Promise.allSettled([...pendingNonApiAiDraftWrites]);
+  }
+  return ipcRenderer.invoke('flush-non-api-ai-persistence');
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Filesystem ──────────────────────────────────────────────────────────
@@ -63,6 +84,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
   discardLocalApplication: (args) => ipcRenderer.invoke('discard-local-application', args),
   getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
+  discoverLocalApplications: (args) => ipcRenderer.invoke('discover-local-applications', args),
   openLocalApplicationFolder: (args) => ipcRenderer.invoke('open-local-application-folder', args),
   importLocalApplication: (args) => ipcRenderer.invoke('import-local-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
@@ -101,6 +123,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // listener/replay gap. A true renderer navigation cancels its job instead.
   replayPendingNonApiAiRequests: () => ipcRenderer.invoke('replay-pending-non-api-ai-requests'),
   submitNonApiAiResponse: (args) => ipcRenderer.invoke('submit-non-api-ai-response', args),
+  updateNonApiAiDraft,
+  flushNonApiAiPersistence,
+  completeNonApiAiRun: (runId) => ipcRenderer.invoke('complete-non-api-ai-run', { runId }),
+  stepBackNonApiAiRequest: (requestId) => ipcRenderer.invoke('step-back-non-api-ai-request', { requestId }),
   cancelNonApiAiRequest: (requestId) => ipcRenderer.invoke('cancel-non-api-ai-request', { requestId }),
   revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
 

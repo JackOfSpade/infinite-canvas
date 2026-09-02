@@ -114,6 +114,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    project, or tool solely to cover another job requirement. Each additional
    evidence block must deepen, corroborate, extend, or honestly qualify the
    same throughline, and must state that relationship before its details. Write
+   a substantive bridge even when the shift stays within one paragraph: two
+   distinct systems or responsibilities do not become connected merely because
+   they occurred in the same role or job. Before the new proof, name the shared
+   responsibility, constraint, or outcome; if the evidence supplies none,
+   split the paragraph or omit the weaker proof. Write
    a complete draft in which every paragraph advances, demonstrates, deepens,
    or honestly qualifies the controlling argument, and any second example
    supports rather than starts a second argument;
@@ -133,7 +138,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    to/through Y`, unsolicited admissions of missing experience, transitions
    that announce a migration or change but name only the origin or only the
    destination, causal connectives whose premise the preceding sentences never
-   state, comparisons nested inside conditions, and a coined organizing frame
+   state, within-paragraph shifts between distinct responsibilities that rely
+   on adjacency or “the same job” instead of naming a shared responsibility,
+   constraint, or outcome, comparisons nested inside conditions, and a coined
+   organizing frame
    applied to the position itself rather than to the evidence. A
    concluding or transitional sentence must name the concrete responsibility,
    system, decision, or process it synthesizes and remain within that evidence's
@@ -351,7 +359,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    semicolon, or a dash. Prefer the
    concrete system, data flow, responsibility, or decision to an abstract
    metaphor, and never repeat a metaphor across paragraphs as connective
-   tissue. When a sentence announces a migration, move, or change, land it in
+   tissue. Within a paragraph, do not place distinct systems or responsibilities
+   side by side merely because they occurred in the same role or job. Before
+   shifting to the new proof, name the shared responsibility, constraint, or
+   outcome; adjacency and “the same job” are not a bridge. If no supported
+   relationship exists, split the paragraph or omit the weaker proof. When a
+   sentence announces a migration, move, or change, land it in
    the same sentence by naming both the origin and destination. Open a
    paragraph with a demonstrative noun phrase only when the immediately
    preceding paragraph establishes its referent; a demonstrative never reaches past the previous
@@ -386,9 +399,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    sentence explicitly distinguishes it from another role. Never
    join two pieces of evidence with a
    bare additive connective such as `I also built` or `... too`: state the
-   relation that makes the second piece advance the argument, and introduce a
-   personal project by first stating the concrete gap or problem it answers
-   and only then the artifact. Name a specific tool, framework, or product
+   relation that makes the second piece advance the argument. On its first
+   mention, introduce every unfamiliar candidate project, product, system, or
+   prior employer with the candidate's role or relationship and a concise
+   descriptor before relying on its name; the reader cannot be assumed to have
+   read the résumé first. Name a specific tool, framework, or product
    only when the job listing or the research names it, or as that paragraph's
    single concrete anchor; otherwise describe it by category, as in `a Python
    back end` or `containerized deployment`. The résumé carries the stack, so a
@@ -397,11 +412,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    equivalence with `maps onto`, `translates directly to`, or `mirrors`, and
    do not quote the employer's phrasing back as the second half of an analogy:
    argue the shared mechanism (constraints, data flow, failure modes) and let
-   the transfer stay implicit. State logistics facts in plain first person,
-   never in bureaucratic register such as `in possession of`. Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter: legal work status belongs on the application form, and Infinite
-   Canvas rejects the entire result when the letter states it (for example
-   `Canadian citizen`, `authorized to work`, `permanent resident`, `visa
-   sponsorship`, `legally entitled to`).
+   the transfer stay implicit. Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter: legal work status belongs on the application form. Do not state application
+   logistics either: availability, start date, schedule, work location,
+   relocation, commute, travel willingness, and sponsorship belong in
+   application fields, even when career data or the listing mentions them.
+   Infinite Canvas rejects a result that includes
+   them (for example `willing to work anywhere`, `available to start`,
+   `authorized to work`, or `visa sponsorship`).
    If the final paragraph invites a conversation, use direct present-tense
    language and connect the candidate's relevant contribution to the specific
    target work. Do not end solely on what the candidate wants to learn, hear,
@@ -577,7 +594,7 @@ effective `OUTPUT_BUNDLE_ROOT` value copied exactly. Write it to
       { "id": "cover-register", "status": "pass", "evidence": "The letter uses direct natural prose without generic or bureaucratic language." },
       { "id": "cover-sentence-craft", "status": "pass", "evidence": "Sentences are concise and grammatical with no semicolon or dash clause splices." },
       { "id": "cover-figure-discipline", "status": "pass", "evidence": "Every retained figure is necessary and present in selected résumé evidence." },
-      { "id": "cover-legal-status", "status": "pass", "evidence": "No citizenship, residency, visa, or work-authorization statement appears." },
+      { "id": "cover-legal-status", "status": "pass", "evidence": "No application logistics or legal-work-status statement appears." },
       { "id": "cover-envelope", "status": "pass", "evidence": "Identity and contact fields match the résumé and no envelope fact was inferred." },
       { "id": "cross-document-consistency", "status": "pass", "evidence": "Résumé, letter, and argument contract agree on identity, facts, and scope." },
       { "id": "requirement-coverage", "status": "pass", "evidence": "High-priority requirements were addressed or honestly omitted without invention." },
@@ -637,10 +654,8 @@ effective `OUTPUT_BUNDLE_ROOT` value copied exactly. Write it to
       "relationToPrimary": "Why this evidence corroborates, deepens, extends, qualifies, or provides a foundation for the primary proof."
     },
     "logistics": {
-      "statement": "Optional exact logistics statement that appears in the letter.",
-      "careerDataQuotes": [
-        "Exact supporting quote copied verbatim from context/career-data.txt."
-      ]
+      "statement": "",
+      "careerDataQuotes": []
     }
   }
 }
@@ -675,9 +690,9 @@ when it has a genuine narrative role
 its relationship to the primary proof. The cover-letter quality rationale must
 explicitly attest that the final letter preserves **one controlling argument**
 and **minimum-sufficient evidence**. Do not use the contract to add facts that
-are absent from the letter or career data. Include `logistics` only when the
-letter states availability, relocation, commute, schedule, coverage, or a
-similar logistics fact. Its `statement` must appear exactly in the letter and
-its `careerDataQuotes` must be verbatim supporting career-data quotes. Omit
-`logistics` when the letter has no logistics claim; never infer it from the job
-location, employer, school, profile, or context.
+are absent from the letter or career data. `logistics` is a compatibility
+object only: omit it, or leave its `statement` empty. Never use it to place
+availability, relocation, commute, schedule, work location, travel, start
+date, or legal-work-status facts in a letter; those belong in application
+fields and must not be inferred from the job location, employer, school,
+profile, or context.

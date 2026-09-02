@@ -12,13 +12,15 @@ import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { PDFDocument } from 'pdf-lib';
-import { renderPdf, applyDualPdf } from './resumeRender.js';
+import { renderPdf, applyDualPdf, pdfHasDualModeBackground } from './resumeRender.js';
 import {
+  embedApplicationSyncConfig,
   extractVariantAttrs,
   isDualMode,
   restoreTrustedReceiptDerivations,
   sanitizeDocumentMainHtml,
 } from './resumeHtml.js';
+import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
 
@@ -30,6 +32,7 @@ export const APPLICATION_SYNC_PORT = 43_192;
 export const APPLICATION_SYNC_PATH = '/application-sync';
 const MAX_HTML_BYTES = 64 * 1024 * 1024;
 const STATE_FILE = 'application-sync-workspaces.json';
+const APPLICATION_SYNC_TOKEN_RE = /^[a-f0-9]{64}$/i;
 const workspaces = new Map();
 const workspaceSyncQueues = new Map();
 let server = null;
@@ -105,7 +108,11 @@ async function captureOrVerifyWorkspaceIdentity(workspace) {
   try {
     directoryStat = await fs.promises.lstat(workspace.workspaceDir);
   } catch (error) {
-    throw new Error(`Application Sync workspace is unavailable: ${error?.message || error}`);
+    // Keep the code so restore can distinguish a disposable, user-deleted
+    // application folder from an unsafe replacement.
+    const unavailable = new Error(`Application Sync workspace is unavailable: ${error?.message || error}`);
+    unavailable.code = error?.code;
+    throw unavailable;
   }
   if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
     throw new Error('Application Sync workspace must be a regular directory, not a symbolic link.');
@@ -118,7 +125,9 @@ async function captureOrVerifyWorkspaceIdentity(workspace) {
   try {
     applicationStat = await fs.promises.lstat(workspace.applicationPath);
   } catch (error) {
-    throw new Error(`Application Sync workspace HTML is unavailable: ${error?.message || error}`);
+    const unavailable = new Error(`Application Sync workspace HTML is unavailable: ${error?.message || error}`);
+    unavailable.code = error?.code;
+    throw unavailable;
   }
   if (!applicationStat.isFile() || applicationStat.isSymbolicLink()) {
     throw new Error('Application Sync workspace HTML must be a regular file.');
@@ -154,6 +163,20 @@ async function readFileHandleBounded(handle, maxBytes) {
   }
   if (offset > maxBytes) throw new Error('The saved application workspace exceeds the safe Sync size limit.');
   return Buffer.concat(chunks, offset).toString('utf8');
+}
+
+async function readBinaryFileHandleBounded(handle, maxBytes) {
+  const chunks = [];
+  let offset = 0;
+  while (offset <= maxBytes) {
+    const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, maxBytes + 1 - offset));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+    if (!bytesRead) break;
+    chunks.push(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  if (offset > maxBytes) throw new Error('The application PDF exceeds the safe Sync size limit.');
+  return Buffer.concat(chunks, offset);
 }
 
 async function readRegisteredWorkspaceHtml(workspace) {
@@ -210,6 +233,74 @@ async function readRegisteredWorkspaceHtml(workspace) {
   }
 }
 
+async function readRegisteredWorkspacePdf(workspace, documentKind) {
+  const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath
+    : documentKind === 'resume' ? workspace.resumePdfPath : '';
+  if (!pdfPath || !isInside(workspace.workspaceDir, pdfPath)) {
+    throw new Error('Application Sync received an invalid PDF document kind.');
+  }
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  let preOpenStat = null;
+  let handle;
+  if (!noFollow) {
+    preOpenStat = await fs.promises.lstat(pdfPath);
+    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
+      throw new Error('Application Sync PDF must be a regular file.');
+    }
+  }
+  try {
+    handle = await fs.promises.open(pdfPath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    if (!noFollow || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) throw error;
+    preOpenStat = await fs.promises.lstat(pdfPath);
+    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
+      throw new Error('Application Sync PDF must be a regular file.');
+    }
+    handle = await fs.promises.open(pdfPath, fs.constants.O_RDONLY);
+  }
+  try {
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.size > MAX_HTML_BYTES
+      || (preOpenStat && !sameFileIdentity(openedStat, preOpenStat))) {
+      throw new Error('Application Sync PDF changed or is not a safe regular file.');
+    }
+    await captureOrVerifyWorkspaceIdentity(workspace);
+    const currentPathStat = await fs.promises.lstat(pdfPath);
+    if (!currentPathStat.isFile() || currentPathStat.isSymbolicLink()
+      || !sameFileIdentity(currentPathStat, openedStat)) {
+      throw new Error('Application Sync PDF changed while it was being opened.');
+    }
+    const bytes = await readBinaryFileHandleBounded(handle, MAX_HTML_BYTES);
+    const finalStat = await handle.stat();
+    if (!sameFileIdentity(finalStat, openedStat)
+      || finalStat.size !== openedStat.size
+      || finalStat.mtimeMs !== openedStat.mtimeMs
+      || finalStat.ctimeMs !== openedStat.ctimeMs) {
+      throw new Error('Application Sync PDF changed while it was being read.');
+    }
+    if (bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
+      throw new Error('Application Sync sibling is not a valid PDF.');
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+// Rendering can take long enough for a user to save another edit in the
+// external Application.html. Do not let the earlier Sync request silently
+// promote over that newer revision. This deliberately reuses the descriptor-
+// bound reader, so the comparison also rechecks the workspace and final-file
+// symlink/identity defenses before the bundle transaction begins.
+async function assertWorkspaceHtmlUnchanged(workspace, expectedHtml) {
+  const currentHtml = await readRegisteredWorkspaceHtml(workspace);
+  const expected = Buffer.from(String(expectedHtml || ''), 'utf8');
+  const current = Buffer.from(currentHtml, 'utf8');
+  if (expected.length !== current.length || !crypto.timingSafeEqual(expected, current)) {
+    throw new Error('Application Sync workspace changed while the PDF was rendering. Reopen the latest Application.html and retry Sync.');
+  }
+}
+
 async function persistWorkspaces() {
   const payload = JSON.stringify({
     version: 2,
@@ -244,23 +335,47 @@ function persistWorkspacesSerialized() {
 function loadWorkspaces() {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
+    let parsed;
     try {
-      const parsed = JSON.parse(await fs.promises.readFile(statePath(), 'utf8'));
-      let migratedIdentity = false;
-      for (const raw of Array.isArray(parsed?.workspaces) ? parsed.workspaces : []) {
-        const normalized = normalizeWorkspace(raw);
-        if (!normalized) continue;
-        try {
-          const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
-          if (!normalized.identity) migratedIdentity = true;
-          workspaces.set(workspace.token, workspace);
-        } catch (error) {
+      parsed = JSON.parse(await fs.promises.readFile(statePath(), 'utf8'));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') logger.warn(`[ApplicationSync] Could not read saved workspace capabilities: ${error?.message || error}`);
+      return;
+    }
+
+    let rewriteState = false;
+    for (const raw of Array.isArray(parsed?.workspaces) ? parsed.workspaces : []) {
+      const normalized = normalizeWorkspace(raw);
+      // Invalid entries cannot ever be served. Drop them from the durable
+      // state too, rather than rediscovering the same bad capability at every
+      // launch.
+      if (!normalized) {
+        rewriteState = true;
+        continue;
+      }
+      try {
+        const workspace = await captureOrVerifyWorkspaceIdentity(normalized);
+        if (!normalized.identity) rewriteState = true;
+        workspaces.set(workspace.token, workspace);
+      } catch (error) {
+        rewriteState = true;
+        if (error?.code === 'ENOENT') {
+          // Generated application folders are deliberately disposable. Their
+          // absence after a user cleans Applied Jobs is expected, not a
+          // security incident, and should not produce a warning on every
+          // subsequent launch.
+          logger.info(`[ApplicationSync] Discarding unavailable saved workspace capability: ${normalized.workspaceDir}`);
+        } else {
           logger.warn(`[ApplicationSync] Ignoring unsafe saved workspace: ${error?.message || error}`);
         }
       }
-      if (migratedIdentity) await persistWorkspaces();
-    } catch (error) {
-      if (error?.code !== 'ENOENT') logger.warn(`[ApplicationSync] Could not read saved workspace capabilities: ${error?.message || error}`);
+    }
+    if (rewriteState) {
+      try {
+        await persistWorkspaces();
+      } catch (error) {
+        logger.warn(`[ApplicationSync] Could not prune saved workspace capabilities: ${error?.message || error}`);
+      }
     }
   })();
   return loadPromise;
@@ -283,6 +398,79 @@ function corsHeaders(origin) {
 function sendJson(response, status, body, origin) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders(origin) });
   response.end(JSON.stringify(body));
+}
+
+function sha256(data) {
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+function applicationPanelSha256(html, documentKind) {
+  const dom = new JSDOM(String(html || ''));
+  try {
+    const panel = dom.window.document.querySelector(`[data-ic-document-panel="${documentKind}"]`);
+    const main = panel?.querySelector('main.page');
+    if (!main) throw new Error(`Application workspace is missing its ${documentKind} document panel.`);
+    return sha256(Buffer.from(main.outerHTML, 'utf8'));
+  } finally {
+    dom.window.close();
+  }
+}
+
+function applicationSyncDataFromHtml(html) {
+  const dom = new JSDOM(String(html || ''));
+  try {
+    const node = dom.window.document.querySelector('[id="ic-application-bundle-data"][type="application/json"]');
+    if (!node) throw new Error('Application workspace is missing its Sync data.');
+    const data = JSON.parse(node.textContent || '{}');
+    return data?.sync && typeof data.sync === 'object' ? data.sync : {};
+  } finally {
+    dom.window.close();
+  }
+}
+
+function withApplicationDocumentRevision(html, documentKind, pdfBytes, token) {
+  const existing = applicationSyncDataFromHtml(html);
+  const documents = {
+    resume: {
+      pdfSha256: String(existing?.documents?.resume?.pdfSha256 || ''),
+      htmlSha256: String(existing?.documents?.resume?.htmlSha256 || ''),
+    },
+    cover: {
+      pdfSha256: String(existing?.documents?.cover?.pdfSha256 || ''),
+      htmlSha256: String(existing?.documents?.cover?.htmlSha256 || ''),
+    },
+  };
+  documents[documentKind] = {
+    pdfSha256: sha256(pdfBytes),
+    htmlSha256: applicationPanelSha256(html, documentKind),
+  };
+  return embedApplicationSyncConfig(html, {
+    endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`,
+    token,
+    version: 2,
+    documents,
+  });
+}
+
+function withApplicationPrintVariant(html, dualMode) {
+  const source = String(html || '');
+  const dom = new JSDOM(source, { includeNodeLocations: true });
+  let location;
+  try {
+    location = dom.nodeLocation(dom.window.document.documentElement)?.startTag;
+  } finally {
+    dom.window.close();
+  }
+  if (!location || !Number.isInteger(location.startOffset) || !Number.isInteger(location.endOffset)) {
+    throw new Error('Application workspace root HTML element has no source boundary.');
+  }
+  const rootTag = source.slice(location.startOffset, location.endOffset);
+  const mode = dualMode ? 'dual-pdf' : 'ink-only';
+  const attribute = /\sdata-print(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/i;
+  const updatedRoot = attribute.test(rootTag)
+    ? rootTag.replace(attribute, ` data-print="${mode}"`)
+    : rootTag.slice(0, -1) + ` data-print="${mode}">`;
+  return source.slice(0, location.startOffset) + updatedRoot + source.slice(location.endOffset);
 }
 
 function readJson(request) {
@@ -554,12 +742,167 @@ export async function inspectApplicationSyncRevision({ applicationPath, pdfPath,
   return manifest;
 }
 
-async function syncWorkspace(payload) {
+function registeredWorkspaceForToken(payload) {
   const token = typeof payload?.token === 'string' ? payload.token : '';
-  const workspace = workspaces.get(token);
-  if (!workspace || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(workspace?.token || ''.padEnd(64, '0')))) {
+  // Validate before looking up or comparing the bearer value. Besides making
+  // malformed requests an ordinary authorization denial, this guarantees both
+  // buffers given to timingSafeEqual have the same fixed byte length.
+  if (!APPLICATION_SYNC_TOKEN_RE.test(token)) {
     throw Object.assign(new Error('This workspace is not registered with Infinite Canvas. Launch the app and reopen the saved application.'), { statusCode: 403 });
   }
+  const workspace = workspaces.get(token);
+  if (!workspace || !APPLICATION_SYNC_TOKEN_RE.test(workspace.token)
+    || !crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(workspace.token, 'hex'))) {
+    throw Object.assign(new Error('This workspace is not registered with Infinite Canvas. Launch the app and reopen the saved application.'), { statusCode: 403 });
+  }
+  return { token, workspace };
+}
+
+async function reconcileWorkspacePdfs(payload) {
+  const { token, workspace } = registeredWorkspaceForToken(payload);
+  return withApplicationSyncWorkspaceLock(workspace.workspaceDir, async () => {
+    if (workspaces.get(token) !== workspace) {
+      throw Object.assign(new Error('This workspace was replaced by a newer generated application. Reopen the latest Application.html.'), { statusCode: 409 });
+    }
+    await captureOrVerifyWorkspaceIdentity(workspace);
+    const storedHtml = await readRegisteredWorkspaceHtml(workspace);
+    let reconciledHtml = storedHtml;
+    let syncData = applicationSyncDataFromHtml(reconciledHtml);
+    const importedDocuments = [];
+    const staleDocuments = [];
+    const conflicts = [];
+    const variantMismatches = [];
+    const checkedPdfs = new Map();
+    const pdfDualModes = new Map();
+    let metadataChanged = false;
+
+    for (const documentKind of ['resume', 'cover']) {
+      let pdfBytes;
+      try {
+        pdfBytes = await readRegisteredWorkspacePdf(workspace, documentKind);
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          conflicts.push({ document: documentKind, reason: 'The sibling PDF is missing.' });
+          continue;
+        }
+        throw error;
+      }
+      checkedPdfs.set(documentKind, pdfBytes);
+      pdfDualModes.set(documentKind, await pdfHasDualModeBackground(pdfBytes));
+    }
+
+    // The paper treatment belongs to the shared HTML root, so import it only
+    // when BOTH sibling PDFs agree. A matching pair is an unambiguous external
+    // revision and the saved preview should look like those PDFs. If the two
+    // PDFs disagree, neither one is allowed to silently change the other
+    // document's display; the per-document mismatch remains stale below.
+    const originalDualMode = isDualMode(extractVariantAttrs(reconciledHtml));
+    const distinctPdfModes = new Set(pdfDualModes.values());
+    if (pdfDualModes.size === 2 && distinctPdfModes.size === 1) {
+      const [pdfDualMode] = distinctPdfModes;
+      if (pdfDualMode !== originalDualMode) {
+        reconciledHtml = withApplicationPrintVariant(reconciledHtml, pdfDualMode);
+        importedDocuments.push('resume', 'cover');
+        metadataChanged = true;
+      }
+    }
+
+    for (const documentKind of ['resume', 'cover']) {
+      const pdfBytes = checkedPdfs.get(documentKind);
+      if (!pdfBytes) continue;
+      const actualPdfSha256 = sha256(pdfBytes);
+      const expected = syncData?.documents?.[documentKind] || {};
+      const currentHtmlSha256 = applicationPanelSha256(reconciledHtml, documentKind);
+      const pdfChanged = Boolean(expected.pdfSha256) && expected.pdfSha256 !== actualPdfSha256;
+      const htmlChanged = Boolean(expected.htmlSha256) && expected.htmlSha256 !== currentHtmlSha256;
+      const expectedDualMode = isDualMode(extractVariantAttrs(reconciledHtml));
+      const actualDualMode = pdfDualModes.get(documentKind);
+      const variantMismatch = expectedDualMode !== actualDualMode;
+
+      if (variantMismatch) {
+        if (!staleDocuments.includes(documentKind)) staleDocuments.push(documentKind);
+        variantMismatches.push({
+          document: documentKind,
+          expected: expectedDualMode ? 'dual-pdf' : 'ink-only',
+          actual: actualDualMode ? 'dual-pdf' : 'ink-only',
+        });
+      }
+
+      if (!pdfChanged && expected.pdfSha256) {
+        if (htmlChanged && !staleDocuments.includes(documentKind)) staleDocuments.push(documentKind);
+        continue;
+      }
+      if (pdfChanged && htmlChanged) {
+        conflicts.push({ document: documentKind, reason: 'Both the PDF and editable HTML changed after their last shared revision.' });
+        continue;
+      }
+
+      let reconciliation;
+      try {
+        reconciliation = await reconcileApplicationHtmlFromPdf({
+          html: reconciledHtml,
+          pdfBytes,
+          documentKind,
+        });
+      } catch (error) {
+        conflicts.push({
+          document: documentKind,
+          reason: String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 500),
+        });
+        continue;
+      }
+      if (reconciliation?.success !== true || reconciliation?.status === 'conflict'
+        || typeof reconciliation?.html !== 'string') {
+        conflicts.push({
+          document: documentKind,
+          reason: String(reconciliation?.error || reconciliation?.reason || 'The PDF text could not be mapped back to editable HTML without ambiguity.').slice(0, 500),
+        });
+        continue;
+      }
+      reconciledHtml = reconciliation.html;
+      if (reconciliation.changed && !importedDocuments.includes(documentKind)) importedDocuments.push(documentKind);
+      // Do not certify a text-aligned but visually incompatible pair. The HTML
+      // owns the app-selected paper treatment; a normal Sync will re-render
+      // this PDF with the correct ink-only/dual-mode state.
+      if (!variantMismatch) {
+        reconciledHtml = withApplicationDocumentRevision(reconciledHtml, documentKind, pdfBytes, token);
+        syncData = applicationSyncDataFromHtml(reconciledHtml);
+        metadataChanged = true;
+      }
+    }
+
+    if (reconciledHtml !== storedHtml) {
+      await captureOrVerifyWorkspaceIdentity(workspace);
+      await assertWorkspaceHtmlUnchanged(workspace, storedHtml);
+      await replaceApplicationBundleAtomically([
+        { destination: workspace.applicationPath, data: reconciledHtml, expectedCurrentData: storedHtml },
+      ], {
+        verify: async () => {
+          const saved = await readRegisteredWorkspaceHtml(workspace);
+          if (saved !== reconciledHtml) throw new Error('Reconciled application HTML failed readback verification.');
+          for (const [documentKind, expectedPdf] of checkedPdfs) {
+            const currentPdf = await readRegisteredWorkspacePdf(workspace, documentKind);
+            if (!currentPdf.equals(expectedPdf)) {
+              throw new Error(`The ${documentKind} PDF changed while its text was being imported.`);
+            }
+          }
+          return true;
+        },
+      });
+    }
+    return {
+      importedDocuments,
+      staleDocuments,
+      conflicts,
+      variantMismatches,
+      metadataChanged,
+      reloadRequired: importedDocuments.length > 0,
+    };
+  });
+}
+
+async function syncWorkspace(payload) {
+  const { token, workspace } = registeredWorkspaceForToken(payload);
   const documentKind = payload?.document === 'cover' ? 'cover' : payload?.document === 'resume' ? 'resume' : '';
   const html = typeof payload?.html === 'string' ? payload.html : '';
   if (!documentKind || !html.trim() || Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
@@ -619,9 +962,15 @@ async function syncWorkspace(payload) {
       // the cream layer to a variant that already paints its own opaque background
       // produces a page that is neither.
       if (isDualMode(extractVariantAttrs(mergedHtml))) pdf = await applyDualPdf(pdf);
+      // Persist the exact source/PDF pair that produced this revision. The
+      // load-time reconciliation path uses these hashes to distinguish a
+      // one-sided external PDF edit (safe to import) from simultaneous HTML
+      // and PDF edits (a conflict that must not be resolved silently).
+      mergedHtml = withApplicationDocumentRevision(mergedHtml, documentKind, pdf, token);
       const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath : workspace.resumePdfPath;
       try {
         await captureOrVerifyWorkspaceIdentity(workspace);
+        await assertWorkspaceHtmlUnchanged(workspace, storedHtml);
       } catch (error) {
         throw Object.assign(new Error(`The registered application workspace changed before Sync could write: ${error?.message || error}`), { statusCode: 409 });
       }
@@ -630,7 +979,11 @@ async function syncWorkspace(payload) {
       // editable document paired with an old employer-facing PDF.
       updateSyncAttempt(attemptId, { phase: 'writing and verifying revision' });
       const manifest = await replaceApplicationBundleAtomically([
-        { destination: workspace.applicationPath, data: mergedHtml },
+        // The transaction rechecks this snapshot after moving the old HTML to
+        // its rollback backup. That closes the final gap after the pre-render
+        // guard above: an external editor save cannot be backed up and then
+        // deleted while this older render is promoted.
+        { destination: workspace.applicationPath, data: mergedHtml, expectedCurrentData: storedHtml },
         { destination: pdfPath, data: pdf },
       ], {
         verify: () => inspectApplicationSyncRevision({
@@ -657,8 +1010,20 @@ async function syncWorkspace(payload) {
   }
 }
 
-export function applicationSyncConfig(token) {
-  return { endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`, token, version: 1 };
+export function applicationSyncConfig(token, { html = '', resumePdf = null, coverPdf = null } = {}) {
+  const documentRevision = (documentKind, pdf) => ({
+    pdfSha256: pdf == null ? '' : sha256(Buffer.from(pdf)),
+    htmlSha256: html ? applicationPanelSha256(html, documentKind) : '',
+  });
+  return {
+    endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`,
+    token,
+    version: 2,
+    documents: {
+      resume: documentRevision('resume', resumePdf),
+      cover: documentRevision('cover', coverPdf),
+    },
+  };
 }
 
 export function applicationSyncStatusSnapshot() {
@@ -707,7 +1072,10 @@ export async function startApplicationSyncServer() {
     if (request.method === 'OPTIONS') return sendJson(response, 204, {}, origin);
     if (request.method !== 'POST' || (origin && origin !== 'null' && origin !== 'file://')) return sendJson(response, 403, { success: false, error: 'Sync requests must come from a saved local application file.' }, origin);
     try {
-      const result = await syncWorkspace(await readJson(request));
+      const payload = await readJson(request);
+      const result = payload?.action === 'reconcile'
+        ? await reconcileWorkspacePdfs(payload)
+        : await syncWorkspace(payload);
       sendJson(response, 200, { success: true, ...result }, origin);
     } catch (error) {
       logger.warn(`[ApplicationSync] Sync failed: ${error?.message || error}`);
@@ -754,4 +1122,25 @@ export async function __verifyApplicationSyncWorkspaceIdentityForTests(workspace
 export async function __readApplicationSyncWorkspaceHtmlForTests(workspace) {
   return readRegisteredWorkspaceHtml(workspace);
 }
+export async function __assertApplicationSyncWorkspaceSnapshotForTests(workspace, expectedHtml) {
+  return assertWorkspaceHtmlUnchanged(workspace, expectedHtml);
+}
+export function __applicationPanelSha256ForTests(html, documentKind) {
+  return applicationPanelSha256(html, documentKind);
+}
+export async function __reconcileApplicationSyncWorkspaceForTests(payload) {
+  return reconcileWorkspacePdfs(payload);
+}
+export async function __syncApplicationSyncWorkspaceForTests(payload) {
+  return syncWorkspace(payload);
+}
 export function __withApplicationSyncWorkspaceLockForTests(workspaceDir, fn) { return withApplicationSyncWorkspaceLock(workspaceDir, fn); }
+export function __applicationSyncStatePathForTests() { return statePath(); }
+export async function __loadApplicationSyncWorkspacesForTests() { return loadWorkspaces(); }
+export async function __resetApplicationSyncWorkspacesForTests() {
+  await persistenceQueue.catch(() => {});
+  workspaces.clear();
+  workspaceSyncQueues.clear();
+  loadPromise = null;
+  persistenceQueue = Promise.resolve();
+}

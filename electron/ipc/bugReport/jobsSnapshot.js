@@ -2444,7 +2444,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push(`\n### Competitive salary check${ago(c.ts)}`);
     lines.push('> What this answers: whether the competitive-salary check is what exhausted this run\'s AI quota. Every eligible job is grouped into a cohort by role/seniority/experience/employment type/location/currency, and EACH cohort costs two LLM calls — one grounded research call plus one assessment call — on the same quota fit-scoring and bucketing draw from. Cohorts fragment by the job\'s own city, so a broad multi-employer search can multiply into many cohorts. The numbers below describe what happened this run, not a diagnosis of why.');
     lines.push(`- Eligible: ${rec(c.eligible)} scored job(s) · fit threshold applied: ${rec(c.minFitScore)}`);
-    lines.push(`- Skipped: ${rec(c.skippedBelowFit)} below the fit threshold, ${rec(c.skippedNoOffer)} no stated salary, ${rec(c.skippedNoLocation)} no resolvable location`);
+    lines.push(`- Skipped: ${rec(c.skippedBelowFit)} below the fit threshold, ${rec(c.skippedNoCurrency)} no resolvable market currency, ${rec(c.skippedNoLocation)} no resolvable location`);
+    lines.push(`- Missing/unusable advertised salary: ${rec(c.missingOffer)} · market recommendations produced: ${rec(c.recommendedNoOffer)}`);
     lines.push(`- Cohorts: ${rec(c.cohorts)} → researched ${rec(c.researched)}, failed ${rec(c.failedCohorts)}`);
     lines.push(`- Jobs assessed: ${rec(c.assessed)} · cache hit(s): ${rec(c.cacheHits)}`);
     if (Array.isArray(c.failures) && c.failures.length > 0) {

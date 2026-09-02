@@ -6344,6 +6344,14 @@ export default [
       assert(doc.includes('window.icPageGuidesRecompute = scheduleRecompute')
         && doc.includes('.ic-page-guides { display: none !important; }'),
       'resume doc: page guides recompute on screen and are excluded from print');
+      // The screen guide models Sync's isolated ATS-safe PDF render, not the
+      // editable page's web-font metrics. Keep the exact shared token values
+      // in the emitted clone so a one-page Sync PDF cannot show a false Page 2
+      // seam in the workspace preview.
+      assert(doc.includes('var PAGE_GUIDE_FONT_TOKENS = {"--ff-display":"Georgia, \\"Times New Roman\\", serif","--ff-body":"Arial, \\"Helvetica Neue\\", sans-serif","--ff-mono":"Menlo, Consolas, \\"Courier New\\", monospace"};')
+        && doc.includes('clone.style.setProperty(property, PAGE_GUIDE_FONT_TOKENS[property]);')
+        && doc.includes("clone.style.setProperty('font-family', 'var(--ff-body)');"),
+      'resume doc: page-guide clone must use the shared ATS-safe PDF font tokens and body inheritance');
       const renderedMain = doc.split('</style>').pop().match(/<main\b[^>]*>/i)?.[0] || '';
       assert(!/\sdata-(?:print|mono|page|density)\b/i.test(renderedMain), 'resume doc: root variants must not be shadowed by model-level main attributes');
       // A model that mistakenly returns a full fenced document is normalized to

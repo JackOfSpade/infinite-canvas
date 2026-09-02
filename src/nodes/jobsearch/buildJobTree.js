@@ -83,7 +83,7 @@ const DEFAULT_RANGES = [
 // can preserve a single, safe representation. A missing/unknown assessment is
 // deliberately a neutral legacy state: opening an old canvas must never imply
 // that new compensation research was run.
-const COMPENSATION_STATUSES = new Set(['competitive', 'below_market', 'uncertain', 'not_evaluated']);
+const COMPENSATION_STATUSES = new Set(['competitive', 'below_market', 'market_recommendation', 'uncertain', 'not_evaluated']);
 // These records are renderer-facing, potentially persisted AI output. Keep an
 // absurd value from becoming a very long disclosure (or, worse, supporting a
 // semantic green/red result). This is the same generous annual-cash ceiling
@@ -161,6 +161,7 @@ function normalizedCompensationStatus(value) {
   const raw = textValue(value).toLowerCase().replace(/[\s-]+/g, '_');
   if (COMPENSATION_STATUSES.has(raw)) return raw;
   if (['above_market', 'at_market', 'worth_it'].includes(raw)) return 'competitive';
+  if (['recommended', 'market_recommended', 'salary_recommendation'].includes(raw)) return 'market_recommendation';
   if (['belowmarket', 'not_worth_it', 'under_market'].includes(raw)) return 'below_market';
   if (['unknown', 'unavailable', 'not_applicable'].includes(raw)) return 'uncertain';
   return '';
@@ -178,7 +179,7 @@ export function normalizeCompensationAssessment(value) {
       status: 'not_evaluated',
       reasonCode: 'legacy_unresearched',
       justification: 'Compensation research was not run for this saved result. Re-run its Job Search module to evaluate the advertised cash salary.',
-      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', sourceLinks: [],
+      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, sourceLinks: [],
       isLegacy: true,
     };
   }
@@ -194,6 +195,7 @@ export function normalizeCompensationAssessment(value) {
     comparisonLocation: normalizedLocation(source.comparisonLocation ?? source.marketLocation ?? source.evaluatedLocation),
     justification: textValue(source.justification ?? source.reasoning ?? source.explanation ?? source.summary).slice(0, MAX_COMPENSATION_TEXT_LENGTH),
     researchedAt: textValue(source.researchedAt ?? source.researchDate ?? source.researchedOn).slice(0, 100),
+    currencyInferredFromLocation: source.currencyInferredFromLocation === true,
     sourceLinks: normalizedSourceLinks(source.sourceLinks ?? source.sources ?? source.evidence),
     isLegacy: false,
   };
@@ -227,11 +229,19 @@ export function normalizeCompensationAssessment(value) {
     normalized.status = 'uncertain';
     normalized.reasonCode = 'incompatible_comparison_period';
     normalized.justification = 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.';
+  } else if (normalized.status === 'market_recommendation'
+    && (!(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
+      || !normalized.competitiveRange.currency || normalized.competitiveRange.period !== 'annual')) {
+    normalized.status = 'uncertain';
+    normalized.reasonCode = 'incomplete_market_recommendation';
+    normalized.justification = 'Compensation research did not retain a complete annual market range and currency, so no salary recommendation is shown.';
   } else if (!normalized.justification) {
     normalized.justification = normalized.status === 'competitive'
       ? 'The advertised guaranteed cash salary reaches the researched competitive range for this role and location.'
       : normalized.status === 'below_market'
         ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
+        : normalized.status === 'market_recommendation'
+          ? 'The listing did not provide usable cash pay to compare; this is the researched competitive salary range for the role and location.'
         : normalized.status === 'uncertain'
           ? 'The available salary evidence was not comparable enough to make a reliable cash-pay conclusion.'
           : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';

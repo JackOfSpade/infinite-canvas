@@ -1754,6 +1754,48 @@ export default [
     },
   },
 {
+    name: 'ATS-safe PDF font override covers literal named-page footer typography before readiness checks',
+    run: async () => {
+      const [{ atsSafePdfFontExpression }, { JSDOM }] = await Promise.all([
+        import('../../electron/ipc/resumeRender.js'),
+        import('jsdom'),
+      ]);
+      const dom = new JSDOM(`<!doctype html><html><head></head><body>
+        <p id="display" style='font-family: "Source Serif 4", Georgia'>Display</p>
+        <p id="body" style='font-family: Inter, Arial'>Body</p>
+        <p id="mono" style='font-family: "IBM Plex Mono", monospace'>Mono</p>
+        <p id="unrelated" style='font-family: "Fira Code", monospace'>Unrelated</p>
+      </body></html>`);
+      try {
+        const result = new Function('document', 'getComputedStyle', `return ${atsSafePdfFontExpression()};`)(
+          dom.window.document,
+          dom.window.getComputedStyle,
+        );
+        const root = dom.window.document.documentElement;
+        const override = dom.window.document.getElementById('ic-ats-safe-pdf-page-fonts');
+        const valueFor = (id) => dom.window.document.getElementById(id).style.getPropertyValue('font-family');
+        const safeMono = 'Menlo, Consolas, "Courier New", monospace';
+        const pageNames = ['letter', 'a4', 'letter-compact', 'a4-compact'];
+        assert(result === true
+          && root.style.getPropertyValue('--ff-mono') === safeMono,
+        'the isolated PDF render replaces the root mono token with an ATS-safe system stack');
+        assert(override && pageNames.every((pageName) =>
+          override.textContent.includes(`@page ${pageName} { @bottom-right { font-family: ${safeMono}; } }`)),
+        'the isolated PDF render also overrides every named-page footer, whose design-system font family is intentionally literal');
+        assert(!override.textContent.includes('IBM Plex Mono'),
+          'the PDF-only page-font override must not retain a web-font dependency');
+        assert(valueFor('display') === 'Georgia, "Times New Roman", serif'
+          && valueFor('body') === 'Arial, "Helvetica Neue", sans-serif'
+          && valueFor('mono') === safeMono
+          && valueFor('unrelated') === '"Fira Code", monospace',
+        'literal Source Serif, Inter, and IBM Plex Mono element rules are normalized while unrelated families remain untouched');
+        return { pageOverrides: pageNames.length, literalRemnantsNormalized: 3 };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+{
     // A single display-face probe can pass while an actual document face is
     // missing or a shell cascade overrides Inter/mono with a system fallback.
     // Conversely, Chromium does not fetch faces unused by this document, so

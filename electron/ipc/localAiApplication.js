@@ -17,7 +17,7 @@ import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDo
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization, targetPageCountForJob } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
-import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkLogisticsGrounding, checkMappingNarrativeStructure, checkRoleThesis, evaluateCoverLetterChecks, formatCoverLetterDate } from './coverLetterChecks.js';
+import { authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkRoleThesis, evaluateCoverLetterChecks, formatCoverLetterDate } from './coverLetterChecks.js';
 import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { logger } from '../logger.js';
 
@@ -38,7 +38,7 @@ const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 // Keep enough recent observations to investigate a live handoff, while the
 // monotonic counter preserves the fact that older observations existed.
 const MAX_LOCAL_AI_HANDOFF_HISTORY = 32;
-const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Never delay the relevance of a background fact. Frame an unfamiliar prior employer with the candidate’s role or relationship, then use the shortest unambiguous reference. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. Refer to the target scope as this role or the work itself; use job-listing attribution only when it establishes the provenance of an unverified employer or company assertion. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, category-restatement bridge sentences that add no decision, mechanism, constraint, or result, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
+const COVER_LETTER_COHESION_REVISION_RULE = 'For the cover letter, preserve one controlling throughline and use minimum-sufficient evidence; the résumé owns breadth. Cut or consolidate before introducing another employer, project, or tool merely to cover a different requirement. Each additional proof must have one explicit supporting role in the same argument, with that relationship clear before its details. Within a paragraph, do not place distinct systems or responsibilities side by side merely because they occurred in the same role or job. Before shifting to the new proof, name the shared responsibility, constraint, or outcome; adjacency and “the same job” are not a bridge. If the evidence supplies no relationship, split the paragraph or omit the weaker proof. Never delay the relevance of a background fact. On first mention, frame an unfamiliar prior employer with the candidate’s role or relationship, and frame an unfamiliar named project, product, or system as a concise artifact the candidate built, led, or maintained before relying on its name. Describe cross-domain evidence through the concrete artifact, system, or responsibility, without implying broader domain or operational scope. Exclude application logistics entirely: availability, start date, schedule, location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship belong in application fields, not a cover letter. Treat an employer, team, product, or operational assertion that comes only from the job listing as the listing’s description rather than independently verified fact; use an unqualified assertion about the employer only when reliable research verifies it, without turning this source framing into repetitive hedging. Refer to the target scope as this role or the work itself; use job-listing attribution only when it establishes the provenance of an unverified employer or company assertion. When source attribution is required, make the source document—not the target position—the grammatical subject of its reporting verb. Refer to the position attached to the application with a proximal determiner unless the sentence explicitly contrasts it with another role. Name actors and referents explicitly wherever pronouns would be ambiguous, and place modifiers beside the actions they govern. Preserve facts while varying distinctive source wording across documents. Use contrast, causal, and connective language only when the necessary premise or sequence is already supported. Prefer ordinary contemporary diction. Honest qualification prevents a misleading claim or answers an explicit application question; it is not permission to volunteer a weakness. Reject unexplained shifts, chronological backtracking without a stated purpose, inventory-style paragraphs, overloaded sentences, repeated organizing metaphors, delayed relevance, detached synthesis, category-restatement bridge sentences that add no decision, mechanism, constraint, or result, and a second thesis. Conclusions and transitions must name the concrete responsibility or mechanism they synthesize and remain within the evidence’s scope. Never add a candidate fact, outcome, scope, tool, sequence, or motivation, and keep general domain principles distinct from personal experience.';
 const COVER_LETTER_COPY_PRECISION_RULE = 'Punctuate introductory phrases so the transition into the main subject is immediately clear. Read every sentence once as a recruiter seeing it for the first time; reject idiom, figurative personification, or an implied actor, artifact, or action when the reader must translate it or reconstruct what it literally means. Also scan each clause boundary for an accidental familiar compound or alternate parse: if adjacent words can first read as a different unit, recast the sentence instead of using punctuation to force its intended grammar. In interface or ownership claims, name the concrete actor, artifact, and action instead. Keep communication verbs attached to an actual document or speaker rather than assigning them to the work or position being described. Give each named technology a governing verb that describes its actual role, and never group technologies with distinct roles under one operation. When describing interface guidance, distinguish metaphorical reference from visible on-screen indication and state only the literal limitation. When a closing invites further conversation, use direct present-tense language and connect the candidate’s relevant contribution to the specific target work; do not end solely on what the candidate wants to learn, hear, or discuss, and reject conditional or deferential boilerplate, including would welcome a conversation or discussion.';
 
 export const APPLICATION_QUALITY_CHECKLIST_VERSION = 2;
@@ -73,12 +73,12 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'cover-minimum-evidence', document: 'coverLetter', requirement: 'Only minimum-sufficient evidence is used; each additional proof has an explicit supporting role.' },
   { id: 'cover-priority-alignment', document: 'coverLetter', requirement: 'The argument connects distinctive candidate evidence to an emphasized employer need.' },
   { id: 'cover-opening', document: 'coverLetter', requirement: 'The first sentence adds substantive information and advances the argument immediately.' },
-  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance; bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
+  { id: 'cover-continuity', document: 'coverLetter', requirement: 'Every paragraph advances the same argument with clear transitions and no delayed relevance. Within a paragraph, a shift between distinct systems or responsibilities names its shared responsibility, constraint, or outcome before the new proof; shared role or job context alone is not a bridge. Bridge sentences add a decision, mechanism, constraint, or result rather than restating a category.' },
   { id: 'cover-reference-clarity', document: 'coverLetter', requirement: 'Employers, actors, systems, comparisons, causal links, and temporal references are unambiguous; target scope is stated as this role or the work itself and the selected position is referenced proximally, while listing-only employer context is attributed only when provenance is necessary, with its source document—not the target position—as the reporting subject.' },
   { id: 'cover-register', document: 'coverLetter', requirement: 'Prose is direct and natural, without generic, bureaucratic, additive, advertisement-facing, or conditional/deferential closing language; a final invitation uses direct present tense and connects the candidate’s contribution to target work.' },
   { id: 'cover-sentence-craft', document: 'coverLetter', requirement: 'Sentences are concise, grammatical, parallel, and punctuated for immediate parsing; they pass a literal first-read and word-boundary parse, use concrete actors, artifacts, and actions where needed, give every named technology a role-accurate governing verb without grouping distinct roles under one operation, and contain no semicolon or dash clause splices.' },
   { id: 'cover-figure-discipline', document: 'coverLetter', requirement: 'Every figure is necessary and appears in the selected résumé evidence.' },
-  { id: 'cover-legal-status', document: 'coverLetter', requirement: 'The letter contains no citizenship, residency, visa, or work-authorization statement.' },
+  { id: 'cover-legal-status', document: 'coverLetter', requirement: 'The letter contains no application logistics: availability, start date, schedule, work location, relocation, commute, travel willingness, citizenship, residency, visa, sponsorship, or work-authorization statement.' },
   { id: 'cover-envelope', document: 'coverLetter', requirement: 'The host-owned identity, contact, salutation, and closing are not contradicted or inferred.' },
   { id: 'cross-document-consistency', document: 'bundle', requirement: 'Résumé, cover letter, and argument contract agree on identity, facts, terminology, and scope.' },
   { id: 'requirement-coverage', document: 'bundle', requirement: 'Every high-priority requirement is deliberately addressed or honestly omitted without invention.' },
@@ -548,30 +548,22 @@ function sanitizeCoverLetterArgument(raw) {
       relationToPrimary: cleanArgumentText(raw.secondaryEvidence.relationToPrimary, 'secondaryEvidence.relationToPrimary'),
     };
   }
-  let logistics = null;
+  // Legacy handoffs may retain an empty logistics object. Keep that shape
+  // compatible, but never let availability/location promises enter letter
+  // prose through the non-rendered argument contract.
   if (raw.logistics != null) {
     if (!raw.logistics || typeof raw.logistics !== 'object' || Array.isArray(raw.logistics)) {
       throw new Error('Local AI coverLetterArgument.logistics must be an object when present.');
     }
     const statement = cleanText(raw.logistics.statement, 700).replace(/\s+/g, ' ').trim();
-    if (statement.length < 4) throw new Error('Local AI coverLetterArgument.logistics.statement must be specific.');
-    if (!Array.isArray(raw.logistics.careerDataQuotes) || !raw.logistics.careerDataQuotes.length || raw.logistics.careerDataQuotes.length > 4) {
-      throw new Error('Local AI coverLetterArgument.logistics.careerDataQuotes must contain one to four source quotes.');
+    if (statement) {
+      throw new Error('Local AI coverLetterArgument.logistics must be empty: availability, location, relocation, commute, travel, schedule, and legal work status belong in application fields, never the cover letter.');
     }
-    logistics = {
-      statement,
-      careerDataQuotes: raw.logistics.careerDataQuotes.map((value, index) => {
-        const quote = cleanText(value, 1_200).replace(/\s+/g, ' ').trim();
-        if (!quote) throw new Error(`Local AI coverLetterArgument.logistics.careerDataQuotes[${index}] must be text.`);
-        return quote;
-      }),
-    };
   }
   return {
     roleThesis: cleanArgumentText(raw.roleThesis, 'roleThesis'),
     primaryEvidence,
     ...(secondaryEvidence ? { secondaryEvidence } : {}),
-    ...(logistics ? { logistics } : {}),
   };
 }
 
@@ -752,24 +744,6 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
   const coverLetterParagraphs = validateEntries(raw.coverLetterParagraphs,
     (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : []).map(normalizeSourceGroundingText),
     'coverLetterParagraphs', 'paragraph', 'careerDataQuotes');
-  if (coverLetterArgument?.logistics) {
-    const renderedLetter = (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [])
-      .map(normalizeSourceGroundingText).join('\n');
-    if (!renderedLetter.includes(normalizeSourceGroundingText(coverLetterArgument.logistics.statement))) {
-      throw new Error('Local AI coverLetterArgument.logistics.statement must appear exactly in the final cover-letter paragraphs.');
-    }
-    const logisticsQuotes = coverLetterArgument.logistics.careerDataQuotes.map((value, index) => {
-      const quote = normalizeSourceGroundingText(value);
-      if (!sourceQuoteIsSpecific(quote) || !trustedSource.includes(quote)) {
-        throw new Error(`Local AI coverLetterArgument.logistics.careerDataQuotes[${index}] is not an exact specific quote from trusted career data.`);
-      }
-      return quote;
-    });
-    if (new Set(logisticsQuotes).size !== logisticsQuotes.length) {
-      throw new Error('Local AI coverLetterArgument.logistics.careerDataQuotes repeats a trusted source quote.');
-    }
-    coverLetterArgument.logistics.careerDataQuotes = logisticsQuotes;
-  }
   const argumentEntries = [coverLetterArgument?.primaryEvidence, coverLetterArgument?.secondaryEvidence].filter(Boolean);
   for (const [index, argument] of argumentEntries.entries()) {
     const matched = resumeBullets.find(bullet => argumentEvidenceMatchesBullet(argument.evidence, bullet.text));
@@ -898,7 +872,6 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
     checkRoleThesis(coverPlan),
     checkMappingNarrativeStructure(coverPlan),
     checkEvidenceGrounding(coverPlan, resumeEvidence),
-    ...(hasTrustedCareerData ? [checkLogisticsGrounding(coverPlan, careerData)] : []),
     ...evaluateCoverLetterChecks({
       plan: coverPlan,
       paragraphs: coverLetter.paragraphs,
@@ -1877,6 +1850,70 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, company: input.job?.company || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
 }
 
+/**
+ * Return only Local AI jobs that are demonstrably owned by `canvasFilePath`.
+ *
+ * A JobCard is renderer state and can be explicitly deleted while the private
+ * app-owned handoff folder remains active.  The canvas-level recovery driver
+ * uses this enumeration to finish those jobs without resurrecting a deleted
+ * card.  Do not trust directory names or a manifest alone: every candidate is
+ * a regular directory below the canonical jobs root and must have matching
+ * manifest + input ownership before it is returned.
+ */
+export async function discoverLocalApplicationJobs(canvasFilePath) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  const root = path.resolve(localJobsRoot(canvas.canvasRoot));
+  let rootStat;
+  try { rootStat = await fs.promises.lstat(root); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('The canvas .local-ai/jobs folder is not a trusted directory.');
+  }
+  const realRoot = await fs.promises.realpath(root);
+  if (realRoot !== root || !isWithinDirectory(canvas.canvasRoot, realRoot)) {
+    throw new Error('The canvas .local-ai/jobs folder resolved outside the canvas folder.');
+  }
+
+  const entries = await fs.promises.readdir(realRoot, { withFileTypes: true });
+  const discovered = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !JOB_ID_RE.test(entry.name)) continue;
+    const dir = path.join(realRoot, entry.name);
+    try {
+      const stat = await fs.promises.lstat(dir);
+      const realDir = await fs.promises.realpath(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || realDir !== dir
+        || !isWithinDirectory(realRoot, realDir) || realDir === realRoot) {
+        throw new Error('job directory is not a trusted regular directory');
+      }
+      const [manifest, inputRaw] = await Promise.all([
+        loadManifest(dir),
+        readOwnedFile(realRoot, path.join(dir, 'input.json'), { maxBytes: 700_000 }),
+      ]);
+      const input = JSON.parse(inputRaw);
+      if (manifest.id !== entry.name || input?.jobId !== entry.name || input?.version !== LOCAL_AI_APPLICATION_VERSION) {
+        throw new Error('job manifest and input do not agree');
+      }
+      assertManifestCanvasOwnership(manifest, input, canvas);
+      discovered.push({
+        id: entry.name,
+        canvasFilePath: canvas.canonicalCanvasFilePath,
+        createdAt: manifest.createdAt || null,
+        job: safeJob(input.job),
+      });
+    } catch (error) {
+      // A malformed or foreign folder must never gain recovery ownership. It
+      // is left untouched for explicit diagnostics/recovery, while healthy
+      // app-owned siblings continue to be discoverable.
+      logger.warn(`[LocalAI] Ignored untrusted discovered job ${entry.name}: ${error?.message || error}`);
+    }
+  }
+  return discovered.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || a.id.localeCompare(b.id));
+}
+
 export function registerLocalAiApplicationHandlers() {
   handleSafe('queue-local-application', async (_event, args, signal) => {
     // queueLocalApplicationJob cooperates at every durable-write boundary.
@@ -1912,6 +1949,9 @@ export function registerLocalAiApplicationHandlers() {
     }
   });
   handleSafe('get-local-application-status', async (_event, { jobId, canvasFilePath } = {}) => ({ localJob: await localApplicationStatus(jobId, canvasFilePath) }));
+  handleSafe('discover-local-applications', async (_event, { canvasFilePath } = {}) => ({
+    localJobs: await discoverLocalApplicationJobs(canvasFilePath),
+  }));
   handleSafe('discard-local-application', async (_event, { jobId, canvasFilePath } = {}) =>
     discardLocalApplicationJob(jobId, canvasFilePath));
   handleSafe('open-local-application-folder', async (_event, { jobId, canvasFilePath } = {}) => {

@@ -495,7 +495,7 @@ export const LETTER_PLAN_SCHEMA = {
         whyItMattersToCandidate: { type: 'string', description: 'Why the detail matters given the candidate trajectory; empty when no hook applies.' },
       },
     },
-    logistics: { type: 'string', description: 'The only field allowed to use career-data facts: explicit availability, location/relocation intent, or stated motivation. Never citizenship, work authorization, residency, or visa status — those are application-form facts, not letter material. Empty when not applicable.' },
+    logistics: { type: 'string', description: 'Compatibility field only. It must always be an empty string: cover letters exclude availability, start date, schedule, location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship because those belong in application fields.' },
     droppedNeeds: {
       type: 'array',
       items: {

@@ -14,6 +14,7 @@ export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
 export const MAX_HYPHENATION_OBSERVATIONS = 8;
 export const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
 export const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
+export const MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS = 4;
 export const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
 export const MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS = 4;
 export const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
@@ -26,6 +27,7 @@ export const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
 export const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
 export const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
 export const MAX_COPY_PRECISION_OBSERVATIONS = 4;
+export const MAX_STANDALONE_INTRODUCTION_OBSERVATIONS = 4;
 export const MAX_SENTENCE_WORDS = 40;
 // One off-posting tool name is a paragraph's single concrete anchor; a second
 // one is a stack list. Across the letter, three names is a stack tour even
@@ -383,31 +385,12 @@ export function selectBetterLetterNeeds(firstNeeds, firstCheck, retryNeeds, retr
 }
 
 /**
- * Career data has one deliberately narrow plan-only lane: stated logistics.
- * Treat that lane like résumé evidence rather than trusting a model-authored
- * availability or relocation assertion.  Near-quote/overlap permits normal
- * grammatical cleanup while requiring the source to actually say it.
+ * Legacy compatibility entry point. Career-data support never makes logistics
+ * cover-letter material; any nonempty plan value is now rejected outright.
  */
 export function checkLogisticsGrounding(plan = {}, careerData = '') {
-  const logistics = text(plan?.logistics);
-  if (!logistics) return result('logistics-grounding', true, 'no career-data logistics claim');
-  const sourceWords = words(careerData);
-  const logisticsWords = words(logistics);
-  const run = sharedRunLength(logisticsWords, sourceWords);
-  const overlap = tokenOverlap(logisticsWords, sourceWords);
-  const shortClaim = logisticsWords.length < 8;
-  const requiredRun = Math.min(MIN_EVIDENCE_SHINGLE_WORDS, logisticsWords.length);
-  // Short phrases have too few tokens for a bag-of-words score to mean
-  // anything: “available weekends, local” can otherwise be assembled from
-  // unrelated profile fragments. Require the entire short phrase as a source
-  // run; longer prose still needs both a concrete source run and broad overlap.
-  const grounded = shortClaim
-    ? run === logisticsWords.length
-    : run >= requiredRun && overlap >= MIN_EVIDENCE_TOKEN_OVERLAP;
-  return grounded
-    ? result('logistics-grounding', true, 'plan logistics are grounded in career data')
-    : result('logistics-grounding', false,
-      `plan logistics share a longest ${run}-word run and ${Math.round(overlap * 100)}% token overlap with career data${shortClaim ? '; short logistics claims require a contiguous source match' : ''}`);
+  void careerData;
+  return checkLogisticsExclusion(plan);
 }
 
 function droppedNeed(plan, needIndex) {
@@ -714,50 +697,47 @@ export function checkRequestedWorkSampleLink(jobText = '', resumeMainHtml = '') 
     : result('work-sample-link', false, 'posting requests a portfolio, repository, demo, or shipped-work link, but the résumé has no clickable http(s) link');
 }
 
-// These are logistics concepts, not a general claim or tone vocabulary. The
-// prose writer receives logistics only through the plan, so a concept absent
-// from that field is necessarily a strengthened availability/location promise.
-const LOGISTICS_CONCEPTS = Object.freeze([
-  { label: 'availability', pattern: /\bavailab(?:le|ility)\b/iu },
-  { label: 'full-time', pattern: /\bfull[- ]time\b/iu },
-  { label: 'part-time', pattern: /\bpart[- ]time\b/iu },
-  { label: 'evening schedule', pattern: /\bevenings?\b/iu },
-  { label: 'overnight schedule', pattern: /\bovernights?\b/iu },
-  { label: 'weekend schedule', pattern: /\bweekends?\b/iu },
-  { label: 'shift schedule', pattern: /\bshifts?\b/iu },
-  { label: 'on-call schedule', pattern: /\bon[- ]call\b/iu },
-  { label: 'round-the-clock coverage', pattern: /\bround[- ]the[- ]clock\b/iu },
-  { label: 'continuous coverage', pattern: /\bcontinuous(?:[\s,;:-]+[\p{L}-]+)?[\s,;:-]+coverage\b/iu },
-  { label: 'coverage', pattern: /\bcoverage\b/iu },
-  { label: '24/7 coverage', pattern: /\b(?:24\s*\/\s*7|24[- ]?hour)\b/iu },
-  { label: 'relocation', pattern: /\brelocat(?:e|es|ed|ing|ion)\b/iu },
-  { label: 'local status', pattern: /\blocal(?:ly)?\b/iu },
-  { label: 'commute', pattern: /\bcommut(?:e|es|ed|ing)\b/iu },
+/** Legacy compatibility entry point; sourced logistics are no longer letter material. */
+export function checkLogisticsContainment(plan = {}, paragraphs = []) {
+  return checkLogisticsExclusion(plan, paragraphs);
+}
+
+// A cover letter argues fit; it is not an application-form substitute. Keep
+// this deliberately promise-shaped so a factual discussion of a system's
+// geographic data or availability does not become a false positive.
+const COVER_LETTER_LOGISTICS_PROMISES = Object.freeze([
+  { label: 'availability', pattern: /\b(?:I(?:\s+am|['’]m)\s+available|my\s+availability|available\s+(?:to|for)\s+(?:start|work|relocat(?:e|ing)|travel|shifts?|full[- ]time|part[- ]time|immediately|on))/iu },
+  { label: 'start date', pattern: /\b(?:I\s+(?:can|will|would|am\s+(?:able|ready|prepared)\s+to)\s+start\b|my\s+(?:available\s+)?start\s+date\b)/iu },
+  { label: 'work location', pattern: /\b(?:I(?:\s+am|['’]m)\s+(?:based|located|living|residing)\s+in|I\s+live\s+in|my\s+current\s+(?:location|base)\s+is|(?:based|located)\s+in\s+[^,.!?]{1,80},\s+I\b)/iu },
+  { label: 'work-location willingness', pattern: /\bI(?:\s+am|['’]m)\s+(?:(?:willing|able|prepared|ready)\s+to\s+work(?:ing)?|open\s+to\s+(?:work(?:ing)?\s+|an?\s+)?)\s*(?:anywhere|on[- ]site|hybrid|remotely?|remote|in[- ]office)\b|\bI\s+(?:can|will|would|currently)\s+work\s+(?:anywhere|on[- ]site|hybrid|remotely?|in[- ]office)\b/iu },
+  { label: 'relocation', pattern: /\b(?:I(?:\s+am|['’]m)\s+)?(?:willing|able|prepared|ready|open)\s+to\s+(?:relocat(?:e|ing)|relocation)\b|\bI\s+(?:can|will|would)\s+relocat(?:e|ing)\b/iu },
+  { label: 'commute', pattern: /\bI\s+(?:(?:can|will|would)\s+|am\s+willing\s+to\s+)?commut(?:e|ing)\b/iu },
+  { label: 'commute distance', pattern: /\b(?:I\s+live|I(?:\s+am|['’]m)\s+(?:located|based))\b[^.!?]{0,70}\b(?:\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty|fifty|sixty)[- ]?(?:minute|hour|mile|kilomet(?:er|re))s?\b[^.!?]{0,40}\b(?:from|away)\b/iu },
+  { label: 'travel willingness', pattern: /\bI\s+(?:(?:can|will|would)\s+|am\s+(?:willing|able|prepared|ready|open)\s+to\s+)?travel\b|\bI\s+(?:can|will|would)\s+work\b[^.!?]{0,90}\b(?:and\s+)?travel\b/iu },
+  { label: 'schedule availability', pattern: /\bI\s+(?:can|will|would|am\s+able\s+to)\s+(?:start|work)\b[^.!?]{0,70}\b(?:weekends?|evenings?|overnights?|shifts?|on[- ]call|full[- ]time|part[- ]time)\b/iu },
 ]);
 
 /**
- * Keep logistics promises structurally contained to plan.logistics. This does
- * not attempt semantic inference: it only forbids named scheduling, coverage,
- * and location concepts that the plan did not explicitly supply.
+ * Excludes application logistics from both the argument plan and rendered
+ * prose. Legal-work-status language has its own more specific diagnostic;
+ * this covers the remaining availability/location promises.
  */
-export function checkLogisticsContainment(plan = {}, paragraphs = []) {
+export function checkLogisticsExclusion(plan = {}, paragraphs = []) {
   const planLogistics = text(plan?.logistics);
-  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  if (planLogistics) {
+    return result('logistics-exclusion', false,
+      'argument plan contains logistics; availability, location, relocation, commute, travel, and schedule details belong in application fields, not the cover letter');
+  }
   const observations = [];
-  for (let paragraphIndex = 0; paragraphIndex < list.length; paragraphIndex++) {
-    const paragraph = text(list[paragraphIndex]);
-    for (const concept of LOGISTICS_CONCEPTS) {
-      if (concept.pattern.test(paragraph) && !concept.pattern.test(planLogistics)) {
-        observations.push(`paragraph ${paragraphIndex + 1} mentions ${concept.label}, which is absent from plan logistics`);
-      }
+  for (let index = 0; index < (Array.isArray(paragraphs) ? paragraphs : []).length; index++) {
+    const paragraph = text(paragraphs[index]);
+    for (const promise of COVER_LETTER_LOGISTICS_PROMISES) {
+      const match = promise.pattern.exec(paragraph);
+      if (match) observations.push(`paragraph ${index + 1} makes a ${promise.label} promise (“${boundedDetailValue(match[0])}”); move it to the application fields`);
     }
   }
-  if (observations.length) {
-    const visible = observations.slice(0, MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS);
-    return result('logistics-containment', false,
-      `logistics containment observations: ${visible.join('; ')}${observations.length > visible.length ? `; ${observations.length - visible.length} additional observation(s) omitted` : ''}`);
-  }
-  return result('logistics-containment', true, 'prose logistics concepts are contained in plan logistics');
+  return observationResult('logistics-exclusion', observations, MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS,
+    `${Array.isArray(paragraphs) ? paragraphs.length : 0} paragraph(s) omit application logistics`);
 }
 
 // ---------------------------------------------------------------------------
@@ -907,16 +887,52 @@ export function checkParallelStructure(passages = []) {
  * form once the letter's argument is established.
  */
 export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
-  const firstSentence = sentences(Array.isArray(paragraphs) ? paragraphs[0] : '')[0] || '';
+  const passages = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
   for (const employer of (Array.isArray(employerNames) ? employerNames : [])
     .map(text).filter(Boolean).sort((left, right) => right.length - left.length)) {
-    if (!new RegExp(`^At\\s+${escapeRegExp(employer)}\\s*,`, 'iu').test(firstSentence)) continue;
-    observations.push(`opening sentence begins “${leadingWordsSnippet(firstSentence, 6)}”; introduce the candidate's prior role or relationship at ${employer} before the evidence`);
-    break;
+    const employerReference = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(employer)}(?![\\p{L}\\p{N}])`, 'iu');
+    const relationship = new RegExp(`(?:\\b(?:as|while\\s+working\\s+as)\\s+(?:an?\\s+)?[\\p{L}'’-]+(?:\\s+[\\p{L}'’-]+){0,5}\\s+(?:at|with)\\s+${escapeRegExp(employer)}\\b|\\bmy(?:\\s+[\\p{L}'’-]+){0,5}\\s+(?:role|work|position|tenure)\\b[^.!?]{0,70}\\b(?:at|with)\\s+${escapeRegExp(employer)}\\b|\\bI\\s+(?:worked|served|was\\s+employed)\\b[^.!?]{0,70}\\b(?:at|with)\\s+${escapeRegExp(employer)}\\b)`, 'iu');
+    let first = null;
+    for (let index = 0; index < passages.length && !first; index++) {
+      const sentence = sentences(passages[index]).find(item => employerReference.test(text(item)));
+      if (sentence) first = { index, sentence: text(sentence) };
+    }
+    if (!first || relationship.test(first.sentence)) continue;
+    observations.push(`paragraph ${first.index + 1} first names ${employer} without the candidate's role or relationship; introduce that context before relying on the employer as evidence`);
   }
   return observationResult('prior-employer-opening', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
-    'the opening sentence contextualizes any prior employer it introduces');
+    'each prior employer is introduced with the candidate\'s role or relationship before its evidence');
+}
+
+// These checks receive project names from the structured résumé markup, never
+// arbitrary capitalization in prose. That makes the check strict for a known
+// artifact such as AI-Chalkboard without mistaking a target company, city, or
+// ordinary capitalized phrase for a candidate project.
+const ARTIFACT_DESCRIPTOR = /\b(?:project|product|system|tool|application|app|server|service|platform|overlay|workflow|library|framework|extension|plugin|integration|dashboard|website|utility|prototype)\b/iu;
+const ARTIFACT_RELATIONSHIP = /\b(?:I\s+(?:built|created|developed|designed|maintained|led|made|authored)|my\s+|(?:creator|author|builder|developer|designer)\s+of)\b/iu;
+
+export function checkNamedArtifactIntroduction(paragraphs = [], projectNames = []) {
+  const passages = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (const name of (Array.isArray(projectNames) ? projectNames : []).map(text).filter(Boolean)) {
+    const namePattern = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(name)}(?![\\p{L}\\p{N}])`, 'iu');
+    let first = null;
+    for (let index = 0; index < passages.length && !first; index++) {
+      const sentence = sentences(passages[index]).find(item => namePattern.test(text(item)));
+      if (sentence) first = { index, sentence: text(sentence) };
+    }
+    if (!first) continue;
+    const nameIndex = first.sentence.search(namePattern);
+    const before = first.sentence.slice(0, Math.max(0, nameIndex));
+    const after = first.sentence.slice(nameIndex + name.length);
+    const sameSentenceIntroduction = (ARTIFACT_RELATIONSHIP.test(before) || ARTIFACT_RELATIONSHIP.test(after))
+      && (ARTIFACT_DESCRIPTOR.test(before) || ARTIFACT_DESCRIPTOR.test(after));
+    if (sameSentenceIntroduction) continue;
+    observations.push(`paragraph ${first.index + 1} first names ${name} without identifying it as the candidate's project, product, system, or role context; introduce that context before relying on the name`);
+  }
+  return observationResult('named-artifact-introduction', observations, MAX_STANDALONE_INTRODUCTION_OBSERVATIONS,
+    `${passages.length} paragraph(s) introduce unfamiliar named candidate artifacts before relying on them`);
 }
 
 // Bare industry labels can imply operational or domain tenure the evidence
@@ -1104,6 +1120,44 @@ export function checkAdditiveSeam(paragraphs = []) {
   }
   return observationResult('additive-seam', observations, MAX_ADDITIVE_SEAM_OBSERVATIONS,
     `${list.length} paragraph(s) join their evidence without a bare additive connective`);
+}
+
+// A responsibility pivot needs more than the fact that two tasks occurred in
+// one job. These two constructions have already produced letters that move
+// from one system to another without explaining their shared responsibility:
+// “That was a different problem. I solved it …” and “The same job included …”.
+// Keep the check deliberately lexical and narrow. It catches the opaque
+// hand-off, not every use of “problem”, “challenge”, or “same”.
+const OPAQUE_RESPONSIBILITY_PIVOT = /\b(?:a|another|the)\s+(?:different|separate)\s+(?:problem|challenge)\b/iu;
+const ANAPHORIC_PIVOT_SOLUTION = /^(?:i|we)\s+(?:solved|addressed|handled|tackled|fixed)\s+(?:it|that|this)\b/iu;
+const SAME_JOB_SCOPE_OPENER = /^the\s+same\s+(?:job|role|position)\s+(?:also\s+)?(?:included|involved|covered)\b/iu;
+
+/**
+ * Requires a substantive bridge when prose changes responsibilities.
+ *
+ * A shared employer, job, or chronology is context, not an argumentative
+ * relationship. The repair names the shared responsibility, constraint, or
+ * outcome before introducing the next proof; when the evidence cannot support
+ * one, the writer should split or remove the weaker proof.
+ */
+export function checkResponsibilityTransition(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const paragraph = text(list[index]);
+    if (SAME_JOB_SCOPE_OPENER.test(paragraph)) {
+      observations.push(`paragraph ${index + 1} opens with “${leadingWordsSnippet(paragraph)}”; shared job scope is not a bridge between responsibilities — name the shared responsibility, constraint, or outcome before the new proof, or split or remove it`);
+    }
+    const paragraphSentences = sentences(paragraph);
+    for (let sentenceIndex = 0; sentenceIndex + 1 < paragraphSentences.length; sentenceIndex++) {
+      const pivot = paragraphSentences[sentenceIndex];
+      const solution = paragraphSentences[sentenceIndex + 1];
+      if (!OPAQUE_RESPONSIBILITY_PIVOT.test(pivot) || !ANAPHORIC_PIVOT_SOLUTION.test(solution)) continue;
+      observations.push(`paragraph ${index + 1} shifts from “${leadingWordsSnippet(pivot)}” to “${leadingWordsSnippet(solution)}” through an opaque problem label; name the shared responsibility, constraint, or outcome before the new proof, or split or remove it`);
+    }
+  }
+  return observationResult('responsibility-transition', observations, MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS,
+    `${list.length} paragraph(s) bridge responsibility shifts with a substantive relationship`);
 }
 
 // In “every existing tool calls for”, the ordinary compound noun “tool calls”
@@ -1345,7 +1399,7 @@ const PLAIN_REGISTER_PATTERNS = Object.freeze([
   /\bpossess(?:es)?\s+a\s+valid\b/iu,
 ]);
 
-/** Keeps logistics facts in plain first person rather than officialese. */
+/** Keeps any remaining factual prose direct rather than officialese. */
 export function checkPlainRegister(paragraphs = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
@@ -1366,7 +1420,7 @@ export function checkPlainRegister(paragraphs = []) {
     }
   }
   return observationResult('plain-register', observations, MAX_PLAIN_REGISTER_OBSERVATIONS,
-    `${list.length} paragraph(s) state logistics facts in plain first person`);
+    `${list.length} paragraph(s) use direct, non-bureaucratic prose`);
 }
 
 // A sentence-initial workplace phrase followed directly by “I” needs a comma
@@ -1568,12 +1622,12 @@ export function checkOpeningDemonstrative(paragraphs = []) {
 }
 
 /** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
-export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '', careerData = '') {
+export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '') {
   const checks = [
     checkRoleThesis(plan),
     checkEvidenceGrounding(plan, evidence),
     checkNeedGrounding(needs, jobText, researchText),
-    checkLogisticsGrounding(plan, careerData),
+    checkLogisticsExclusion(plan),
     checkLogisticsLegalStatus(plan),
     checkMappingNarrativeStructure(plan),
   ];
@@ -1626,7 +1680,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     companySpecificity,
     checkShape(plan, paragraphs),
     checkFigureDiscipline(paragraphs, evidence, plan),
-    checkLogisticsContainment(plan, paragraphs),
+    checkLogisticsExclusion(plan, paragraphs),
     // Register and style checks. They are appended rather than interleaved so
     // the established check order stays stable, and every one of them reads
     // paragraphs only, so they still run in the plan-degraded path where the
@@ -1634,11 +1688,13 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkCompoundHyphenation(paragraphs),
     checkParallelStructure(paragraphs),
     checkPriorEmployerOpening(paragraphs, priorEmployers),
+    checkNamedArtifactIntroduction(paragraphs, (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name)),
     checkVagueDomainWorkLabel(paragraphs),
     checkReferenceClarity(paragraphs),
     checkModifierAttachment(paragraphs),
     checkAnchorRelevance(paragraphs, jobText, researchText),
     checkAdditiveSeam(paragraphs),
+    checkResponsibilityTransition(paragraphs),
     checkToolCallsGardenPath(paragraphs),
     checkLowInformationToolBuild(paragraphs),
     checkContainerizationTechnologyRoles(paragraphs),
