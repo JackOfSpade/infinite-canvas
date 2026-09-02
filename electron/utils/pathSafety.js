@@ -126,6 +126,15 @@ export function isExistingFile(filePath) {
   }
 }
 
+/** Async twin of `isExistingFile` — true when `filePath` exists and is a regular file. */
+export async function isExistingFileAsync(filePath) {
+  try {
+    return (await fs.promises.stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 // Sensitive system/config roots and credential-store files. A canvas is a
 // portable, loadable JSON document (File ▸ Open Canvas, or a shared canvas
 // file) whose document/image nodes carry arbitrary `filePath` strings — an

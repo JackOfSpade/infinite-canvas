@@ -298,7 +298,7 @@ export default [
           { data: { filePath: '/missing/stale.txt', relativeFilePath: '../outside.txt' } },
           { data: { filePath: '/missing/inside.txt', relativeFilePath: 'attachments/inside.txt' } },
         ] };
-        resolvePortableFilePaths(data, canvasPath);
+        await resolvePortableFilePaths(data, canvasPath);
         assert(data.nodes[0].data.filePath === '/missing/stale.txt',
           `relative traversal must not substitute an outside file, got ${data.nodes[0].data.filePath}`);
         assert(data.nodes[1].data.filePath === insideFile,

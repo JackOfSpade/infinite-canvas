@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { isWithinDirectory, isExistingFile as isFile } from '../utils/pathSafety.js';
+import { isWithinDirectory, isExistingFileAsync as isFile } from '../utils/pathSafety.js';
 
 const DEFAULT_MAX_DEPTH = 15;
 const DEFAULT_MAX_ENTRIES = 20_000;
@@ -36,10 +36,10 @@ function recordDiagnostic(entry) {
   if (diagnostics.length > DIAGNOSTIC_MAX_ENTRIES) diagnostics.shift();
 }
 
-function isSearchableDirectory(dirPath) {
+async function isSearchableDirectory(dirPath) {
   if (!dirPath || !path.isAbsolute(dirPath) || path.parse(dirPath).root === dirPath) return false;
   try {
-    return fs.statSync(dirPath).isDirectory();
+    return (await fs.promises.stat(dirPath)).isDirectory();
   } catch {
     return false;
   }
@@ -78,12 +78,12 @@ export function rememberMissingPreviewSearchRoot(filePath, rootDir) {
  * and intentionally left unresolved rather than silently linking the wrong
  * photo merely because one duplicate happened to be closer to the root.
  */
-export function findExactFilenameBelow(
+export async function findExactFilenameBelow(
   rootDir,
   filename,
   { maxDepth = DEFAULT_MAX_DEPTH, maxEntries = DEFAULT_MAX_ENTRIES } = {},
 ) {
-  if (!filename || path.basename(filename) !== filename || !isSearchableDirectory(rootDir)) {
+  if (!filename || path.basename(filename) !== filename || !(await isSearchableDirectory(rootDir))) {
     return { status: 'not-found', path: null, root: rootDir, matches: [], entriesScanned: 0 };
   }
 
@@ -97,7 +97,7 @@ export function findExactFilenameBelow(
     queueIndex += 1;
     let entries;
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
+      entries = (await fs.promises.readdir(dir, { withFileTypes: true }))
         .sort((a, b) => a.name.localeCompare(b.name));
     } catch {
       continue;
@@ -140,11 +140,11 @@ export function findExactFilenameBelow(
  * broadens into a sibling hierarchy. Results are briefly cached so multiple
  * thumbnail/lightbox requests do not repeat the same bounded directory walk.
  */
-export function resolveMissingPreviewPath(missingPath, { searchRoot = null } = {}) {
+export async function resolveMissingPreviewPath(missingPath, { searchRoot = null } = {}) {
   if (typeof missingPath !== 'string' || !path.isAbsolute(missingPath)) {
     return { status: 'not-found', path: null, root: null, matches: [], entriesScanned: 0 };
   }
-  if (isFile(missingPath)) {
+  if (await isFile(missingPath)) {
     return { status: 'existing', path: missingPath, root: path.dirname(missingPath), matches: [missingPath], entriesScanned: 0 };
   }
 
@@ -164,12 +164,12 @@ export function resolveMissingPreviewPath(missingPath, { searchRoot = null } = {
   const cacheKey = `${normalizedPath}\0${root}`;
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < RESULT_CACHE_TTL_MS) {
-    if (!cached.result.path || isFile(cached.result.path)) return { ...cached.result, cached: true };
+    if (!cached.result.path || await isFile(cached.result.path)) return { ...cached.result, cached: true };
     resultCache.delete(cacheKey);
   }
 
   const result = {
-    ...findExactFilenameBelow(root, path.basename(normalizedPath)),
+    ...(await findExactFilenameBelow(root, path.basename(normalizedPath))),
     rootSource,
   };
   // A move/copy can briefly leave the destination absent. Do not cache a

@@ -13,7 +13,7 @@ import {
   resolveMissingPreviewPath,
 } from './missingPreviewRelink.js';
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
-import { isWithinDirectory, isExistingFile, isSensitivePath } from '../utils/pathSafety.js';
+import { isWithinDirectory, isExistingFileAsync, isSensitivePath } from '../utils/pathSafety.js';
 
 // Extensions the 'open-file' handler will hand to the OS shell. Covers the
 // image/document/media/archive types this app's own drop/preview handling
@@ -493,12 +493,24 @@ function relativePortablePath(canvasPath, filePath) {
   return rel.includes(path.sep) ? rel : `.${path.sep}${rel}`;
 }
 
-function resolvePortablePath(canvasPath, filePath, relativePath) {
+// existsSync-equivalent async existence check: true for directories too
+// (unlike isExistingFileAsync, which requires a regular file). Used wherever
+// the prior synchronous code called fs.existsSync directly.
+async function pathExists(targetPath) {
+  try {
+    await fs.promises.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePortablePath(canvasPath, filePath, relativePath) {
   const baseDir = path.dirname(canvasPath);
-  if (filePath && typeof filePath === 'string' && fs.existsSync(filePath)) return filePath;
+  if (filePath && typeof filePath === 'string' && await pathExists(filePath)) return filePath;
   if (filePath && typeof filePath === 'string') {
     const candidate = path.join(baseDir, path.basename(filePath));
-    if (fs.existsSync(candidate)) return candidate;
+    if (await pathExists(candidate)) return candidate;
   }
   if (relativePath && typeof relativePath === 'string') {
     const candidate = path.resolve(baseDir, relativePath);
@@ -506,7 +518,7 @@ function resolvePortablePath(canvasPath, filePath, relativePath) {
     // come from an untrusted file. It may name only a descendant of the canvas
     // directory; accepting ../ escapes here turns a portable-path fallback
     // into an arbitrary absolute-path substitution.
-    if (isWithinDirectory(baseDir, candidate) && fs.existsSync(candidate)) return candidate;
+    if (isWithinDirectory(baseDir, candidate) && await pathExists(candidate)) return candidate;
   }
   return filePath;
 }
@@ -515,7 +527,7 @@ function isImagePath(filePath) {
   return typeof filePath === 'string' && isProductImageExtension(path.extname(filePath));
 }
 
-export function resolvePortableImagePath(canvasPath, filePath, relativePath) {
+export async function resolvePortableImagePath(canvasPath, filePath, relativePath) {
   const baseDir = path.dirname(canvasPath);
   const absoluteCandidate = typeof filePath === 'string' && filePath.length > 0
     ? (path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(baseDir, filePath))
@@ -528,14 +540,14 @@ export function resolvePortableImagePath(canvasPath, filePath, relativePath) {
   // Prefer the exact stored path, then the exact portable relative path. While
   // each still exists, register the hierarchy the local-file protocol should
   // search if the image is moved later in this session.
-  if (absoluteCandidate && isExistingFile(absoluteCandidate)) {
+  if (absoluteCandidate && await isExistingFileAsync(absoluteCandidate)) {
     const searchRoot = isWithinDirectory(baseDir, absoluteCandidate)
       ? baseDir
       : path.dirname(absoluteCandidate);
     rememberMissingPreviewSearchRoot(absoluteCandidate, searchRoot);
     return absoluteCandidate;
   }
-  if (safeRelativeCandidate && isExistingFile(safeRelativeCandidate)) {
+  if (safeRelativeCandidate && await isExistingFileAsync(safeRelativeCandidate)) {
     rememberMissingPreviewSearchRoot(safeRelativeCandidate, baseDir);
     return safeRelativeCandidate;
   }
@@ -549,7 +561,7 @@ export function resolvePortableImagePath(canvasPath, filePath, relativePath) {
   const belongsToWorkspaceHierarchy = !!safeRelativeCandidate || isWithinDirectory(baseDir, missingPath);
   const searchRoot = belongsToWorkspaceHierarchy ? baseDir : path.dirname(missingPath);
   rememberMissingPreviewSearchRoot(missingPath, searchRoot);
-  const relink = resolveMissingPreviewPath(missingPath, { searchRoot });
+  const relink = await resolveMissingPreviewPath(missingPath, { searchRoot });
 
   if (relink.status === 'found') {
     rememberMissingPreviewSearchRoot(relink.path, searchRoot);
@@ -570,6 +582,20 @@ function traverseCanvasNodes(nodes, fn) {
     fn(node);
     if (node?.type === 'group' && node.data?.canvasData?.nodes) {
       traverseCanvasNodes(node.data.canvasData.nodes, fn);
+    }
+  }
+}
+
+// Async sibling of traverseCanvasNodes for callers whose per-node callback
+// does fs work. Awaits fn for each node sequentially (same order as the sync
+// walk) before recursing into a group's nested canvas — never Promise.all,
+// so nodes are still visited and awaited one at a time.
+async function traverseCanvasNodesAsync(nodes, fn) {
+  if (!Array.isArray(nodes)) return;
+  for (const node of nodes) {
+    await fn(node);
+    if (node?.type === 'group' && node.data?.canvasData?.nodes) {
+      await traverseCanvasNodesAsync(node.data.canvasData.nodes, fn);
     }
   }
 }
@@ -604,22 +630,30 @@ function annotatePortableFilePaths(data, canvasPath) {
   });
 }
 
-export function resolvePortableFilePaths(data, canvasPath) {
-  traverseCanvasNodes(data?.nodes, (node) => {
+export async function resolvePortableFilePaths(data, canvasPath) {
+  await traverseCanvasNodesAsync(data?.nodes, async (node) => {
     const d = node?.data;
     if (!d) return;
 
     if (d.filePath) {
       d.filePath = isImagePath(d.filePath) || isImagePath(d.filename)
-        ? resolvePortableImagePath(canvasPath, d.filePath, d.relativeFilePath)
-        : resolvePortablePath(canvasPath, d.filePath, d.relativeFilePath);
+        ? await resolvePortableImagePath(canvasPath, d.filePath, d.relativeFilePath)
+        : await resolvePortablePath(canvasPath, d.filePath, d.relativeFilePath);
       const rel = relativePortablePath(canvasPath, d.filePath);
       if (rel) d.relativeFilePath = rel;
       else delete d.relativeFilePath;
     }
 
     if (Array.isArray(d.imagePaths)) {
-      d.imagePaths = d.imagePaths.map((p, i) => resolvePortableImagePath(canvasPath, p, d.relativeImagePaths?.[i]));
+      // Sequential, not Promise.all: each resolvePortableImagePath call can
+      // read/write the shared missing-preview search-root map and result
+      // cache, so resolving out of order (or concurrently) could change which
+      // entries get evicted/reused and reorder the resulting log lines.
+      const resolvedImagePaths = [];
+      for (let i = 0; i < d.imagePaths.length; i += 1) {
+        resolvedImagePaths.push(await resolvePortableImagePath(canvasPath, d.imagePaths[i], d.relativeImagePaths?.[i]));
+      }
+      d.imagePaths = resolvedImagePaths;
       const rels = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
       if (rels.some(Boolean)) d.relativeImagePaths = rels;
       else delete d.relativeImagePaths;
@@ -822,7 +856,7 @@ export function registerFilesystemHandlers() {
     const content = await fs.promises.readFile(targetPath, 'utf-8');
     try {
       const data = JSON.parse(content);
-      resolvePortableFilePaths(data, targetPath);
+      await resolvePortableFilePaths(data, targetPath);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
 
       // Clean up legacy separate progress sidecar file if it exists

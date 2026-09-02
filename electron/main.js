@@ -653,7 +653,7 @@ if (!gotTheLock) {
           isImageRequest
           && !isExistingFile(targetPath)
         ) {
-          const relink = resolveMissingPreviewPath(normalizedPath);
+          const relink = await resolveMissingPreviewPath(normalizedPath);
           if (relink.status === 'found') {
             targetPath = relink.path;
             if (!relink.cached) {

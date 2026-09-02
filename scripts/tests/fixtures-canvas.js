@@ -2495,7 +2495,7 @@ export default [
   },
 {
     name: 'Missing preview relink stays in the current hierarchy, finds exact names, and refuses ambiguity',
-    run: () => {
+    run: async () => {
       const root = path.join(os.tmpdir(), `ic-preview-relink-${process.pid}-${Date.now()}`);
       const workspace = path.join(root, 'workspace');
       const original = path.join(workspace, 'products', 'photo.jpg');
@@ -2532,7 +2532,7 @@ export default [
         clearMissingPreviewRelinkCache();
         clearMissingPreviewRelinkDiagnostics();
         clearMissingPreviewSearchRoots();
-        const portableFound = resolvePortableImagePath(
+        const portableFound = await resolvePortableImagePath(
           path.join(workspace, 'canvas.json'),
           original,
           path.join('.', 'products', 'photo.jpg'),
@@ -2543,25 +2543,25 @@ export default [
         clearMissingPreviewRelinkDiagnostics();
         clearMissingPreviewSearchRoots();
         rememberMissingPreviewSearchRoot(original, workspace);
-        const found = resolveMissingPreviewPath(original);
+        const found = await resolveMissingPreviewPath(original);
         assert(found.status === 'found' && found.path === moved, `missing preview should relink within its remembered current hierarchy -> ${JSON.stringify(found)}`);
         assert(found.root === workspace && found.rootSource === 'remembered', 'missing preview should report its bounded remembered hierarchy');
-        const cached = resolveMissingPreviewPath(original);
+        const cached = await resolveMissingPreviewPath(original);
         assert(cached.cached === true && cached.path === moved, 'repeated preview requests should reuse the bounded relink cache');
 
         clearMissingPreviewRelinkCache();
         clearMissingPreviewSearchRoots();
         const lateOriginal = path.join(workspace, 'empty', 'photo.jpg');
-        const parentOnly = resolveMissingPreviewPath(lateOriginal);
+        const parentOnly = await resolveMissingPreviewPath(lateOriginal);
         assert(parentOnly.status === 'not-found', 'missing preview relink must not climb upward to a same-name file in the parent folder');
         const lateMoved = path.join(workspace, 'empty', 'later', 'photo.jpg');
         fs.mkdirSync(path.dirname(lateMoved), { recursive: true });
         fs.writeFileSync(lateMoved, 'late image');
-        const recoveredAfterNotFound = resolveMissingPreviewPath(lateOriginal);
+        const recoveredAfterNotFound = await resolveMissingPreviewPath(lateOriginal);
         assert(recoveredAfterNotFound.status === 'found' && recoveredAfterNotFound.path === lateMoved,
           'not-found preview searches should not be cached across a move/copy completion');
 
-        const external = resolvePortableImagePath(path.join(workspace, 'canvas.json'), externalOriginal, '');
+        const external = await resolvePortableImagePath(path.join(workspace, 'canvas.json'), externalOriginal, '');
         assert(external === externalMoved,
           'external image relink should ignore an empty legacy relative path and search its original folder and descendants only');
 
@@ -2575,23 +2575,23 @@ export default [
             },
           }],
         };
-        resolvePortableFilePaths(documentData, path.join(workspace, 'canvas.json'));
+        await resolvePortableFilePaths(documentData, path.join(workspace, 'canvas.json'));
         assert(documentData.nodes[0].data.filePath === documentMoved,
           'document image previews should use the same descendant-only relinking as SellHub photos');
 
-        const wrongCase = findExactFilenameBelow(workspace, 'Photo.jpg');
+        const wrongCase = await findExactFilenameBelow(workspace, 'Photo.jpg');
         assert(wrongCase.status === 'not-found', 'missing preview relink should require an exact case-sensitive filename');
 
-        const ambiguous = findExactFilenameBelow(ambiguousRoot, 'duplicate.jpg');
+        const ambiguous = await findExactFilenameBelow(ambiguousRoot, 'duplicate.jpg');
         assert(ambiguous.status === 'ambiguous' && ambiguous.path === null && ambiguous.matches.length === 2, 'same-depth duplicate filenames should be left unresolved');
-        const crossDepthAmbiguous = findExactFilenameBelow(crossDepthRoot, 'cross-depth.jpg');
+        const crossDepthAmbiguous = await findExactFilenameBelow(crossDepthRoot, 'cross-depth.jpg');
         assert(crossDepthAmbiguous.status === 'ambiguous' && crossDepthAmbiguous.matches.length === 2,
           'duplicate filenames at different depths should be left unresolved instead of silently choosing the nearer one');
         const ambiguousMissing = path.join(ambiguousRoot, 'missing', 'duplicate.jpg');
-        const initiallyAmbiguous = resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
+        const initiallyAmbiguous = await resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
         assert(initiallyAmbiguous.status === 'ambiguous', 'resolver should report duplicate matches as ambiguous');
         fs.rmSync(path.join(ambiguousRoot, 'b', 'duplicate.jpg'));
-        const resolvedAfterDuplicateRemoved = resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
+        const resolvedAfterDuplicateRemoved = await resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
         assert(resolvedAfterDuplicateRemoved.status === 'found' && resolvedAfterDuplicateRemoved.path === path.join(ambiguousRoot, 'a', 'duplicate.jpg'),
           'negative/ambiguous preview results should not stay cached after the hierarchy changes');
         const diagnostics = getMissingPreviewRelinkDiagnostics();
