@@ -212,7 +212,7 @@ export function matchesNoResultsSentinel(text) {
 // ("Select your model…"), or real listings the extractor missed (= drift) —
 // WITHOUT the user having to paste the page HTML (the gap that made the "stuck on
 // Swappa" report un-diagnosable from the report alone).
-export function htmlTextSnippet(html, maxChars = 220) {
+function htmlTextSnippet(html, maxChars = 220) {
   if (!html) return '';
   // Strip non-visible blocks (script/style/noscript) BEFORE bounding the window.
   // eBay-class pages carry a >100KB inline <style> in <head>; slicing to a small

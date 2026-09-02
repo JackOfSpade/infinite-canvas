@@ -89,7 +89,7 @@ export const CLAUDE_FAMILY_LADDER = Object.freeze([
  * Fable), so selecting it in Settings gets the current generation without
  * making everyone pay for a probe they don't need.
  */
-export const AUTO_TRACKED_FAMILIES = Object.freeze([
+const AUTO_TRACKED_FAMILIES = Object.freeze([
   CLAUDE_FAMILY.OPUS, CLAUDE_FAMILY.SONNET, CLAUDE_FAMILY.HAIKU,
 ]);
 

@@ -110,7 +110,7 @@ export function selectRestorableStatuses(stored, now = Date.now(), maxAgeMs = ST
 }
 
 // Restore last session's connected statuses from disk (once per process).
-export function loadPersistedStatusCache() {
+function loadPersistedStatusCache() {
   if (_statusCacheLoaded) return;
   _statusCacheLoaded = true;
   try {

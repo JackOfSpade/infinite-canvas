@@ -47,13 +47,13 @@ const MANIFEST_SUFFIX = '.jobs-run.json';
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
 const LAST_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
-export const JOB_RUN_RECEIPT_VERSION = 1;
+const JOB_RUN_RECEIPT_VERSION = 1;
 // A manifest older than this is "stale" — not auto-offered for resume (the user
 // likely abandoned it). 24h; the renderer can still surface a manual choice.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Sidecar paths for a canvas file, or null when the canvas was never saved. */
-export function runFilesForCanvas(canvasFilePath) {
+function runFilesForCanvas(canvasFilePath) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
   const dir = path.dirname(canvasFilePath);
   const base = path.basename(canvasFilePath).replace(/\.json$/i, '');

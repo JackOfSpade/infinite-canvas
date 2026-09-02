@@ -7,8 +7,8 @@
 // The persisted per-source stats live in electron/ipc/scrapeVerification.js
 // (which needs electron-store); the math lives here so it's testable in plain Node.
 
-export const VERIFICATION_EMA_ALPHA = 0.3;  // weight of the newest run (matches scrapeBudget)
-export const VERIFICATION_MIN_SAMPLES = 2;   // need 2 runs of data before reordering off the default
+const VERIFICATION_EMA_ALPHA = 0.3;  // weight of the newest run (matches scrapeBudget)
+const VERIFICATION_MIN_SAMPLES = 2;   // need 2 runs of data before reordering off the default
 
 // Fold a single run's 0/1 "did this source make the user manually solve something?"
 // into a source's running stats (EMA + sample count). Returns the new stats object.

@@ -642,9 +642,13 @@ export async function callLLMText(prompt, opts = {}) {
   }
 }
 
-// Legacy read/cancel support only. New callers cannot submit Batch API work;
-// these functions exist solely to finish or discard jobs paid for by an older
-// app version before economy scoring was removed.
+// Batch API client, currently with NO caller. Economy/batch scoring was retired:
+// nothing submits batches any more, and jobs.js's 'poll-job-batch' handler now
+// retires a legacy sidecar locally and deliberately does NOT contact the API to
+// poll or cancel the remote request. These wrappers are kept alongside
+// jobBatchReconcile.js's reconcileBatchScores (also caller-less, also retained)
+// so the read/cancel half of that pipeline still exists if batch scoring is
+// re-enabled. Do not treat them as live paths when tracing the scoring flow.
 export async function getLLMTextBatchStatus(batchId) {
   const settings = getAISettings();
   if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');

@@ -71,7 +71,7 @@ export function repairMojibake(s) {
 
 // Repair the user-facing text fields of a job IN PLACE. Returns the job.
 const JOB_TEXT_FIELDS = ['title', 'company', 'location', 'salary', 'snippet', 'description'];
-export function repairJobMojibake(job) {
+function repairJobMojibake(job) {
   if (!job || typeof job !== 'object') return job;
   for (const f of JOB_TEXT_FIELDS) {
     if (typeof job[f] === 'string' && job[f]) job[f] = repairMojibake(job[f]);

@@ -8,9 +8,9 @@
 import crypto from 'crypto';
 import path from 'path';
 
-export const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
-export const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
-export const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
+const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
+const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
+const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
 
 function savedCanvasPath(canvasFilePath) {
   return typeof canvasFilePath === 'string' && canvasFilePath.trim()

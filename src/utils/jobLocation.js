@@ -202,7 +202,7 @@ export function describeLocationTreatment(sourceId, canonicalLocation = '', coun
 // its location field (that's the company HQ or a region hint, not a work-site
 // requirement). Location adherence buckets these as `remote`, never off-target.
 // Derived from LOCATION_TREATMENT so a new remote board added above is honored here.
-export const REMOTE_BOARD_SOURCES = new Set(
+const REMOTE_BOARD_SOURCES = new Set(
   Object.entries(LOCATION_TREATMENT).filter(([, t]) => /remote board/i.test(t)).map(([id]) => id)
 );
 

@@ -55,7 +55,7 @@ export function formatGeminiGroundedResponse(prose, candidate) {
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget).
-export const GEMINI_TEMPERATURE = 0.1;
+const GEMINI_TEMPERATURE = 0.1;
 // NOTE: we deliberately do NOT cap prompt/context size on our end. The model's
 // own input window (~1M tokens on every model we call) is the only ceiling — an
 // over-limit prompt is rejected by the API and that error is surfaced as-is. We
@@ -659,7 +659,7 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quota
  * key. Without this, "Check availability" reports "no Gemini key" even though
  * normal Gemini calls work fine through Vertex (Finding 4). NEVER throws.
  */
-export async function probeGeminiVertex(model = VERTEX_GEMINI_MODEL_FALLBACKS[0], quotaStatsMap = null) {
+async function probeGeminiVertex(model = VERTEX_GEMINI_MODEL_FALLBACKS[0], quotaStatsMap = null) {
   let token;
   let pid;
   try {
@@ -696,7 +696,7 @@ export async function probeGeminiVertex(model = VERTEX_GEMINI_MODEL_FALLBACKS[0]
  * Returns null silently if no service account is configured or the call fails.
  * NEVER throws.
  */
-export async function fetchGeminiQuotaStats() {
+async function fetchGeminiQuotaStats() {
   let projectId;
   let token;
   try {

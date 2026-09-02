@@ -22,7 +22,7 @@ const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/
 // downstream file budget. Keep one encoder for the session because logging can
 // happen on hot paths such as ResizeObserver updates.
 const textEncoder = new TextEncoder();
-export function utf8ByteLength(value) {
+function utf8ByteLength(value) {
   return textEncoder.encode(String(value)).byteLength;
 }
 

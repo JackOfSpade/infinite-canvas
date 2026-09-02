@@ -189,7 +189,7 @@ export function geminiModelsInTier(tier) {
 
 const MODEL_BY_ID = new Map(GEMINI_MODEL_REGISTRY.map((entry) => [entry.id, entry]));
 
-export function getGeminiModelInfo(model) {
+function getGeminiModelInfo(model) {
   return MODEL_BY_ID.get(model) || null;
 }
 

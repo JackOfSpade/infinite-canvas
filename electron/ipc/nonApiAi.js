@@ -202,9 +202,9 @@ export async function flushNonApiAiPersistence() {
   await durableWriteTail;
 }
 
-export const NON_API_AI_STEP_BACK_CODE = 'NON_API_AI_STEP_BACK';
+const NON_API_AI_STEP_BACK_CODE = 'NON_API_AI_STEP_BACK';
 
-export class NonApiAiStepBackError extends Error {
+class NonApiAiStepBackError extends Error {
   constructor(message = 'Return to the previous Non-API AI handoff step') {
     super(message);
     this.name = 'NonApiAiStepBackError';

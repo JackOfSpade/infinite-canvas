@@ -2,38 +2,38 @@
 // Keep this module free of Electron/LLM/fs imports: the checks are deliberately
 // usable from the Node smoke suite and from the application pipeline.
 
-export const MIN_EVIDENCE_SHINGLE_WORDS = 5;
-export const MIN_EVIDENCE_TOKEN_OVERLAP = 0.6;
-export const REDUNDANCY_SHINGLE_WORDS = 8;
-export const MAX_REDUNDANCY_PHRASE_WORDS = 24;
-export const MAX_CHECK_DETAIL_VALUE_CHARS = 160;
+const MIN_EVIDENCE_SHINGLE_WORDS = 5;
+const MIN_EVIDENCE_TOKEN_OVERLAP = 0.6;
+const REDUNDANCY_SHINGLE_WORDS = 8;
+const MAX_REDUNDANCY_PHRASE_WORDS = 24;
+const MAX_CHECK_DETAIL_VALUE_CHARS = 160;
 export const MAX_LETTER_FIGURES = 3;
-export const MAX_FIGURE_DETAIL_ITEMS = 12;
-export const MAX_GENERIC_OBSERVATIONS = 12;
+const MAX_FIGURE_DETAIL_ITEMS = 12;
+const MAX_GENERIC_OBSERVATIONS = 12;
 export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
 export const MAX_HYPHENATION_OBSERVATIONS = 8;
 export const MAX_ANCHOR_RELEVANCE_OBSERVATIONS = 8;
-export const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
-export const MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS = 4;
-export const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
-export const MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS = 4;
-export const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
-export const MAX_PUNCTUATION_OBSERVATIONS = 8;
-export const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
-export const MAX_SALIENT_ECHO_OBSERVATIONS = 4;
-export const MAX_LEGAL_STATUS_OBSERVATIONS = 4;
-export const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
-export const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
-export const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
-export const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
-export const MAX_COPY_PRECISION_OBSERVATIONS = 4;
-export const MAX_STANDALONE_INTRODUCTION_OBSERVATIONS = 4;
+const MAX_ADDITIVE_SEAM_OBSERVATIONS = 4;
+const MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS = 4;
+const MAX_POSTING_REFERENCE_OBSERVATIONS = 4;
+const MAX_CLAIMED_EQUIVALENCE_OBSERVATIONS = 4;
+const MAX_SENTENCE_LENGTH_OBSERVATIONS = 5;
+const MAX_PUNCTUATION_OBSERVATIONS = 8;
+const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
+const MAX_SALIENT_ECHO_OBSERVATIONS = 4;
+const MAX_LEGAL_STATUS_OBSERVATIONS = 4;
+const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
+const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
+const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
+const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
+const MAX_COPY_PRECISION_OBSERVATIONS = 4;
+const MAX_STANDALONE_INTRODUCTION_OBSERVATIONS = 4;
 export const MAX_SENTENCE_WORDS = 40;
 // One off-posting tool name is a paragraph's single concrete anchor; a second
 // one is a stack list. Across the letter, three names is a stack tour even
 // when they are spread one per paragraph.
-export const MAX_PARAGRAPH_OFF_POSTING_TOOLS = 1;
-export const MAX_LETTER_OFF_POSTING_TOOLS = 2;
+const MAX_PARAGRAPH_OFF_POSTING_TOOLS = 1;
+const MAX_LETTER_OFF_POSTING_TOOLS = 2;
 // Absence of a tool name is evidence only when the corpus is an actual posting
 // description. The pipeline builds that corpus from title/company/location/
 // salary/description, and an unscraped description is a first-class supported
@@ -42,7 +42,7 @@ export const MAX_LETTER_OFF_POSTING_TOOLS = 2;
 // this floor the check skips rather than reading every name in the letter as
 // off-posting.
 export const MIN_ANCHOR_RELEVANCE_CORPUS_WORDS = 60;
-export const OBSERVATION_SNIPPET_WORDS = 8;
+const OBSERVATION_SNIPPET_WORDS = 8;
 
 export const BANNED_GENERIC_PHRASES = Object.freeze([
   'writing to express my interest',

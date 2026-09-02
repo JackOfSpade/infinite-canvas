@@ -92,7 +92,7 @@ export const MINIMAP_NODE_COLORS = {
 };
 
 /** Default dimensions per node type */
-export const NODE_DIMS = {
+const NODE_DIMS = {
   text:     { w: 180, h: 36  },
   link:     { w: 180, h: 50  },
   document: { w: 180, h: 36  },

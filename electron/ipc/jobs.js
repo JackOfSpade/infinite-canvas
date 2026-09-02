@@ -1126,7 +1126,7 @@ function abortableDelay(ms, signal) {
 // contradicting the cooldown advice in its own diagnostics.
 let linkedinLastCeilingIp = null;
 let linkedinLastCeilingAt = 0;
-export const LINKEDIN_SAME_IP_RETRY_COOLDOWN_MS = 60_000;
+const LINKEDIN_SAME_IP_RETRY_COOLDOWN_MS = 60_000;
 
 export function linkedInSameIpRetryDecision(lastIp, lastCeilingAt, currentIp, now = Date.now()) {
   if (!lastIp || !currentIp || currentIp !== lastIp) return { skip: false, retryAfterMs: 0 };
@@ -1650,7 +1650,7 @@ export function recordJobsBoardScope(nodeId, windowId) {
   if (!jobsTelemetry.nodeId) jobsTelemetry.windowId = windowId ?? null;
 }
 
-export const JOB_BOARD_GENERATION_CAPABILITY = 'job-board-generation';
+const JOB_BOARD_GENERATION_CAPABILITY = 'job-board-generation';
 export const JOB_BOARD_TAXONOMY_INVALID = 'JOB_BOARD_TAXONOMY_INVALID';
 
 /**
@@ -1769,7 +1769,7 @@ function invalidJobBoardTaxonomyError(reason, provider) {
  * no role, so the gate is a no-op and this pass-through remains the only title
  * policy those runs ever see.
  */
-export function acceptProviderSearchResults(jobs) {
+function acceptProviderSearchResults(jobs) {
   return Array.isArray(jobs) ? [...jobs] : [];
 }
 
@@ -1782,7 +1782,7 @@ export const applyFinalJobTitleRelevanceGate = acceptProviderSearchResults;
 // A non-empty title/company is not evidence the scorer received a JD. Keep the
 // threshold modest so compact but genuine listings survive, while a list-card
 // stub or "Job description" label remains retryable instead of being scored.
-export function hasResolvedJobDescription(job, minChars = 120) {
+function hasResolvedJobDescription(job, minChars = 120) {
   return String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length >= minChars;
 }
 

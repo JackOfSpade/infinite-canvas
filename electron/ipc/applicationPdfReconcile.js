@@ -64,7 +64,7 @@ export function normalizePdfText(value) {
     .trim();
 }
 
-export function textTokens(value) {
+function textTokens(value) {
   return normalizePdfText(value).match(PDF_TEXT_TOKEN) || [];
 }
 
@@ -102,7 +102,7 @@ function needsSpace(previous, next) {
  * Convert one pdf.js page's text items into visual lines.  Returned entries
  * retain page/y/x geometry and are ordered in normal reading order.
  */
-export function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
+function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
   const ordered = (Array.isArray(items) ? items : [])
     .map(item => itemGeometry(item, page))
     .filter(item => normalizePdfText(item.text))
@@ -166,7 +166,7 @@ function median(values) {
  * cover-letter body paragraphs, whose PDF representation has one item per
  * wrapped line but a noticeably larger gap between paragraphs.
  */
-export function groupGeometrySeparatedBlocks(lines) {
+function groupGeometrySeparatedBlocks(lines) {
   const ordered = (Array.isArray(lines) ? lines : [])
     .filter(line => normalizePdfText(line?.text))
     .map(line => ({ ...line, text: normalizePdfText(line.text) }))
@@ -284,7 +284,7 @@ function replaceCoverLeafText(element, replacement) {
  * each body paragraph, and closing lines are independently mapped.  Extra or
  * missing blocks are a conflict rather than an unsafe paragraph merge.
  */
-export function reconcileCoverTextBlocks(main, lines) {
+function reconcileCoverTextBlocks(main, lines) {
   const leaves = coverLeafElements(main);
   const bodyLeaves = leaves.filter(element => element.matches('.letter-body > p:not(.salutation)'));
   const prefixLeaves = leaves.slice(0, leaves.indexOf(bodyLeaves[0]));
@@ -378,7 +378,7 @@ function semanticSkillLines(lines, rows) {
  * headings and skill labels, so it cannot invent a structure from a foreign
  * or damaged PDF.
  */
-export function canonicalizeResumePdfLines(lines, main) {
+function canonicalizeResumePdfLines(lines, main) {
   const knownHeadings = [...main.querySelectorAll('.section-head h2')].map(element => normalizePdfText(element.textContent));
   const normalized = (Array.isArray(lines) ? lines : []).map(line => ({
     ...line,
@@ -522,7 +522,7 @@ function reconcilePlainTextBulletInsertions(main, nodes, current, incoming, anch
  * one-for-one token mapping between stable LCS anchors.  Insertions/removals,
  * a wholly rewritten document, or oversized documents return a conflict.
  */
-export function reconcileResumeTextBlocks(main, lines) {
+function reconcileResumeTextBlocks(main, lines) {
   const nodes = visibleResumeTextNodes(main);
   const current = nodes.flatMap(node => textTokens(node.nodeValue));
   const canonicalLines = canonicalizeResumePdfLines(lines, main);
@@ -591,7 +591,7 @@ export function reconcileApplicationHtmlFromPdfBlocks({ applicationHtml, html, d
 }
 
 /** Extract the PDF then reconcile one selected application panel. */
-export async function reconcileApplicationPdf({ applicationHtml, html, pdfBytes, documentKind = 'resume', document } = {}) {
+async function reconcileApplicationPdf({ applicationHtml, html, pdfBytes, documentKind = 'resume', document } = {}) {
   const blocks = await extractPdfTextBlocks(pdfBytes);
   return reconcileApplicationHtmlFromPdfBlocks({ applicationHtml, html, documentKind, document, blocks });
 }

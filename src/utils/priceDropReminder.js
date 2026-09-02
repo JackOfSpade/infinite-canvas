@@ -16,7 +16,7 @@
 export const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 export const MAX_PRICE_DROP_TIMER_DELAY_MS = 2_147_000_000;
 export const INITIAL_PRICE_DROP_CHECK_DELAY_MS = 100;
-export const DEFAULT_PRICE_DROP_STARTING_TIER = 'best';
+const DEFAULT_PRICE_DROP_STARTING_TIER = 'best';
 
 const PRICE_DROP_STARTING_TIERS = new Set(['quick', 'best', 'max']);
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;

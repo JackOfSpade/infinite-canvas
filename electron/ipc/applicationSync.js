@@ -28,8 +28,8 @@ const { app } = electronPkg;
 
 // A stable, loopback-only port means a saved HTML document keeps working after
 // a normal app restart. The capability token remains the authorization layer.
-export const APPLICATION_SYNC_PORT = 43_192;
-export const APPLICATION_SYNC_PATH = '/application-sync';
+const APPLICATION_SYNC_PORT = 43_192;
+const APPLICATION_SYNC_PATH = '/application-sync';
 const MAX_HTML_BYTES = 64 * 1024 * 1024;
 const STATE_FILE = 'application-sync-workspaces.json';
 const APPLICATION_SYNC_TOKEN_RE = /^[a-f0-9]{64}$/i;

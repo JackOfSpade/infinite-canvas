@@ -397,7 +397,7 @@ export function applicationVariantAttrsForJob(job = {}) {
 // ignoring harmless collapsed margins and decorative rules. The threshold
 // leaves a modest visual tail, but catches the kind of aggressive post-fit
 // pruning that strands several supported bullets off the page.
-export const MIN_RESUME_TYPE_AREA_UTILIZATION = 0.90;
+const MIN_RESUME_TYPE_AREA_UTILIZATION = 0.90;
 
 // Deliberately UNBOUNDED above. A value over 1 is the overflow MAGNITUDE —
 // the text spans 1.37 type areas — and it is the only size signal the fit

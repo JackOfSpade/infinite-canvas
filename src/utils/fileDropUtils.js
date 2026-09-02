@@ -23,7 +23,7 @@ export function getLocalFilePath(file, pathResolver = defaultPathResolver) {
   }
 }
 
-export function getFileDisplayName(file, pathResolver = defaultPathResolver) {
+function getFileDisplayName(file, pathResolver = defaultPathResolver) {
   const name = file?.name || file?.filename || '';
   if (typeof name === 'string' && name.trim()) return name.trim();
   const path = getLocalFilePath(file, pathResolver);

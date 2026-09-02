@@ -37,7 +37,7 @@ function normalizedKey(value) {
 }
 
 /** Normalise source aliases before consulting the country policy. */
-export function normalizeJobSourceId(sourceId) {
+function normalizeJobSourceId(sourceId) {
   const id = normalizedKey(sourceId).replace(/\s+/g, '-');
   return SOURCE_ALIASES[id] || id;
 }

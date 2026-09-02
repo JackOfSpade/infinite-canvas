@@ -19,7 +19,7 @@ import { clamp } from './mathUtils.js';
 // Taking the max satisfies both and grows automatically with the card count —
 // for the current source counts it reproduces ~the old radii, and for many more
 // sources it expands rather than letting cards collide.
-export const RADIAL_GAP = 28; // min arc/clearance gap between card and neighbours/hub
+const RADIAL_GAP = 28; // min arc/clearance gap between card and neighbours/hub
 
 export function radialRadius({ count, cardW, cardH, hubW, hubH, gap = RADIAL_GAP }) {
   const n = Math.max(1, count || 1);
@@ -97,9 +97,9 @@ export function spiralStep(dropWidth, dropHeight) {
 // rendered circle (getBoundingClientRect), so a fixed 12px zone is a huge slice
 // of a zoomed-out circle and a sliver on a zoomed-in one. Make it a fraction of
 // the rendered radius (which already folds in zoom) with sane bounds.
-export const EDGE_ZONE_RATIO = 0.15;
-export const EDGE_ZONE_MIN = 8;
-export const EDGE_ZONE_MAX = 28;
+const EDGE_ZONE_RATIO = 0.15;
+const EDGE_ZONE_MIN = 8;
+const EDGE_ZONE_MAX = 28;
 
 export function edgeZoneForRadius(renderedRadiusPx) {
   return clamp((renderedRadiusPx || 0) * EDGE_ZONE_RATIO, EDGE_ZONE_MIN, EDGE_ZONE_MAX);

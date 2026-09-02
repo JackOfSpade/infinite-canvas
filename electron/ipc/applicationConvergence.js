@@ -19,7 +19,7 @@ export function applicationConvergenceInstruction({ revisionAttempt = 1, unchang
 // signal; returning any earlier candidate is a convergence cycle and stops the
 // loop for the same reason. Provider credit exhaustion remains a provider
 // failure, not an app-authored attempt cap.
-export function assessApplicationRevision({ currentHash = '', candidateHash = '', seenHashes = [] } = {}) {
+function assessApplicationRevision({ currentHash = '', candidateHash = '', seenHashes = [] } = {}) {
   if (candidateHash === currentHash) {
     return { accept: false, diminishingReturns: true, reason: 'the revision was byte-for-byte unchanged' };
   }

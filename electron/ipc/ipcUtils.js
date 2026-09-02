@@ -136,7 +136,7 @@ export function snapshotActiveNodeTasks(senderId = null) {
  * @param {number} timeoutMs - Optional timeout in milliseconds
  * @returns {{ ac: AbortController, signal: AbortSignal, cleanup: Function }}
  */
-export function createSenderAbortController(event, timeoutMs = 0) {
+function createSenderAbortController(event, timeoutMs = 0) {
   const ac = new AbortController();
   const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
   // A renderer reload replaces its IPC world but keeps the same WebContents.

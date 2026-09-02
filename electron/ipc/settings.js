@@ -148,7 +148,7 @@ function decryptSectionSecrets(keys, obj) {
 // Broadcasts a payload to every alive renderer. Used so that nodes already
 // mounted in the canvas can react to settings changes (e.g. clear "API key
 // missing" errors) instead of requiring an app reload.
-export function broadcastToAllRenderers(channel, payload) {
+function broadcastToAllRenderers(channel, payload) {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
       win.webContents.send(channel, payload);

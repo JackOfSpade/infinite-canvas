@@ -394,7 +394,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
  * succeed and LinkedIn serves an authwall), so we can stop and ask the user to
  * switch to a working VPN server instead of stalling.
  */
-export async function probeInternet(signal, timeoutMs = 5000) {
+async function probeInternet(signal, timeoutMs = 5000) {
   if (signal?.aborted) return true; // caller bailing — don't misreport as offline
   const urls = ['https://www.google.com/generate_204', 'https://api.ipify.org'];
   for (const url of urls) {
@@ -1423,7 +1423,7 @@ const USAJOBS_RESULTS_PER_PAGE = 500;
  */
 const USAJOBS_MAX_PAGES = 10;
 
-export async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget = Infinity) {
+async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget = Infinity) {
   const rows = [];
   let providerTotal = null;
   let warning = null;

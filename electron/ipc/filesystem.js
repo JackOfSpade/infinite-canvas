@@ -119,7 +119,7 @@ export async function resolveAllowedOpenFilePath(filePath) {
 const ALLOWED_TEXT_EDIT_EXTS = new Set(['.md', '.txt']);
 
 /** True when a document is one of the two formats the renderer exposes as editable. */
-export function isAllowedTextEditExt(filePath) {
+function isAllowedTextEditExt(filePath) {
   return ALLOWED_TEXT_EDIT_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
 }
 

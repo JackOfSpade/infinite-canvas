@@ -3,11 +3,11 @@ import { normalizeCountry, normalizeLocationInput } from './jobLocation.js';
 // Job-search locations are deliberately stored as fields, rather than one
 // comma-separated phrase.  This keeps the UI unambiguous and lets the salary
 // research pipeline use an exact residence without re-parsing user input.
-export const REMOTE_RESIDENCE_STORAGE_KEY = 'infiniteCanvas.jobSearch.remoteResidences';
+const REMOTE_RESIDENCE_STORAGE_KEY = 'infiniteCanvas.jobSearch.remoteResidences';
 
-export const EMPTY_LOCATION = Object.freeze({ city: '', subdivision: '', country: '', countryCode: null });
+const EMPTY_LOCATION = Object.freeze({ city: '', subdivision: '', country: '', countryCode: null });
 
-export function fixedCountryLocation(country) {
+function fixedCountryLocation(country) {
   const canonical = normalizeCountry(country);
   return {
     city: '',
@@ -17,7 +17,7 @@ export function fixedCountryLocation(country) {
   };
 }
 
-export function defaultRemoteResidences() {
+function defaultRemoteResidences() {
   return {
     usa: fixedCountryLocation('United States'),
     canada: fixedCountryLocation('Canada'),

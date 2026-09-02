@@ -65,7 +65,7 @@ export const ATS_SAFE_PDF_FONT_TOKENS = Object.freeze({
   '--ff-mono': 'Menlo, Consolas, "Courier New", monospace',
 });
 
-export function escapeHtml(s) {
+function escapeHtml(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

@@ -20,7 +20,7 @@ export const parseJobSearchEnvBoolean = parseScopeEnvBoolean;
 
 // Parse a comma-separated minutes list ("1,2,4,8,16,32") into a positive-number
 // array; falls back to the default when empty/garbage.
-export function parseJobSearchWaitsMin(value, fallback) {
+function parseJobSearchWaitsMin(value, fallback) {
   if (value == null || value === '') return fallback;
   const parts = String(value)
     .split(',')

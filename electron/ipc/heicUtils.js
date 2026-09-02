@@ -15,7 +15,7 @@ const SIPS = '/usr/bin/sips';
 // only jpeg/png/gif/webp; Gemini also takes heic/webp — but to keep one code path
 // we normalize anything outside this set to JPEG, so both providers always get
 // bytes they can read (HEIC, TIFF, JXL, AVIF, BMP, SVG, …).
-export const VISION_SAFE_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+const VISION_SAFE_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 
 /**
  * Transcode `filePath` to a JPEG temp file via sips when its extension is NOT in
@@ -24,7 +24,7 @@ export const VISION_SAFE_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '
  * AVIF/BMP/SVG/…). macOS-only: throws on other platforms ONLY when a conversion
  * is actually required (safe formats pass through everywhere).
  */
-export async function convertToJpegIfNeeded(filePath, safeExts) {
+async function convertToJpegIfNeeded(filePath, safeExts) {
   const ext = path.extname(filePath).toLowerCase();
   if (safeExts.has(ext)) {
     return filePath; // already a format the consumer accepts — no conversion needed

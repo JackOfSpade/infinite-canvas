@@ -13,9 +13,9 @@ export function strokePoints(stroke) {
 
 export function sqr(x) { return x * x; }
 
-export function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y); }
+function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y); }
 
-export function lerpPt(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+function lerpPt(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
 
 export function distToSegment(p, a, b) {
   const l2 = dist2(a, b);

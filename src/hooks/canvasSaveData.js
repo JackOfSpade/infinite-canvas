@@ -9,7 +9,7 @@ import { sanitizeNodesForSave, sanitizeEdgesForSave, CURRENT_SCHEMA_VERSION } fr
  * text for whatever the user is actively typing. Two ticks let React process
  * the blur-triggered setState and run the effect that mirrors `nodes`.
  */
-export async function flushActiveContentEditable() {
+async function flushActiveContentEditable() {
   const active = document.activeElement;
   if (active && active.isContentEditable) {
     active.blur();

@@ -126,7 +126,7 @@ export function profileCookieStorePaths(userDataDir) {
  * Size/mtime fingerprint of the cookie store. File metadata only — the store is
  * never opened, so no cookie value is ever read here.
  */
-export function readProfileCookieStoreStamp(userDataDir) {
+function readProfileCookieStoreStamp(userDataDir) {
   let mtimeMs = 0;
   let size = 0;
   let found = 0;

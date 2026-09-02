@@ -5,7 +5,7 @@
  */
 
 const LEGACY_SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 1;
-export const SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 2;
+const SKILL_OPPORTUNITY_HISTOGRAM_VERSION = 2;
 
 /**
  * A deliberately conservative display-name key. This removes formatting
@@ -25,7 +25,7 @@ export function normalizeOpportunityName(value) {
     .replace(/\s+/g, ' ');
 }
 
-export function stableOpportunityId(prefix, value) {
+function stableOpportunityId(prefix, value) {
   const normalized = normalizeOpportunityName(value);
   // FNV-1a is not for security; it gives a short, deterministic, filesystem/
   // JSON-safe identity that survives restarts and role-name spelling variants.
@@ -154,7 +154,7 @@ function validOpportunityItem(item) {
  * generation lose its entire durable demand signal. The caller still gets one
  * role-generation entry for every valid role analysis.
  */
-export function normalizeSkillOpportunityAnalysis(analysis) {
+function normalizeSkillOpportunityAnalysis(analysis) {
   if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) {
     throw new Error('Skill-opportunity analysis must be an object.');
   }
