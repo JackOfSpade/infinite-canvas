@@ -1394,6 +1394,9 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
       outcome: ['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(terminal?.outcome)
         ? terminal.outcome
         : search ? (Number(search.kept) > 0 ? 'populated' : 'zero') : 'unknown',
+      ...(terminal?.scoreReadyCount != null && Number.isFinite(Number(terminal.scoreReadyCount))
+        ? { scoreReadyCount: Math.max(0, Math.floor(Number(terminal.scoreReadyCount))) }
+        : {}),
     },
     ...(search ? {
       funnel: {
@@ -3937,6 +3940,13 @@ Return a JSON object with four arrays of search query strings:
     // Reset per-run state at search START, not at search end — a paste or captcha
     // resolve can arrive mid-run (before the search result returns), and resetting
     // at the end would wipe those records before the bug report reads them.
+    // Search/scoring are process-global too. Leaving their prior values in place
+    // until the new run reaches those stages lets a mid-run report combine the
+    // current pipeline token with the previous funnel, and a terminal zero run
+    // never reaches scoring to overwrite the old record at all.
+    jobsTelemetry.search = null;
+    jobsTelemetry.scoring = null;
+    jobsTelemetry.scoringHeartbeat = null;
     jobsTelemetry.resolves = {};
     jobsTelemetry.resumeAttempts = {}; // scoped to this run, same reasoning as resolves above
     jobsTelemetry.compensation = null; // scoped to this run, same reasoning as resolves above
@@ -5541,6 +5551,7 @@ Return a JSON object with four arrays of search query strings:
     runId = null,
     terminalStatus = null,
     terminalOutcome = null,
+    scoreReadyCount = null,
   } = {}) => {
     // Clean finish (including a successful resume-on-crash that runs to
     // completion): the staged jobs + run manifest have served their purpose, so
@@ -5553,6 +5564,7 @@ Return a JSON object with four arrays of search query strings:
     const receipt = buildJobRunCompletionReceipt(runId, Date.now(), {
       status: terminalStatus,
       outcome: terminalOutcome,
+      scoreReadyCount,
     });
     const completion = await completeRunWithReceipt(canvasFilePath, receipt, {
       trashItem: (p) => shell.trashItem(p),
@@ -6252,11 +6264,16 @@ Return a JSON object with four arrays of search query strings:
             plannedAssignments: progress.plannedAssignments || 0,
             classifiedAssignments: progress.classifiedAssignments || 0,
           };
-          const chunks = `${progress.completedBatches}/${progress.batchCount ?? '?'} chunk(s)`;
-          const direct = progress.stage === 'planned'
-            ? `; all ${progress.processed}/${progress.total} job(s) assigned by the bounded plan — no classifier handoff needed`
-            : '';
-          logger.info(`[Jobs][${nodeId}] Taxonomy ${progress.stage}: ${chunks}, ${progress.processed}/${progress.total} job(s)${direct}`);
+          // A plan is always the first manual handoff; classifier chunks are
+          // discovered only after it returns.  Label the 0/0 planning receipt
+          // explicitly so it cannot look like a zero-job classification run.
+          const classifierChunks = `${progress.completedBatches}/${progress.batchCount ?? '?'} classifier chunk(s)`;
+          const detail = progress.stage === 'planning'
+            ? '; awaiting the global plan to determine whether classifier work is needed'
+            : progress.stage === 'planned'
+              ? `; all ${progress.processed}/${progress.total} job(s) assigned by the bounded plan — no classifier handoff needed`
+              : '';
+          logger.info(`[Jobs][${nodeId}] Taxonomy ${progress.stage}: ${classifierChunks}, ${progress.processed}/${progress.total} job(s)${detail}`);
         },
       });
     } catch (err) {
@@ -7548,6 +7565,11 @@ Return a JSON object with four arrays of search query strings:
     // session is dead must downgrade the cached "connected" status.
     await syncIndeedSessionStatusFromScrape(result?.sessionDiagnostics, result?.warning);
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    // Raw source-returned rows stay distinct from the subset that clears the
+    // role/history/description gates below. This value is also returned to the
+    // renderer so its collected counter remains in the same dimension as the
+    // initial search's `gatheredCount`.
+    const gathered = Math.max(0, Number(extracted.length) || 0);
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);
     const ageDropped = extracted.length - ageFiltered.length;
@@ -7591,12 +7613,14 @@ Return a JSON object with four arrays of search query strings:
     if (jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
       const bySource = jobsTelemetry.search.bySource || (jobsTelemetry.search.bySource = {});
       const prior = bySource[sourceId] || {};
-      const gathered = Math.max(0, Number(extracted.length) || 0);
-      const retained = Math.max(0, Number(items.length) || 0);
+      // Keep the source funnel in a single dimension: `count` is the number of
+      // source rows admitted before the target-role/history/evidence gates, so
+      // a resumed page must add every extracted row, not only its score-ready
+      // survivors. The latter remains a separate `kept`/renderer queue fact.
       bySource[sourceId] = {
         ...prior,
         providerGathered: Math.max(0, Number(prior.providerGathered ?? prior.gathered ?? prior.count) || 0) + gathered,
-        count: Math.max(0, Number(prior.count) || 0) + retained,
+        count: Math.max(0, Number(prior.count) || 0) + gathered,
         // PRE-role-gate on purpose. `unique` means "unique survivors of the
         // dedup", and the report divides count/unique to conclude that a source
         // re-served clamped pages. Folding the role gate's drops in here made a
@@ -7631,7 +7655,9 @@ Return a JSON object with four arrays of search query strings:
       nodeId,
       sourceId,
       status: resumeStatus,
-      count: items.length,
+      // This mirrors the initial source-card count: raw rows collected before
+      // the downstream role/evidence gates, not only the score-ready subset.
+      count: gathered,
       warning,
       completed: 1,
       total: 1,
@@ -7669,6 +7695,11 @@ Return a JSON object with four arrays of search query strings:
     return {
       resolved,
       items,
+      // The renderer owns the score-ready merge, but its visible collected
+      // counter must retain this raw source-returned dimension. In the real
+      // 307 + 90 resume case, only 8 rows are score-ready while all 90 were
+      // still collected and must be reflected in the 397 total.
+      gatheredCount: gathered,
       warning,
       removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
     };

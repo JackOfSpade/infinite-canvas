@@ -232,6 +232,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     terminalStatus,
     terminalOutcome,
     completionCanvasFilePath = canvasFilePath,
+    scoreReadyCount = null,
   ) => {
     if (!runId || !window.electronAPI?.completeJobRun) return null;
     try {
@@ -240,6 +241,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         runId,
         terminalStatus,
         terminalOutcome,
+        scoreReadyCount,
       });
       if (!result?.ok) {
         EventLogger.error(
@@ -1046,6 +1048,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         jobRunId,
         displayed.length > 0 ? 'completed' : 'failed',
         displayed.length > 0 ? 'populated' : 'incomplete',
+        canvasFilePath,
+        displayed.length,
       )
       : null;
     if (cancelled()) return;
@@ -3016,6 +3020,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
+      resultDisposition: null,
       pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
       ...buildJobHubCareerClearPatch(),
       manualAiResume: null,

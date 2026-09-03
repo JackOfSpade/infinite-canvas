@@ -23,7 +23,7 @@ import { ApplicationLaunchPromptDialog } from '../components/ApplicationLaunchPr
 // of full-process fit, not a guaranteed hiring outcome.
 function scoreColor(score) {
   if (score >= 85) return '#22c55e'; // green  — strong hiring fit
-  if (score >= 65) return '#3b82f6'; // blue   — solid hiring fit
+  if (score >= 70) return '#3b82f6'; // blue   — solid hiring fit
   if (score >= 40) return '#eab308'; // amber  — partial/stretch hiring fit
   return '#6b7280';                  // gray   — limited hiring fit
 }

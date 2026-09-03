@@ -14,8 +14,8 @@ import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
  *   3. Job role        — ordered A→Z.
  * …then the job cards (ordered by score desc).
  *
- * Hiring-fit bands are fixed to the scoring rubric (85+ excellent, 65–84 good,
- * 40–64 partial/stretch, below 40 limited). The AI bucketing pass creates the
+ * Hiring-fit bands are fixed to the scoring rubric (85+ excellent, 70–84 good,
+ * 40–69 partial/stretch, below 40 limited). The AI bucketing pass creates the
  * salary ranges and role partition; the renderer places each job into its band
  * (by matchScore) and salary range (by parsed salary) DETERMINISTICALLY, so a
  * weak model can't drop or duplicate jobs across the three nested levels. The
@@ -58,13 +58,13 @@ export const ROLE_VISIBLE_DEFAULT = 10;
 
 // One scoring rubric, shared by every run and every saved taxonomy. Allowing the
 // bucketing model to move these thresholds made a score of 55 "Good fit" even
-// though the scoring rubric defines 40–64 as a partial/stretch outcome.
+// though the scoring rubric defines 40–69 as a partial/stretch outcome.
 // Not imported elsewhere — normalizeBandsWithRepairs is the sole enforcement
 // point, so this stays module-private.
 const FIXED_LIKELIHOOD_BANDS = Object.freeze([
   Object.freeze({ label: 'Excellent hiring fit (85–100)', minScore: 85, maxScore: 100 }),
-  Object.freeze({ label: 'Good hiring fit (65–84)',       minScore: 65, maxScore: 84 }),
-  Object.freeze({ label: 'Partial hiring fit (40–64)',    minScore: 40, maxScore: 64 }),
+  Object.freeze({ label: 'Good hiring fit (70–84)',       minScore: 70, maxScore: 84 }),
+  Object.freeze({ label: 'Partial hiring fit (40–69)',    minScore: 40, maxScore: 69 }),
   Object.freeze({ label: 'Limited hiring fit (0–39)',     minScore: 0,  maxScore: 39 }),
 ]);
 

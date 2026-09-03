@@ -208,6 +208,19 @@ export function useIssueReporter({
       const currentNodeIds = [...new Set((allNodesDeep || [])
         .map(node => typeof node?.id === 'string' ? node.id : null)
         .filter(Boolean))];
+      // Job Board staleness is a consumer-stage completion fact, not a heavy
+      // node-dump detail. Preserve a bounded, non-job-content summary so JOBS
+      // and RECOVERY reports can still say that collection finished while a
+      // connected board is intentionally hiding an obsolete cascade.
+      const allJobBoardStates = (allNodesDeep || [])
+        .filter(node => node?.type === 'jobboard')
+        .map(node => ({
+          id: typeof node.id === 'string' ? node.id : '',
+          hubState: typeof node.data?.hubState === 'string' ? node.data.hubState : 'empty',
+          resultCount: Number.isFinite(Number(node.data?.resultCount)) ? Math.max(0, Math.floor(Number(node.data.resultCount))) : null,
+          stale: node.data?.stale === true,
+          staleReason: typeof node.data?.staleReason === 'string' ? node.data.staleReason.slice(0, 120) : null,
+        }));
       const localApplications = (allNodesDeep || []).flatMap((n) => {
         const localApplication = n?.type === 'jobcard' ? n?.data?.localApplication : null;
         return localApplication?.id ? [{
@@ -233,6 +246,8 @@ export function useIssueReporter({
           hasJobNodes: (allNodesDeep || []).some(n => isJobNodeType(n?.type)),
           hasSellNodes: (allNodesDeep || []).some(n => isSellNodeType(n?.type)),
           currentNodeIds,
+          jobBoardStates: allJobBoardStates.slice(0, 25),
+          jobBoardStateCount: allJobBoardStates.length,
         } : null,
         nodes: reportNodes,
         edges,

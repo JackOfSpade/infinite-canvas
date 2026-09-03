@@ -236,6 +236,13 @@ export default [
       const build = combine.indexOf('buildJobTreeNodes', enrichedUnion);
       assert(bucket >= 0 && taxonomy > bucket && compensation > taxonomy && enrichedUnion > compensation && build > enrichedUnion,
         'Combine must validate bucketing before compensation, then build cards only from the enriched returned union');
+      const snapshot = combine.indexOf("new CustomEvent('canvas-take-snapshot')", build);
+      const clear = combine.indexOf('clearBoardChildren();', build);
+      const add = combine.indexOf('addElementsGlobally(id, newNodes, newEdges', clear);
+      const publish = combine.indexOf("hubState: 'done'", add);
+      const completion = combine.indexOf('[JobBoard] combine completed', publish);
+      assert(snapshot > build && clear > snapshot && add > clear && publish > add && completion > publish,
+        'a successful Re-combine must build first, snapshot once, replace the old cascade, then publish/log the completed board');
       assert(combine.includes('union = attachCompensationRemoteResidences(union, remoteResidencesByOrigin)'),
         'Combine must attach each origin module’s residence map to the full union before the IPC call');
       assert(board.includes('const activeRequestId = compensationRequestIdRef.current;')
@@ -272,7 +279,12 @@ export default [
         && bucketHandler.includes('taxonomyClassifiedAssignments: taxonomyProgress.classifiedAssignments')
         && !bucketHandler.includes('taxonomyChunksCompleted: result?.batchCount'),
       'successful bucketing telemetry retains bounded-run progress instead of reading orchestration fields stripped by taxonomy sanitization');
-      return { ordering: ['bucket', 'taxonomy', 'compensation', 'build'], exactNodeProgress: true, transientCleanup: true };
+      return {
+        ordering: ['bucket', 'taxonomy', 'compensation', 'build', 'snapshot', 'clear', 'add', 'publish'],
+        exactNodeProgress: true,
+        transactionalReplacement: true,
+        transientCleanup: true,
+      };
     },
   },
 ];

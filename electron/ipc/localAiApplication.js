@@ -414,32 +414,52 @@ async function ensureProjectRoutine(projectRoot) {
 
 function promptFor({ jobId, workingFolder, canvasRoot, routinePath }) {
   const inputJobsRoot = localJobsRoot(canvasRoot);
+  const jobFolder = path.join(inputJobsRoot, jobId);
+  const resultPath = path.join(jobFolder, 'result.json');
+  // ensureProjectRoutine installs the wait helper beside the routine. Derive
+  // this authoritative path from the returned routine path instead of
+  // duplicating today's <working-folder>/local_ai layout assumption here.
+  const handoffHelperPath = path.join(path.dirname(routinePath), 'wait-for-handoff.mjs');
+  const receiptPath = path.join(localAiHandoffReceiptsRoot(canvasRoot), `${jobId}.json`);
   const outputBundlePath = path.join(canvasRoot, 'Applied Jobs');
+  const launchValues = JSON.stringify({
+    WORKING_FOLDER: workingFolder,
+    ROOT_LOCATION: canvasRoot,
+    ROUTINE_PATH: routinePath,
+    INPUT_JOBS_ROOT: inputJobsRoot,
+    JOB_FOLDER: jobFolder,
+    RESULT_PATH: resultPath,
+    HANDOFF_HELPER_PATH: handoffHelperPath,
+    RECEIPT_PATH: receiptPath,
+    OUTPUT_BUNDLE_ROOT: 'Applied Jobs',
+    OUTPUT_BUNDLE_PATH: outputBundlePath,
+    JOB_ID: jobId,
+    JOB_FORMAT_VERSION: LOCAL_AI_APPLICATION_VERSION,
+    QUALITY_CHECKLIST_VERSION: APPLICATION_QUALITY_CHECKLIST_VERSION,
+  }, null, 2);
   return `Run exactly one actionable Local AI application job from the Infinite Canvas project.
 
 Use any local coding agent with filesystem and shell access. This workflow is provider-neutral; do not switch to a vendor API or require a particular vendor's CLI.
 
-These launch values are authoritative and override placeholders in the routine:
+This is an execution handoff, not a request to explain the routine or draft an example in chat. Carry the job through its filesystem handoff and measured revision loop.
 
-WORKING_FOLDER: ${workingFolder}
-ROOT_LOCATION: ${canvasRoot}
-ROUTINE_PATH: ${routinePath}
-INPUT_JOBS_ROOT: ${inputJobsRoot}
-OUTPUT_BUNDLE_ROOT: Applied Jobs
-OUTPUT_BUNDLE_PATH: ${outputBundlePath}
-JOB_ID: ${jobId}
+The following JSON launch values are authoritative. Decode every string literally, including spaces and punctuation. They override placeholders or job-selection defaults in the routine:
 
-Start in WORKING_FOLDER, then read and follow the complete routine at ROUTINE_PATH. ROOT_LOCATION is the folder containing the currently saved canvas. Resolve OUTPUT_BUNDLE_ROOT relative to ROOT_LOCATION, so the final hierarchy remains ./Applied Jobs/<Company>/<Location>/<Role>/.
+\`\`\`json
+${launchValues}
+\`\`\`
 
-Process only JOB_ID. Do not select a different queued job. If that job is no longer actionable, stop without changing any files.
+Set the shell working directory to WORKING_FOLDER, then read ROUTINE_PATH completely before drafting or writing anything. Follow that routine as the writer-facing contract. ROOT_LOCATION is the folder containing the currently saved canvas. OUTPUT_BUNDLE_ROOT is relative to ROOT_LOCATION, so Infinite Canvas will save the final hierarchy as ./Applied Jobs/<Company>/<Location>/<Role>/.
 
-Keep this same local-agent run active for the complete measured handoff. Handle every matching \`revision-required\`, legacy \`revision-exhausted\`, and \`invalid\` response exactly as prescribed. After every \`result.json\` write, invoke the app-owned handoff helper immediately and continue waiting without a timeout or iteration limit.
+Process only JOB_ID at JOB_FOLDER. Do not select or inspect a different queued job. Confirm the selected manifest/input belong to JOB_ID and use the stated job-format and quality-checklist versions. If that exact job is not actionable, stop without changing any files and report why.
 
-Stop only upon a matching terminal receipt, matching \`render-retry-required\` feedback, disappearance of the job folder without a matching receipt, or explicit user interruption. Report acceptance and measured page counts only when supported by the matching terminal receipt.
+Infinite Canvas must remain open while the handoff runs. Keep this same local-agent run active for the complete measured handoff. Write the completed JSON to RESULT_PATH only; do not merely print it in chat. Immediately after every successful \`result.json\` write, invoke HANDOFF_HELPER_PATH for that exact result hash, JOB_FOLDER, and RECEIPT_PATH as prescribed by the routine. Make no intervening tool call or cosmetic rewrite.
 
-Write only the selected job's UTF-8 \`result.json\`. Do not modify project source, canvas data, input/context files, feedback, or generated bundles directly. Infinite Canvas owns validation, rendering, and the final save beneath OUTPUT_BUNDLE_PATH.
+Matching \`invalid\`, \`revision-required\`, and legacy \`revision-exhausted\` feedback are nonterminal: correct or materially revise the result as prescribed, rerun the complete checklist, overwrite only RESULT_PATH, and invoke the helper again without a timeout or iteration limit. Once a result has been written, stop only upon a matching terminal receipt, matching \`render-retry-required\` feedback, disappearance of JOB_FOLDER without a matching receipt, or explicit user interruption. Report acceptance and measured page counts only when supported by the matching terminal receipt.
 
-No response needs to be pasted back into Infinite Canvas. Completion is communicated through the routine's local filesystem handoff.
+Do not modify project source, canvas data, the routine, design references, input/context files, manifest, feedback, receipt, or generated bundles directly. Apart from RESULT_PATH, create no files. Infinite Canvas owns validation, rendering, and the final save beneath OUTPUT_BUNDLE_PATH.
+
+No response needs to be pasted back into Infinite Canvas. Completion is communicated through the local filesystem handoff. Your final chat response is only a concise status report backed by the matching feedback or receipt.
 `;
 }
 

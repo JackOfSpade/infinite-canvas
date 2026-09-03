@@ -2122,6 +2122,7 @@ export default [
         ['epoch.bump()', 'a late-settling parse would write the old profile straight back onto the cleared hub'],
         ['cancelNodeTask', 'the backend scrape would keep running and bounce the hub out of its cleared empty state'],
         ['cancelQueuedRunsForNode', 'a queued module run would start against career files that no longer exist'],
+        ['resultDisposition: null', 'the empty hub would retain stale scored/empty completion provenance from the cleared run'],
         ['addToast(', 'a clear refused because a run is in flight would be a silent dead button'],
       ];
       for (const [needle, consequence] of guarded) {

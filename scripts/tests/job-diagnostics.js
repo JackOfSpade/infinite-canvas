@@ -4,6 +4,7 @@ import { __loadJobAnalysisSnapshotForTests } from '../test-dependencies.js';
 import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
+import { sanitizeLastRunReceipt } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
@@ -86,6 +87,258 @@ export default [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+  },
+},
+{
+    name: 'job completion assessment survives a FULL 50k clipboard cap and reconciles recovered scoring',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-completion-assessment-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-hub';
+      const runId = 'completion-run-16';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: Array.from({ length: 16 }, () => ({})),
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId, startedAt: Date.now() - 10_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 16 }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 307, deduped: 307, kept: 8, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
+          sources: {},
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, startedAt: Date.now() - 10_000, ts: Date.now(), runId },
+          search: {
+            ts: Date.now() - 9_000, queries: 1, raw: 307, deduped: 307, ageDropped: 0,
+            roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 8, runId,
+            // Deliberately bigger than the clipboard cap. The assessment must
+            // remain usable even though this audit pushes Scoring out of the
+            // positional static prefix.
+            remoteRelevance: {
+              indeed: Array.from({ length: 300 }, (_, index) => ({
+                title: `Cap fixture job ${index} ${'evidence '.repeat(24)}`,
+                company: 'Cap Fixture Co', matched: [{ query: 'Software Architect', matchedTerms: ['software', 'architect'], requiredMatches: 2 }],
+              })),
+            },
+          },
+          resolves: {
+            indeed: { ts: Date.now() - 8_000, hasMergeTelemetry: true, cumulativeMergeNet: 8, merge: { pendingBefore: 8, pendingAfter: 16 } },
+          },
+          scoring: { ts: Date.now() - 7_000, input: 16, selectedForScoring: 16, scored: 16, placeholders: 0, unscored: 0, batches: 2, failedBatches: 0 },
+          bucketing: { ts: Date.now() - 6_000, input: 16, roleCount: 1, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [] },
+        });
+
+        const capped = generateMarkdown({
+          description: 'Verify the whole run completed.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }, null, { maxChars: 50_000 });
+
+        assert(capped.hardTruncated && capped.markdown.length <= 50_000,
+          'completion assessment fixture must exercise the hard 50k clipboard cap');
+        assert(capped.markdown.includes('## Job Completion Assessment')
+          && capped.markdown.includes('✅ **VERIFIED COMPLETE**')
+          && capped.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
+          && capped.markdown.includes('input 16 → scored 16')
+          && capped.markdown.includes('terminal score-ready 16')
+          && capped.markdown.includes('Saved score-ready snapshot: 16 job(s)')
+          && capped.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree on `completion-run-16`'),
+        'early completion assessment reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot before the cap');
+        assert(capped.markdown.indexOf('## Job Completion Assessment') < capped.markdown.indexOf('## Job Search Pipeline')
+          && !capped.markdown.includes('### Scoring'),
+        'assessment is ordered before the long pipeline and survives when the detailed scoring subsection is clipped');
+
+        telemetry.pipeline = { ...telemetry.pipeline, runId: 'pipeline-token-mismatch' };
+        const mixedRun = generateMarkdown({
+          description: 'Do not combine mismatched run telemetry.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const mixedAssessment = mixedRun.slice(mixedRun.indexOf('## Job Completion Assessment'), mixedRun.indexOf('## Job Search Pipeline'));
+        assert(mixedAssessment.includes('⚠️ **INDETERMINATE**')
+          && mixedAssessment.includes('run tokens disagree')
+          && mixedAssessment.includes('pipeline `pipeline-token-mismatch`')
+          && mixedAssessment.includes('search `completion-run-16`'),
+        'completion assessment detects a pipeline/search run-token mismatch instead of borrowing the matching receipt and snapshot');
+        telemetry.pipeline = { ...telemetry.pipeline, runId };
+
+        const receiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+        const unclearedReceipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        unclearedReceipt.cleanup = { attempted: true, cleared: false };
+        fs.writeFileSync(receiptPath, JSON.stringify(unclearedReceipt), 'utf8');
+        const uncleared = generateMarkdown({
+          description: 'Do not certify a run whose recovery cleanup failed.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const unclearedAssessment = uncleared.slice(uncleared.indexOf('## Job Completion Assessment'), uncleared.indexOf('## Non-API AI Handoff Lifecycle'));
+        assert(unclearedAssessment.includes('⚠️ **INDETERMINATE**')
+          && unclearedAssessment.includes('terminal cleanup was not confirmed')
+          && unclearedAssessment.includes('cleanup not confirmed')
+          && !unclearedAssessment.includes('✅ **VERIFIED COMPLETE**'),
+        'completion assessment never certifies a completed receipt whose recovery-sidecar cleanup was not confirmed');
+        unclearedReceipt.cleanup = { attempted: true, cleared: true };
+        fs.writeFileSync(receiptPath, JSON.stringify(unclearedReceipt), 'utf8');
+
+        // A genuine zero-result run intentionally never enters scoring or the
+        // Job Board's taxonomy pass.  The explicit terminal outcome, empty
+        // search/recovery funnel, and run-owned empty snapshot are the evidence
+        // that those stages were vacuously complete rather than forgotten.
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(), jobs: [],
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId, nodeId, startedAt: Date.now() - 5_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'zero' }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 229, deduped: 1, kept: 0, relevanceDropped: 228, ageDropped: 0, roleDropped: 1, historyDropped: 0, descriptionEvidenceDropped: 0 },
+          sources: {},
+        }), 'utf8');
+        telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId };
+        telemetry.search = {
+          ts: Date.now() - 4_000, queries: 1, raw: 229, deduped: 1, ageDropped: 0,
+          roleDropped: 1, historyDropped: 0, relevanceDropped: 228, kept: 0, runId,
+        };
+        telemetry.resolves = {};
+        telemetry.scoring = null;
+        telemetry.bucketing = null;
+        const zeroResult = generateMarkdown({
+          description: 'Verify a completed zero-result run.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const zeroAssessment = zeroResult.slice(zeroResult.indexOf('## Job Completion Assessment'), zeroResult.indexOf('## Job Listing Link Diagnostics'));
+        assert(zeroAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && zeroAssessment.includes('0 initial score-ready = 0 expected scoring input')
+          && zeroAssessment.includes('Scoring: not required — zero score-ready jobs.')
+          && zeroAssessment.includes('Taxonomy: not required — zero scored jobs.')
+          && zeroAssessment.includes('Saved score-ready snapshot: 0 job(s)')
+          && zeroAssessment.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree'),
+        'completion assessment verifies an explicitly completed zero-result run without impossible scoring/taxonomy telemetry');
+
+        const staleBoardResult = generateMarkdown({
+          description: 'Search completed but the attached board still shows its prior run.', filterCode: 'JOBS',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'stale-board'],
+            omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+            jobBoardStates: [{ id: 'stale-board', hubState: 'done', resultCount: 16, stale: true, staleReason: '1 updated' }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [], edges: [], drawings: [], frontEndState: { currentFile: canvas },
+          nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const staleBoardAssessment = staleBoardResult.slice(staleBoardResult.indexOf('## Job Completion Assessment'), staleBoardResult.indexOf('## Job Search Pipeline'));
+        assert(staleBoardAssessment.includes('⚠️ **SEARCH COMPLETE; BOARD REFRESH REQUIRED**')
+          && staleBoardAssessment.includes('1/1 stale')
+          && staleBoardAssessment.includes('16 cached result(s) hidden pending board action')
+          && staleBoardAssessment.includes('(1 updated)'),
+        'focused JOBS reports retain compact stale-board semantics after their heavy node payload is filtered out');
+        const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
+        assert(issueReporterSource.includes('jobBoardStates: allJobBoardStates.slice(0, 25)')
+          && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length'),
+        'the renderer stamps bounded board state before JOBS/RECOVERY filters remove the node payload');
+
+        // These process-global stage records do not carry run tokens.  If an
+        // older populated run left them behind, the newer explicit-zero proof
+        // must still win instead of comparing 0 current jobs with stale counts.
+        telemetry.scoring = { ts: Date.now() - 10_000, input: 16, selectedForScoring: 16, scored: 16, placeholders: 0, unscored: 0, batches: 2, failedBatches: 0 };
+        telemetry.bucketing = { ts: Date.now() - 9_000, input: 16, roleCount: 1, missing: 0, duplicated: 0 };
+        const zeroWithStaleStages = generateMarkdown({
+          description: 'Do not borrow stage telemetry from the prior run.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const staleZeroAssessment = zeroWithStaleStages.slice(zeroWithStaleStages.indexOf('## Job Completion Assessment'), zeroWithStaleStages.indexOf('## Job Listing Link Diagnostics'));
+        assert(staleZeroAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && !staleZeroAssessment.includes('search/recovery 0 ≠ scoring input 16')
+          && !staleZeroAssessment.includes('scored 16 ≠ saved score-ready 0'),
+        'a current explicit-zero run ignores uncorrelated scoring/taxonomy telemetry left by a prior run');
+
+        const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const freshRunResetStart = jobsBackend.indexOf('// Reset per-run state at search START');
+        const freshRunResetEnd = jobsBackend.indexOf('// Fresh per-source event trail for this run', freshRunResetStart);
+        const freshRunReset = jobsBackend.slice(freshRunResetStart, freshRunResetEnd);
+        assert(freshRunResetStart >= 0 && freshRunResetEnd > freshRunResetStart
+          && freshRunReset.includes('jobsTelemetry.search = null;')
+          && freshRunReset.includes('jobsTelemetry.scoring = null;')
+          && freshRunReset.includes('jobsTelemetry.scoringHeartbeat = null;'),
+        'a fresh search clears prior search/scoring telemetry before any await, so mid-run and zero-run FULL reports cannot mix runs');
+
+        // Recovery can subtract as well as add. An exact description retry may
+        // prove one pending listing unavailable, leaving a 3→2 scoring queue.
+        // The compact assessment must use that signed renderer delta just like
+        // the detailed pipeline reconciliation does.
+        const subtractiveRunId = 'completion-run-subtractive-recovery';
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId: subtractiveRunId, sourceHubId: nodeId, canvasFilePath: canvas,
+          createdAt: Date.now(), jobs: [{}, {}],
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId: subtractiveRunId, nodeId, startedAt: Date.now() - 5_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 2 }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 3, deduped: 3, kept: 3, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
+          sources: {},
+        }), 'utf8');
+        telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId: subtractiveRunId };
+        telemetry.search = {
+          ts: Date.now() - 4_000, queries: 1, raw: 3, deduped: 3, ageDropped: 0,
+          roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 3, runId: subtractiveRunId,
+        };
+        telemetry.resolves = {
+          indeed: {
+            ts: Date.now() - 3_000, kind: 'description-retry', hasMergeTelemetry: true,
+            cumulativeMergeNet: -1, merge: { pendingBefore: 3, pendingAfter: 2 },
+          },
+        };
+        telemetry.scoring = { ts: Date.now() - 2_000, input: 2, selectedForScoring: 2, scored: 2, placeholders: 0, unscored: 0, batches: 1, failedBatches: 0 };
+        telemetry.bucketing = { ts: Date.now() - 1_000, input: 2, roleCount: 1, missing: 0, duplicated: 0 };
+        const subtractive = generateMarkdown({
+          description: 'Verify recovery that removed an unavailable row.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const subtractiveAssessment = subtractive.slice(subtractive.indexOf('## Job Completion Assessment'), subtractive.indexOf('## Job Listing Link Diagnostics'));
+        assert(subtractiveAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && subtractiveAssessment.includes('3 initial score-ready − 1 removed by recovery = 2 expected scoring input')
+          && subtractiveAssessment.includes('input 2 → scored 2'),
+        'completion assessment preserves a signed recovery queue delta instead of clamping a removal to zero');
+
+        const unrelated = generateMarkdown({
+          description: 'Do not borrow another canvas run.', filterCode: 'FULL',
+          // A filtered report carries this deep id index even after its nodes
+          // are stripped. An empty index must not inherit process-global jobs
+          // telemetry from completion-hub.
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [], omittedSections: ['nodes'] },
+          nodes: [], edges: [], drawings: [], frontEndState: { currentFile: canvas },
+          nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const assessment = unrelated.slice(unrelated.indexOf('## Job Completion Assessment'), unrelated.indexOf('## Non-API AI Handoff Lifecycle'));
+        assert(assessment.includes('⚠️ **INDETERMINATE**')
+          && assessment.includes('Scoring: not retained in this process.')
+          && !assessment.includes('input 16 → scored 16'),
+        'completion assessment refuses process-global live telemetry when the report has no matching hub id');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { scored: 16, recovered: 8 };
     },
   },
 {
@@ -127,7 +380,7 @@ export default [
         const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
         assert(recovery.includes('Last terminal run receipt: ✅ completed')
           && recovery.includes('previous-process receipt — live pipeline telemetry is unavailable in this process')
-          && recovery.includes('Funnel: 13 raw → 11 deduped → 4 kept')
+          && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 4 kept')
           && recovery.includes('`google`: 11 returned')
           && recovery.includes('warning rate-limit (block)'),
         'a prior-process receipt preserves terminal status, timing/funnel, source warning codes, and provenance');
@@ -2914,7 +3167,7 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['resolved-resume-reporting']), null, null);
-        assert(report.includes('superseded by 1 post-completion resume pass')
+        assert(report.includes('superseded by 1 post-completion recovery attempt')
           && report.includes('### Initial Search Pass')
           && report.includes('Initial-pass counters only')
           && report.includes('indeed=resume resolved → 19')
@@ -2926,6 +3179,111 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+{
+    name: 'native Indeed resume preserves raw collection, score-ready additions, and terminal receipt provenance',
+    run: () => {
+      // This is the observed production shape: 307 initial raw Indeed rows
+      // yielded 8 score-ready jobs, then a challenge resume extracted another
+      // 90 raw rows of which 8 survived. Collection and scoring must not blend
+      // those two dimensions into the impossible 315 value (307 + 8).
+      const initialRaw = 307;
+      const resumedRaw = 90;
+      const initialScoreReady = 8;
+      const resumedScoreReady = 8;
+      assert(initialRaw + resumedRaw === 397 && initialScoreReady + resumedScoreReady === 16,
+        'fixture must encode the 307 + 90 raw / 8 + 8 score-ready production sequence');
+
+      const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const resumeStart = backend.indexOf("logger.info(`[Jobs][${nodeId}] Resuming Indeed:");
+      const resumeEnd = backend.indexOf("// Renderer calls this after it merges captcha-resolve", resumeStart);
+      const resume = backend.slice(resumeStart, resumeEnd);
+      assert(resumeStart >= 0 && resumeEnd > resumeStart
+        && resume.includes('const gathered = Math.max(0, Number(extracted.length) || 0)')
+        && resume.includes('count: Math.max(0, Number(prior.count) || 0) + gathered')
+        && resume.includes('providerGathered: Math.max(0, Number(prior.providerGathered ?? prior.gathered ?? prior.count) || 0) + gathered')
+        && resume.includes('gatheredCount: gathered')
+        && !resume.includes('count: Math.max(0, Number(prior.count) || 0) + retained'),
+      'native resume advances both source-returned dimensions by all 90 extracted rows and exposes that raw delta to the renderer');
+
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const resolvedStart = sourceCard.indexOf('if (result?.resolved)');
+      const resolvedEnd = sourceCard.indexOf('} else if (prevForRestore)', resolvedStart);
+      const resolved = sourceCard.slice(resolvedStart, resolvedEnd);
+      assert(resolved.includes('const sourceGatheredCount = explicitGatheredCount != null && Number.isFinite(Number(explicitGatheredCount))')
+        && resolved.includes(': sourceGatheredCount;')
+        && resolved.includes('const preResolveCount = Number.isFinite(prevForRestore?.count)')
+        && resolved.includes('return (baseCount ?? 0) + sourceGatheredCount;'),
+      'source card preserves an 8-row score-ready merge while it advances the collected count by the explicit 90-row raw delta');
+
+      const receipt = sanitizeLastRunReceipt({
+        runId: 'indeed-resume-307-90',
+        terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 16 },
+        funnel: {
+          raw: 307, relevanceDropped: 0, deduped: 307, ageDropped: 0,
+          roleDropped: 298, historyDropped: 0, descriptionEvidenceDropped: 1, kept: 8,
+        },
+        sources: { indeed: { count: 397, providerGathered: 397, relevanceDropped: 0 } },
+      });
+      assert(receipt.terminal.scoreReadyCount === 16
+        && receipt.funnel.kept === 8
+        && receipt.sources.indeed.count === 397
+        && receipt.sources.indeed.providerGathered === 397,
+      'receipt stores the terminal 16-score-ready fact separately from its initial 8-row funnel and keeps source dimensions aligned');
+      return { raw: initialRaw + resumedRaw, scoreReady: initialScoreReady + resumedScoreReady };
+    },
+  },
+{
+    name: 'job pipeline report: LinkedIn counts every post-search Solve attempt and suppresses the stale source trail after a clean finish',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves,
+        resumeAttempts: telemetry.resumeAttempts, sourceEvents: telemetry.sourceEvents,
+        linkedinEnrich: telemetry.linkedinEnrich,
+      };
+      const now = Date.now();
+      Object.assign(telemetry, {
+        nodeId: 'linkedin-multi-solve-reporting', windowId: null,
+        pipeline: { ts: now - 10_000, durationMs: 53_500, active: false, phase: 'completed' },
+        search: {
+          ts: now - 20_000, queries: 1, raw: 52, relevanceDropped: 0, deduped: 52,
+          ageDropped: 0, historyDropped: 0, kept: 11,
+          bySource: { linkedin: { count: 11, warning: { code: 'linkedin-rate-limited', severity: 'throttle' } } },
+        },
+        resolves: {
+          linkedin: {
+            ts: now - 1_000, kind: 'linkedin-reenrich', needEnrich: 1,
+            enrichSuccess: 1, walled: false, stillEmpty: 0,
+          },
+        },
+        resumeAttempts: {},
+        sourceEvents: {
+          linkedin: [
+            { t: 0, status: 'error', code: 'linkedin-rate-limited' },
+            { t: 9_000, status: 'done' },
+          ],
+        },
+        linkedinEnrich: [
+          { ts: now - 9_000, kind: 'solve', enriched: 5, stillEmpty: 36, walled: true },
+          { ts: now - 7_000, kind: 'solve', enriched: 7, stillEmpty: 29, walled: true },
+          { ts: now - 5_000, kind: 'solve', enriched: 24, stillEmpty: 5, walled: true },
+          { ts: now - 3_000, kind: 'solve', enriched: 4, stillEmpty: 1, walled: true },
+          { ts: now - 1_000, kind: 'solve', enriched: 1, stillEmpty: 0, walled: false },
+        ],
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['linkedin-multi-solve-reporting']), null, null);
+        assert(report.includes('superseded by 5 post-completion recovery attempts')
+          && report.includes('5 later recovery passes superseded this result')
+          && !report.includes('`linkedin`: error⚠linkedin-rate-limited@+0s'),
+        'the summary must agree with the retained LinkedIn Solve trail and a clean final pass must supersede stale source errors');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { attempts: 5 };
     },
 },
 {
@@ -4035,7 +4393,7 @@ export default [
         && board.includes('aria-label="Minimum hiring fit"'),
       'board filters use the same out-of-100 hiring-fit semantics and expose an accessible minimum-fit label');
       assert(tree.includes('Excellent hiring fit (85–100)')
-        && tree.includes('Partial hiring fit (40–64)')
+        && tree.includes('Partial hiring fit (40–69)')
         && tree.includes('Limited hiring fit (0–39)')
         && !tree.includes('Excellent fit (85–100%)'),
       'tree bands express hiring-fit ranges without percentage/probability notation');
@@ -4962,7 +5320,7 @@ export default [
           source: 'ziprecruiter', url: 'https://jobs/pulselearning', posted: '17 days ago',
         }],
         bucketTree: {
-          likelihoodBands: [{ label: 'Good fit (65–84%)', minScore: 65, maxScore: 84 }],
+          likelihoodBands: [{ label: 'Good fit (70–84%)', minScore: 70, maxScore: 84 }],
           salaryRanges: [
             { label: '$120k+', minSalary: 120000, maxSalary: 0 },
             { label: '$80k–$120k', minSalary: 80000, maxSalary: 120000 },
@@ -5224,7 +5582,7 @@ export default [
       'salary ranges: app-authored catch-all is not misreported as a blank model label');
       const bands = normalizeBandsWithRepairs([{ label: 'Strong fit', minScore: 80, maxScore: 99 }]);
       assert(bands.bands.map(b => `${b.label}:${b.minScore}-${b.maxScore}`).join('|')
-        === 'Excellent hiring fit (85–100):85-100|Good hiring fit (65–84):65-84|Partial hiring fit (40–64):40-64|Limited hiring fit (0–39):0-39',
+        === 'Excellent hiring fit (85–100):85-100|Good hiring fit (70–84):70-84|Partial hiring fit (40–69):40-69|Limited hiring fit (0–39):0-39',
       'hiring-fit bands: model-authored thresholds/labels are replaced by the fixed scoring rubric');
       assert(bands.repairs.includes('replaced hiring-fit bands with fixed scoring rubric'),
         'hiring-fit bands: replacing legacy/model thresholds is visible in repair telemetry');
@@ -5238,7 +5596,7 @@ export default [
       }, 2, ['$123K - $130K/yr', '$1.6K - $2.0K/wk']);
       assert(taxonomy.salaryRanges.some(r => r.label === '$80k–$120k/yr'),
         'taxonomy sanitization: adds a low-end range for parseable weekly salary');
-      assert(taxonomy.likelihoodBands.map(b => b.minScore).join(',') === '85,65,40,0',
+      assert(taxonomy.likelihoodBands.map(b => b.minScore).join(',') === '85,70,40,0',
         'taxonomy sanitization: hiring-fit thresholds stay aligned with the scoring rubric');
       assert(taxonomy.roles[0].jobIndices.join(',') === '0', 'taxonomy sanitization: drops duplicate/out-of-range role indexes');
       assert(taxonomy.roles.find(role => role.name === 'Other')?.jobIndices.join(',') === '1',
@@ -5287,7 +5645,7 @@ export default [
       assert(result.newNodes.some(n => n.data?.kind === 'salary' && n.data.label === '$80k–$120k/yr' && n.data.count === 1),
         'tree placement: decimal weekly salary lands in its annualized range');
 
-      const boundaryScores = [100, 85, 84, 65, 64, 40, 39, 0];
+      const boundaryScores = [100, 85, 84, 70, 69, 40, 39, 0];
       const boundaryTree = buildJobTreeNodes({
         displayedJobs: boundaryScores.map((matchScore, index) => ({
           title: `Boundary ${matchScore}`, company: 'Acme', location: 'Remote',
@@ -5307,8 +5665,8 @@ export default [
         .map(n => [n.data.label, n.data.count]);
       assert(JSON.stringify(boundaryBands) === JSON.stringify([
         ['Excellent hiring fit (85–100)', 2],
-        ['Good hiring fit (65–84)', 2],
-        ['Partial hiring fit (40–64)', 2],
+        ['Good hiring fit (70–84)', 2],
+        ['Partial hiring fit (40–69)', 2],
         ['Limited hiring fit (0–39)', 2],
       ]), `tree placement: rubric boundary scores map to fixed bands, got ${JSON.stringify(boundaryBands)}`);
       return { repairs: taxonomy.repairs.length };

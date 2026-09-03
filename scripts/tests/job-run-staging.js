@@ -122,6 +122,8 @@ export default [
       });
       assert(built.terminal.status === 'failed' && built.terminal.outcome === 'incomplete',
         `renderer terminal provenance must override the search-only default, got ${JSON.stringify(built.terminal)}`);
+      assert(!Object.hasOwn(built.terminal, 'scoreReadyCount'),
+        'an unknown terminal result count must stay absent rather than being coerced from null to zero');
       assert(sanitized.terminal.status === 'completed' && sanitized.terminal.outcome === 'collection-only',
         `collection-only completion must remain distinct from a genuine zero, got ${JSON.stringify(sanitized.terminal)}`);
       return { failed: built.terminal.outcome, intentionalSkip: sanitized.terminal.outcome };

@@ -247,13 +247,17 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
         ? '⚠️ staging cleanup attempted but not cleared'
         : 'staging cleanup attempted; result not recorded'
     : 'staging cleanup was not attempted';
+  const terminalScoreReady = Number(receipt.terminal?.scoreReadyCount);
+  const terminalScoreReadyDetail = Number.isFinite(terminalScoreReady)
+    ? ` · terminal score-ready ${Math.max(0, Math.floor(terminalScoreReady))}`
+    : '';
   const lines = [
-    `- Last terminal run receipt: ${status} · ${outcome} · run \`${receiptIdentifier(receipt.runId)}\` · started ${receiptTime(receipt.startedAt)} · ended ${receiptTime(receipt.completedAt)}${receiptElapsed(receipt.startedAt, receipt.completedAt)} · ${receipt.stagingStarted ? 'staging started' : 'staging not recorded'} · ${cleanup} · ${receiptHubCorrelation(receipt.nodeId, currentNodeIds)} · ${provenance}`,
+    `- Last terminal run receipt: ${status} · ${outcome}${terminalScoreReadyDetail} · run \`${receiptIdentifier(receipt.runId)}\` · started ${receiptTime(receipt.startedAt)} · ended ${receiptTime(receipt.completedAt)}${receiptElapsed(receipt.startedAt, receipt.completedAt)} · ${receipt.stagingStarted ? 'staging started' : 'staging not recorded'} · ${cleanup} · ${receiptHubCorrelation(receipt.nodeId, currentNodeIds)} · ${provenance}`,
   ];
 
   const funnel = receipt.funnel;
   if (funnel) {
-    lines.push(`  - Funnel: ${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}`);
+    lines.push(`  - Initial-search funnel: ${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -358,6 +362,242 @@ function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, c
   const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
   const recordedCanvas = snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath || null;
   return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobCountLabel} · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshot.runId || 'not recorded'}\` · ${recoveryHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${legacyIgnoredLabel()}`;
+}
+
+function nonnegativeCount(value) {
+  if (value == null || value === '') return null;
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
+}
+
+function signedCount(value) {
+  if (value == null || value === '') return null;
+  const count = Number(value);
+  return Number.isFinite(count) ? Math.trunc(count) : null;
+}
+
+function recordedRunToken(value) {
+  const text = String(value || '').trim();
+  return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
+}
+
+// Return only the metadata needed for the compact completion reconciliation.
+// This deliberately shares the ownership rule used by the full recovery
+// section: a legacy directory-scoped snapshot is usable only when it names the
+// current canvas, and no job body ever crosses this boundary.
+function currentSavedSnapshotFact(canvasFilePath, currentNodeIds) {
+  const paths = recoveryPathsForCanvas(canvasFilePath);
+  if (!paths) return { state: 'unavailable' };
+  let parsed = parseRecoveryJson(paths.currentSnapshot);
+  if ((parsed.exists === false || parsed.parseError) && paths.legacyCurrentSnapshot) {
+    const legacy = parseRecoveryJson(paths.legacyCurrentSnapshot);
+    if (legacy.value && snapshotOwnedByCanvas(legacy.value, canvasFilePath)) parsed = { ...legacy, legacyOwned: true };
+  }
+  if (!parsed.exists) return { state: 'absent' };
+  if (parsed.errorCode || parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
+    return { state: 'invalid' };
+  }
+  const snapshot = parsed.value;
+  const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
+  const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
+  const canvasMatches = !snapshot.canvasFilePath && !snapshot.snapshotContext?.canvasFilePath
+    ? null
+    : recoveryCanvasCorrelation(snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath, canvasFilePath) === 'canvas matches this report';
+  return {
+    state: 'parseable',
+    jobs,
+    runId: recordedRunToken(snapshot.runId),
+    hubPresent: !nodeId ? null : !!currentNodeIds?.has?.(nodeId),
+    canvasMatches,
+    legacyOwned: !!parsed.legacyOwned,
+  };
+}
+
+function recoveryMergeNet(telemetry) {
+  let total = 0;
+  for (const resolve of Object.values(telemetry?.resolves || {})) {
+    // Recovery is not necessarily additive. An exact-description retry can
+    // prove that an existing pending row is unavailable and remove it, so the
+    // renderer's authoritative queue delta may be negative. The detailed
+    // pipeline already preserves that signed accounting; clamping it here made
+    // the compact completion verdict disagree with the same report below.
+    const cumulative = signedCount(resolve?.cumulativeMergeNet);
+    if (cumulative != null && resolve?.hasMergeTelemetry === true) {
+      total += cumulative;
+      continue;
+    }
+    const before = nonnegativeCount(resolve?.merge?.pendingBefore);
+    const after = nonnegativeCount(resolve?.merge?.pendingAfter);
+    if (before != null && after != null) {
+      total += after - before;
+      continue;
+    }
+    const kept = nonnegativeCount(resolve?.kept);
+    if (kept != null) total += kept;
+  }
+  return total;
+}
+
+/**
+ * A cap-safe answer to the broad question "did the job run actually finish?"
+ *
+ * This is intentionally a reconciliation, not a duplicate pipeline dump. It
+ * joins the initial search plus post-search recovery with the scorer, taxonomy,
+ * terminal receipt, and owned saved snapshot. Any missing or conflicting fact
+ * is INDETERMINATE rather than a green completion claim.
+ */
+export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = new Set(), jobBoardStates = [], jobBoardStateCount = null) {
+  const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
+  let telemetry = null;
+  try { telemetry = getJobsTelemetry() || null; } catch { /* report absence below */ }
+  // The telemetry singleton is process-global. Do not attribute a different
+  // canvas's run to this report simply because its saved snapshot is readable.
+  if (telemetry?.nodeId && !ids.has(telemetry.nodeId)) telemetry = null;
+
+  const receiptState = canvasFilePath ? readLastRunReceiptSnapshot(canvasFilePath) : { exists: false };
+  const receipt = receiptState?.receipt || null;
+  const snapshot = currentSavedSnapshotFact(canvasFilePath, ids);
+  const searchKept = nonnegativeCount(telemetry?.search?.kept);
+  const recovered = telemetry ? recoveryMergeNet(telemetry) : null;
+  const expected = searchKept == null ? null : searchKept + recovered;
+  const scoring = telemetry?.scoring || null;
+  const scoreInput = nonnegativeCount(scoring?.selectedForScoring ?? scoring?.input);
+  const scored = nonnegativeCount(scoring?.scored);
+  const placeholders = nonnegativeCount(scoring?.placeholders);
+  const unscored = nonnegativeCount(scoring?.unscored);
+  const failedBatches = nonnegativeCount(scoring?.failedBatches);
+  const taxonomy = telemetry?.bucketing || null;
+  const taxonomyInput = nonnegativeCount(taxonomy?.input);
+  const taxonomyMissing = nonnegativeCount(taxonomy?.missing);
+  const taxonomyDuplicated = nonnegativeCount(taxonomy?.duplicated);
+  const pipelinePhase = String(telemetry?.pipeline?.phase || '').toLowerCase();
+  const receiptCompleted = receipt?.terminal?.status === 'completed';
+  const receiptCleanupConfirmed = receipt?.cleanup?.attempted === true && receipt?.cleanup?.cleared === true;
+  const receiptScoreReady = nonnegativeCount(receipt?.terminal?.scoreReadyCount);
+  // A completed zero-result run deliberately never invokes scoring or board
+  // taxonomy: there is no score-ready input for either stage.  Prove that
+  // vacuous completion from three independent retained facts instead of
+  // requiring telemetry that cannot legitimately exist.  This also prevents
+  // process-global scoring/taxonomy from a prior run (those records have no run
+  // token) from contaminating the newer, explicitly-zero receipt.
+  const completedZeroResult = receiptCompleted
+    && receipt?.terminal?.outcome === 'zero'
+    && expected === 0
+    && snapshot.state === 'parseable'
+    && snapshot.jobs === 0;
+  const runTokens = [
+    // Keep these independently: a stale search stamp and a newer pipeline
+    // stamp can otherwise be collapsed by `pipeline || search` and make a
+    // mixed run look correlated with a matching receipt/snapshot.
+    ['pipeline', recordedRunToken(telemetry?.pipeline?.runId)],
+    ['search', recordedRunToken(telemetry?.search?.runId)],
+    ['receipt', recordedRunToken(receipt?.runId)],
+    ['snapshot', snapshot.runId],
+  ].filter(([, token]) => !!token);
+  const distinctRunTokens = [...new Set(runTokens.map(([, token]) => token))];
+  const boards = (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25).map(board => ({
+    id: receiptIdentifier(board?.id, 'unknown'),
+    hubState: receiptIdentifier(board?.hubState, 'empty'),
+    resultCount: nonnegativeCount(board?.resultCount),
+    stale: board?.stale === true,
+    staleReason: String(board?.staleReason || '').replace(/[\r\n`]/g, ' ').slice(0, 120),
+  }));
+  const totalBoards = nonnegativeCount(jobBoardStateCount) ?? boards.length;
+  const staleBoards = boards.filter(board => board.stale);
+
+  const gaps = [];
+  if (pipelinePhase && pipelinePhase !== 'completed') gaps.push(`live pipeline is \`${pipelinePhase}\``);
+  if (receiptState.exists && !receiptCompleted) gaps.push('terminal receipt is not completed');
+  if (receiptCompleted && !receiptCleanupConfirmed) gaps.push('terminal cleanup was not confirmed');
+  if (expected != null && expected < 0) gaps.push(`search/recovery produced an impossible negative input (${expected})`);
+  if (!completedZeroResult) {
+    if (expected != null && scoreInput != null && expected !== scoreInput) gaps.push(`search/recovery ${expected} ≠ scoring input ${scoreInput}`);
+    if (scoreInput != null && scored != null && scoreInput !== scored) gaps.push(`scored ${scored}/${scoreInput}`);
+    if ((placeholders || 0) > 0) gaps.push(`${placeholders} placeholder score(s)`);
+    if ((unscored || 0) > 0) gaps.push(`${unscored} unscored job(s)`);
+    if ((failedBatches || 0) > 0) gaps.push(`${failedBatches} failed scoring batch(es)`);
+    if (taxonomy?.error) gaps.push('taxonomy reported an error');
+    if (scored != null && taxonomyInput != null && scored !== taxonomyInput) gaps.push(`scored ${scored} ≠ taxonomy input ${taxonomyInput}`);
+    if ((taxonomyMissing || 0) > 0 || (taxonomyDuplicated || 0) > 0) {
+      gaps.push(`taxonomy missing ${taxonomyMissing || 0}, duplicated ${taxonomyDuplicated || 0}`);
+    }
+    if (snapshot.state === 'parseable' && scored != null && snapshot.jobs != null && scored !== snapshot.jobs) {
+      gaps.push(`scored ${scored} ≠ saved score-ready ${snapshot.jobs}`);
+    }
+    if (receiptScoreReady != null && scored != null && receiptScoreReady !== scored) {
+      gaps.push(`terminal score-ready ${receiptScoreReady} ≠ scored ${scored}`);
+    }
+  }
+  if (receiptScoreReady != null && snapshot.state === 'parseable' && snapshot.jobs != null && receiptScoreReady !== snapshot.jobs) {
+    gaps.push(`terminal score-ready ${receiptScoreReady} ≠ saved score-ready ${snapshot.jobs}`);
+  }
+  if (distinctRunTokens.length > 1) {
+    gaps.push(`run tokens disagree (${runTokens.map(([source, token]) => `${source} \`${token}\``).join(', ')})`);
+  }
+  if (snapshot.canvasMatches === false || snapshot.hubPresent === false) gaps.push('saved snapshot belongs to a different canvas/hub');
+
+  const requiredFactsPresent = pipelinePhase === 'completed' && receiptCompleted && receiptCleanupConfirmed
+    && expected != null
+    && (completedZeroResult || (scoreInput != null && scored != null && taxonomyInput != null))
+    && snapshot.state === 'parseable' && snapshot.jobs != null
+    // A count coincidence across an old snapshot and a new in-memory run must
+    // never earn a green verdict. At least two independently retained run
+    // tokens must identify the same run before calling it VERIFIED.
+    && runTokens.length >= 2 && distinctRunTokens.length === 1;
+  const searchVerified = requiredFactsPresent && gaps.length === 0;
+  const verdict = searchVerified && staleBoards.length > 0
+    ? `⚠️ **SEARCH COMPLETE; BOARD REFRESH REQUIRED** — search stages agree, but ${staleBoards.length} Job Board${staleBoards.length === 1 ? ' has' : 's have'} stale inputs.`
+    : searchVerified
+    ? '✅ **VERIFIED COMPLETE** — every reconciled stage agrees.'
+    : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
+
+  const searchLine = searchKept == null
+    ? '- Search + recovery: not retained in this process.'
+    : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''} = ${expected} expected scoring input.`;
+  const scoringLine = completedZeroResult
+    ? '- Scoring: not required — zero score-ready jobs.'
+    : !scoring
+    ? '- Scoring: not retained in this process.'
+    : `- Scoring: input ${scoreInput ?? '?'} → scored ${scored ?? '?'} · placeholders ${placeholders ?? '?'} · unscored ${unscored ?? '?'} · failed batches ${failedBatches ?? '?'}.`;
+  const taxonomyLine = completedZeroResult
+    ? '- Taxonomy: not required — zero scored jobs.'
+    : !taxonomy
+    ? '- Taxonomy: not retained in this process.'
+    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}.`;
+  const receiptLine = !receiptState.exists
+    ? '- Terminal receipt: absent — prior-process completion cannot be proven.'
+    : !receipt
+      ? '- Terminal receipt: present but invalid.'
+      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}.`;
+  const snapshotLine = snapshot.state === 'parseable'
+    ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s) · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
+    : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
+  const runCorrelationLine = runTokens.length < 2
+    ? '- Run correlation: insufficient retained run tokens — cannot verify this is one run.'
+    : distinctRunTokens.length === 1
+      ? `- Run correlation: ✅ ${runTokens.map(([source]) => source).join(' + ')} agree on \`${distinctRunTokens[0]}\`.`
+      : `- Run correlation: ⚠️ ${runTokens.map(([source, token]) => `${source}=\`${token}\``).join(', ')}.`;
+  const boardLine = totalBoards === 0
+    ? '- Job Board consumers: none recorded.'
+    : staleBoards.length === 0
+      ? `- Job Board consumers: ${totalBoards} recorded · no stale board state.`
+      : `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${board.id}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`;
+
+  if (!telemetry && !receiptState.exists && snapshot.state === 'unavailable') return '';
+  return `
+## Job Completion Assessment
+> Compact, cap-safe reconciliation of the search/recovery funnel, scoring, taxonomy, terminal receipt, and the owned saved score-ready snapshot. Detailed per-job evidence remains in Job Search Pipeline and the uncapped saved report.
+
+- ${verdict}
+- Live pipeline: ${pipelinePhase || 'not retained'}.
+${receiptLine}
+${searchLine}
+${scoringLine}
+${taxonomyLine}
+${snapshotLine}
+${runCorrelationLine}
+${boardLine}
+`;
 }
 
 /**
@@ -587,7 +827,17 @@ function latestResolvedRecovery(telemetry, sourceId, searchTs = 0) {
   const resolve = telemetry?.resolves?.[sourceId];
   const resolveTs = Number(resolve?.ts) || 0;
   const warning = resolve?.warning;
-  const successful = resolve?.resolved === true || Number(resolve?.kept) > 0;
+  // LinkedIn's Solve branch records its own reenrichment shape rather than the
+  // generic { resolved, kept } fields. A clean final pass therefore used to
+  // leave the stale initial error/done source trail visible even though the
+  // dedicated enrichment trail proved that every residual was recovered.
+  const linkedInReenrichmentComplete = resolve?.kind === 'linkedin-reenrich'
+    && Number.isFinite(Number(resolve?.stillEmpty))
+    && Number(resolve?.stillEmpty) === 0
+    && !resolve?.walled
+    && !resolve?.skippedSameIp
+    && !resolve?.browserUnavailable;
+  const successful = resolve?.resolved === true || Number(resolve?.kept) > 0 || linkedInReenrichmentComplete;
   if (resolveTs > (Number(searchTs) || 0) && successful && !warning) {
     return { kind: 'resolve', ts: resolveTs, count: Math.max(0, Number(resolve?.kept) || 0), resolve };
   }
@@ -604,7 +854,7 @@ function resolvedResumeCount(attempt) {
   return match ? Math.max(0, Number(match[1]) || 0) : null;
 }
 
-function postPipelineResumePassCount(telemetry, pipeline) {
+function postPipelineRecoveryAttemptCount(telemetry, pipeline) {
   if (pipeline?.active || !pipeline?.ts) return 0;
   const completedAt = Number(pipeline.ts) || 0;
   let count = 0;
@@ -616,6 +866,17 @@ function postPipelineResumePassCount(telemetry, pipeline) {
       count += resolved.length;
       sourcesWithResolvedAttempt.add(sourceId);
     }
+  }
+  // `resolves.linkedin` is intentionally last-write-wins, while the bounded
+  // linkedinEnrich trail retains every Solve click. Count that trail directly
+  // so a five-pass recovery cannot be summarized as one merely because only
+  // the final detailed resolve row survives. Mark the source as accounted for
+  // to avoid counting that final row again below.
+  const linkedInSolvePasses = (Array.isArray(telemetry?.linkedinEnrich) ? telemetry.linkedinEnrich : [])
+    .filter(entry => entry?.kind === 'solve' && (Number(entry?.ts) || 0) > completedAt);
+  if (linkedInSolvePasses.length > 0) {
+    count += linkedInSolvePasses.length;
+    sourcesWithResolvedAttempt.add('linkedin');
   }
   // Some older paths emitted a resolve row but not a resume-attempt row. Count
   // that newer completion once, while avoiding double-counting the normal pair.
@@ -861,8 +1122,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   let savedSnapshotJobs = [];
   let savedRecoveryJobs = [];
 
-  const postCompletionResumePasses = t.pipeline
-    ? postPipelineResumePassCount(t, t.pipeline)
+  const postCompletionRecoveryAttempts = t.pipeline
+    ? postPipelineRecoveryAttemptCount(t, t.pipeline)
     : 0;
 
   if (t.pipeline) {
@@ -881,8 +1142,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : durationMs < 60_000 ? `${(durationMs / 1000).toFixed(1)}s`
           : `${Math.floor(durationMs / 60_000)}m${Math.round((durationMs % 60_000) / 1000)}s`;
     lines.push(`### Live Search Stage`);
-    const supersedingResumes = postCompletionResumePasses;
-    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${supersedingResumes > 0 ? ` · superseded by ${supersedingResumes} post-completion resume pass${supersedingResumes === 1 ? '' : 'es'}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
+    const supersedingRecoveries = postCompletionRecoveryAttempts;
+    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${supersedingRecoveries > 0 ? ` · superseded by ${supersedingRecoveries} post-completion recovery attempt${supersedingRecoveries === 1 ? '' : 's'}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
     if (p.runOrigin || p.profileInputMode) {
       const runOriginLabel = {
         initial: 'Initial career-file run',
@@ -923,7 +1184,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
 
   if (t.search) {
     const s = t.search;
-    lines.push(`### ${postCompletionResumePasses > 0 ? 'Initial Search Pass' : 'Search'}${ago(s.ts)}`);
+    lines.push(`### ${postCompletionRecoveryAttempts > 0 ? 'Initial Search Pass' : 'Search'}${ago(s.ts)}`);
     lines.push(`- Queries: ${s.queries}`);
     const relevanceStage = s.relevanceDropped > 0
       ? ` → title-relevance-dropped ${s.relevanceDropped}`
@@ -955,8 +1216,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - Rejected titles (sample): ${samples.map(x => `\`${historyReportValue(x?.title, '', 60)}\` (${x?.source || '?'})`).join(', ')}`);
       }
     }
-    if (postCompletionResumePasses > 0) {
-      lines.push(`- _Initial-pass counters only — ${postCompletionResumePasses} later recovery pass${postCompletionResumePasses === 1 ? '' : 'es'} superseded this result. Final recovered-source funnels are reported under Resume attempts and Captcha-resolve / Solve below._`);
+    if (postCompletionRecoveryAttempts > 0) {
+      lines.push(`- _Initial-pass counters only — ${postCompletionRecoveryAttempts} later recovery pass${postCompletionRecoveryAttempts === 1 ? '' : 'es'} superseded this result. Final recovered-source funnels are reported under Resume attempts and Captcha-resolve / Solve below._`);
     }
     lines.push(s.relevanceDropped > 0
       ? '- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_'

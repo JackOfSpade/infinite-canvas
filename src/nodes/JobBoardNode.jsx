@@ -545,9 +545,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // failure in that window left a board claiming "N unique jobs" over an
       // empty canvas. Clearing and adding back-to-back (no await between)
       // closes that orphan window: a throw above leaves the old board intact.
-      clearBoardChildren();
+      // Snapshot before asking ReactFlow to delete anything. `deleteElements`
+      // currently yields internally, but undo correctness must not depend on
+      // that implementation detail or a future synchronous deletion path.
       if (newNodes.length > 0) {
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+      }
+      clearBoardChildren();
+      if (newNodes.length > 0) {
         if (addElementsGlobally) addElementsGlobally(id, newNodes, newEdges, 'sibling');
         else { addNodes(newNodes); addEdges(newEdges); }
         requestAnimationFrame(() => fitView({ duration: 600, padding: 0.2 }));

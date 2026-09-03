@@ -25,7 +25,7 @@ import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, re
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
-import { buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
+import { buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -2215,6 +2215,34 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     catch { jobRecoveryMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Diagnostics', new Error('could not inspect recovery sidecars')); }
   }
 
+  // Keep the completion verdict ahead of the long Job Search Pipeline section.
+  // A clipboard-capped FULL report cuts that section positionally, so its
+  // detailed Scoring/Taxonomy subsections cannot be the only proof that a run
+  // completed. This compact reconciliation deliberately carries only counts
+  // and status facts; the full evidence remains in the pipeline below and in
+  // the uncapped saved report.
+  let jobCompletionAssessmentMarkdown = '';
+  if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
+    const jobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
+      ? payload.filterStats.jobBoardStates
+      : (nodes || []).filter(node => node?.type === 'jobboard').map(node => ({
+          id: node.id,
+          hubState: node.data?.hubState,
+          resultCount: node.data?.resultCount,
+          stale: node.data?.stale,
+          staleReason: node.data?.staleReason,
+        }));
+    try {
+      jobCompletionAssessmentMarkdown = buildJobCompletionAssessment(
+        canvasFilePath,
+        currentNodeIds,
+        jobBoardStates,
+        payload.filterStats?.jobBoardStateCount,
+      );
+    }
+    catch { jobCompletionAssessmentMarkdown = diagnosticRenderFailureMarkdown('Job Completion Assessment', new Error('could not reconcile job completion facts')); }
+  }
+
   let marketplacePipelineMarkdown = '';
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
@@ -2283,7 +2311,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

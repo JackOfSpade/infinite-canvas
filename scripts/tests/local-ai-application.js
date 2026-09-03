@@ -469,12 +469,33 @@ export default [
           && parsedInput.qualityChecklist?.version === APPLICATION_QUALITY_CHECKLIST_VERSION
           && JSON.stringify(parsedInput.qualityChecklist.criteria) === JSON.stringify(APPLICATION_QUALITY_CRITERIA),
           'job manifest and input are tied to the exact queued job id');
+        const expectedJobFolder = path.join(jobsRoot, queued.id);
+        const expectedReceiptPath = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
+        const launchValuesMatch = /```json\n([\s\S]*?)\n```/.exec(prompt);
+        const launchValues = launchValuesMatch ? JSON.parse(launchValuesMatch[1]) : null;
         assert(queued.folder.startsWith(`${project.root}${path.sep}.local-ai${path.sep}jobs${path.sep}`)
           && queued.canvasFilePath === project.canvasFilePath
-          && prompt.includes('LOCAL_AI_APPLICATION_ROUTINE.md') && prompt.includes(`WORKING_FOLDER: ${process.cwd()}`)
-          && prompt.includes(`ROOT_LOCATION: ${project.root}`) && prompt.includes(`INPUT_JOBS_ROOT: ${jobsRoot}`)
-          && prompt.includes('OUTPUT_BUNDLE_ROOT: Applied Jobs') && prompt.includes(`JOB_ID: ${queued.id}`),
-        'job is beside the saved canvas and binds a provider-neutral local agent to the exact routine, roots, and job id');
+          && queued.prompt === prompt
+          && prompt.includes('LOCAL_AI_APPLICATION_ROUTINE.md')
+          && JSON.stringify(launchValues) === JSON.stringify({
+            WORKING_FOLDER: process.cwd(),
+            ROOT_LOCATION: project.root,
+            ROUTINE_PATH: path.join(process.cwd(), 'local_ai', 'LOCAL_AI_APPLICATION_ROUTINE.md'),
+            INPUT_JOBS_ROOT: jobsRoot,
+            JOB_FOLDER: expectedJobFolder,
+            RESULT_PATH: path.join(expectedJobFolder, 'result.json'),
+            HANDOFF_HELPER_PATH: path.join(process.cwd(), 'local_ai', 'wait-for-handoff.mjs'),
+            RECEIPT_PATH: expectedReceiptPath,
+            OUTPUT_BUNDLE_ROOT: 'Applied Jobs',
+            OUTPUT_BUNDLE_PATH: path.join(project.root, 'Applied Jobs'),
+            JOB_ID: queued.id,
+            JOB_FORMAT_VERSION: LOCAL_AI_APPLICATION_VERSION,
+            QUALITY_CHECKLIST_VERSION: APPLICATION_QUALITY_CHECKLIST_VERSION,
+          })
+          && prompt.includes('execution handoff, not a request to explain')
+          && prompt.includes('Matching `invalid`, `revision-required`, and legacy `revision-exhausted` feedback are nonterminal')
+          && prompt.includes('Apart from RESULT_PATH, create no files'),
+        'job is beside the saved canvas and gives a provider-neutral local agent an exact, versioned, execution-oriented handoff contract');
         assert(jobListing.includes('Developer') && jobListing.includes('Build reliable systems.')
           && careerData === 'Built reliable systems with measurable outcomes.',
         'Generate materializes the complete job-listing and career context the local coding agent needs');

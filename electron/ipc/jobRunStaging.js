@@ -167,6 +167,11 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   const terminalOutcome = ['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
     ? receipt.terminal.outcome
     : 'unknown';
+  // The initial search funnel can legitimately be smaller than the terminal
+  // score-ready set when a post-search source resume contributes additional
+  // rows. Preserve the terminal count independently rather than implying that
+  // the initial funnel's `kept` value is the completed scoring total.
+  const scoreReadyCount = receiptNumber(receipt?.terminal?.scoreReadyCount, null);
   const sources = {};
   for (const [sourceId, source] of Object.entries(receipt.sources || {}).slice(0, 20)) {
     const safeId = receiptToken(sourceId, 60);
@@ -189,7 +194,11 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     startedAt: receiptNumber(receipt.startedAt, null),
     completedAt: receiptNumber(receipt.completedAt, null),
     updatedAt: receiptNumber(receipt.updatedAt ?? receipt.completedAt, null),
-    terminal: { status: terminalStatus, outcome: terminalOutcome },
+    terminal: {
+      status: terminalStatus,
+      outcome: terminalOutcome,
+      ...(scoreReadyCount != null ? { scoreReadyCount } : {}),
+    },
     ...(funnel ? { funnel } : {}),
     sources,
     stagingStarted: receipt.stagingStarted === true,

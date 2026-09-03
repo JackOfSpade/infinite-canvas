@@ -230,6 +230,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       if (result?.resolved) {
         const items = Array.isArray(result?.items) ? result.items : [];
         const resolvedCount = items.length;
+        // A native source resume can collect many raw rows while only a subset
+        // survives its title/evidence gates. Prefer its explicit raw collection
+        // total for the funnel, while preserving `resolvedCount` for the
+        // score-ready queue merge below. Older resolve handlers only return
+        // score-ready rows, so retain that backwards-compatible fallback.
+        const explicitGatheredCount = result?.gatheredCount;
+        const sourceGatheredCount = explicitGatheredCount != null && Number.isFinite(Number(explicitGatheredCount))
+          ? Math.max(0, Math.floor(Number(explicitGatheredCount)))
+          : resolvedCount;
         const replaceSourceItems = !!result.replaceSourceItems;
         const replaceMatchingItems = !!result.replaceMatchingItems;
         const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
@@ -239,18 +248,26 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         // search, while an incremental recovery really did collect these rows.
         const gatheredCountDelta = (replaceSourceItems || replaceMatchingItems)
           ? 0
-          : resolvedCount;
+          : sourceGatheredCount;
         const nextCount = (prev) => {
           const priorCount = Number.isFinite(prev?.count) && prev.count >= 0
             ? prev.count
             : null;
+          // The backend may emit its terminal progress event before this IPC
+          // promise settles. That event carries this pass's count, not the
+          // card's pre-resume total; always prefer the count captured at click
+          // time so 307 existing + 90 resumed becomes 397, never 90 + 90.
+          const preResolveCount = Number.isFinite(prevForRestore?.count) && prevForRestore.count >= 0
+            ? prevForRestore.count
+            : null;
+          const baseCount = preResolveCount ?? priorCount;
           // A replacement/re-enrichment Solve improves already-collected rows.
           // Keep the card's collection count stable; its score-ready response
           // count is not a new source collection total.
           if (replaceSourceItems || replaceMatchingItems) {
-            return priorCount ?? resolvedCount;
+            return baseCount ?? resolvedCount;
           }
-          return (priorCount ?? 0) + resolvedCount;
+          return (baseCount ?? 0) + sourceGatheredCount;
         };
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
           // Carry the resolve's own warning (if any) so the hub can re-derive

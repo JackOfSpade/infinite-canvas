@@ -239,6 +239,10 @@ export default [
       const scoring = jobsSource.slice(scoringStart, scoringEnd);
       assert(scoring.includes('batch: context.topLevelBatch') && scoring.includes('batchTotal: scoringBatches.length'),
         'every manual scoring attempt, including a split/recovery child, keeps its original top-level batch identity');
+      assert(jobsSource.includes('classifier chunk(s)')
+        && jobsSource.includes('awaiting the global plan to determine whether classifier work is needed')
+        && jobsSource.includes('assigned by the bounded plan — no classifier handoff needed'),
+      'taxonomy progress labels 0/0 as classifier work and distinguishes plan-pending from planner-only completion');
 
       const hints = [];
       let activeClassifications = 0;

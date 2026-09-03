@@ -180,7 +180,7 @@ export default [
         && resume.includes('jobsTelemetry.resolves[sourceId] = {')
         && resume.includes('resumeFunnel: {')
         && resume.includes('providerGathered: Math.max(0, Number(prior.providerGathered ?? prior.gathered ?? prior.count) || 0) + gathered')
-        && resume.includes('count: Math.max(0, Number(prior.count) || 0) + retained')
+        && resume.includes('count: Math.max(0, Number(prior.count) || 0) + gathered')
         && resume.includes('recordJobSourceProgress(resumeProgress, { updatePipeline: false, expectedNodeId: nodeId })')
         && resume.includes('removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean)'),
       'native Indeed resume records the complete funnel, history samples, evidence drops, and a terminal source event without reactivating the gather pipeline');
