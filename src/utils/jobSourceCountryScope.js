@@ -57,7 +57,8 @@ export function classifyJobTargetLocation(target, structuredLocation = null) {
     : (target && typeof target === 'object' ? target : null);
   const raw = clean(typeof target === 'string' ? target : (structured?.display || ''));
 
-  if (structured?.isRemote && !clean(structured.city) && !clean(structured.stateCode) && !clean(structured.region)) {
+  if (structured?.isRemote && !clean(structured.city) && !clean(structured.stateCode)
+      && !clean(structured.subdivision) && !clean(structured.region)) {
     const normalizedCountry = normalizeLocationInput(structured.country);
     return {
       raw,
@@ -76,11 +77,17 @@ export function classifyJobTargetLocation(target, structuredLocation = null) {
   // answers for the same input (notably postal-code forms such as Denver, CO).
   const boardReady = structured ? deriveLocationParam(structured, raw) : raw;
   const normalized = normalizeLocationInput(boardReady || raw);
+  // A US board-ready string deliberately omits its country ("Denver, CO", or a
+  // bare "Denver" for a city-only target), so re-parsing it cannot always
+  // recover one. Fall back to the country the caller already stated rather than
+  // reporting the target as unclassified — source applicability is a country
+  // decision, and an unclassified target wrongly excludes USAJobs and Dice.
+  const stated = normalized.country ? null : normalizeLocationInput(structured?.country);
   return {
     raw,
     boardReady: normalized.boardReady,
-    country: normalized.country || null,
-    countryCode: normalized.countryCode,
+    country: normalized.country || stated?.country || null,
+    countryCode: normalized.countryCode || stated?.countryCode || null,
     scope: normalized.scope,
     city: normalized.city || null,
     subdivision: normalized.subdivisionCode

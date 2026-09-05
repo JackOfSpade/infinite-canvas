@@ -228,6 +228,12 @@ End-to-end, given candidate data + job description:
    discuss. Keep the invitation direct and present-tense, without conditional or
    deferential boilerplate: `I welcome a conversation` is direct; `I would
    welcome a conversation` or `I would welcome a discussion` is not.
+   The check reads two halves of that sentence: the candidate's asset has to
+   be named by a possessive, an authorship clause, or a demonstrative carrying
+   its own descriptor (`my integration work`, `the connector I built`, `that
+   MCP server experience` — never a bare `that work`), and the sentence has to
+   say what the asset does for the target work (`... could support ...`,
+   `... supports ...`, `applying ... to ...`).
 
    **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
    the first sentence must lead with a job-specific thesis, a concrete

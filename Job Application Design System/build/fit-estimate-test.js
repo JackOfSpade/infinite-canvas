@@ -236,7 +236,7 @@ function bulletLines(chars, oneLine, twoLine) {
 /* Estimate the ink span of one document, in baselines. `pick` selects the
    optimistic ('max') or pessimistic ('min') edge of every band. */
 function estimate(main, cost, pick) {
-  var t = 0, notes = [];
+  var t = 0;
   var edge = function (b) { return BAND[b][pick]; };
 
   /* Header block. */
@@ -289,7 +289,7 @@ function estimate(main, cost, pick) {
 
   return { lines: Math.round(t * 100) / 100, roles: roles.length,
            bullets: roles.reduce(function (n, r) { return n + bulletsIn(r).length; }, 0),
-           sections: sections, skillRows: skillRows, notes: notes };
+           sections: sections, skillRows: skillRows };
 }
 
 /* ---- Section 1: capacity, published --------------------------------- */

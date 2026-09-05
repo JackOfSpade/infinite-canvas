@@ -2,6 +2,7 @@ import {
   FileIcon, FileCode, FileImage, FileAudio, FileVideo,
   FileArchive, FileText, FileSpreadsheet, FileJson
 } from 'lucide-react';
+import { isProductImageExtension } from './fileExtensions.js';
 
 /**
  * Encodes a local filesystem path for the custom `local-file://` Electron protocol.
@@ -54,7 +55,9 @@ export function getFileCategoryInfo(filename) {
   const ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
   const badge = ext ? ext.substring(0, 4).toUpperCase() : 'FILE';
   
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'tiff', 'tif', 'avif', 'jxl'].includes(ext)) {
+  // Same list the drop/upload paths accept, so a newly supported image format
+  // cannot render as a generic document card.
+  if (isProductImageExtension(ext)) {
     return { category: FILE_CATEGORIES.IMAGE, label: 'Image', color: 'pink', badge, Icon: FileImage };
   }
   if (['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'cpp', 'rs', 'go', 'php', 'rb', 'kt', 'swift', 'sh'].includes(ext)) {

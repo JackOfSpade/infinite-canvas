@@ -7,6 +7,7 @@ import { generateId } from './idGenerator.js';
 import { safeClone } from './navigationUtils.js';
 import { JOB_COLLECTION_LIMITS_DEFAULT } from './jobCollectionLimits.js';
 import { readLastRemoteResidences } from './jobSearchLocations.js';
+import { TRANSIENT_PROCESSING_HUB_STATES, getJobSearchTransientKeysForSave } from './persistenceTransientState.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that
@@ -112,8 +113,50 @@ export const NODE_FACTORIES = {
   marketplacestatus: createMarketplaceStatusNode,
 };
 
-// Hub states that indicate an active background job — clones should not inherit these.
-const ACTIVE_HUB_STATES = new Set(['queued', 'parsing', 'querying', 'searching', 'scoring', 'analyzing']);
+// A duplicate never owns the original hub's IPC controller, manual-AI run, or
+// source-card children.  Preserve completed result data, but never carry a
+// nonterminal run state into the clone: it would render as busy/paused forever
+// with no operation capable of completing it. `sources-ready` and the retired
+// `scoring-batch` state are intentionally included even though they are not
+// save-sanitized processing states — their recovery controls belong to the
+// original hub and its source cards only.
+const NONTERMINAL_JOB_HUB_STATES = new Set([
+  ...TRANSIENT_PROCESSING_HUB_STATES,
+  'sources-ready',
+  'scoring-batch',
+]);
+const CLONED_JOB_HUB_RUN_KEYS = new Set([
+  'queuedModuleRun',
+  'pendingJobs',
+  'pendingTargetRole',
+  'pendingCareerData',
+  'pendingBatch',
+  'activeTargetRole',
+  'activeJobPreferences',
+  'pendingJobPreferences',
+  'pendingJobPreferencesInterpretation',
+  'pendingJobPreferencePlan',
+  'scrapeWarnings',
+  'errorMessage',
+  'isRateLimit',
+  'rerunOutcome',
+  'rerunNotice',
+]);
+
+function sanitizeJobHubClone(data) {
+  const state = data?.hubState;
+  if (!NONTERMINAL_JOB_HUB_STATES.has(state)) return;
+  const hasCompletedResults = Array.isArray(data.scoredJobs) && data.scoredJobs.length > 0;
+  data.hubState = hasCompletedResults ? 'done' : 'empty';
+  // The save sanitizer's list is state-sensitive (`sources-ready` retains its
+  // recovery buffers), whereas a duplicate must discard those buffers in every
+  // nonterminal state. Use both lists so later additions cannot leave a copied
+  // manual/preference run stranded.
+  for (const key of [...getJobSearchTransientKeysForSave(state), ...CLONED_JOB_HUB_RUN_KEYS]) {
+    delete data[key];
+  }
+  delete data.inputLocked;
+}
 
 /**
  * Create a clean, safe clone of an existing node for duplication.
@@ -153,13 +196,16 @@ export function cloneNode(original, dx = 40, dy = 40) {
     delete clone.deletable;
   }
 
-  // Sanitize transient AI hub states so the clone is not stuck waiting
-  // for an IPC response it didn't initiate.
-  if (clone.data?.hubState) {
-    if (ACTIVE_HUB_STATES.has(clone.data.hubState)) {
-      clone.data.hubState = 'empty';
-    } else if (clone.data.hubState === 'researching') {
+  // Sanitize transient AI hub states so the clone is not stuck waiting for an
+  // IPC response it didn't initiate. Job Search needs its richer run-state
+  // cleanup above; Sell Hub retains its existing draft recovery behavior.
+  if (clone.type === 'jobhub') {
+    sanitizeJobHubClone(clone.data);
+  } else if (clone.data?.hubState) {
+    if (clone.data.hubState === 'researching') {
       clone.data.hubState = 'draft';
+    } else if (TRANSIENT_PROCESSING_HUB_STATES.includes(clone.data.hubState)) {
+      clone.data.hubState = 'empty';
     }
     delete clone.data.queuedModuleRun;
   }
@@ -184,8 +230,10 @@ export function reassignCanvasDataIDs(node) {
   const processCanvasData = (canvasData) => {
     if (!canvasData) return canvasData;
     const newNodes = (canvasData.nodes || []).map(n => {
-      // Pass dx=0, dy=0 to preserve exact relative positioning within the sub-canvas
-      let newNode = cloneNode(n, 0, 0); 
+      // Pass dx=0, dy=0 to preserve exact relative positioning within the sub-canvas.
+      // cloneNode's `selected: true` is for the node the user acted on; inside a
+      // sub-canvas it would make every child of the copy drag and delete together.
+      let newNode = { ...cloneNode(n, 0, 0), selected: false };
       newNode.id = getMappedId(n.id); // remap original ID consistently
 
       if (newNode.type === 'group' && newNode.data?.canvasData) {

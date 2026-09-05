@@ -314,9 +314,19 @@ async function atomicWriteHistory(filePath, content) {
  */
 export async function appendJobsHistory(canvasFilePath, jobs) {
   const filePath = historyPathForCanvas(canvasFilePath);
-  if (!filePath) return { written: 0, pruned: 0, skipped: 'no-canvas-path' };
-  if (!Array.isArray(jobs) || jobs.length === 0) return { written: 0, pruned: 0 };
-  return withHistoryLock(filePath, () => appendJobsHistoryLocked(canvasFilePath, filePath, jobs));
+  const supplied = Array.isArray(jobs) ? jobs : [];
+  // This is the final durable visibility boundary. A normal board never sends
+  // filtered rows, but saved legacy data and direct IPC callers must not turn
+  // a strict-preference rejection into a 60-day "already seen" suppression.
+  const eligible = supplied.filter(job => job?.preferenceAssessment?.status !== 'filtered');
+  const preferenceFilteredSkipped = supplied.length - eligible.length;
+  const withPreferenceSkip = (result) => preferenceFilteredSkipped > 0
+    ? { ...result, preferenceFilteredSkipped }
+    : result;
+  if (!filePath) return withPreferenceSkip({ written: 0, pruned: 0, skipped: 'no-canvas-path' });
+  if (eligible.length === 0) return withPreferenceSkip({ written: 0, pruned: 0 });
+  return withHistoryLock(filePath, () => appendJobsHistoryLocked(canvasFilePath, filePath, eligible))
+    .then(withPreferenceSkip);
 }
 
 async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {

@@ -14,7 +14,7 @@ import { registerLocalAiApplicationHandlers } from './ipc/localAiApplication.js'
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
 import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
-import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
+import { registerAccountsHandlers, schedulePlatformVerification, verifyAllPlatforms } from './ipc/accounts.js';
 import { closeAllPages } from './ipc/browserPool.js';
 import { closeAllAuthWindows, closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
@@ -886,6 +886,11 @@ if (!gotTheLock) {
     createWindow({ mode: 'auto' });
 
     if (process.env.INFINITE_CANVAS_E2E !== '1') {
+      // Mark every platform pending before the delayed worker pool begins. The
+      // renderer can mount and show accurate "Checking connections" state, and
+      // auth-gated actions can await their selected platform instead of reading
+      // an empty/stale cache during this grace period.
+      schedulePlatformVerification();
       // Let the renderer mount and auto-load the workspace before launching the
       // Chrome-based marketplace/account verifier windows. The verifier still runs
       // every normal launch; UI automation disables it to stay isolated and avoid

@@ -109,6 +109,83 @@ export function collapseEventBursts(lines, { minRun = 8, minPrefix = 12 } = {}) 
   return { lines: out, foldedLineCount, collapsedRuns };
 }
 
+// Render-time repeat folding for the main-process log block, CLIPBOARD path
+// only — the same last-resort transform `collapseEventBursts` applies to the
+// event timeline, which the log block never had. A paginating browser source
+// emits one near-identical progress pair per page, so a single deep walk can
+// fill most of the retained log budget with rows that differ only in their
+// counters (a real report retained 54 of 93 log lines as Glassdoor
+// "page N: M new jobs" / "descriptions: M/M expanded" pairs from a run the
+// reader was not asking about, while whole diagnostic sections were dropped to
+// make room). Only INFO/DEBUG lines fold, and only within one repeated shape:
+// WARN and ERROR always pass through verbatim, because a swallowed error is the
+// single most valuable line in this block. The first and last few occurrences
+// of a folded shape survive so the walk's start, end and extent stay readable.
+// Save-to-file never calls this.
+const LOG_LINE = /^\[(\d\d:\d\d:\d\d\.\d\d\d)\] (\w+) +(.*)$/;
+const FOLDABLE_LEVELS = new Set(['INFO', 'DEBUG', 'LOG']);
+const LOG_FOLD_MIN_RUN = 6;
+const LOG_FOLD_KEEP_HEAD = 1;
+const LOG_FOLD_KEEP_TAIL = 2;
+const MAX_LOG_SHAPE_CHARS = 120;
+
+// Digits carry the per-iteration difference (page number, counts, ids); the
+// surrounding words are the shape. Collapsing only digit runs keeps two
+// genuinely different messages apart while merging one message's repeats.
+function logShapeOf(message) {
+  return message.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, MAX_LOG_SHAPE_CHARS);
+}
+
+function isFoldedLogLine(line) {
+  return /^\[\d\d:\d\d:\d\d\.\d\d\d–\d\d:\d\d:\d\d\.\d\d\d\] /.test(line) && line.includes(' repeat(s) elided');
+}
+
+export function collapseLogRepeats(lines, {
+  minRun = LOG_FOLD_MIN_RUN, keepHead = LOG_FOLD_KEEP_HEAD, keepTail = LOG_FOLD_KEEP_TAIL,
+} = {}) {
+  const source = Array.isArray(lines) ? lines : [];
+  const shapes = new Map(); // shape -> indexes, in order
+  for (let i = 0; i < source.length; i++) {
+    const line = typeof source[i] === 'string' ? source[i] : String(source[i] ?? '');
+    if (isFoldedLogLine(line)) continue;
+    const match = LOG_LINE.exec(line);
+    if (!match) continue;
+    const [, , level, message] = match;
+    if (!FOLDABLE_LEVELS.has(level.toUpperCase())) continue;
+    const key = `${level.toUpperCase()}|${logShapeOf(message)}`;
+    const bucket = shapes.get(key) || [];
+    bucket.push(i);
+    shapes.set(key, bucket);
+  }
+
+  const elided = new Map(); // index of the first elided line -> summary line
+  const dropped = new Set();
+  let foldedLineCount = 0;
+  let collapsedShapes = 0;
+  for (const [key, indexes] of shapes) {
+    if (indexes.length < minRun) continue;
+    const middle = indexes.slice(keepHead, indexes.length - keepTail);
+    if (middle.length < minRun - keepHead - keepTail || middle.length === 0) continue;
+    const firstTs = LOG_LINE.exec(String(source[middle[0]]))?.[1] || '';
+    const lastTs = LOG_LINE.exec(String(source[middle.at(-1)]))?.[1] || '';
+    const [level, shape] = [key.slice(0, key.indexOf('|')), key.slice(key.indexOf('|') + 1)];
+    // Observation only, and it names the shape it stands for so the elision can
+    // never be mistaken for a gap in the run itself.
+    elided.set(middle[0], `[${firstTs}–${lastTs}] ${level} ×${middle.length} repeat(s) elided — ${shape}`);
+    for (const index of middle) dropped.add(index);
+    foldedLineCount += middle.length;
+    collapsedShapes++;
+  }
+  if (collapsedShapes === 0) return { lines: source, foldedLineCount: 0, collapsedShapes: 0 };
+
+  const out = [];
+  for (let i = 0; i < source.length; i++) {
+    if (elided.has(i)) out.push(elided.get(i));
+    if (!dropped.has(i)) out.push(source[i]);
+  }
+  return { lines: out, foldedLineCount, collapsedShapes };
+}
+
 export function buildMainProcessLogsMarkdown(lines) {
   if (!Array.isArray(lines) || lines.length === 0) return '';
   return `
@@ -148,7 +225,14 @@ function truncateBaseForClipboard(baseMarkdown, room) {
   const headings = [...baseMarkdown.matchAll(/^## (.+)$/gm)].map((m) => ({ text: m[1], index: m.index }));
 
   const note = '\n\n> ⚠️ Report content after this point was omitted by the clipboard cap. The recent logs and event timeline continue below; use "Save to file" for every uncapped currently retained section.\n';
-  const contentRoom = Math.max(0, room - note.length);
+  // The base carries fenced blocks (the application diagnostics embed json/html
+  // samples). A cut landing INSIDE one leaves the fence unclosed, so the
+  // omission note, the logs heading and the whole retained tail render as code
+  // — the report then looks intact while its own truncation marker is invisible.
+  // Reserve room for a closer up front so balancing one can never push the
+  // output past the cap.
+  const FENCE_CLOSER = '\n```\n';
+  const contentRoom = Math.max(0, room - note.length - FENCE_CLOSER.length);
   if (contentRoom === 0) {
     return { text: note.slice(0, room), droppedSections: headings.map((h) => h.text), partialSection: null };
   }
@@ -184,34 +268,63 @@ function truncateBaseForClipboard(baseMarkdown, room) {
     .map((m) => m[1].trim())
     .filter((name) => !droppedSections.includes(name));
 
-  return { text: candidate.slice(0, cut).trimEnd() + note, droppedSections, partialSection, droppedSubsections };
+  const retained = candidate.slice(0, cut).trimEnd();
+  const unclosedFence = (retained.match(/^ {0,3}```/gm) || []).length % 2 === 1;
+  return {
+    text: retained + (unclosedFence ? FENCE_CLOSER : '') + note,
+    droppedSections,
+    partialSection,
+    droppedSubsections,
+  };
 }
 
 // The filter summary is assembled before the clipboard cap runs. When a FULL
 // report subsequently sheds old events, its otherwise-accurate selection
 // summary ("event log kept all N line(s)") would describe data that is no
 // longer present in the copied markdown. Make that distinction explicit in the
-// final artifact: FULL selected every event, while the clipboard retained only
-// the newest subset.
-function clarifyCappedFilterSummary(baseMarkdown, retainedEvents, totalEvents) {
-  if (retainedEvents >= totalEvents) return baseMarkdown;
+// final artifact: FULL selected every raw event, while the clipboard retained
+// a post-fold set of rendered lines and may then have trimmed its oldest lines.
+function clarifyCappedFilterSummary(baseMarkdown, retainedEvents, renderedEvents, rawEvents, fold = null) {
+  // The clipboard can first fold a raw structural burst and only then trim
+  // rendered lines. Comparing the post-fold line count directly with the raw
+  // count made a fully retained folded timeline read as if events were lost
+  // (for example, "retained 145 of 206" when 62 raw removals were represented
+  // by one summary and all 145 rendered lines survived). Keep the units honest:
+  // raw captured lines are the selection total; rendered lines are the cap's
+  // retention unit.
+  if (retainedEvents >= renderedEvents && !(fold?.foldedLineCount > 0)) return baseMarkdown;
   return baseMarkdown.replace(
     /event log kept all (\d+) line\(s\)/g,
-    (_, selected) =>
-      `event log selected all ${selected} line(s) before clipboard capping; ` +
-      `clipboard retained ${retainedEvents} of ${totalEvents} event line(s)`
+    (_, selected) => {
+      const selection = `event log selected all ${selected} line(s) before clipboard capping`;
+      if (fold?.foldedLineCount > 0) {
+        return `${selection}; clipboard retained ${retainedEvents} of ${renderedEvents} rendered event line(s) `
+          + `after folding ${fold.foldedLineCount} repeated line(s) from ${rawEvents} captured line(s) `
+          + `into ${fold.collapsedRuns} run line(s)`;
+      }
+      return `${selection}; clipboard retained ${retainedEvents} of ${renderedEvents} event line(s)`;
+    }
   );
 }
 
 // `totalEvents` here is the post-fold line count, so the banner must also state
 // how many captured lines those folds stand for — otherwise the retained/total
 // ratio silently describes a smaller timeline than the one that was recorded.
-function clipboardRetentionDetail(retainedEvents, totalEvents, retainedLogs, totalLogs, fold = null) {
+function clipboardRetentionDetail(retainedEvents, totalEvents, retainedLogs, totalLogs, fold = null, logFold = null) {
   const detail = `retained ${retainedEvents} of ${totalEvents} most-recent event line(s) and ` +
     `${retainedLogs} of ${totalLogs} most-recent main-process log line(s)`;
-  if (!fold || !(fold.foldedLineCount > 0)) return detail;
-  return `${detail}; ${fold.foldedLineCount} repeated event line(s) from ${fold.rawTotal} captured line(s) ` +
-    `were folded into ${fold.collapsedRuns} run line(s) before capping`;
+  const clauses = [];
+  if (fold?.foldedLineCount > 0) {
+    clauses.push(`${fold.foldedLineCount} repeated event line(s) from ${fold.rawTotal} captured line(s) `
+      + `were folded into ${fold.collapsedRuns} run line(s) before capping`);
+  }
+  // Stated separately from the event fold: the two counts describe different
+  // blocks and one figure covering both would misreport either.
+  if (logFold?.foldedLineCount > 0) {
+    clauses.push(`${logFold.foldedLineCount} repeated main-process log line(s) from ${logFold.rawTotal} captured line(s) `
+      + `were elided into ${logFold.collapsedShapes} summary line(s) before capping`);
+  }
+  return clauses.length ? `${detail}; ${clauses.join('; ')}` : detail;
 }
 
 const MAX_NAMED_DROPPED_SECTIONS = 6;
@@ -264,19 +377,51 @@ function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSectio
   return `${parts.slice(0, -1).join(', ')}, and ${parts.at(-1)}`;
 }
 
+// Both tail blocks are fixed chrome wrapped around `lines.join('\n')`, and every
+// trim below re-measures the block after shedding ONE line. Rebuilding the join
+// (and memmoving a `shift()`) per shed line is quadratic in the retained count —
+// the renderer ships up to a 500KB event buffer (~6,000 lines), which blocked the
+// main process for seconds inside the generate-bug-report-markdown handler. This
+// window keeps the same shed-one-and-re-measure loops but makes each iteration
+// O(1): the joined length is tracked arithmetically and the oldest line is
+// dropped by advancing a start index.
+const EMPTY_EVENTS_FALLBACK = '*(No events recorded)*';
+const LOGS_BLOCK_CHROME = buildMainProcessLogsMarkdown(['']).length;
+const EVENTS_BLOCK_CHROME = buildFencedTextBlock([''], EMPTY_EVENTS_FALLBACK).length;
+const EMPTY_EVENTS_CHARS = buildFencedTextBlock([], EMPTY_EVENTS_FALLBACK).length;
+
+function openTailWindow(lines, chromeChars, emptyChars) {
+  const source = Array.isArray(lines) ? lines : [];
+  // Array.prototype.join renders null/undefined as an empty string, so the
+  // per-line lengths must agree with join — not with String(line).
+  const lengths = source.map((line) => (line == null ? 0 : String(line).length));
+  let start = 0;
+  let joined = lengths.reduce((sum, n) => sum + n, 0) + Math.max(0, source.length - 1);
+  return {
+    get count() { return source.length - start; },
+    get chars() { return start >= source.length ? emptyChars : chromeChars + joined; },
+    dropOldest() {
+      if (start >= source.length) return;
+      joined -= lengths[start] + (source.length - start > 1 ? 1 : 0);
+      start++;
+    },
+    lines() { return source.slice(start); },
+  };
+}
+
 // A "floor" tail: a guaranteed minimum of the MOST-RECENT logs + events, balanced
 // so neither fully crowds out the other. The main-process logs (a bounded 200-line
 // ring buffer holding swallowed-error detail) get up to ~45% of the floor; the
 // rest goes to the most-recent event lines, which reclaim the slack when the logs
 // are short or absent. Returns the trimmed slices (newest-kept) — NOT mutated copies.
 function reserveFloorTail(allLogs, allEvents, floorChars) {
-  const logs = [...allLogs];
-  const events = [...allEvents];
+  const logs = openTailWindow(allLogs, LOGS_BLOCK_CHROME, 0);
+  const events = openTailWindow(allEvents, EVENTS_BLOCK_CHROME, EMPTY_EVENTS_CHARS);
   const logBudget = Math.floor(floorChars * 0.45);
-  while (logs.length > 0 && buildMainProcessLogsMarkdown(logs).length > logBudget) logs.shift();
-  const eventBudget = Math.max(0, floorChars - buildMainProcessLogsMarkdown(logs).length - EVENT_HISTORY_HEADING.length);
-  while (events.length > 0 && buildFencedTextBlock(events, '*(No events recorded)*').length > eventBudget) events.shift();
-  return { logs, events };
+  while (logs.count > 0 && logs.chars > logBudget) logs.dropOldest();
+  const eventBudget = Math.max(0, floorChars - logs.chars - EVENT_HISTORY_HEADING.length);
+  while (events.count > 0 && events.chars > eventBudget) events.dropOldest();
+  return { logs: logs.lines(), events: events.lines() };
 }
 
 // The static-section detail expands the banner, which in turn shrinks the
@@ -309,20 +454,26 @@ function buildNamedStaticTruncation(baseMarkdown, tailMarkdown, maxChars, buildB
 
 export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars) {
   const rawEvents = Array.isArray(eventLines) ? eventLines : [];
-  const allLogs = Array.isArray(mainProcessLogLines) ? mainProcessLogLines : [];
+  const rawLogs = Array.isArray(mainProcessLogLines) ? mainProcessLogLines : [];
 
   const tailOf = (logs, events) =>
-    `${buildMainProcessLogsMarkdown(logs)}${EVENT_HISTORY_HEADING}${buildFencedTextBlock(events, '*(No events recorded)*')}`;
+    `${buildMainProcessLogsMarkdown(logs)}${EVENT_HISTORY_HEADING}${buildFencedTextBlock(events, EMPTY_EVENTS_FALLBACK)}`;
 
   // Fits with the full base + full tail: nothing to do. A report that fits keeps
   // every id verbatim — burst folding is strictly a last-resort transform.
-  const fullTail = tailOf(allLogs, rawEvents);
+  const fullTail = tailOf(rawLogs, rawEvents);
   if (baseMarkdown.length + fullTail.length <= maxChars) {
     return { markdown: baseMarkdown + fullTail, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
   }
 
   const { lines: allEvents, foldedLineCount, collapsedRuns } = collapseEventBursts(rawEvents);
   const foldDetail = { foldedLineCount, collapsedRuns, rawTotal: rawEvents.length };
+  // Same last-resort treatment for the log block. A deep paginating walk emits
+  // one near-identical progress line per page, so without this the log budget
+  // is spent restating a single source's page counter while the oldest, most
+  // structurally different lines are the ones shed.
+  const { lines: allLogs, foldedLineCount: foldedLogLineCount, collapsedShapes } = collapseLogRepeats(rawLogs);
+  const logFoldDetail = { foldedLineCount: foldedLogLineCount, collapsedShapes, rawTotal: rawLogs.length };
 
   const TAIL_FLOOR = Math.min(14_000, Math.floor(maxChars * 0.3));
   const floor = reserveFloorTail(allLogs, allEvents, TAIL_FLOOR);
@@ -332,31 +483,32 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   // oldest logs, only as much as needed to fit. base+floor fitting guarantees this
   // never has to dip below the floor.
   if (baseMarkdown.length + tailOf(floor.logs, floor.events).length <= maxChars) {
-    let events = [...allEvents];
-    let logs = [...allLogs];
+    const events = openTailWindow(allEvents, EVENTS_BLOCK_CHROME, EMPTY_EVENTS_CHARS);
+    const logs = openTailWindow(allLogs, LOGS_BLOCK_CHROME, 0);
+    const tailChars = () => logs.chars + EVENT_HISTORY_HEADING.length + events.chars;
     let trimmedEventCount = 0;
     let trimmedLogCount = 0;
-    while (baseMarkdown.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
-      events.shift();
+    while (baseMarkdown.length + tailChars() > maxChars && events.count > floor.events.length) {
+      events.dropOldest();
       trimmedEventCount++;
     }
-    while (baseMarkdown.length + tailOf(logs, events).length > maxChars && logs.length > floor.logs.length) {
-      logs.shift();
+    while (baseMarkdown.length + tailChars() > maxChars && logs.count > floor.logs.length) {
+      logs.dropOldest();
       trimmedLogCount++;
     }
     // Replacing the pre-cap FULL summary adds a little text. Continue trimming
     // against that final wording so an accurate explanation never pushes the
     // copied report over its size limit.
-    let cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, rawEvents.length);
-    while (cappedBase.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
-      events.shift();
+    let cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
+    while (cappedBase.length + tailChars() > maxChars && events.count > floor.events.length) {
+      events.dropOldest();
       trimmedEventCount++;
-      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, rawEvents.length);
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
     }
-    while (cappedBase.length + tailOf(logs, events).length > maxChars && logs.length > floor.logs.length) {
-      logs.shift();
+    while (cappedBase.length + tailChars() > maxChars && logs.count > floor.logs.length) {
+      logs.dropOldest();
       trimmedLogCount++;
-      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, rawEvents.length);
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
     }
 
     const buildNotice = (droppedSections = [], partialSection = null, droppedSubsections = []) => {
@@ -368,21 +520,22 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       // Folding alone can bring the report under the cap, so the drop clause is
       // omitted rather than left dangling when nothing was actually shed.
       const dropped = parts.length > 0 ? `; dropped ${parts.join(' and ')}` : '';
-      return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.length, allEvents.length, logs.length, allLogs.length, foldDetail)}${dropped}. Use "Save to file" for the full uncapped currently retained report.\n\n`;
+      return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.count, allEvents.length, logs.count, allLogs.length, foldDetail, logFoldDetail)}${dropped}. Use "Save to file" for the full uncapped currently retained report.\n\n`;
     };
     let notice = buildNotice();
-    while (notice.length + cappedBase.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
-      events.shift();
+    while (notice.length + cappedBase.length + tailChars() > maxChars && events.count > floor.events.length) {
+      events.dropOldest();
       trimmedEventCount++;
-      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, rawEvents.length);
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.count, allEvents.length, rawEvents.length, foldDetail);
       notice = buildNotice();
     }
-    while (notice.length + cappedBase.length + tailOf(logs, events).length > maxChars && logs.length > floor.logs.length) {
-      logs.shift();
+    while (notice.length + cappedBase.length + tailChars() > maxChars && logs.count > floor.logs.length) {
+      logs.dropOldest();
       trimmedLogCount++;
       notice = buildNotice();
     }
-    let out = notice + cappedBase + tailOf(logs, events);
+    const retainedTail = tailOf(logs.lines(), events.lines());
+    let out = notice + cappedBase + retainedTail;
     if (out.length > maxChars) {
       // The explanatory banner itself can be larger than the slack above the
       // tail floor. Preserve its exact retention counts by shedding the same
@@ -391,17 +544,17 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       // removed. The helper stabilizes the mutually-dependent notice and cut
       // so a section exposed only by the smaller named-banner room is not
       // silently missing from the final notice.
-      const namedCut = buildNamedStaticTruncation(cappedBase, tailOf(logs, events), maxChars, buildNotice);
+      const namedCut = buildNamedStaticTruncation(cappedBase, retainedTail, maxChars, buildNotice);
       notice = namedCut.banner;
       const cutBase = namedCut.cutBase;
-      out = notice + cutBase + tailOf(logs, events);
+      out = notice + cutBase + retainedTail;
       return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };
     }
     // Burst folding alone can bring the report under the cap. Nothing was
     // dropped in that case, but the markdown is still transformed and carries a
     // truncation banner — reporting truncated:false would have the renderer
     // toast claim a plain, complete copy.
-    return { markdown: out, truncated: trimmedEventCount > 0 || trimmedLogCount > 0 || foldedLineCount > 0, trimmedEventCount, trimmedLogCount, hardTruncated: false };
+    return { markdown: out, truncated: trimmedEventCount > 0 || trimmedLogCount > 0 || foldedLineCount > 0 || foldedLogLineCount > 0, trimmedEventCount, trimmedLogCount, hardTruncated: false };
   }
 
   // The static base ALONE (plus even the floor tail) blows the budget. Reserve
@@ -419,8 +572,18 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   // meaningful prefix (the hard-cap assertions in job-diagnostics.js depend on
   // that half — an unbounded tail starves the base and five of them fail).
   const TAIL_CEILING = Math.floor(maxChars * 0.5);
-  const grown = reserveFloorTail(allLogs, allEvents, Math.max(TAIL_FLOOR, TAIL_CEILING));
   const floorTailLength = tailOf(floor.logs, floor.events).length;
+  // Grow PROPORTIONALLY to the overflow, not as a cliff. Jumping straight to
+  // the ceiling meant a base one char past the floor path immediately forfeited
+  // (ceiling − floor) chars of static diagnostics to buy tail lines it did not
+  // need — the report that motivated this lost six whole sections and a
+  // mid-section cut through the job pipeline audit that way. A base that
+  // overflows by more than the growth room is being cut deeply regardless, so
+  // the original "spend the leftover on the tail" reasoning still applies there
+  // and the ceiling is reached exactly as before.
+  const overflow = Math.max(0, baseMarkdown.length + floorTailLength - maxChars);
+  const tailBudget = TAIL_FLOOR + Math.min(Math.max(0, TAIL_CEILING - TAIL_FLOOR), overflow);
+  const grown = reserveFloorTail(allLogs, allEvents, Math.max(TAIL_FLOOR, tailBudget));
   const useGrown = tailOf(grown.logs, grown.events).length >= floorTailLength;
   const tail = useGrown ? grown : floor;
 
@@ -428,9 +591,9 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   const trimmedEventCount = allEvents.length - tail.events.length;
   const trimmedLogCount = allLogs.length - tail.logs.length;
   const omissionVerb = trimmedEventCount > 0 || trimmedLogCount > 0 ? 'were' : 'was';
-  const cappedBase = clarifyCappedFilterSummary(baseMarkdown, tail.events.length, rawEvents.length);
+  const cappedBase = clarifyCappedFilterSummary(baseMarkdown, tail.events.length, allEvents.length, rawEvents.length, foldDetail);
   const buildBanner = (droppedSections = [], partialSection = null, droppedSubsections = []) =>
-    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection, droppedSubsections)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(tail.events.length, allEvents.length, tail.logs.length, allLogs.length, foldDetail)}). Use "Save to file" for the full uncapped currently retained report.\n\n`;
+    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection, droppedSubsections)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(tail.events.length, allEvents.length, tail.logs.length, allLogs.length, foldDetail, logFoldDetail)}). Use "Save to file" for the full uncapped currently retained report.\n\n`;
 
   const { banner, cutBase } = buildNamedStaticTruncation(cappedBase, tailMd, maxChars, buildBanner);
   let out = banner + cutBase + tailMd;

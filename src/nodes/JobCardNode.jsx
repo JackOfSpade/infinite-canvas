@@ -351,7 +351,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} raw=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} target=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
     if (!url || !window.electronAPI?.openExternal) {
       EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`);
-      addToast('No safe job-listing link is available for this card.', 'error');
+      addToast({
+        title: 'Cannot Open Listing',
+        description: 'No safe job-listing link is available for this card.',
+        type: 'error',
+      });
       return;
     }
     try {
@@ -365,7 +369,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     } catch (error) {
       const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
       EventLogger.log(`[JobCard] external-link failed id=${id} target=${diagnostic.targetRoute} reason=${reason}`);
-      addToast('Could not open the job listing. Please try again.', 'error');
+      addToast({
+        title: 'Cannot Open Listing',
+        description: 'Could not open the job listing. Please try again.',
+        type: 'error',
+      });
     }
   }, [id, data, addToast]);
 
@@ -375,7 +383,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // Same handleSafe contract as openJobUrl: the invoke resolves even on
     // failure, so a resolved { success: false } must be surfaced, not ignored.
     const result = await window.electronAPI.openExternal(url);
-    if (!result?.success) addToast('Could not open that link. Please try again.', 'error');
+    if (!result?.success) {
+      addToast({
+        title: 'Cannot Open Link',
+        description: 'Could not open that link. Please try again.',
+        type: 'error',
+      });
+    }
   }, [addToast]);
 
   // Dismiss = delete this card, then re-derive the tree view so the column

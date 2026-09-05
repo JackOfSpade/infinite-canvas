@@ -29,6 +29,20 @@ export function validateJobBoardTaxonomy(taxonomy, jobCount) {
 }
 
 /**
+ * A manual-AI dialog cancellation aborts the owning IPC task and therefore
+ * arrives at the renderer through the same unsuccessful envelope as a real
+ * provider/taxonomy failure. Keep that intentional control-flow outcome out of
+ * failure logs and toasts while still treating every other unsuccessful
+ * response as actionable.
+ */
+export function isJobBoardUserCancellation(value) {
+  if (!value) return false;
+  if (value?.cancelled === true || value?.errorCode === 'JOB_TASK_CANCELLED') return true;
+  const message = typeof value === 'string' ? value : value?.error || value?.message;
+  return message === 'Manual AI job cancelled';
+}
+
+/**
  * Pre-taxonomy boards from the short-lived flat-card implementation are not a
  * trustworthy completed result.  Keep locked boards as historical snapshots,
  * but prompt every editable legacy board to successfully re-combine instead of

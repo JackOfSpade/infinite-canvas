@@ -772,7 +772,14 @@ export const SWAPPA_SOLD_EXTRACTOR = `
   }
 
   // Step 1 — already on the sales fragment (test / direct-nav)? Parse it directly.
-  if (document.querySelector('a[href*="/listing/view/"]')) {
+  // An ACTIVE /listings/<slug> page — which a run can land on via the Solve
+  // window or a single-product redirect — also carries a[href*="/listing/view/"]
+  // cards, so a bare anchor check would emit asking prices tagged swappa-sold.
+  // Require the sales path or Swappa's own "Sold" anchor titles before treating
+  // this document as a sales table.
+  var onSalesFragment = false;
+  try { onSalesFragment = /\\/xui\\/product\\/[a-z0-9-]+\\/sales/i.test(location.pathname || ''); } catch (e) {}
+  if (onSalesFragment || document.querySelector('a[href*="/listing/view/"][title*="Sold" i]')) {
     var slugNow = '';
     try { var m = (location.pathname || '').match(/\\/(?:xui\\/product|prices|listings)\\/([a-z0-9-]+)/i); slugNow = m ? m[1] : ''; } catch (e) {}
     var directSales = parseSales(document, modelNameFromSlug(slugNow));

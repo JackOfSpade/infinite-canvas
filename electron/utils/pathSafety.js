@@ -145,12 +145,25 @@ export async function isExistingFileAsync(filePath) {
 // would break normal use) — it can't be exhaustive, but it covers the
 // highest-value credential/config targets an attacker would go for.
 const SENSITIVE_PATH_PATTERNS = [
-  '/etc/', '/var/', '/proc/', '/sys/', '/dev/',
-  '/.ssh/', '/.aws/', '/.config/', '/.env',
+  '/.ssh/', '/.aws/', '/.config/',
   '/.netrc', '/.npmrc', '/.docker/', '/.bash_history', '/.zsh_history',
   '/.gnupg/', '/keychains/', '/library/keychains/',
   'ntuser.dat', 'system32', 'windows/debug',
 ];
+
+// Unix system roots are sensitive only at the start of a path: `/etc/passwd`
+// is a system file, `~/Documents/etc/receipt.pdf` and `~/dev/shot.png` are
+// ordinary attachments a substring match used to reject.
+const SENSITIVE_ROOT_PATTERNS = ['/etc/', '/var/', '/proc/', '/sys/', '/dev/'];
+
+// Callers pass realpath output, and macOS firmlinks resolve /etc → /private/etc
+// and /var → /private/var, so the anchor tolerates a leading `/private`. The
+// optional drive segment keeps `C:\var` anchored too.
+const SENSITIVE_ROOT_PREFIX_RE = /^(?:\/[a-z]:)?(?:\/private(?=\/))?/u;
+
+// `.env`/`.env.local` are credential stores; `.environment-shots/` is not, so
+// match the whole path component rather than a bare prefix.
+const SENSITIVE_DOTENV_PATTERNS = ['/.env/', '/.env.'];
 
 // These collection roots are dangerous mutation targets themselves, but their
 // descendants are legitimate user storage (shared attachments and mounted
@@ -171,6 +184,9 @@ export function isSensitivePath(resolvedPath) {
   const isWindowsRoot = /^[a-zA-Z]:[\\/]?$/u.test(rawPath);
   if (isUnixRoot || isWindowsRoot) return true;
   if (SENSITIVE_EXACT_PATHS.has(exactPath)) return true;
+  const rootAnchoredPath = verificationPath.replace(SENSITIVE_ROOT_PREFIX_RE, '');
+  if (SENSITIVE_ROOT_PATTERNS.some(p => rootAnchoredPath.startsWith(p))) return true;
+  if (SENSITIVE_DOTENV_PATTERNS.some(p => verificationPath.includes(p))) return true;
   return SENSITIVE_PATH_PATTERNS.some(p => verificationPath.includes(p));
 }
 

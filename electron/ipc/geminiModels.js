@@ -305,8 +305,13 @@ export function classifyGeminiFailure(status, message = '') {
   // model-local incompatibility, not a request failure: cool it down and keep
   // the cascade moving instead of burning the same RPD on every call.
   if (code === 400 && /thinking(?:config|[ _-]?(?:level|budget))/.test(text)) return 'thinking-config';
-  if ([500, 502, 503, 504].includes(code) || /\b(500|502|503|504)\b/.test(text)) return 'server';
+  if ([500, 502, 503, 504].includes(code)) return 'server';
+  // The truncation rule outranks the text-only 5xx match: an output-cap failure
+  // carries no status and embeds raw token counts, so "wrote 503 visible tokens"
+  // would otherwise read as provider overload and hide the one verdict that means
+  // "raise TASK_MAX_TOKENS". Same digit-run trap the \b429\b match avoids.
   if (text.includes('truncat') || text.includes('max_tokens') || text.includes('token output cap')) return 'truncation';
+  if (/\b(500|502|503|504)\b/.test(text)) return 'server';
   return 'other';
 }
 

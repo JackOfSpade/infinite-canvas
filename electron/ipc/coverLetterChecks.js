@@ -892,7 +892,34 @@ export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
   for (const employer of (Array.isArray(employerNames) ? employerNames : [])
     .map(text).filter(Boolean).sort((left, right) => right.length - left.length)) {
     const employerReference = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(employer)}(?![\\p{L}\\p{N}])`, 'iu');
-    const relationship = new RegExp(`(?:\\b(?:as|while\\s+working\\s+as)\\s+(?:an?\\s+)?[\\p{L}'’-]+(?:\\s+[\\p{L}'’-]+){0,5}\\s+(?:at|with)\\s+${escapeRegExp(employer)}\\b|\\bmy(?:\\s+[\\p{L}'’-]+){0,5}\\s+(?:role|work|position|tenure)\\b[^.!?]{0,70}\\b(?:at|with)\\s+${escapeRegExp(employer)}\\b|\\bI\\s+(?:worked|served|was\\s+employed)\\b[^.!?]{0,70}\\b(?:at|with)\\s+${escapeRegExp(employer)}\\b)`, 'iu');
+    // The contract asks only that the candidate's role or relationship appear
+    // in the sentence that first names the employer. Requiring `at`/`with` and
+    // a fixed left-to-right order rejected sentences that plainly satisfy it —
+    // "as a data engineer for X", "At X I served as…", "X hired me as…" — so
+    // the preposition class includes `for`, an employer-first branch mirrors
+    // each relationship frame, and the employer-as-subject frame is accepted.
+    const name = escapeRegExp(employer);
+    const preposition = '(?:at|with|for)';
+    const roleNoun = '(?:role|work|position|tenure)';
+    const relationship = new RegExp(
+      `(?:\\b(?:as|while\\s+working\\s+as)\\s+(?:an?\\s+|the\\s+)?[\\p{L}'’-]+(?:\\s+[\\p{L}'’-]+){0,5}\\s+${preposition}\\s+${name}\\b`
+      + `|\\bmy(?:\\s+[\\p{L}'’-]+){0,5}\\s+${roleNoun}\\b[^.!?]{0,70}\\b${preposition}\\s+${name}\\b`
+      + `|\\bI\\s+(?:worked|served|was\\s+employed)\\b[^.!?]{0,70}\\b${preposition}\\s+${name}\\b`
+      // Employer-first orderings of the same three frames. Each one still has
+      // to assert a ROLE: the bare copulas ("…and I am glad it is") and the
+      // conjunction "as" ("…as traffic grew") are among the commonest words in
+      // English, and admitting them made this branch fire on any first-person
+      // aside within 70 characters of the employer's name.
+      + `|\\b${preposition}\\s+${name}\\b[^.!?]{0,70}\\bI\\s+(?:worked|served|was\\s+employed`
+      + `|(?:was|am)\\s+(?:an?|the)\\s+[\\p{L}'’-]+|held\\s+(?:an?|the)\\s+(?:[\\p{L}'’-]+\\s+){0,3}${roleNoun})\\b`
+      + `|\\b${preposition}\\s+${name}\\b[^.!?]{0,70}\\bmy(?:\\s+[\\p{L}'’-]+){0,5}\\s+${roleNoun}\\b`
+      + `|\\b${preposition}\\s+${name}\\b[^.!?]{0,70}\\b(?:as|while\\s+working\\s+as)\\s+(?:an?|the)\\s+[\\p{L}'’-]+`
+      // Employer as the subject that established the relationship. Only
+      // unambiguous employment verbs — "brought me to this field" is not one.
+      + `|\\b${name}\\b[^.!?]{0,70}\\b(?:hired|employed|contracted)\\s+me\\b`
+      + ')',
+      'iu',
+    );
     let first = null;
     for (let index = 0; index < passages.length && !first; index++) {
       const sentence = sentences(passages[index]).find(item => employerReference.test(text(item)));
@@ -1080,7 +1107,7 @@ export function checkAnchorRelevance(paragraphs = [], jobText = '', researchText
   // A tour spread one name per paragraph is still a tour, so the letter-wide
   // total is checked even when no single paragraph exceeded its anchor.
   if (letterWide.length > MAX_LETTER_OFF_POSTING_TOOLS) {
-    observations.push(`letter names ${letterWide.length} stack tools the posting and research never mention (${boundedQuotedList(letterWide)}); the resume carries the stack — keep at most one off-posting tool name in the whole letter`);
+    observations.push(`letter names ${letterWide.length} stack tools the posting and research never mention (${boundedQuotedList(letterWide)}); the resume carries the stack — keep at most ${MAX_LETTER_OFF_POSTING_TOOLS} off-posting tool names in the whole letter`);
   }
   return observationResult('anchor-relevance', observations, MAX_ANCHOR_RELEVANCE_OBSERVATIONS,
     `${letterWide.length} off-posting stack tool name(s) across ${list.length} paragraph(s)`);
@@ -1514,16 +1541,99 @@ const SELF_DIRECTED_CONVERSATION_CLOSE = /\bI\s+(?:want|hope|plan|aim|intend)\s+
 const LOOK_FORWARD_CONVERSATION_CLOSE = /\bI\s+look\s+forward\s+to\s+(?:talking|speaking|discussing|connecting|learning|exploring)\b/iu;
 const DIRECT_CONVERSATION_CLOSE = /\bI\s+welcome\s+(?:(?:(?:the\s+)?(?:chance|opportunity))\s+to\s+(?:talk|speak|discuss|connect|share|explore)|(?:a\s+)?(?:conversation|discussion)\b)/iu;
 const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b[^.!?]{0,180}\b(?:or|versus)\b/iu;
-const CANDIDATE_CONTRIBUTION_CLOSE = /\bmy\s+(?:(?:[\p{L}’'-]+\s+){0,3})(?:experience|skills?|work|background|perspective|practice)\b[^.!?]{0,180}\b(?:can|could|would|will)\s+(?:support|contribute(?:\s+to)?|help|advance|strengthen|improve|build|deliver|apply)\b/iu;
-
 // A future-facing discussion can be an effective close when it makes the
-// candidate's contribution concrete. The positive guard is deliberately
-// modest: it recognizes an explicit candidate asset connected to an action
-// that advances the employer's work, rather than trying to infer relevance
-// from every sentence containing a conversation verb.
+// candidate's contribution concrete. Two independent conditions, because the
+// contract (STYLE.md §11.2, SKILL.md, and the routine, which all say to apply
+// this "as a register rule, not as a template for the closing sentence") asks
+// for a connection, not a word order:
+//
+//   1. the closing names an asset the candidate demonstrably owns, and
+//   2. it points that asset at the employer's work.
+//
+// Requiring one fused `my … <modal> <verb>` pattern made the check a template
+// after all: “applying my MCP server experience to the agent integrations this
+// role owns” and “the connector work I built would fit the systems this team
+// runs” are exactly the closings the guidance asks for, and both were rejected.
+// Ownership still has to be explicit — a bare demonstrative (“that work”)
+// leans on an earlier paragraph instead of standing up in the invitation.
+const CANDIDATE_ASSET_NOUNS = 'experience|expertise|skills?|work|background|perspective|practice|training';
+const CANDIDATE_ARTIFACT_NOUNS = 'server|service|tool|tooling|pipeline|pipelines|integration|integrations'
+  + '|connector|connectors|system|systems|harness|platform|prototype|library|scraper|model';
+// Three ways to mark an asset as the candidate's, in decreasing explicitness:
+// a possessive; an authorship clause; or a demonstrative that carries its own
+// descriptor. The third exists because “that MCP server experience” does name
+// the asset — it is a bare demonstrative (“that work”) that names nothing and
+// leans entirely on an earlier paragraph, so the descriptor is required.
+// Demonstratives only, never “the”: “the engineering practice this team uses”
+// is employer-facing, and accepting it would make the guard meaningless.
+// The demonstrative branch is also restricted to ASSET nouns — artifact nouns
+// (systems, pipelines, integrations) are usually the EMPLOYER's in a closing.
+// The descriptor slot counts words, so it needs a floor on what counts as a
+// descriptor: "that kind of work" leans on an earlier paragraph exactly as much
+// as "that work" does. The floor is on the HEAD modifier — the token attached
+// to the asset noun — not on the first token, because "that broader kind of
+// work" is just as vacuous while "that same-day pipeline experience" is not.
+// A light-noun frame always puts `of` or a light noun in the head position.
+const DESCRIPTOR_FILLERS = 'of|kind|kinds|sort|sorts|type|types|phase|part|parts|area|areas|line|piece'
+  + '|bit|amount|next|same|other|others|more|much|such|that|this';
+const CANDIDATE_ASSET_CLOSE = new RegExp(
+  `\\bmy\\s+(?:[\\p{L}’'-]+\\s+){0,3}(?:${CANDIDATE_ASSET_NOUNS})\\b`
+  + `|\\bthe\\s+(?:[\\p{L}’'-]+\\s+){0,3}(?:${CANDIDATE_ASSET_NOUNS}|${CANDIDATE_ARTIFACT_NOUNS})\\s+I\\s+`
+  + '(?:built|wrote|designed|created|developed|shipped|led|own|owned|maintained|architected)\\b'
+  + `|\\b(?:that|this|those|these)\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?!(?:${DESCRIPTOR_FILLERS})\\s)[\\p{L}’'-]+\\s+(?:${CANDIDATE_ASSET_NOUNS})\\b`,
+  'iu',
+);
+// The present-tense forms are not optional extras: the routine and SKILL.md
+// both tell the writer to keep this invitation in direct present tense, and a
+// modal-only guard measurably rejected “…how my pipeline experience supports
+// your ingestion backlog” — the sentence the contract asks for.
+const CONTRIBUTION_VERBS = 'support|contribute(?:\\s+to)?|help|advance|strengthen|improve|build|deliver'
+  + '|apply|serve|shorten|extend|scale|accelerate|fit';
+const CONTRIBUTION_VERBS_PRESENT = 'supports|contributes(?:\\s+to)?|helps|advances|strengthens|improves|builds'
+  + '|delivers|applies|serves|shortens|extends|scales|accelerates|fits';
+const CANDIDATE_CONTRIBUTION_ACTION = new RegExp(
+  `\\b(?:can|could|would|will|might)\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?:${CONTRIBUTION_VERBS})\\b`
+  + `|\\b(?:${CONTRIBUTION_VERBS_PRESENT})\\b`
+  + '|\\b(?:apply|applying|bring|bringing|put|putting|use|using|contribute|contributing'
+  + '|extend|extending|connect|connecting|carry|carrying)\\b',
+  'iu',
+);
+
+// The third condition is what makes this a CONNECTION test rather than a
+// vocabulary test. Asset and action alone are both satisfied by "I welcome a
+// conversation about using my experience", which points nowhere: the action
+// verbs are among the commonest in English and neither test requires the
+// sentence to reach the employer's side at all. STYLE.md §11.2 asks the
+// closing to carry "the role-facing contribution", so the sentence has to name
+// the other side of that connection. No company name is available here, so
+// this is the generic employer-facing lexicon.
+const EMPLOYER_TARGET_NOUNS = 'team|teams|role|position|group|organi[sz]ation|company|district|product|products'
+  + '|platform|codebase|backlog|roadmap|effort|work|mission|practice|pipeline|pipelines|system|systems|service|services';
+const EMPLOYER_FACING_TARGET = new RegExp(
+  '\\byour(?:s)?\\b'
+  // A modifier slot is required: real closings say "the service team", "this
+  // engineering group", not only the bare noun.
+  + `|\\b(?:this|the)\\s+(?:[\\p{L}’'-]+\\s+){0,2}(?:${EMPLOYER_TARGET_NOUNS})\\b`
+  + '|\\b(?:client|clients|customer|customers|user|users|student|students|patient|patients|here)\\b',
+  'iu',
+);
+
 function hasCandidateContributionClose(value) {
-  return CANDIDATE_CONTRIBUTION_CLOSE.test(value);
+  return CANDIDATE_ASSET_CLOSE.test(value)
+    && CANDIDATE_CONTRIBUTION_ACTION.test(value)
+    && EMPLOYER_FACING_TARGET.test(value);
 }
+
+// The observation has to be executable on its own: a writer reading only this
+// line must be able to produce a closing that passes. The previous wording
+// ("name the experience, skills, or work…") described the goal but not the two
+// things the check tests, so a revision could name the experience, still miss
+// the ownership marker, and fail the identical check a second time.
+const CANDIDATE_CONTRIBUTION_REMEDIATION = 'the invitation wording itself is correct, so keep it; the '
+  + 'sentence needs both halves — name the candidate’s asset with a possessive, an authorship clause, or a '
+  + 'demonstrative that carries its own descriptor (“my integration work”, “the connector I built”, “that '
+  + 'MCP server experience”), never a bare demonstrative (“that work”), and say what that asset does for the '
+  + 'target work (“…could support…”, “…supports…”, “applying … to …”)';
 
 /** Keeps the invitation in the closing direct and specific. */
 export function checkDirectWelcomeClosing(paragraphs = []) {
@@ -1536,14 +1646,21 @@ export function checkDirectWelcomeClosing(paragraphs = []) {
   const selfDirectedMatch = SELF_DIRECTED_CONVERSATION_CLOSE.exec(finalSentence)
     || LOOK_FORWARD_CONVERSATION_CLOSE.exec(finalSentence);
   if (selfDirectedMatch && !hasCandidateContributionClose(finalSentence)) {
-    observations.push(`paragraph ${index + 1} ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; close by connecting the candidate's experience, skills, or work to the specific work they could support`);
+    observations.push(`paragraph ${index + 1} ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; ${CANDIDATE_CONTRIBUTION_REMEDIATION}`);
   }
   const directConversation = DIRECT_CONVERSATION_CLOSE.exec(finalSentence);
   const employerChoice = EMPLOYER_CHOICE_CLOSE.exec(finalSentence);
   if (employerChoice) {
     observations.push(`paragraph ${index + 1} asks the employer to choose between initiatives (“${boundedDetailValue(employerChoice[0])}”); close with the candidate's concrete contribution to the target work instead of posing an employer-facing prototype question`);
-  } else if (directConversation && !hasCandidateContributionClose(text(list[index]))) {
-    observations.push(`paragraph ${index + 1} uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; name the experience, skills, or work that could support the specific target responsibility`);
+    // Both branches read the FINAL SENTENCE, deliberately. STYLE.md §11.2 is
+    // explicit that "its final sentence should connect the candidate's
+    // relevant contribution to the target work", and grading the two
+    // invitation shapes at different scopes made the rule unlearnable: the
+    // same closing paragraph passed with "I welcome a conversation about that
+    // work" and failed with "I look forward to discussing that work", decided
+    // only by which verb the last sentence happened to use.
+  } else if (directConversation && !hasCandidateContributionClose(finalSentence)) {
+    observations.push(`paragraph ${index + 1} uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; ${CANDIDATE_CONTRIBUTION_REMEDIATION}`);
   }
   return observationResult('direct-welcome-closing', observations, MAX_COPY_PRECISION_OBSERVATIONS,
     `${list.length} paragraph(s) use a direct, specific invitation when they close with “welcome”`);
@@ -1554,9 +1671,11 @@ export function checkDirectWelcomeClosing(paragraphs = []) {
 // space on an eligibility screen. Unlike the register family this is a
 // removal rule, not a rephrasing rule, so no observation suggests a plain
 // wording. Closed list; the capitalized-nationality guard keeps common-noun
-// uses such as “citizen developers” out of scope.
+// uses such as “citizen developers” out of scope, and the determiner list in
+// that slot keeps a sentence-initial common noun (“A citizen request queue”)
+// from reading as a nationality.
 const LEGAL_STATUS_CONCEPTS = Object.freeze([
-  { label: 'citizenship', pattern: /\b\p{Lu}(?:\p{L}|\.)*\s+citizen(?:ship)?\b/u },
+  { label: 'citizenship', pattern: /\b(?!(?:A|An|The|Our|My|Your|Their|Its|His|Her|This|That|These|Those|Each|Every|No|Some|Any|One|Both|Many|Most|Several|Other|Another|Such)\b)\p{Lu}(?:\p{L}|\.)*\s+citizen(?:ship)?\b/u },
   { label: 'citizenship', pattern: /\b(?:my|dual)\s+citizenship\b/iu },
   { label: 'citizenship', pattern: /\bcitizen\s+of\s+\p{Lu}\p{L}+\b/u },
   { label: 'work authorization', pattern: /\bwork\s+(?:authoriza|authorisa)tion\b/iu },

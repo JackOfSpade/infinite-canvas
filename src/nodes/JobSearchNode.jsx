@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useContext, useMemo, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useContext, useMemo, useState, useId } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
@@ -23,6 +23,7 @@ import { buildJobHubCareerClearPatch, getHubDropLockReason, hubHasAcceptedInitia
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { filterHandledJobSourceWarnings, isJobSourceWarningGating } from '../utils/jobSourceWarningPolicy';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
+import { isTerminalSourceStatus } from '../utils/sourceProgress';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
 import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
@@ -51,6 +52,7 @@ import {
 import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
 import { detectQueryOperators } from '../utils/jobTitleMatch';
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
+import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
 // Collection limits are always user-controlled; this switch affects scoring only.
@@ -74,17 +76,18 @@ const JOB_MAX_AGE_DAYS_LIMIT = 180;
 const STATE_LABELS = {
   empty: null,
   parsing: 'Reading resume...',
+  'interpreting-preferences': 'Understanding Job Preferences...',
   querying: 'Planning search strategy...',
   searching: 'Searching for jobs...',
+  'evaluating-preferences': 'Checking Job Preferences...',
   scoring: 'AI scoring matches...',
   queued: 'Waiting to run...',
   'sources-ready': null,
   done: null,
 };
 
-const PROCESSING_STATES = ['queued', 'parsing', 'querying', 'searching', 'scoring'];
+const PROCESSING_STATES = ['queued', 'parsing', 'interpreting-preferences', 'querying', 'searching', 'evaluating-preferences', 'scoring'];
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
-const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
 function createManualAiRunId(nodeId) {
   const entropy = globalThis.crypto?.randomUUID?.()
@@ -125,18 +128,119 @@ function reanalysisRestorePatch(data) {
     rerunNotice: data?.rerunNotice,
     jobCount: data?.jobCount,
     resultDisposition: data?.resultDisposition,
+    preferenceMatchedCount: data?.preferenceMatchedCount,
+    preferenceFilteredCount: data?.preferenceFilteredCount,
+    preferenceEvaluation: data?.preferenceEvaluation,
+    preferenceCandidatePool: data?.preferenceCandidatePool,
   };
 }
 
-function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation }) {
+function buildQueryCacheKey({ resumeFingerprint, targetRole, jobPreferences, preferredLocation }) {
   return JSON.stringify({
-    // v4: remote salary-comparison residences do not influence generated
+    // v5: remote salary-comparison residences do not influence generated
     // search queries or whether a cached query bundle can be safely reused.
-    strategyVersion: 4,
+    strategyVersion: 5,
     resumeFingerprint: String(resumeFingerprint || ''),
     targetRole: String(targetRole || '').trim(),
+    jobPreferences: String(jobPreferences || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
   });
+}
+
+// The main process owns the AI/web-research semantics. This deliberately only
+// normalizes its response envelope so the renderer can keep older app builds
+// working while the preference APIs roll out.
+function normalizePreferenceEvaluation(result, fallbackJobs) {
+  const fallback = Array.isArray(fallbackJobs) ? fallbackJobs : [];
+  if (!result || result.success === false) {
+    return { jobs: fallback, candidatePool: fallback, matchedCount: null, filteredCount: null, evaluation: null };
+  }
+  const jobs = Array.isArray(result.jobs)
+    ? result.jobs
+    : Array.isArray(result.matchedJobs)
+      ? result.matchedJobs
+      : Array.isArray(result.acceptedJobs)
+        ? result.acceptedJobs
+        : fallback;
+  const matchedCount = Number.isFinite(result.preferenceMatchedCount)
+    ? result.preferenceMatchedCount
+    : Number.isFinite(result.matchedCount)
+      ? result.matchedCount
+      : Number.isFinite(result.counts?.accepted) ? result.counts.accepted : jobs.length;
+  const filteredCount = Number.isFinite(result.preferenceFilteredCount)
+    ? result.preferenceFilteredCount
+    : Number.isFinite(result.filteredCount)
+      ? result.filteredCount
+      : Number.isFinite(result.counts?.filtered) ? result.counts.filtered : Math.max(0, fallback.length - jobs.length);
+  const candidatePool = Array.isArray(result.preferenceCandidatePool)
+    ? result.preferenceCandidatePool
+    : Array.isArray(result.candidatePool)
+      ? result.candidatePool
+      : (Array.isArray(result.acceptedJobs) || Array.isArray(result.filteredJobs))
+        ? dedupJobsAcrossSources([
+            ...(Array.isArray(result.acceptedJobs) ? result.acceptedJobs : []),
+            ...(Array.isArray(result.filteredJobs) ? result.filteredJobs : []),
+          ])
+        : fallback;
+  return {
+    jobs,
+    candidatePool,
+    matchedCount,
+    filteredCount,
+    evaluation: result.preferenceEvaluation || result.evaluation || (
+      result.counts || result.audits || result.preferencePlan
+        ? { preferencePlan: result.preferencePlan || null, audits: result.audits || [], counts: result.counts || null }
+        : null
+    ),
+  };
+}
+
+function mergePreferenceCandidatePools(existing, incoming) {
+  const prior = Array.isArray(existing) ? existing : [];
+  const next = Array.isArray(incoming) ? incoming : [];
+  return dedupJobsAcrossSources([...prior, ...next]);
+}
+
+function mergePreferenceEvaluations(existing, incoming) {
+  if (!existing) return incoming || null;
+  if (!incoming) return existing;
+  const numericTotal = (key) => {
+    const a = Number(existing?.counts?.[key]);
+    const b = Number(incoming?.counts?.[key]);
+    return (Number.isFinite(a) ? a : 0) + (Number.isFinite(b) ? b : 0);
+  };
+  const audits = [...(Array.isArray(existing.audits) ? existing.audits : []), ...(Array.isArray(incoming.audits) ? incoming.audits : [])];
+  // New audits carry a bounded listing identity. Use the same location-aware
+  // cross-source identity as the candidate pool: title/company alone merges
+  // distinct requisitions in (for example) New York and San Francisco, while
+  // URL alone fails to merge the same listing returned by two boards. Legacy
+  // audits lack that identity, so retain their old conservative exact fallback.
+  const identifiedAudits = audits.filter(audit => audit?.listingIdentity && typeof audit.listingIdentity === 'object');
+  const legacyAudits = audits.filter(audit => !audit?.listingIdentity || typeof audit.listingIdentity !== 'object');
+  const uniqueIdentifiedAudits = dedupJobsAcrossSources(identifiedAudits.map(audit => ({
+    ...audit.listingIdentity,
+    title: audit.title,
+    company: audit.company,
+    __audit: audit,
+  }))).map(audit => audit.__audit);
+  const uniqueLegacyAudits = legacyAudits.filter((audit, index, list) => {
+    const key = `${audit?.title || ''}|${audit?.company || ''}|${audit?.status || ''}|${audit?.summary || ''}`;
+    return list.findIndex((candidate) => `${candidate?.title || ''}|${candidate?.company || ''}|${candidate?.status || ''}|${candidate?.summary || ''}` === key) === index;
+  });
+  const uniqueAudits = audits.filter(audit => (
+    (audit?.listingIdentity && typeof audit.listingIdentity === 'object'
+      ? uniqueIdentifiedAudits
+      : uniqueLegacyAudits
+    ).includes(audit)
+  ));
+  return {
+    preferencePlan: incoming.preferencePlan || existing.preferencePlan || null,
+    audits: uniqueAudits,
+    counts: {
+      input: numericTotal('input'), accepted: numericTotal('accepted'), filtered: numericTotal('filtered'),
+      strictConflicts: numericTotal('strictConflicts'), strictUnverified: numericTotal('strictUnverified'),
+    },
+  };
 }
 
 function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
@@ -196,6 +300,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const addElementsGlobally = nav?.addElementsGlobally;
   const canvasFilePath = nav?.currentFile || null;
   const moduleRunQueue = useModuleRunQueue();
+  const targetRoleHelpId = useId();
+  const jobPreferencesHelpId = useId();
   const processingRunsRef = useRef(createRunOwnershipGuard());
   // Present only while the done-state re-analysis owns the run guard. It lets
   // either cancel route (the in-card X or Non-API AI dialog) restore the prior
@@ -357,7 +463,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     hubStateRef.current = data.hubState;
     pendingJobsRef.current = data.pendingJobs;
     gatheredCountRef.current = data.gatheredCount ?? 0;
-    jobRunIdRef.current = data.jobRunId || null;
+    // Adopt a committed token, never blank the live one. `handlePostSearchResult`
+    // sets this ref the moment the search returns, but a scored run does not
+    // commit the token to node data until it finishes — so the old
+    // `data.jobRunId || null` re-ran on the next state change (hubState →
+    // 'scoring', gatheredCount update) and erased it mid-run. That left
+    // `resetRunId` resolving to null, so Cancel during scoring discarded no
+    // batch and orphaned the run's manifest/staging sidecars on disk — the exact
+    // failure fixtures-canvas.js guards for. Every path that must clear the
+    // token (resetHandler, handleRerun, handleClearCareerFiles, runPipeline's
+    // start) assigns this ref explicitly, so nothing relies on it clearing here.
+    if (data.jobRunId) jobRunIdRef.current = data.jobRunId;
   }, [data.scrapeWarnings, data.hubState, data.pendingJobs, data.gatheredCount, data.jobRunId]);
 
   // Per-source progress state populated by backend `job-source-progress`
@@ -431,7 +547,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         : persistedCleanTerminal
           ? persisted
           : (live || persisted);
-      return !!effective && TERMINAL_SOURCE_STATUSES.has(effective.status);
+      return !!effective && isTerminalSourceStatus(effective.status);
     });
 
     if (allVisibleCardsTerminal) {
@@ -453,12 +569,56 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     void window.electronAPI?.completeNonApiAiRun?.(runId).catch(() => {});
   }, [getNode, id, updateGlobal]);
 
+  // This sits above the late-USAJobs callback because hooks evaluate their
+  // dependency arrays during render. Keeping it below that callback made the
+  // callback's `[... evaluatePreferencesForRun]` dependency read this `const`
+  // while it was still in its temporal dead zone, crashing every fresh hub.
+  const evaluatePreferencesForRun = useCallback(async ({
+    jobs, profile, careerData, activeTargetRole, activeJobPreferences,
+    jobPreferencesInterpretation, locationSnapshot, manualAiRunId,
+  }) => {
+    const fallbackJobs = Array.isArray(jobs) ? jobs : [];
+    if (!activeJobPreferences) {
+      return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null };
+    }
+    // Older main processes do not expose this IPC yet. Keep their existing
+    // search behavior rather than pretending a preference was verified.
+    if (!window.electronAPI?.evaluateJobPreferences) {
+      return { jobs: fallbackJobs, candidatePool: fallbackJobs, matchedCount: null, filteredCount: null, evaluation: null };
+    }
+    updateGlobal(id, { hubState: 'evaluating-preferences', jobCount: fallbackJobs.length });
+    const result = await window.electronAPI.evaluateJobPreferences({
+      jobs: fallbackJobs,
+      profile,
+      careerData,
+      nodeId: id,
+      manualAiRunId,
+      targetRole: activeTargetRole,
+      jobPreferences: activeJobPreferences,
+      jobPreferencePlan: jobPreferencesInterpretation,
+      preferencePlan: jobPreferencesInterpretation,
+      jobPreferencesInterpretation,
+      searchLocation: locationSnapshot?.searchLocation || null,
+      remoteResidences: locationSnapshot?.remoteResidences || null,
+    });
+    if (result?.success === false) {
+      const error = new Error(result.error || 'Failed to evaluate Job Preferences');
+      if (result.isRateLimit) error.isRateLimit = true;
+      throw error;
+    }
+    return normalizePreferenceEvaluation(result, fallbackJobs);
+  }, [id, updateGlobal]);
+
   // Background-streamed scored jobs (the late USAJobs refresh) used to spawn cards
   // straight into the done canvas. Now the Job Search Module only STORES its
   // scored jobs — a connected Job Board Module does the display — so this merges
   // the fresh set into data.scoredJobs (deduped) and updates the summary counts.
   // The board picks them up on its next Combine / Re-combine.
-  const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings, gatheredDelta = 0 }) => {
+  const appendJobsToDoneCanvas = useCallback(({
+    scoredJobs, filteredWarnings, gatheredDelta = 0,
+    preferenceMatchedDelta = null, preferenceFilteredDelta = null,
+    preferenceEvaluation = null, preferenceCandidatePool = null,
+  }) => {
     const fresh = Array.isArray(scoredJobs) ? scoredJobs : [];
     const existing = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
     const added = uniqueJobsAcrossSources(existing, fresh);
@@ -470,6 +630,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const allScores = nextScored.map(j => j.matchScore || 0);
     const scoreRangeMin = allScores.length ? Math.min(...allScores) : (data.scoreRangeMin ?? 0);
     const scoreRangeMax = allScores.length ? Math.max(...allScores) : (data.scoreRangeMax ?? 100);
+    // Same rule as finishScoringAndSpawn: an append made with no preferences in
+    // effect must not recreate the redundant pool that path deliberately skips.
+    const appendRanPreferences = preferenceMatchedDelta != null || preferenceFilteredDelta != null;
+    const combinedPreferenceCandidatePool = (appendRanPreferences && Array.isArray(preferenceCandidatePool))
+      ? mergePreferenceCandidatePools(data.preferenceCandidatePool, preferenceCandidatePool)
+      : data.preferenceCandidatePool ?? null;
+    const combinedPreferenceEvaluation = preferenceEvaluation
+      ? mergePreferenceEvaluations(data.preferenceEvaluation, preferenceEvaluation)
+      : data.preferenceEvaluation ?? null;
 
     updateGlobal(id, {
       hubState: 'done',
@@ -479,6 +648,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Keep the "scraped → kept" funnel in sync after a background append.
       gatheredCount: (data.gatheredCount || 0) + gatheredDelta,
       scrapedCount: (data.scrapedCount || 0) + added.length,
+      preferenceMatchedCount: preferenceMatchedDelta == null
+        ? data.preferenceMatchedCount ?? null
+        : (Number(data.preferenceMatchedCount) || 0) + preferenceMatchedDelta,
+      preferenceFilteredCount: preferenceFilteredDelta == null
+        ? data.preferenceFilteredCount ?? null
+        : (Number(data.preferenceFilteredCount) || 0) + preferenceFilteredDelta,
+      preferenceEvaluation: combinedPreferenceEvaluation,
+      preferenceCandidatePool: combinedPreferenceCandidatePool,
       finalSourceCounts,
       scoreRangeMin,
       scoreRangeMax,
@@ -489,7 +666,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       rerunOutcome: null,
       rerunNotice: null,
     });
-  }, [id, data.scoredJobs, data.finalSourceCounts, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.scrapeWarnings, updateGlobal]);
+  }, [id, data.scoredJobs, data.finalSourceCounts, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.scrapeWarnings, data.preferenceMatchedCount, data.preferenceFilteredCount, data.preferenceEvaluation, data.preferenceCandidatePool, updateGlobal]);
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRunsRef.current.active) return;
@@ -529,7 +706,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferredLocation: (data.canonicalLocation || data.preferredLocation || '').trim(),
         // A pinned role gates this background refresh exactly as it gates the main
         // search, or USAJobs would be the one source able to ship off-role rows.
-        targetRole: (data.targetRole || '').trim(),
+        // This late source belongs to the completed search generation. The
+        // editable controls may already describe the *next* run.
+        targetRole: (data.activeTargetRole ?? data.targetRole ?? '').trim(),
+        jobPreferences: data.activeJobPreferences ?? data.jobPreferences ?? '',
+        preferencePlan: data.jobPreferencePlan ?? data.jobPreferencesInterpretation ?? null,
       });
 
       if (cancelled()) return;
@@ -570,7 +751,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         });
 
         const remainingBlocks = filteredWarnings.filter(isJobSourceWarningGating);
-        if (remainingBlocks.length === 0 && mergedPending.length > 0) {
+        // No pending-length gate: a paused run that collected nothing must still
+        // resume, exactly as the Skip/resolve handlers do. resumeScoring's empty
+        // branch finishes it in 'done' rather than stranding it in a
+        // 'sources-ready' screen with no remaining blocks and no action.
+        if (remainingBlocks.length === 0) {
           EventLogger.log(`[JobSearch][${id}] Auto-resuming scoring from sources-ready state.`);
           processingRunsRef.current.finish(processingToken);
           await resumeScoringRef.current?.();
@@ -584,7 +769,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
 
           const profile = data.resumeProfile;
-          const activeTargetRole = (data.targetRole || '').trim();
+          const activeTargetRole = (data.activeTargetRole ?? data.targetRole ?? '').trim();
+          const activeJobPreferences = data.activeJobPreferences ?? data.jobPreferences ?? '';
+          const jobPreferencesInterpretation = data.jobPreferencePlan ?? data.jobPreferencesInterpretation ?? null;
           const locationSnapshot = data.locationSnapshot || {
             searchLocation: getSearchLocation({
               searchLocation: data.searchLocation,
@@ -594,15 +781,105 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             remoteResidences: normalizeRemoteResidences(data.remoteResidences),
           };
 
+          // The background source's raw volume belongs in the gathered funnel,
+          // but preferences must only assess genuinely new listings. Otherwise
+          // a duplicate USAJobs row can inflate matched/filtered counts and
+          // append duplicate audit evidence after the candidate pool dedupes.
+          const existingPreferencePool = Array.isArray(data.preferenceCandidatePool)
+            ? data.preferenceCandidatePool
+            : (Array.isArray(data.scoredJobs) ? data.scoredJobs : []);
+          const newPreferenceCandidates = uniqueJobsAcrossSources(existingPreferencePool, freshJobs);
+          if (newPreferenceCandidates.length === 0) {
+            updateGlobal(currentId, {
+              hubState: 'done',
+              scrapeWarnings: filteredWarnings,
+              gatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length,
+            });
+            return;
+          }
+
+          const preferenceResult = await evaluatePreferencesForRun({
+            jobs: newPreferenceCandidates,
+            profile,
+            careerData: data.careerData,
+            activeTargetRole,
+            activeJobPreferences,
+            jobPreferencesInterpretation,
+            locationSnapshot,
+          });
+          if (cancelled()) return;
+          const combinedPreferenceCandidatePool = mergePreferenceCandidatePools(
+            data.preferenceCandidatePool,
+            preferenceResult.candidatePool,
+          );
+          const combinedPreferenceEvaluation = mergePreferenceEvaluations(
+            data.preferenceEvaluation,
+            preferenceResult.evaluation,
+          );
+          const combinedPreferenceMatchedCount = (Number(data.preferenceMatchedCount) || 0)
+            + (preferenceResult.matchedCount || 0);
+          const combinedPreferenceFilteredCount = (Number(data.preferenceFilteredCount) || 0)
+            + (preferenceResult.filteredCount || 0);
+          if (preferenceResult.jobs.length === 0) {
+            // A background source can be the first source to find listings
+            // after an authoritative empty. Persist its filtered candidate
+            // pool before returning to done so a later preference edit can
+            // re-evaluate it without another scrape.
+            try {
+              await window.electronAPI?.saveJobAnalysisSnapshot?.({
+                jobs: combinedPreferenceCandidatePool,
+                profile,
+                careerData: data.careerData,
+                nodeId: currentId,
+                targetRole: activeTargetRole,
+                jobPreferences: activeJobPreferences,
+                jobPreferencePlan: jobPreferencesInterpretation,
+                preferenceEvaluation: combinedPreferenceEvaluation,
+                preferenceCandidatePool: combinedPreferenceCandidatePool,
+                snapshotContext: {
+                  sourceHubId: currentId,
+                  runId: jobRunIdRef.current || null,
+                  canvasFilePath,
+                  resumeSummary: buildResumeSummary(profile),
+                  sourceGatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length,
+                  locationSnapshot,
+                  searchLocation: locationSnapshot.searchLocation,
+                  remoteResidences: locationSnapshot.remoteResidences,
+                },
+              });
+            } catch (snapshotError) {
+              EventLogger.error(`[JobSearch][${id}] Failed to save preference-filtered USAJobs snapshot:`, snapshotError);
+            }
+            updateGlobal(currentId, {
+              hubState: 'done',
+              scrapeWarnings: filteredWarnings,
+              // The late source was genuinely gathered even though every new
+              // listing failed preferences. Keep the done funnel truthful.
+              gatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length,
+              preferenceMatchedCount: combinedPreferenceMatchedCount,
+              preferenceFilteredCount: combinedPreferenceFilteredCount,
+              preferenceEvaluation: combinedPreferenceEvaluation,
+              preferenceCandidatePool: combinedPreferenceCandidatePool,
+              resultDisposition: (Array.isArray(data.scoredJobs) && data.scoredJobs.length > 0)
+                ? 'scored'
+                : 'preference-filtered',
+            });
+            return;
+          }
+
           const manualAiRunId = createManualAiRunId(currentId);
           const scoreResult = await window.electronAPI.scoreJobs({
-            jobs: freshJobs,
+            jobs: preferenceResult.jobs,
             profile,
             careerData: data.careerData,
             nodeId: currentId,
             manualAiRunId,
             manualAiRecoveryMode: 'append-scored-jobs',
             targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            jobPreferencePlan: jobPreferencesInterpretation,
+            preferenceEvaluation: combinedPreferenceEvaluation,
+            preferenceCandidatePool: combinedPreferenceCandidatePool,
             searchLocation: locationSnapshot.searchLocation,
             remoteResidences: locationSnapshot.remoteResidences,
             snapshotContext: {
@@ -641,6 +918,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               careerData: data.careerData,
               nodeId: currentId,
               targetRole: activeTargetRole,
+              jobPreferences: activeJobPreferences,
+              jobPreferencePlan: jobPreferencesInterpretation,
+              preferenceEvaluation: combinedPreferenceEvaluation,
+              preferenceCandidatePool: combinedPreferenceCandidatePool,
               snapshotContext: {
                 sourceHubId: currentId,
                 runId: jobRunIdRef.current || null,
@@ -650,6 +931,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 locationSnapshot,
                 searchLocation: locationSnapshot.searchLocation,
                 remoteResidences: locationSnapshot.remoteResidences,
+                jobPreferences: activeJobPreferences,
+                jobPreferencePlan: jobPreferencesInterpretation,
+                preferenceCandidatePool: combinedPreferenceCandidatePool,
               },
             });
             if (saved && !saved.saved) {
@@ -665,6 +949,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             scoredJobs: scoreResult.scoredJobs,
             filteredWarnings,
             gatheredDelta: freshJobs.length,
+            preferenceMatchedDelta: preferenceResult.matchedCount,
+            preferenceFilteredDelta: preferenceResult.filteredCount,
+            preferenceEvaluation: preferenceResult.evaluation,
+            preferenceCandidatePool: preferenceResult.candidatePool,
           });
           completeManualAiRun(manualAiRunId);
         } else {
@@ -682,9 +970,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         description: err?.message || String(err),
         type: 'error',
       });
+      // Restore a terminal state from ANY transient processing state, not just
+      // 'scoring'. This refresh also passes through 'evaluating-preferences',
+      // and leaving the hub parked there is not merely cosmetic: every state in
+      // TRANSIENT_PROCESSING_HUB_STATES is rewritten to 'empty' on save, so a
+      // failed background append turned a hub that already held complete
+      // results into an empty drop card on the next reload.
+      const strandedState = hubStateRef.current;
+      const stranded = TRANSIENT_PROCESSING_HUB_STATES.includes(strandedState);
       updateGlobal(currentId, {
-        hubState: hubStateRef.current === 'scoring' ? 'done' : hubStateRef.current,
-        ...(hubStateRef.current === 'scoring' ? { resultDisposition: 'incomplete' } : {}),
+        hubState: stranded ? 'done' : strandedState,
+        ...(stranded ? { resultDisposition: 'incomplete' } : {}),
         errorMessage: err?.message || String(err),
       });
     } finally {
@@ -692,7 +988,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, data.gatheredCount, data.scoredJobs, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, data.careerData, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, completeManualAiRun, isMountedRef]);
+  }, [id, data.maxAgeDays, data.gatheredCount, data.scoredJobs, collectionLimits, enabledSourceIds, activeEnabledSourceIds, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.locationSnapshot, data.remoteResidences, data.careerData, data.jobPreferences, data.activeJobPreferences, data.activeTargetRole, data.jobPreferencePlan, data.jobPreferencesInterpretation, data.preferenceMatchedCount, data.preferenceFilteredCount, data.preferenceEvaluation, data.preferenceCandidatePool, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, completeManualAiRun, evaluatePreferencesForRun, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -774,6 +1070,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // / reset) — React's "adjust state when a prop changes" pattern (no effect, so it
   // doesn't trip react-hooks/set-state-in-effect).
   const storeRole = data.targetRole || '';
+  const storeJobPreferences = data.jobPreferences || '';
   const storeSearchLocation = getSearchLocation(data);
   const storeSearchLocationKey = JSON.stringify(storeSearchLocation);
   const storeRemoteResidences = normalizeRemoteResidences(data.remoteResidences);
@@ -781,6 +1078,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const [targetRole, setRoleDraft] = useState(storeRole);
   const [lastStoreRole, setLastStoreRole] = useState(storeRole);
   if (storeRole !== lastStoreRole) { setLastStoreRole(storeRole); setRoleDraft(storeRole); }
+  const [jobPreferences, setJobPreferencesDraft] = useState(storeJobPreferences);
+  const [lastStoreJobPreferences, setLastStoreJobPreferences] = useState(storeJobPreferences);
+  if (storeJobPreferences !== lastStoreJobPreferences) {
+    setLastStoreJobPreferences(storeJobPreferences);
+    setJobPreferencesDraft(storeJobPreferences);
+  }
   const [searchLocation, setSearchLocationDraft] = useState(storeSearchLocation);
   const [lastStoreSearchLocation, setLastStoreSearchLocation] = useState(storeSearchLocationKey);
   if (storeSearchLocationKey !== lastStoreSearchLocation) {
@@ -806,6 +1109,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const v = typeof val === 'string' ? val : '';
     setRoleDraft(v);                                  // synchronous local update → caret preserved
     updateGlobal(id, { targetRole: v });              // write through to the persisted store
+  }, [id, updateGlobal]);
+  const setJobPreferences = useCallback((val) => {
+    const v = typeof val === 'string' ? val.slice(0, 4000) : '';
+    setJobPreferencesDraft(v);
+    updateGlobal(id, { jobPreferences: v });
   }, [id, updateGlobal]);
   const setSearchLocation = useCallback((next) => {
     const normalized = normalizeStructuredLocation(next);
@@ -1020,6 +1328,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
     aiSkipped = false, collectionOnly = false, testMode = false,
     jobRunId = null, cancelled = () => false, completeRun = true,
+    preferenceMatchedCount = null, preferenceFilteredCount = null,
+    preferenceEvaluation = null, preferenceCandidatePool = null,
+    resultDisposition = 'scored',
   }) => {
     if (cancelled()) return;
     const displayed = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -1061,11 +1372,35 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     updateGlobal(id, {
       hubState: 'done',
+      // The hub is the only in-canvas record of WHICH run produced these
+      // results. Every other completing branch already stamps it; this one did
+      // not, so after a scored run `data.jobRunId` was null and both consumers
+      // that key off it silently degraded: the saved-snapshot correlation at
+      // `savedAnalysisMatchesCurrentRun` could never be true, and the main
+      // process's `snapshotIsThisRun` recovery guard (jobs.js) fell through its
+      // `!jobRunId` escape on every call. A re-analysis of saved results passes
+      // a possibly-null token with completeRun:false; keep the live one rather
+      // than erasing it.
+      ...(jobRunId ? { jobRunId } : {}),
       scoredJobs: displayed, // read by a connected Job Board Module on Combine
       resultCount: displayed.length,
       totalScoredCount: displayed.length,
       scrapedCount: scrapedCount ?? displayed.length,
       gatheredCount: gatheredCount ?? scrapedCount ?? displayed.length,
+      preferenceMatchedCount,
+      preferenceFilteredCount,
+      preferenceEvaluation,
+      // The pool exists so a later Job Preferences edit can re-judge listings
+      // this run FILTERED OUT. When no preferences ran, both counts come back
+      // null and the pool is the untouched job list — a byte-for-byte second
+      // copy of the same listings already in `scoredJobs`, saved into
+      // canvas.json on every autosave for a feature the run never used.
+      // `handleReanalyze` already falls back to `scoredJobs` when the pool is
+      // empty, so dropping it here costs nothing and halves the persisted
+      // job payload for anyone not using preferences.
+      preferenceCandidatePool: (preferenceMatchedCount == null && preferenceFilteredCount == null)
+        ? null
+        : (Array.isArray(preferenceCandidatePool) ? preferenceCandidatePool : null),
       // Keep testMode as a legacy alias for old saved canvases only.
       aiSkipped: !!aiSkipped,
       collectionOnly: !!collectionOnly,
@@ -1073,12 +1408,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // A successful scorer settlement is authoritative only for its positive
       // rows. A zero-result search is stamped separately as `empty-complete`
       // before it reaches this scorer path.
-      resultDisposition: 'scored',
+      resultDisposition,
       finalSourceCounts,
       scoreRangeMin,
       scoreRangeMax,
       pendingJobs: null,
       pendingBatch: null,
+      pendingCareerData: null,
+      pendingTargetRole: null,
+      pendingJobPreferences: null,
+      pendingJobPreferencePlan: null,
+      pendingJobPreferencesInterpretation: null,
       scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
       rerunOutcome: null,
       rerunNotice: null,
@@ -1092,6 +1432,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     scrapeWarnings, activeTargetRole, originalPos,
     jobRunId = null, cancelled, locationSnapshot = null, completeRun = true,
     manualAiRunId = null, resultMode = 'replace',
+    // An append recovery may retain the original run's aggregate gathered
+    // count in its snapshot. Never add that aggregate to an already-done hub;
+    // callers pass only the genuinely new source volume here.
+    gatheredDelta = null,
+    activeJobPreferences = '', jobPreferencesInterpretation = null,
+    preferenceMatchedCount = null, preferenceFilteredCount = null,
+    preferenceEvaluation = null, preferenceCandidatePool = null,
   }) => {
     const currentId = id;
     const effectiveManualAiRunId = manualAiRunId || createManualAiRunId(currentId);
@@ -1115,6 +1462,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       manualAiRunId: effectiveManualAiRunId,
       manualAiRecoveryMode: resultMode === 'append' ? 'append-scored-jobs' : null,
       targetRole: activeTargetRole,
+      jobPreferences: activeJobPreferences,
+      jobPreferencePlan: jobPreferencesInterpretation,
+      preferencePlan: jobPreferencesInterpretation,
+      jobPreferencesInterpretation,
+      preferenceEvaluation,
+      preferenceCandidatePool,
       searchLocation: effectiveLocationSnapshot.searchLocation,
       remoteResidences: effectiveLocationSnapshot.remoteResidences,
       snapshotContext: {
@@ -1125,6 +1478,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         sourceGatheredCount: gatheredCount,
         searchLocation: effectiveLocationSnapshot.searchLocation,
         remoteResidences: effectiveLocationSnapshot.remoteResidences,
+        jobPreferences: activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        preferencePlan: jobPreferencesInterpretation,
+        jobPreferencesInterpretation,
+        preferenceEvaluation,
+        preferenceCandidatePool,
       },
     });
     if (cancelled()) return;
@@ -1162,7 +1521,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       appendJobsToDoneCanvas({
         scoredJobs: scoreResult.scoredJobs,
         filteredWarnings: scrapeWarnings,
-        gatheredDelta: gatheredCount ?? jobs.length,
+        gatheredDelta: gatheredDelta ?? jobs.length,
+        preferenceMatchedDelta: scoreResult.preferenceMatchedCount ?? preferenceMatchedCount,
+        preferenceFilteredDelta: scoreResult.preferenceFilteredCount ?? preferenceFilteredCount,
+        preferenceEvaluation: scoreResult.preferenceEvaluation ?? preferenceEvaluation,
+        preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceCandidatePool,
       });
       completeManualAiRun(effectiveManualAiRunId);
       return;
@@ -1179,6 +1542,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       aiSkipped: !!scoreResult.aiSkipped,
       collectionOnly: !!scoreResult.collectionOnly,
       testMode: !!scoreResult.testMode,
+      preferenceMatchedCount: scoreResult.preferenceMatchedCount ?? preferenceMatchedCount,
+      preferenceFilteredCount: scoreResult.preferenceFilteredCount ?? preferenceFilteredCount,
+      preferenceEvaluation: scoreResult.preferenceEvaluation ?? preferenceEvaluation,
+      preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceCandidatePool,
       jobRunId,
       cancelled,
       completeRun,
@@ -1317,7 +1684,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    * the score handoff (with each path's own gatheredCount) stay with the caller.
    */
   const handlePostSearchResult = useCallback(async ({
-    currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
+    currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole,
+    activeJobPreferences = '', jobPreferencesInterpretation = null,
+    careerData = data.careerData, canvasFilePath: cfp,
     jobRunId = null, locationSnapshot = null, descriptionRecoveryJobs = null,
     gatheredCount = null, cancelled = () => false,
   }) => {
@@ -1334,6 +1703,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: 'sources-ready',
         pendingJobs: foundJobs,
         pendingTargetRole: activeTargetRole,
+        pendingJobPreferences: activeJobPreferences,
+        pendingJobPreferencePlan: jobPreferencesInterpretation,
+        pendingJobPreferencesInterpretation: jobPreferencesInterpretation,
+        pendingCareerData: careerData,
         jobCount: foundJobs.length,
         // Resume scoring must retain the source-card-aligned total from this
         // search instead of deriving it later from the history-deduped pending
@@ -1365,9 +1738,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             jobs: foundJobs,
             descriptionRecoveryJobs,
             profile,
-            careerData: data.careerData,
+            careerData,
             nodeId: currentId,
             targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            jobPreferencePlan: jobPreferencesInterpretation,
+            jobPreferencesInterpretation,
+            preferenceCandidatePool: foundJobs,
             snapshotContext: {
               sourceHubId: currentId,
               runId: jobRunId,
@@ -1397,7 +1774,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
           jobs: [],
           profile,
-          careerData: data.careerData,
+          careerData,
           nodeId: currentId,
           targetRole: activeTargetRole,
           snapshotContext: {
@@ -1508,6 +1885,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // This is a new top-level search, unlike a post-run source append. Reset
     // the source-card aggregate only after this run owns the processing token.
     gatheredCountRef.current = 0;
+    // Clear the PREVIOUS run's token here rather than only in handleRerun: the
+    // saved-manual-AI auto-resume calls runPipeline directly, so a run started
+    // that way inherited the paused run's token and stamped this run's snapshot
+    // with it.  The fresh token replaces this null as soon as the search returns.
+    jobRunIdRef.current = null;
     const currentId = id;
     const effectiveManualAiRunId = manualAiRunId || createManualAiRunId(currentId);
     // Capture cancellation epoch at start; cancelled() returns true after
@@ -1561,10 +1943,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         rerunNotice: null,
         testModeNote: null,
         resultDisposition: null,
+        // Same reason as the ref above: a run reached through any entry point
+        // other than handleRerun must not carry the previous run's token.
+        jobRunId: null,
         locationSnapshot: runLocationSnapshot,
       });
       let profile = providedProfile;
       let resumeFingerprint = data.resumeFingerprint || '';
+      // The React Flow `data` closure cannot observe the just-parsed value
+      // until a later render. Keep this run's career material local so every
+      // following AI step sees the fresh files immediately.
+      let activeCareerData = data.careerData || '';
 
       // Pre-flight: check only sources that require a browser session before
       // expensive scraping starts. LinkedIn is intentionally excluded; its job
@@ -1610,6 +1999,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
         profile = parseResult.profile;
         resumeFingerprint = String(parseResult.fingerprint || '');
+        activeCareerData = parseResult.careerData || '';
 
         updateGlobal(currentId, {
           hubState: 'querying',
@@ -1627,11 +2017,55 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       // Step 2: Query construction
-      const activeTargetRole = (data.targetRole || '').trim();
+      const activeTargetRole = String(liveData.targetRole || '').trim();
+      // Freeze the raw preference text and the AI's interpretation for this
+      // run. A user may edit the textarea while scraping; that edit applies to
+      // their next run, never halfway through this one.
+      const activeJobPreferences = String(liveData.jobPreferences || '').trim();
+      let jobPreferencesInterpretation = null;
+      const interpretPreferences = window.electronAPI?.interpretJobPreferences;
+      if (activeJobPreferences && interpretPreferences) {
+        updateGlobal(currentId, { hubState: 'interpreting-preferences' });
+        const interpretationResult = await window.electronAPI?.interpretJobPreferences({
+          profile,
+          careerData: activeCareerData,
+          nodeId: currentId,
+          manualAiRunId: effectiveManualAiRunId,
+          targetRole: activeTargetRole,
+          jobPreferences: activeJobPreferences,
+          searchLocation: runLocationSnapshot.searchLocation,
+          remoteResidences: runLocationSnapshot.remoteResidences,
+        });
+        if (cancelled()) return;
+        if (interpretationResult?.success === false) {
+          const err = new Error(interpretationResult.error || 'Failed to understand Job Preferences');
+          if (interpretationResult.isRateLimit) err.isRateLimit = true;
+          throw err;
+        }
+        jobPreferencesInterpretation = interpretationResult?.preferencePlan
+          ?? interpretationResult?.jobPreferencePlan
+          ?? interpretationResult?.jobPreferencesInterpretation
+          ?? interpretationResult?.interpretation
+          ?? null;
+        if (jobPreferencesInterpretation?.targetRoleConflict) {
+          throw new Error(
+            jobPreferencesInterpretation.targetRoleConflictReason
+              || 'Your Target role conflicts with your Job Preferences. Edit one of them, then run the search again.',
+          );
+        }
+      }
+      updateGlobal(currentId, {
+        hubState: 'querying',
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        jobPreferencesInterpretation,
+      });
       const activePreferredLocation = locationToLegacyText(runLocationSnapshot.searchLocation);
       const queryCacheKey = buildQueryCacheKey({
         resumeFingerprint,
         targetRole: activeTargetRole,
+        jobPreferences: activeJobPreferences,
         preferredLocation: activePreferredLocation,
       });
       const canReuseQueries = !!(
@@ -1675,6 +2109,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       } else {
         queriesResult = await window.electronAPI.generateJobQueries({
           profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
+          careerData: activeCareerData,
+          jobPreferences: activeJobPreferences,
+          preferencePlan: jobPreferencesInterpretation,
+          jobPreferencesInterpretation,
           manualAiRunId: effectiveManualAiRunId,
         });
         if (cancelled()) return;
@@ -1737,6 +2175,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // role is pinned, a job is kept only if its TITLE contains every word the
         // user typed (see src/utils/jobTitleMatch.js).
         targetRole: activeTargetRole,
+        jobPreferences: activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        preferencePlan: jobPreferencesInterpretation,
+        jobPreferencesInterpretation,
         // Country only, kept separate from preferredLocation so a remote-only
         // search still pins which country's market a board serves.
         countryScope: canonicalCountry,
@@ -1800,7 +2242,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // see handlePostSearchResult). Only proceed to score when neither fires.
       const shouldScore = await handlePostSearchResult({
         currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
-        profile, activeTargetRole, canvasFilePath,
+        profile, activeTargetRole, activeJobPreferences, jobPreferencesInterpretation,
+        careerData: activeCareerData, canvasFilePath,
         jobRunId: searchResult.runId || null,
         locationSnapshot: runLocationSnapshot,
         descriptionRecoveryJobs: Array.isArray(searchResult.descriptionRecoveryJobs)
@@ -1814,14 +2257,33 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return;
       }
 
-      if (SKIP_AI_FOR_TESTING) {
+      const preferenceResult = await evaluatePreferencesForRun({
+        jobs: foundJobs,
+        profile,
+        careerData: activeCareerData,
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        locationSnapshot: runLocationSnapshot,
+        manualAiRunId: effectiveManualAiRunId,
+      });
+      if (cancelled()) return;
+      foundJobs = preferenceResult.jobs;
+      if (foundJobs.length === 0) {
+        // Preserve the full post-history candidate pool even when strict Job
+        // Preferences remove every row. It lets a later preference edit
+        // re-evaluate without scraping the same listings again.
         try {
           await window.electronAPI?.saveJobAnalysisSnapshot?.({
-            jobs: foundJobs,
+            jobs: preferenceResult.candidatePool,
             profile,
-            careerData: data.careerData,
+            careerData: activeCareerData,
             nodeId: currentId,
             targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            jobPreferencePlan: jobPreferencesInterpretation,
+            preferenceEvaluation: preferenceResult.evaluation,
+            preferenceCandidatePool: preferenceResult.candidatePool,
             snapshotContext: {
               sourceHubId: currentId,
               runId: searchResult.runId || null,
@@ -1830,6 +2292,53 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               sourceGatheredCount: visibleGatheredCount,
               searchLocation: runLocationSnapshot.searchLocation,
               remoteResidences: runLocationSnapshot.remoteResidences,
+            },
+          });
+        } catch (err) {
+          EventLogger.error(`[JobSearch][${currentId}] Failed to save preference-filtered snapshot:`, err);
+        }
+        const completion = searchResult.runId
+          ? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0)
+          : null;
+        if (cancelled()) return;
+        updateGlobal(currentId, {
+          hubState: 'done', scoredJobs: [], finalSourceCounts: {}, resultCount: 0,
+          totalScoredCount: 0, scrapedCount: 0, gatheredCount: visibleGatheredCount,
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
+          pendingJobs: null, pendingBatch: null, scrapeWarnings: effectiveWarnings,
+          resultDisposition: 'preference-filtered',
+          errorMessage: terminalFinalizationError(searchResult.runId, canvasFilePath, completion),
+        });
+        completeManualAiRun(effectiveManualAiRunId);
+        return;
+      }
+
+      if (SKIP_AI_FOR_TESTING) {
+        try {
+          await window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: foundJobs,
+            profile,
+            careerData: activeCareerData,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            jobPreferencePlan: jobPreferencesInterpretation,
+            preferenceEvaluation: preferenceResult.evaluation,
+            preferenceCandidatePool: preferenceResult.candidatePool,
+            snapshotContext: {
+              sourceHubId: currentId,
+              runId: searchResult.runId || null,
+              canvasFilePath,
+              resumeSummary: buildResumeSummary(profile),
+              sourceGatheredCount: visibleGatheredCount,
+              searchLocation: runLocationSnapshot.searchLocation,
+              remoteResidences: runLocationSnapshot.remoteResidences,
+              jobPreferences: activeJobPreferences,
+              jobPreferencePlan: jobPreferencesInterpretation,
+              preferenceCandidatePool: preferenceResult.candidatePool,
             },
           });
         } catch (err) {
@@ -1851,6 +2360,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           resultCount: 0,
           scrapedCount: foundJobs.length,
           gatheredCount: visibleGatheredCount,
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
           testMode: true,
           aiSkipped: true,
           collectionOnly: true,
@@ -1874,10 +2387,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       await runScoringAndSpawn({
         profile,
+        careerData: activeCareerData,
         jobs: foundJobs,
         gatheredCount: visibleGatheredCount,
         scrapeWarnings: effectiveWarnings,
         activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        preferenceMatchedCount: preferenceResult.matchedCount,
+        preferenceFilteredCount: preferenceResult.filteredCount,
+        preferenceEvaluation: preferenceResult.evaluation,
+        preferenceCandidatePool: preferenceResult.candidatePool,
         originalPos,
         jobRunId: searchResult.runId || null,
         cancelled,
@@ -1924,7 +2444,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast, completeManualAiRun, completeJobRun]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast, completeManualAiRun, completeJobRun, evaluatePreferencesForRun]);
 
   const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true, runOrigin = 'initial' } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1960,6 +2480,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // the live run token, just like the pending jobs and warnings above.
     const activeJobRunId = jobRunIdRef.current || data.jobRunId || null;
     const profile = data.resumeProfile;
+    const pausedCareerData = data.pendingCareerData ?? data.careerData;
     if (!pending || !Array.isArray(pending) || pending.length === 0) {
       // This terminal branch does not acquire the scoring queue, but it still
       // awaits a snapshot and receipt. Own an epoch so Reset/unmount cannot
@@ -1973,7 +2494,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // This is a real terminal zero-result run, not merely a paused state.
       // Replace the prior analysis snapshot before painting the result so
       // snapshot-only bug-report diagnostics cannot describe an earlier run.
-      const activeTargetRole = data.pendingTargetRole || data.targetRole || '';
+      // An empty target role is a deliberate frozen run input. `||` would
+      // replace it with a role edited while the source warning was paused.
+      const activeTargetRole = data.pendingTargetRole ?? data.activeTargetRole ?? data.targetRole ?? '';
       const locationSnapshot = data.locationSnapshot || {
         searchLocation: getSearchLocation({
           searchLocation: data.searchLocation,
@@ -1986,7 +2509,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
           jobs: [],
           profile,
-          careerData: data.careerData,
+          careerData: pausedCareerData,
           nodeId: id,
           targetRole: activeTargetRole,
           snapshotContext: {
@@ -2022,6 +2545,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
         pendingBatch: null,
+        pendingTargetRole: null,
+        pendingJobPreferences: null,
+        pendingJobPreferencePlan: null,
+        pendingJobPreferencesInterpretation: null,
+        pendingCareerData: null,
         scrapeWarnings: terminalWarnings,
         jobRunId: activeJobRunId,
         rerunOutcome: 'no-new-results',
@@ -2065,15 +2593,98 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         },
       });
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+      // Preserve a deliberately blank role from the paused run; only absent
+      // legacy state may fall back to the editable next-run control.
+      const activeTargetRole = data.pendingTargetRole ?? data.activeTargetRole ?? data.targetRole ?? '';
+      const activeJobPreferences = data.pendingJobPreferences ?? data.jobPreferences ?? '';
+      const jobPreferencesInterpretation = data.pendingJobPreferencesInterpretation
+        ?? data.pendingJobPreferencePlan
+        ?? data.jobPreferencePlan
+        ?? data.jobPreferencesInterpretation
+        ?? null;
+      if (jobPreferencesInterpretation?.targetRoleConflict) {
+        throw new Error(
+          jobPreferencesInterpretation.targetRoleConflictReason
+            || 'Your Target role conflicts with your Job Preferences. Edit one of them, then re-run the search.',
+        );
+      }
+      const locationSnapshot = data.locationSnapshot || {
+        searchLocation: getSearchLocation(data),
+        remoteResidences: normalizeRemoteResidences(data.remoteResidences),
+      };
+      const preferenceResult = await evaluatePreferencesForRun({
+        jobs: pending,
+        profile,
+        careerData: pausedCareerData,
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        locationSnapshot,
+      });
+      if (cancelled()) return;
+      if (preferenceResult.jobs.length === 0) {
+        try {
+          await window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: preferenceResult.candidatePool,
+            profile,
+            careerData: pausedCareerData,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            jobPreferencePlan: jobPreferencesInterpretation,
+            preferenceEvaluation: preferenceResult.evaluation,
+            preferenceCandidatePool: preferenceResult.candidatePool,
+            snapshotContext: {
+              sourceHubId: currentId,
+              runId: activeJobRunId,
+              canvasFilePath,
+              resumeSummary: buildResumeSummary(profile),
+              sourceGatheredCount: pausedGatheredCount,
+              locationSnapshot,
+              searchLocation: locationSnapshot.searchLocation,
+              remoteResidences: locationSnapshot.remoteResidences,
+            },
+          });
+        } catch (err) {
+          EventLogger.error(`[JobSearch][${currentId}] Failed to save paused preference-filtered snapshot:`, err);
+        }
+        if (cancelled()) return;
+        const completion = activeJobRunId
+          ? await completeJobRun(activeJobRunId, 'completed', 'preference-filtered', canvasFilePath, 0)
+          : null;
+        if (cancelled()) return;
+        updateGlobal(currentId, {
+          hubState: 'done', scoredJobs: [], finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
+          scrapedCount: 0, gatheredCount: pausedGatheredCount,
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
+          pendingJobs: null, pendingBatch: null, pendingCareerData: null,
+          pendingTargetRole: null, pendingJobPreferences: null,
+          pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
+          resultDisposition: 'preference-filtered',
+          errorMessage: terminalFinalizationError(activeJobRunId, canvasFilePath, completion),
+        });
+        return;
+      }
       await runScoringAndSpawn({
         profile,
-        jobs: pending,
+        careerData: pausedCareerData,
+        jobs: preferenceResult.jobs,
         gatheredCount: pausedGatheredCount,
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
-        activeTargetRole: data.pendingTargetRole || data.targetRole || '',
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        preferenceMatchedCount: preferenceResult.matchedCount,
+        preferenceFilteredCount: preferenceResult.filteredCount,
+        preferenceEvaluation: preferenceResult.evaluation,
+        preferenceCandidatePool: preferenceResult.candidatePool,
         originalPos,
         jobRunId: activeJobRunId,
         cancelled,
+        locationSnapshot,
       });
     } catch (error) {
       if (cancelled() || isNodeDeletedAbort(error)) return;
@@ -2098,7 +2709,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, data.resumeProfile, data.careerData, data.pendingTargetRole, data.targetRole, data.jobRunId, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, canvasFilePath, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue, isMountedRef, completeJobRun]);
+  }, [id, data, canvasFilePath, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue, isMountedRef, completeJobRun, evaluatePreferencesForRun]);
 
   useEffect(() => {
     resumeScoringRef.current = resumeScoring;
@@ -2170,7 +2781,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (!processingToken) return;
     const currentId = id;
     const cancelled = epoch.start();
-    const activeTargetRole = data.targetRole || '';
+    // Resume semantics come exclusively from the sidecar that owns the staged
+    // rows. Falling back to the editable hub values would silently apply a
+    // post-crash target role or Job Preferences edit to the interrupted run.
+    const activeTargetRole = typeof offer.targetRole === 'string' ? offer.targetRole : '';
+    // A crash-resumed run must keep the preference contract it originally
+    // started with. Editing the textarea while the offer is visible applies to
+    // the next fresh run, not the staged search.
+    const activeJobPreferences = typeof offer.jobPreferences === 'string' ? offer.jobPreferences : '';
+    let jobPreferencesInterpretation = offer.jobPreferencePlan ?? offer.preferencePlan ?? null;
     let lease = null;
     try {
       lease = await moduleRunQueue.acquireModuleRun({
@@ -2198,7 +2817,43 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
 
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
-      updateGlobal(currentId, { hubState: 'searching' });
+      // A malformed/future plan is sanitized to null on manifest read. The raw
+      // user preference text is still durable, so re-interpret it rather than
+      // treating it as an empty plan and accidentally admitting every staged
+      // job. This is the sole recovery fallback; normal resumes reuse their
+      // original frozen plan without a second model call.
+      if (activeJobPreferences && !jobPreferencesInterpretation && window.electronAPI?.interpretJobPreferences) {
+        updateGlobal(currentId, { hubState: 'interpreting-preferences' });
+        const interpretationResult = await window.electronAPI.interpretJobPreferences({
+          profile,
+          careerData: data.careerData,
+          nodeId: currentId,
+          targetRole: activeTargetRole,
+          jobPreferences: activeJobPreferences,
+          searchLocation: data.locationSnapshot?.searchLocation || null,
+          remoteResidences: data.locationSnapshot?.remoteResidences || null,
+        });
+        if (cancelled()) return;
+        if (interpretationResult?.success === false) {
+          const err = new Error(interpretationResult.error || 'Failed to restore Job Preferences for this resumed search');
+          if (interpretationResult.isRateLimit) err.isRateLimit = true;
+          throw err;
+        }
+        jobPreferencesInterpretation = interpretationResult?.preferencePlan
+          ?? interpretationResult?.jobPreferencePlan
+          ?? interpretationResult?.jobPreferencesInterpretation
+          ?? null;
+      }
+      if (jobPreferencesInterpretation?.targetRoleConflict) {
+        throw new Error('This resumed search’s Target role conflicts with its Job Preferences. Start a fresh search after editing one of them.');
+      }
+      updateGlobal(currentId, {
+        hubState: 'searching',
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        jobPreferencesInterpretation,
+      });
       // resume:true → search-jobs re-scrapes only the unfinished sources from their
       // last completed page and reuses staged jobs from finished sources.
       const searchResult = await window.electronAPI.searchJobs({
@@ -2219,6 +2874,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // started with no role must stay ungated. A manifest written before this
         // field existed reports null, which correctly means "do not gate".
         targetRole: offer.targetRole || '',
+        jobPreferences: activeJobPreferences,
+        preferencePlan: jobPreferencesInterpretation,
         countryScope: data.canonicalCountry || '',
         resume: true,
         // The offer is canvas-scoped and can become stale if another run starts
@@ -2266,7 +2923,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       };
       const shouldScore = await handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
-        profile, activeTargetRole, canvasFilePath: cfp,
+        profile, activeTargetRole, activeJobPreferences, jobPreferencesInterpretation, canvasFilePath: cfp,
         jobRunId: searchResult?.runId || null,
         descriptionRecoveryJobs: Array.isArray(searchResult?.descriptionRecoveryJobs)
           ? searchResult.descriptionRecoveryJobs
@@ -2276,10 +2933,43 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         cancelled,
       });
       if (!shouldScore) return;
+      const preferenceResult = await evaluatePreferencesForRun({
+        jobs: foundJobs,
+        profile,
+        careerData: data.careerData,
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        locationSnapshot,
+      });
+      if (cancelled()) return;
+      if (preferenceResult.jobs.length === 0) {
+        const completion = searchResult?.runId
+          ? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', cfp, 0)
+          : null;
+        if (cancelled()) return;
+        updateGlobal(currentId, {
+          hubState: 'done', scoredJobs: [], finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
+          scrapedCount: 0, gatheredCount: visibleGatheredCount,
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
+          pendingJobs: null, pendingBatch: null, scrapeWarnings: warnings,
+          resultDisposition: 'preference-filtered',
+          errorMessage: terminalFinalizationError(searchResult?.runId, cfp, completion),
+        });
+        return;
+      }
       await runScoringAndSpawn({
-        profile, jobs: foundJobs,
+        profile, jobs: preferenceResult.jobs,
         gatheredCount: visibleGatheredCount,
         scrapeWarnings: warnings, activeTargetRole, originalPos,
+        activeJobPreferences, jobPreferencesInterpretation,
+        preferenceMatchedCount: preferenceResult.matchedCount,
+        preferenceFilteredCount: preferenceResult.filteredCount,
+        preferenceEvaluation: preferenceResult.evaluation,
+        preferenceCandidatePool: preferenceResult.candidatePool,
         jobRunId: searchResult?.runId || null, cancelled,
         locationSnapshot,
       });
@@ -2301,7 +2991,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
     }
-  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.locationSnapshot, data.searchLocation, data.remoteResidences, collectionLimits, enabledSourceIds, data.preferredLocation, data.canonicalLocation, data.canonicalCountry, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
+  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data, collectionLimits, enabledSourceIds, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, completeJobRun, evaluatePreferencesForRun]);
 
   const handleDiscardResume = useCallback(async () => {
     // Defense in depth for a stale async offer: only its owning hub may clear
@@ -2491,6 +3181,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (data.hubState !== 'sources-ready') return;
     scrapeWarningsRef.current = [];
     updateGlobal(id, { scrapeWarnings: [] });
+    // Each source card holds its OWN copy of its warning, so clearing the hub
+    // list alone leaves the blocked cards on canvas with live Solve buttons —
+    // and rows recovered after scoring has finished are never scored. Tell them
+    // to settle the same way their Skip button does so the clean-card dismiss
+    // below can actually remove them.
+    document.dispatchEvent(new CustomEvent('job-source-clear-warnings', {
+      detail: { hubId: id },
+    }));
     scheduleCleanSourceCardDismiss('score-current-results');
     resumeScoring();
   }, [id, data.hubState, updateGlobal, resumeScoring, scheduleCleanSourceCardDismiss]);
@@ -2693,7 +3391,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       manualAiResume: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
-      pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [],
+      preferenceMatchedCount: null, preferenceFilteredCount: null,
+      preferenceEvaluation: null, preferenceCandidatePool: null,
+      activeTargetRole: null, activeJobPreferences: null, jobPreferencePlan: null, jobPreferencesInterpretation: null,
+      pendingJobs: null, pendingTargetRole: null,
+      pendingJobPreferences: null, pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
+      pendingCareerData: null,
+      scrapeWarnings: [],
       // A snapshot describes one completed/in-flight run, not the persistent
       // search settings. Leaving it behind lets a later legacy resume use an
       // abandoned residence while the visible fields show the new one.
@@ -2746,6 +3450,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const handleRerun = useCallback(({ frameSourceCards = true } = {}) => {
     if (data.locked || processingRunsRef.current.active) return;
+    if (platformsVerifying) {
+      EventLogger.log(`[JobSearch][${id}] Re-run deferred — selected platform connection verification is still pending`);
+      addToast({
+        title: 'Checking Connections',
+        description: 'Wait for the selected job platform connection check to finish, then re-run the search.',
+        type: 'info',
+      });
+      return;
+    }
     if (activeEnabledSourceIds.length === 0) {
       const message = 'Select at least one job platform before running the search.';
       // Logged BEFORE the "Re-run button clicked" line this handler emits later,
@@ -2778,7 +3491,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     pendingJobsRef.current = null;
     gatheredCountRef.current = 0;
     jobRunIdRef.current = null;
-    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], jobRunId: null, rerunOutcome: null, rerunNotice: null });
+    updateGlobal(id, {
+      pendingJobs: null, pendingTargetRole: null, pendingCareerData: null,
+      pendingJobPreferences: null, pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
+      activeTargetRole: null, scrapeWarnings: [], jobRunId: null, rerunOutcome: null, rerunNotice: null,
+    });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     // Reset the persisting source cards the instant Re-run is clicked, before the
@@ -2795,7 +3512,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile, { frameSourceCards, runOrigin: 'rerun-button' });
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss, activeEnabledSourceIds]);
+  }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss, activeEnabledSourceIds, platformsVerifying]);
 
   // Re-score the currently displayed listings without invoking any search,
   // scrape, seen-history, or job-run lifecycle work. This is deliberately
@@ -2805,7 +3522,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (data.locked || processingRunsRef.current.active) return;
 
     const existingScoredJobs = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
-    if (existingScoredJobs.length === 0) {
+    // The pool must be a SUPERSET of what the hub is displaying, never an
+    // alternative to it. `finishScoringAndSpawn` below REPLACES `scoredJobs`
+    // with whatever this analyses, so any path that leaves the pool holding a
+    // subset — a late append that evaluated only its new rows, preferences
+    // switched on after a run — turned "Re-evaluate Saved Jobs" into a silent
+    // delete of every result outside that subset. Union instead of choosing:
+    // pool entries come first so their preference-audit enrichment survives
+    // dedup, and results absent from the pool are added back.
+    const savedPool = Array.isArray(data.preferenceCandidatePool) ? data.preferenceCandidatePool : [];
+    const savedCandidatePool = savedPool.length > 0
+      ? dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])
+      : existingScoredJobs;
+    if (savedCandidatePool.length === 0) {
       addToast({
         title: 'No Saved Jobs to Re-analyze',
         description: 'Run a job search first, then this action can update its hiring-fit assessments.',
@@ -2829,12 +3558,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // confidence, fitAssessment, rawScore, adjustedScore, adjustments, or
     // calibration would make that placeholder look like the old assessment.
     // Listing and compensation evidence intentionally remain intact.
-    const jobsToReanalyze = existingScoredJobs.map(job => {
+    const jobsToReanalyze = savedCandidatePool.map(job => {
       const listing = { ...(job || {}) };
       [
         'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
         'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
         'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
+        'preferenceAssessment',
       ].forEach(field => delete listing[field]);
       return listing;
     });
@@ -2851,18 +3581,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease = await moduleRunQueue.acquireModuleRun({
         nodeId: currentId,
         kind: 'jobsearch',
-        label: 'Re-analyze hiring fit',
+        label: 'Re-evaluate saved jobs',
         onQueued: ({ position }) => {
           updateGlobal(currentId, {
             hubState: 'queued',
-            queuedModuleRun: { label: 'Re-analyzing hiring fit', position },
+            queuedModuleRun: { label: 'Re-evaluating saved jobs', position },
             errorMessage: null,
             isRateLimit: false,
             resultDisposition: null,
           });
         },
         onQueueUpdate: ({ position }) => {
-          updateGlobal(currentId, { queuedModuleRun: { label: 'Re-analyzing hiring fit', position } });
+          updateGlobal(currentId, { queuedModuleRun: { label: 'Re-evaluating saved jobs', position } });
         },
         onStart: () => {
           if (cancelled()) throw new Error('Node deleted');
@@ -2878,15 +3608,85 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }),
         remoteResidences: normalizeRemoteResidences(data.remoteResidences),
       };
-      setScoringProgress(null);
-      updateGlobal(currentId, { hubState: 'scoring', jobCount: jobsToReanalyze.length });
-      const scoreResult = await window.electronAPI.scoreJobs({
+      const activeTargetRole = (data.targetRole || '').trim();
+      const activeJobPreferences = String(data.jobPreferences || '').trim();
+      let jobPreferencesInterpretation = null;
+      if (activeJobPreferences && window.electronAPI?.interpretJobPreferences) {
+        updateGlobal(currentId, { hubState: 'interpreting-preferences' });
+        const interpretationResult = await window.electronAPI.interpretJobPreferences({
+          profile: data.resumeProfile,
+          careerData: data.careerData,
+          nodeId: currentId,
+          manualAiRunId,
+          targetRole: activeTargetRole,
+          jobPreferences: activeJobPreferences,
+          searchLocation: locationSnapshot.searchLocation,
+          remoteResidences: locationSnapshot.remoteResidences,
+        });
+        if (cancelled()) return;
+        if (interpretationResult?.success === false) throw new Error(interpretationResult.error || 'Failed to understand Job Preferences');
+        jobPreferencesInterpretation = interpretationResult?.preferencePlan
+          ?? interpretationResult?.jobPreferencePlan
+          ?? interpretationResult?.jobPreferencesInterpretation
+          ?? interpretationResult?.interpretation
+          ?? null;
+        if (jobPreferencesInterpretation?.targetRoleConflict) {
+          throw new Error(
+            jobPreferencesInterpretation.targetRoleConflictReason
+              || 'Your Target role conflicts with your Job Preferences. Edit one of them, then re-evaluate.',
+          );
+        }
+      }
+      updateGlobal(currentId, {
+        activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        jobPreferencesInterpretation,
+      });
+      const preferenceResult = await evaluatePreferencesForRun({
         jobs: jobsToReanalyze,
+        profile: data.resumeProfile,
+        careerData: data.careerData,
+        activeTargetRole,
+        activeJobPreferences,
+        jobPreferencesInterpretation,
+        locationSnapshot,
+        manualAiRunId,
+      });
+      if (cancelled()) return;
+      if (preferenceResult.jobs.length === 0) {
+        await finishScoringAndSpawn({
+          scoredJobs: [],
+          gatheredCount: data.gatheredCount,
+          // `scrapedCount` is the score-ready stage of the current funnel.
+          // Keep the original found total, but an all-filtered re-evaluation
+          // has zero current score-ready jobs.
+          scrapedCount: 0,
+          scrapeWarnings: Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [],
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
+          resultDisposition: 'preference-filtered',
+          cancelled,
+          completeRun: false,
+        });
+        completeManualAiRun(manualAiRunId);
+        return;
+      }
+      setScoringProgress(null);
+      updateGlobal(currentId, { hubState: 'scoring', jobCount: preferenceResult.jobs.length });
+      const scoreResult = await window.electronAPI.scoreJobs({
+        jobs: preferenceResult.jobs,
         profile: data.resumeProfile,
         careerData: data.careerData,
         nodeId: currentId,
         manualAiRunId,
-        targetRole: (data.targetRole || '').trim(),
+        targetRole: activeTargetRole,
+        jobPreferences: activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
+        preferencePlan: jobPreferencesInterpretation,
+        preferenceEvaluation: preferenceResult.evaluation,
+        preferenceCandidatePool: preferenceResult.candidatePool,
         searchLocation: locationSnapshot.searchLocation,
         remoteResidences: locationSnapshot.remoteResidences,
         snapshotContext: {
@@ -2894,6 +3694,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           canvasFilePath,
           resumeSummary: buildResumeSummary(data.resumeProfile),
           sourceGatheredCount: data.gatheredCount ?? jobsToReanalyze.length,
+          jobPreferences: activeJobPreferences,
+          jobPreferencePlan: jobPreferencesInterpretation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
           searchLocation: locationSnapshot.searchLocation,
           remoteResidences: locationSnapshot.remoteResidences,
         },
@@ -2911,13 +3714,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       await finishScoringAndSpawn({
         scoredJobs: scoreResult.scoredJobs,
         gatheredCount: data.gatheredCount,
-        // Re-analysis does not collect anything. Preserve the original funnel
-        // rather than replacing it with the saved-listing count.
-        scrapedCount: data.scrapedCount,
+        // Re-analysis does not collect anything, so gatheredCount remains the
+        // original source-found total. The score-ready stage is recomputed
+        // from the current preferences, not retained from an older filter.
+        scrapedCount: preferenceResult.jobs.length,
         scrapeWarnings: Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [],
         aiSkipped: !!scoreResult.aiSkipped,
         collectionOnly: !!scoreResult.collectionOnly,
         testMode: !!scoreResult.testMode,
+        preferenceMatchedCount: scoreResult.preferenceMatchedCount ?? preferenceResult.matchedCount,
+        preferenceFilteredCount: scoreResult.preferenceFilteredCount ?? preferenceResult.filteredCount,
+        preferenceEvaluation: scoreResult.preferenceEvaluation ?? preferenceResult.evaluation,
+        preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceResult.candidatePool,
         cancelled,
         // This score-only action has no search run or history lifecycle.
         completeRun: false,
@@ -2926,8 +3734,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       if (!cancelled()) {
         addToast({
-          title: 'Hiring Fit Re-analyzed',
-          description: `Updated hiring-fit assessments for ${existingScoredJobs.length} saved job${existingScoredJobs.length === 1 ? '' : 's'}.`,
+          title: 'Saved Jobs Re-evaluated',
+          description: `Updated your preferences and hiring-fit assessments for ${savedCandidatePool.length} saved job${savedCandidatePool.length === 1 ? '' : 's'}.`,
           type: 'success',
         });
       }
@@ -2945,7 +3753,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         isRateLimit: !!error?.isRateLimit,
       });
       addToast({
-        title: 'Hiring Fit Re-analysis Failed',
+        title: 'Saved Job Re-evaluation Failed',
         description: 'Your existing scores were kept. Try again when the AI handoff is available.',
         type: 'error',
       });
@@ -2956,7 +3764,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
     }
-  }, [data, id, addToast, epoch, moduleRunQueue, updateGlobal, canvasFilePath, finishScoringAndSpawn, isMountedRef, completeManualAiRun]);
+  }, [data, id, addToast, epoch, moduleRunQueue, updateGlobal, canvasFilePath, finishScoringAndSpawn, isMountedRef, completeManualAiRun, evaluatePreferencesForRun]);
 
   // Drop the hub's career identity (files + everything derived from them) while
   // keeping every search setting, so the user can drop FRESH career files onto
@@ -3021,6 +3829,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
+      activeTargetRole: null,
       pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
       ...buildJobHubCareerClearPatch(),
       manualAiResume: null,
@@ -3124,6 +3933,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const cancelled = epoch.start();
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       const activeTargetRole = String(snapshot.targetRole || '').trim();
+      const activeJobPreferences = String(snapshot.jobPreferences ?? data.jobPreferences ?? '').trim();
+      const jobPreferencesInterpretation = snapshot.jobPreferencePlan
+        ?? snapshot.preferencePlan
+        ?? snapshot.snapshotContext?.jobPreferencePlan
+        ?? snapshot.snapshotContext?.preferencePlan
+        ?? null;
+      if (jobPreferencesInterpretation?.targetRoleConflict) {
+        const message = jobPreferencesInterpretation.targetRoleConflictReason
+          || 'This saved search’s Target role conflicts with its Job Preferences. Edit one of them, then start a fresh search.';
+        updateGlobal(currentId, { hubState: 'done', errorMessage: message, isRateLimit: false });
+        addToast({ title: 'Job Preferences Conflict', description: message, type: 'error' });
+        return;
+      }
       updateGlobal(currentId, {
         errorMessage: null,
         isRateLimit: false,
@@ -3141,13 +3963,80 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           experience: profile.experience_years,
         },
         targetRole: activeTargetRole,
+        jobPreferences: activeJobPreferences,
+        jobPreferencePlan: jobPreferencesInterpretation,
       });
 
       try {
+        const locationSnapshot = snapshot.locationSnapshot || snapshot.snapshotContext?.locationSnapshot || (
+          snapshot.snapshotContext?.searchLocation || snapshot.snapshotContext?.remoteResidences
+            ? {
+                searchLocation: normalizeStructuredLocation(snapshot.snapshotContext?.searchLocation),
+                remoteResidences: normalizeRemoteResidences(snapshot.snapshotContext?.remoteResidences),
+              }
+            : null
+        );
+        // A recovered append can contain a subset that was already committed
+        // before the app restarted. Re-evaluating it would double-count
+        // preferences and create a second audit even though scored-job merging
+        // later hides the duplicate. Mirror the normal late-USAJobs gate here.
+        const existingPreferencePool = Array.isArray(data.preferenceCandidatePool)
+          ? data.preferenceCandidatePool
+          : (Array.isArray(data.scoredJobs) ? data.scoredJobs : []);
+        const jobsToEvaluate = resultMode === 'append'
+          ? uniqueJobsAcrossSources(existingPreferencePool, savedJobs)
+          : savedJobs;
+        if (resultMode === 'append' && jobsToEvaluate.length === 0) {
+          updateGlobal(currentId, { hubState: 'done' });
+          completeManualAiRun(manualAiRunId);
+          return;
+        }
+        const preferenceResult = await evaluatePreferencesForRun({
+          careerData,
+          activeTargetRole,
+          jobs: jobsToEvaluate,
+          profile,
+          activeJobPreferences,
+          jobPreferencesInterpretation,
+          locationSnapshot,
+          manualAiRunId,
+        });
+        if (cancelled()) return;
+        if (preferenceResult.jobs.length === 0) {
+          if (resultMode === 'append') {
+            updateGlobal(currentId, {
+              hubState: 'done',
+              gatheredCount: (Number(data.gatheredCount) || 0) + jobsToEvaluate.length,
+              preferenceMatchedCount: (Number(data.preferenceMatchedCount) || 0) + (preferenceResult.matchedCount || 0),
+              preferenceFilteredCount: (Number(data.preferenceFilteredCount) || 0) + (preferenceResult.filteredCount || 0),
+              preferenceEvaluation: mergePreferenceEvaluations(data.preferenceEvaluation, preferenceResult.evaluation),
+              preferenceCandidatePool: mergePreferenceCandidatePools(data.preferenceCandidatePool, preferenceResult.candidatePool),
+            });
+          } else {
+            const completion = snapshot.runId
+              ? await completeJobRun(snapshot.runId, 'completed', 'preference-filtered', canvasFilePath, 0)
+              : null;
+            if (cancelled()) return;
+            updateGlobal(currentId, {
+              hubState: 'done', scoredJobs: [], finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
+              scrapedCount: 0,
+              gatheredCount: snapshot.sourceGatheredCount ?? savedJobs.length,
+              preferenceMatchedCount: preferenceResult.matchedCount,
+              preferenceFilteredCount: preferenceResult.filteredCount,
+              preferenceEvaluation: preferenceResult.evaluation,
+              preferenceCandidatePool: preferenceResult.candidatePool,
+              pendingJobs: null, pendingBatch: null,
+              resultDisposition: 'preference-filtered',
+              errorMessage: terminalFinalizationError(snapshot.runId, canvasFilePath, completion),
+            });
+          }
+          completeManualAiRun(manualAiRunId);
+          return;
+        }
         await runScoringAndSpawn({
           profile,
           careerData,
-          jobs: savedJobs,
+          jobs: preferenceResult.jobs,
           gatheredCount: snapshot.sourceGatheredCount
             ?? snapshot.searchFunnel?.relevanceKept
             ?? snapshot.searchFunnel?.raw
@@ -3157,22 +4046,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             ? (Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [])
             : [],
           activeTargetRole,
+          activeJobPreferences,
+          jobPreferencesInterpretation,
+          preferenceMatchedCount: preferenceResult.matchedCount,
+          preferenceFilteredCount: preferenceResult.filteredCount,
+          preferenceEvaluation: preferenceResult.evaluation,
+          preferenceCandidatePool: preferenceResult.candidatePool,
           originalPos,
           cancelled,
           jobRunId: snapshot.runId || null,
           // Re-analysis snapshots have no search-run lifecycle. Only complete
           // a staged search when this recovered snapshot owns that run token.
           completeRun: !!snapshot.runId,
-          locationSnapshot: snapshot.locationSnapshot || snapshot.snapshotContext?.locationSnapshot || (
-            snapshot.snapshotContext?.searchLocation || snapshot.snapshotContext?.remoteResidences
-              ? {
-                  searchLocation: normalizeStructuredLocation(snapshot.snapshotContext?.searchLocation),
-                  remoteResidences: normalizeRemoteResidences(snapshot.snapshotContext?.remoteResidences),
-                }
-              : null
-          ),
+          locationSnapshot,
           manualAiRunId,
           resultMode,
+          gatheredDelta: resultMode === 'append' ? jobsToEvaluate.length : null,
         });
       } catch (error) {
         if (cancelled() || isNodeDeletedAbort(error)) return;
@@ -3191,7 +4080,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.locked, data.scrapeWarnings, epoch, getNode, hasReusableCareerProfile, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.gatheredCount, data.jobPreferences, data.locked, data.preferenceCandidatePool, data.preferenceEvaluation, data.preferenceFilteredCount, data.preferenceMatchedCount, data.scoredJobs, data.scrapeWarnings, epoch, getNode, hasReusableCareerProfile, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun]);
 
   const autoResumedManualAiRunRef = useRef(null);
   useEffect(() => {
@@ -3375,7 +4264,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {hubState === 'empty' && (
           <>
             {banner}
-            <div className="flex flex-col items-center justify-center py-8 px-4 cursor-pointer">
+            <div className="flex flex-col items-center justify-center py-8 px-4 cursor-default">
               <Briefcase size={28} className="text-blue-400/40 mb-3" />
               {platformsVerifying ? (
                 <p className="text-white/40 text-sm font-medium">Checking connections…</p>
@@ -3430,27 +4319,50 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 className="nodrag mt-4 w-full flex flex-col items-stretch gap-1.5 text-[10px] text-white/40"
                 onPointerDown={(e) => e.stopPropagation()}
               >
-                <input
-                  type="text"
-                  data-native-undo="true"
-                  value={targetRole}
-                  onChange={(e) => setTargetRole(e.target.value)}
-                  placeholder="Target role (optional) — e.g. Product Manager"
-                  title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once."
-                  className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
-                />
+                <label className="flex flex-col gap-1">
+                  <span>Target role <span className="text-white/25">(optional)</span></span>
+                  <input
+                    type="text"
+                    data-native-undo="true"
+                    value={targetRole}
+                    onChange={(e) => setTargetRole(e.target.value)}
+                    placeholder="E.g. Product Manager"
+                    aria-describedby={targetRoleHelpId}
+                    disabled={!!data.locked}
+                    className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                  <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role once.</span>
+                </label>
                 {roleOperators.length > 0 && (
-                  <p className="text-amber-300/70 text-[9px] leading-snug px-0.5">
+                  <p className="text-amber-300/70 text-[9px] leading-snug px-0.5" role="status">
                     {roleOperators.join(', ')} {roleOperators.length > 1 ? 'are' : 'is'} sent as ordinary words, not search operators — job boards either ignore them or return the opposite of what you meant. Type the role in plain words.
                   </p>
                 )}
+                <label className="flex flex-col gap-1">
+                  <span>Job Preferences <span className="text-white/25">(optional)</span></span>
+                  <textarea
+                    data-native-undo="true"
+                    value={jobPreferences}
+                    onChange={(e) => setJobPreferences(e.target.value)}
+                    rows={3}
+                    maxLength={4000}
+                    placeholder="E.g. Help me pivot away from web development; large established companies only."
+                    aria-describedby={jobPreferencesHelpId}
+                    disabled={!!data.locked}
+                    className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25 leading-snug disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                  <span id={jobPreferencesHelpId} className="text-[9px] leading-snug text-white/25">
+                    Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
+                  </span>
+                </label>
                 <JobSearchLocationFields
                   searchLocation={searchLocation}
                   setSearchLocation={setSearchLocation}
                   remoteResidences={remoteResidences}
                   setRemoteResidence={setRemoteResidence}
+                  disabled={!!data.locked}
                 />
-                <div className="flex items-center justify-center gap-1.5">
+                <label className="flex items-center justify-center gap-1.5">
                   <span>Look back</span>
                   <input
                     type="number"
@@ -3459,10 +4371,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     max={180}
                     value={maxAgeDays}
                     onChange={(e) => setMaxAgeDays(e.target.value)}
-                    className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
+                    aria-label="Maximum posting age in days"
+                    disabled={!!data.locked}
+                    className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 disabled:cursor-not-allowed disabled:opacity-50"
                   />
                   <span>days</span>
-                </div>
+                </label>
                 {!data.locked && (
                   <JobCollectionLimitsControl
                     collectionLimits={collectionLimits}
@@ -3557,6 +4471,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               collectionOnly={!!data.collectionOnly}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}
+              platformsVerifying={platformsVerifying}
+              verifyDone={verifyDone}
+              verifyTotal={verifyTotal}
               onRerun={handleRerun}
               onReanalyze={handleReanalyze}
               onClearCareerFiles={handleClearCareerFiles}
@@ -3573,8 +4490,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               setRemoteResidence={setRemoteResidence}
               targetRole={targetRole}
               setTargetRole={setTargetRole}
+              jobPreferences={jobPreferences}
+              setJobPreferences={setJobPreferences}
+              preferenceMatchedCount={data.preferenceMatchedCount}
+              preferenceFilteredCount={data.preferenceFilteredCount}
+              jobPreferencePlan={data.jobPreferencePlan || null}
+              preferenceEvaluation={data.preferenceEvaluation || null}
               scrapeWarnings={data.scrapeWarnings || []}
               rerunOutcome={data.rerunOutcome || null}
+              resultDisposition={data.resultDisposition || null}
             />
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>

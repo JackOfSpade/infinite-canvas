@@ -114,9 +114,23 @@ export function parsePostedDate(raw, now = new Date()) {
 export function filterJobsByAge(jobs, maxAgeDays, now = new Date()) {
   if (!maxAgeDays || maxAgeDays <= 0) return jobs;
   const cutoff = now.getTime() - maxAgeDays * 86400000;
+  // Boards that publish a DATE rather than a timestamp (USAJobs'
+  // "2026-08-13T00:00:00.0000", every yearless "Aug 12" form) parse to local
+  // midnight. Measuring those against a cutoff that still carries the current
+  // time of day makes this backstop STRICTLY NARROWER than the day-granular
+  // server bound it exists to back up — DatePosted=21 returns the whole 21st
+  // day and this then silently dropped it, so the report could claim
+  // "server-side + client backstop ✅" over rows the client had just discarded.
+  // Date-only postings compare against the START of the cutoff day; anything
+  // carrying a real time of day keeps the exact comparison.
+  const dayCutoff = new Date(cutoff);
+  dayCutoff.setHours(0, 0, 0, 0);
+  const dayCutoffMs = dayCutoff.getTime();
   return jobs.filter(j => {
     const d = parsePostedDate(j.posted, now);
     if (!d) return true;
-    return d.getTime() >= cutoff;
+    const dateOnly = d.getHours() === 0 && d.getMinutes() === 0
+      && d.getSeconds() === 0 && d.getMilliseconds() === 0;
+    return d.getTime() >= (dateOnly ? dayCutoffMs : cutoff);
   });
 }

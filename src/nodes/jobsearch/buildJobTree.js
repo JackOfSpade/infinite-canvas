@@ -26,6 +26,7 @@ import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
  *  - parseSalaryToNumeric     → salary text → annual USD
  *  - computeLayoutPositions   → tight (x,y) for the current expand state
  *  - computeJobTreeView       → single derivation of `hidden` from expand × filter
+ *  - compareJobsByFitAndPreference → deterministic within-fit card order
  *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
 
@@ -94,6 +95,24 @@ const MAX_COMPENSATION_TEXT_LENGTH = 2_400;
 const MAX_SOURCE_LABEL_LENGTH = 240;
 const MAX_SOURCE_DETAILS_LENGTH = 500;
 const MAX_LOCATION_LABEL_LENGTH = 300;
+
+function numericScore(value) {
+  const score = Number(value);
+  return Number.isFinite(score) ? score : 0;
+}
+
+/**
+ * Cards remain primarily ordered by hiring fit. When that score is tied, the
+ * independent Job Preferences assessment gives the user a useful secondary
+ * order. Returning zero for a complete tie deliberately preserves the input's
+ * stable order rather than inventing a title/company tie-break.
+ */
+export function compareJobsByFitAndPreference(a, b) {
+  const fitDelta = numericScore(b?.matchScore) - numericScore(a?.matchScore);
+  if (fitDelta) return fitDelta;
+  return numericScore(b?.preferenceAssessment?.preferenceScore)
+    - numericScore(a?.preferenceAssessment?.preferenceScore);
+}
 
 function textValue(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
@@ -892,6 +911,9 @@ export function buildJobTreeNodes({
         // it defensively for legacy/future schemas, and it must travel through
         // every valid AI-taxonomized board tree.
         compensationAssessment: job.compensationAssessment,
+        // Preference assessment is independent of hiring fit. Preserve it so
+        // cards can explain why an otherwise equal-fit listing is ordered here.
+        preferenceAssessment: job.preferenceAssessment,
         source: job.source, url: job.url, googleCardUrl: job.googleCardUrl,
         applySource: job.applySource, posted: job.posted, language: job.language,
         // The ORIGIN search module's id (the board merges cards from several
@@ -971,7 +993,7 @@ export function buildJobTreeNodes({
       const roleNames = [...byRole.keys()].sort((a, b) => a.localeCompare(b));
       let ri = 0;
       for (const roleName of roleNames) {
-        const jobs = [...byRole.get(roleName)].sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+        const jobs = [...byRole.get(roleName)].sort(compareJobsByFitAndPreference);
         const roleId = `${rangeId}-R${ri++}`;
         const cardIds = jobs.map(j => { const cid = pushCard(j); pushEdge(roleId, cid); return cid; });
         pushGroup(roleId, 'role', roleName, cardIds, cardIds.length);

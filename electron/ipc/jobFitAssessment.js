@@ -691,5 +691,3 @@ export function validateAndNormalizeFitAssessment(raw, {
     ],
   };
 }
-
-export const normalizeFitAssessment = validateAndNormalizeFitAssessment;

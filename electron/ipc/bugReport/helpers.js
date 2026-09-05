@@ -200,7 +200,11 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   // undefined". Skip the check for auto-detected traces — they were already
   // proven logged-in by a different (DOM/cookie/auth-gated) signal.
   const isAutoDetected = traceStatus === 'auto-detected';
-  const redirectMismatch = !staleMismatch && !isAutoDetected && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
+  // A mismatch is only observable when a final URL was actually recorded. A
+  // disk-restored entry (or a trace that only carries an error) has none, and
+  // claiming "redirected to " from an absent URL would assert a cause from no
+  // evidence — and dereference a missing trace below.
+  const redirectMismatch = !staleMismatch && !isAutoDetected && entry?.connected && mustContain && traceFinalUrl && !traceFinalUrl.includes(mustContain.toLowerCase());
   const ambiguousShell = entry?.connected && entry?.lastTrace?.ambiguousShell;
   const connected = entry?.connected
     ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
@@ -293,7 +297,12 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     const negAge = negTs
       ? `${new Date(negTs).toISOString()} (${Math.round((Date.now() - negTs) / 1000)}s ago)`
       : 'time not recorded';
-    lines.push(`  - ⚠️ preserved prior NOT-CONNECTED verdict (${negAge}): ${redactReportUrlsInText(negative.reason)}`);
+    // This is historical evidence, not a second current verdict. The current
+    // row above is connected, but that state may be freshly verified, restored,
+    // or defaulted from the absence of a logout signal. Describe only the cache
+    // fact shared by all three shapes so a healthy session (notably Indeed in
+    // the reported run) does not look contradictory or partially disconnected.
+    lines.push(`  - ℹ️ historical NOT-CONNECTED verdict; current cached status is connected (${negAge}): ${redactReportUrlsInText(negative.reason)}`);
     // The disk-restored shape never carries `trace` (persistStatusCache strips
     // it) — only render this when the in-memory write kept it.
     if (negative.trace && typeof negative.trace === 'object') {

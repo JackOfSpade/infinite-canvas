@@ -74,6 +74,90 @@ async function waitForCheckbox(locator, checked, label, timeoutMs = 5000) {
   }
 }
 
+// The sidebar expands over 300ms and moves/resizes the React Flow pane with
+// it. Playwright can see the module card as soon as its first pixels are
+// visible, but a drag begun then can use a stale target rectangle and release
+// outside the pane. Wait for two equal layout samples before any sidebar-to-
+// canvas drag so this smoke test exercises the actual DnD path deterministically.
+async function waitForStableBox(locator, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  for (;;) {
+    const box = await locator.boundingBox();
+    if (box && previous
+      && Math.abs(box.x - previous.x) < 1
+      && Math.abs(box.y - previous.y) < 1
+      && Math.abs(box.width - previous.width) < 1
+      && Math.abs(box.height - previous.height) < 1) {
+      return box;
+    }
+    if (Date.now() > deadline) assert.fail(`${label} did not reach stable layout`);
+    previous = box;
+    await new Promise((resolve) => setTimeout(resolve, 75));
+  }
+}
+
+// Retain the final drop payload in failures: it distinguishes a lost sidebar
+// MIME payload from a renderer-side insertion failure without tracing every
+// intermediate browser DnD event.
+async function beginDndTrace(page) {
+  await page.evaluate(() => {
+    const trace = [];
+    const record = (event) => {
+      const types = event.dataTransfer ? Array.from(event.dataTransfer.types || []) : [];
+      trace.push({
+        type: event.type,
+        target: event.target?.className || event.target?.tagName || '',
+        clientX: event.clientX,
+        clientY: event.clientY,
+        types,
+        nodeType: event.dataTransfer?.getData('app/node-type') || '',
+      });
+    };
+    document.addEventListener('drop', record, true);
+    window.__smokeDndTrace = { trace, record };
+  });
+}
+
+async function endDndTrace(page) {
+  return page.evaluate(() => {
+    const state = window.__smokeDndTrace;
+    if (!state) return [];
+    document.removeEventListener('drop', state.record, true);
+    delete window.__smokeDndTrace;
+    return state.trace;
+  });
+}
+
+// Module drops over a nested-canvas group intentionally become children of
+// that group. This smoke has already created one parent group by this point,
+// so choose a point proved to be outside every visible group rather than
+// assuming a historical coordinate remains top-level-safe.
+async function findTopLevelModuleDropPosition(page) {
+  const position = await page.evaluate(() => {
+    const paneElement = document.querySelector('.react-flow__pane');
+    if (!paneElement) return null;
+    const paneBox = paneElement.getBoundingClientRect();
+    const groupBoxes = [...document.querySelectorAll('.react-flow__node-group')]
+      .map((element) => element.getBoundingClientRect());
+    const candidates = [
+      { x: Math.min(600, Math.max(220, Math.floor(paneBox.width - 320))), y: 100 },
+      { x: 280, y: 100 },
+      { x: 280, y: 520 },
+      { x: Math.max(220, Math.floor(paneBox.width - 220)), y: 520 },
+    ];
+    const withinPane = ({ x, y }) => x >= 0 && y >= 0 && x < paneBox.width && y < paneBox.height;
+    const withinGroup = ({ x, y }) => groupBoxes.some((box) => {
+      const clientX = paneBox.left + x;
+      const clientY = paneBox.top + y;
+      return clientX >= box.left && clientX <= box.right && clientY >= box.top && clientY <= box.bottom;
+    });
+    return candidates.find((candidate) => withinPane(candidate) && !withinGroup(candidate)) || null;
+  });
+  assert.ok(position, 'the smoke needs a visible pane coordinate outside every nested-canvas group');
+  return position;
+}
+
 async function waitForWorkspaceNodeData(page, filePath, nodeType, predicate, label, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -737,14 +821,32 @@ try {
   step('exercise sidebar drag/drop panels and issue reporter');
   await page.locator('button[title="Jobs"]').click();
   await expectVisible(page, 'Job Search Module');
-  // Module drops land via HTML5 DnD + a React state commit — poll instead of
-  // asserting the instant dragTo returns (the suite's documented flake source;
-  // the Marketplace Status drop was observed flaking 0 !== 1 with bare asserts).
-  await page.getByText('Job Search Module', { exact: true }).locator('..').dragTo(
-    page.locator('.react-flow__pane'),
-    { targetPosition: { x: 700, y: 300 } },
+  const jobModuleCard = page.getByText('Job Search Module', { exact: true }).locator('..');
+  const canvasPane = page.locator('.react-flow__pane');
+  // Module drops land via HTML5 DnD + a React state commit. The sidebar's
+  // width transition shifts the canvas beneath the target position, so settle
+  // both endpoints before the gesture; then poll for React's node commit.
+  await waitForStableBox(jobModuleCard, 'Job Search module card');
+  await waitForStableBox(canvasPane, 'canvas pane after opening Jobs sidebar');
+  const jobDropPosition = await findTopLevelModuleDropPosition(page);
+  await beginDndTrace(page);
+  await jobModuleCard.dragTo(
+    canvasPane,
+    { targetPosition: jobDropPosition },
   );
-  await waitForCount(page.locator('.react-flow__node-jobhub'), (n) => n === 1, 'dragging Job Search module should create a hub');
+  const jobDragTrace = await endDndTrace(page);
+  const serialisedJobDragTrace = JSON.stringify(jobDragTrace);
+  assert(jobDragTrace.some((event) => event.type === 'drop' && event.nodeType === 'jobhub'),
+  `Job Search DnD must carry app/node-type to the pane drop (trace=${serialisedJobDragTrace})`);
+  try {
+    await waitForCount(
+      page.locator('.react-flow__node-jobhub'),
+      (n) => n === 1,
+      `dragging Job Search module should create a hub (trace=${serialisedJobDragTrace})`,
+    );
+  } catch (error) {
+    assert.fail(`${error.message}; rendererErrors=${JSON.stringify(rendererErrors)}`);
+  }
 
   // This is intentionally UI-only: changing a platform must not initiate a
   // scrape. It proves the real rendered Job Search module exposes every scoped
@@ -767,7 +869,7 @@ try {
   await waitForCheckbox(indeedPlatform, true, 'toggling Indeed on should restore the hub allow-list');
 
   step('Job Search target-role input warns about Boolean syntax without blocking it');
-  const roleInput = jobHub.locator('input[placeholder^="Target role"]');
+  const roleInput = jobHub.getByRole('textbox', { name: /^Target role/i });
   await roleInput.waitFor();
   // The advisory text is deliberately non-blocking: the typed role is always
   // sent through unchanged. Operators are unsafe to broadcast — measured across
@@ -808,10 +910,9 @@ try {
 
   await page.locator('button[title="Sell"]').click();
   await expectVisible(page, 'Price Check Module');
-  // (380, 600) is clear of the jobhub just dropped at (700, 300) — hubs are
-  // 280×350, so the old (800, 420) target landed ON the jobhub and the module
-  // drop was (correctly) rejected rather than spawning a sellhub. The bottom-
-  // right corner is out too: the minimap panel obscures it from hit-testing.
+  // This is left of the top-level Job Search module's group-safe drop point.
+  // The bottom-right corner is out too: the minimap panel obscures it from
+  // hit-testing.
   await page.getByText('Price Check Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 380, y: 600 } },

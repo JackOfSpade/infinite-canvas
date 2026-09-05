@@ -1702,7 +1702,12 @@ wants to learn, hear, or discuss leaves the argument pointed inward; revise it
 so the invitation carries the role-facing contribution forward. Keep the
 invitation direct and present-tense without relying on conditional or deferential
 boilerplate: “I welcome a conversation” is direct; “I would welcome a
-conversation” or “I would welcome a discussion” is not.
+conversation” or “I would welcome a discussion” is not. Two halves carry that
+connection: name the asset with a possessive, an authorship clause, or a
+demonstrative carrying its own descriptor (“my integration work”, “the
+connector I built”, “that MCP server experience”) rather than a bare
+demonstrative (“that work”), and say what it does for the target work
+(“… could support …”, “… supports …”, “applying … to …”).
 
 ### 11.3 Accent &amp; the close
 

@@ -748,7 +748,7 @@ export function Canvas() {
   const sidebarStats = useMemo(() => getStats(nodes), [statsSignature]);
 
   return (
-    <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
+    <div className="w-screen h-screen bg-neutral-950 flex">
       <Sidebar
         jobCardsCount={sidebarStats.jobCardsCount}
         sellHubsCount={sidebarStats.sellHubsCount}
@@ -756,7 +756,10 @@ export function Canvas() {
         onReportBugClick={handleReportBugClick}
       />
 
+      {/* reactFlowWrapper measures the flow viewport only — the sidebar must stay
+          outside it or fit-view over-zooms and centers content off-screen. */}
       <div
+        ref={reactFlowWrapper}
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
         onPointerDown={onCanvasPointerDown}
@@ -764,49 +767,47 @@ export function Canvas() {
         onPointerUp={handlePointerUp}
         onPointerLeave={onCanvasPointerLeave}
       >
-        <SearchBar />
+        <CanvasNavigationContext.Provider value={navContextValue}>
+          <SearchBar />
 
-        {loadState.active && (
-          <div className="absolute inset-0 z-[500] flex items-center justify-center bg-neutral-950/80 backdrop-blur-sm">
-            <div className="w-[min(360px,80vw)] rounded-lg border border-white/10 bg-neutral-900/95 p-4 shadow-2xl">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-xs font-semibold text-white/85">Loading workspace</div>
-                <div className="font-mono text-[10px] text-white/45">
-                  {Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%
+          {loadState.active && (
+            <div className="absolute inset-0 z-[500] flex items-center justify-center bg-neutral-950/80 backdrop-blur-sm">
+              <div className="w-[min(360px,80vw)] rounded-lg border border-white/10 bg-neutral-900/95 p-4 shadow-2xl">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold text-white/85">Loading workspace</div>
+                  <div className="font-mono text-[10px] text-white/45">
+                    {Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%
+                  </div>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-emerald-400 transition-[width] duration-200 ease-out"
+                    style={{ width: `${Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%` }}
+                  />
+                </div>
+                <div className="mt-2 text-[10px] text-white/45">
+                  {loadState.label || 'Preparing canvas...'}
                 </div>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-                <div
-                  className="h-full rounded-full bg-emerald-400 transition-[width] duration-200 ease-out"
-                  style={{ width: `${Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%` }}
-                />
-              </div>
-              <div className="mt-2 text-[10px] text-white/45">
-                {loadState.label || 'Preparing canvas...'}
-              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        <CanvasCursors
-          ref={cursorsRef}
-          eraserSize={eraserSize}
-          activeTool={activeTool}
-          placementMode={placementMode}
-        />
-
-        {/* Canvas transition overlay */}
-        {navigation.animPhase && (
-          <div
-            className="canvas-transition-overlay"
-            style={{
-              opacity: navigation.animPhase === 'fade-out' ? 1 : 0,
-              transition: `opacity ${animationDuration / 2}ms ease-in-out`,
-            }}
+          <CanvasCursors
+            ref={cursorsRef}
+            placementMode={placementMode}
           />
-        )}
 
-        <CanvasNavigationContext.Provider value={navContextValue}>
+          {/* Canvas transition overlay */}
+          {navigation.animPhase && (
+            <div
+              className="canvas-transition-overlay"
+              style={{
+                opacity: navigation.animPhase === 'fade-out' ? 1 : 0,
+                transition: `opacity ${animationDuration / 2}ms ease-in-out`,
+              }}
+            />
+          )}
+
           <ReactFlow
             nodes={nodes}
             edges={edges}

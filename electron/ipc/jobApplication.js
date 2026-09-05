@@ -121,7 +121,14 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
   logger.warn(`[JobApplication] Regenerating mismatched ${documentKind} PDF before export: ${inspection.reason}`);
   const rendered = await renderPdf(html, { document: documentKind });
   if (rendered.fontsLoaded === false) {
-    throw new Error(`The ${documentKind === 'cover' ? 'cover-letter' : 'résumé'} fonts were unavailable while repairing an inconsistent generated PDF.`);
+    // Name the faces the predicate rejected rather than diagnosing a cause the
+    // app never observed — the same correction made in resumeRender.js and
+    // applicationSync.js.
+    const faces = (Array.isArray(rendered.missingFontFaces) ? rendered.missingFontFaces : []).filter(Boolean);
+    throw new Error(
+      `The render window could not resolve the ${documentKind === 'cover' ? 'cover-letter' : 'résumé'} fonts`
+      + `${faces.length ? ` (${faces.join(', ')})` : ''} while repairing an inconsistent generated PDF.`,
+    );
   }
   let repaired = rendered.bytes;
   if (isDualMode(extractVariantAttrs(html))) repaired = await applyDualPdf(repaired);
@@ -160,8 +167,7 @@ export function registerPendingApplicationWorkspace({
   const optional = [resumePdfPath, coverLetterPdfPath]
     .map(value => value ? path.resolve(String(value)) : null);
   const paths = [...required, ...optional.filter(Boolean)];
-  if (paths.some(value => path.relative(resolvedWorkDir, value).startsWith(`..${path.sep}`)
-    || path.relative(resolvedWorkDir, value) === '..' || path.isAbsolute(path.relative(resolvedWorkDir, value)))) {
+  if (paths.some(value => !isWithinDirectory(resolvedWorkDir, value))) {
     throw new Error('Application artifact escaped its registered workspace.');
   }
   const workspaceStat = fs.lstatSync(resolvedWorkDir);
@@ -484,26 +490,6 @@ const RESUME_BULLET_SELF_CONTAINMENT_RULE = `STANDALONE HIGHLIGHT BULLETS: Every
 // have incorrectly nested any peer category under the preceding role/section.
 const TOP_LEVEL_SECTION_HIERARCHY_RULE = `TOP-LEVEL SECTION HIERARCHY: Every top-level résumé category is a peer \`<section class="section">\` with a \`.section-head\` and an \`h2\`, regardless of its label. Use \`.subsection-head\` only for a genuine grouping nested within its parent section; never use it as a peer category heading or nest a peer category inside the preceding role/section.`;
 
-function countMatches(text, re) {
-  return (String(text || '').match(re) || []).length;
-}
-
-/** Small structural snapshot used to prove that a length revision changed content. */
-export function summarizeResumeMarkup(mainHtml) {
-  const html = String(mainHtml || '');
-  const highlightBlocks = html.match(/<ul\b[^>]*class=(?:"[^"]*\bhighlights\b[^"]*"|'[^']*\bhighlights\b[^']*')[^>]*>[\s\S]*?<\/ul>/gi) || [];
-  const skillsBlock = /<dl\b[^>]*class=(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*')[^>]*>([\s\S]*?)<\/dl>/i.exec(html)?.[1] || '';
-  return {
-    chars: html.length,
-    hash: crypto.createHash('sha256').update(html).digest('hex').slice(0, 12),
-    roles: countMatches(html, /<article\b[^>]*class=(?:"[^"]*\brole\b[^"]*"|'[^']*\brole\b[^']*')[^>]*>/gi),
-    bullets: highlightBlocks.reduce((sum, block) => sum + countMatches(block, /<li\b/gi), 0),
-    rolesWithoutBullets: retainedResumeRolesWithoutBullets(html).length,
-    roleSummaries: countMatches(html, /<p\b[^>]*class=(?:"[^"]*\brole-summary\b[^"]*"|'[^']*\brole-summary\b[^']*')[^>]*>/gi),
-    skillRows: countMatches(skillsBlock, /<dt\b/gi),
-  };
-}
-
 // The generator returns a raw design-system <main>, not a built document.
 // Keep parsing deliberately regex-based: packaged Electron has no DOM parser,
 // and these model-markup blocks follow the fixed design-system component
@@ -517,6 +503,21 @@ const SKILLS_RE = /<dl\b[^>]*class=(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^'
 const SKILL_PAIR_RE = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/gi;
 const EDU_LINE_RE = /<div\b[^>]*class=(?:"[^"]*\bedu-line\b[^"]*"|'[^']*\bedu-line\b[^']*')[^>]*>([\s\S]*?)<\/div>/gi;
 
+// The 180/100 budget counts VISIBLE characters, and the design system's own
+// gate (build/annotation-budget-test.js) strips tags to the empty string.
+// resumeTextFromHtml replaces every tag with a space so block boundaries do not
+// glue words together — correct for its other consumers, but it inflates the
+// count by one for every mid-token tag, which is exactly where `.nowrap` and a
+// `data-achievement-id` span sit. Measure the budget with the gate's own rule.
+function resumeBudgetTextFromHtml(markup) {
+  return decodeHtmlEntities(String(markup || '')
+    .replace(/<!--[^]*?-->/g, ' ')
+    .replace(/<(?:br|hr)\b[^>]*\/?\s*>/gi, ' ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[\s\u00a0]+/g, ' ')
+    .trim());
+}
+
 function resumeTextFromHtml(markup) {
   return decodeHtmlEntities(String(markup || '')
     .replace(/<!--[^]*?-->/g, ' ')
@@ -526,9 +527,41 @@ function resumeTextFromHtml(markup) {
     .trim());
 }
 
+// A whole class token, not `\b<class>\b`: hyphens are non-word characters, so
+// `\btitle\b` also matches the wrapper `.role-title-line` that encloses the
+// `.title` span and would return "Title · Company" as the role title.
+const CLASS_TOKEN_START = '(?<![\\w-])';
+const CLASS_TOKEN_END = '(?![\\w-])';
+
+// Depth-counted, not a non-greedy same-tag match. `.tradeoff` legitimately
+// wraps other spans — `.annotation-label` and the allowlisted `.nowrap` that
+// the design system uses to keep a value and its unit together — and a lazy
+// `([\s\S]*?)</\1>` stops at the FIRST nested close tag, so an over-budget
+// clause measured as a fragment and passed.
+function firstResumeClassHtml(html, className) {
+  const source = String(html || '');
+  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const open = new RegExp(`<([a-z][\\w:-]*)\\b[^>]*class=(?:"[^"]*${CLASS_TOKEN_START}${escaped}${CLASS_TOKEN_END}[^"]*"|'[^']*${CLASS_TOKEN_START}${escaped}${CLASS_TOKEN_END}[^']*')[^>]*>`, 'i');
+  const match = open.exec(source);
+  if (!match) return '';
+  const tag = match[1].toLowerCase();
+  const start = match.index + match[0].length;
+  const boundary = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'gi');
+  boundary.lastIndex = start;
+  let depth = 1;
+  let step;
+  while ((step = boundary.exec(source))) {
+    depth += step[1] ? -1 : 1;
+    if (depth === 0) return source.slice(start, step.index);
+  }
+  // Unbalanced markup: measure the rest rather than silently reporting a
+  // fragment that would understate a budget.
+  return source.slice(start);
+}
+
 function firstResumeClassText(html, className) {
   const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`<([a-z][\\w:-]*)\\b[^>]*class=(?:"[^"]*\\b${escaped}\\b[^"]*"|'[^']*\\b${escaped}\\b[^']*')[^>]*>([\\s\\S]*?)<\\/\\1>`, 'i');
+  const re = new RegExp(`<([a-z][\\w:-]*)\\b[^>]*class=(?:"[^"]*${CLASS_TOKEN_START}${escaped}${CLASS_TOKEN_END}[^"]*"|'[^']*${CLASS_TOKEN_START}${escaped}${CLASS_TOKEN_END}[^']*')[^>]*>([\\s\\S]*?)<\\/\\1>`, 'i');
   return resumeTextFromHtml(re.exec(String(html || ''))?.[2] || '');
 }
 
@@ -649,7 +682,18 @@ export function extractResumeEvidence(mainHtml) {
       const text = resumeTextFromHtml(bulletMatch[1]);
       const ids = resumeAchievementIds(bulletMatch[1]);
       if (text) {
-        bullets.push({ text, achievementIds: ids });
+        // The `.tradeoff` clause carries its own STYLE.md §5.4 sub-budget, so
+        // it is captured separately from the bullet's full visible text. Its
+        // `.annotation-label` prefix is excluded, matching how the design
+        // system's own budget checker measures the clause.
+        // The label span is removed BEFORE the clause is extracted: it nests
+        // inside `.tradeoff`, and a non-greedy same-tag match would otherwise
+        // stop at the label's own closing tag and measure nothing.
+        const withoutLabels = String(bulletMatch[1]).replace(
+          /<([a-z][\w:-]*)\b[^>]*class=(?:"[^"]*\bannotation-label\b[^"]*"|'[^']*\bannotation-label\b[^']*')[^>]*>[\s\S]*?<\/\1>/gi, ' ',
+        );
+        const tradeoff = resumeBudgetTextFromHtml(firstResumeClassHtml(withoutLabels, 'tradeoff'));
+        bullets.push({ text, tradeoff, budgetText: resumeBudgetTextFromHtml(bulletMatch[1]), achievementIds: ids });
         bulletTexts.push(text);
       }
       for (const id of ids) if (!achievementIds.includes(id)) achievementIds.push(id);
@@ -781,6 +825,39 @@ export function checkResumeBulletFocus(mainHtml) {
     : { id: 'resume-bullet-focus', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement` };
 }
 
+// STYLE.md §5.4 states one number for every bullet, annotated or not: 180
+// visible characters, with a `.tradeoff` clause's own text under 100. Until
+// now nothing in this pipeline measured it. The design system's checker
+// (build/annotation-budget-test.js) reads a filled.html the Local AI routine
+// forbids producing, so a budget the writer is told to respect was enforced
+// only by the writer's own arithmetic — and an overlong bullet reached the
+// renderer as an unexplained page overflow instead of a named defect.
+export const RESUME_BULLET_CHARACTER_BUDGET = 180;
+export const RESUME_TRADEOFF_CHARACTER_BUDGET = 100;
+
+export function checkResumeBulletLength(mainHtml) {
+  const evidence = extractResumeEvidence(mainHtml);
+  const observations = [];
+  evidence.roles.forEach((role, roleIndex) => {
+    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
+      const visible = String(bullet?.budgetText ?? bullet?.text ?? '').replace(/\s+/g, ' ').trim();
+      if (visible.length > RESUME_BULLET_CHARACTER_BUDGET) {
+        observations.push(`${label} bullet ${bulletIndex + 1} is ${visible.length} visible characters (budget ${RESUME_BULLET_CHARACTER_BUDGET}); cut it to ${RESUME_BULLET_CHARACTER_BUDGET} or fewer`);
+      }
+      // The annotation's own text, excluding its label span, carries the
+      // tighter sub-budget so it reads as a subordinate clause.
+      const tradeoff = String(bullet?.tradeoff || '').replace(/\s+/g, ' ').trim();
+      if (tradeoff.length > RESUME_TRADEOFF_CHARACTER_BUDGET) {
+        observations.push(`${label} bullet ${bulletIndex + 1} carries a ${tradeoff.length}-character tradeoff annotation (budget ${RESUME_TRADEOFF_CHARACTER_BUDGET}); shorten it`);
+      }
+    });
+  });
+  return observations.length
+    ? { id: 'resume-bullet-length', passed: false, detail: observations.slice(0, 8).join('; ') }
+    : { id: 'resume-bullet-length', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) fit the ${RESUME_BULLET_CHARACTER_BUDGET}-character budget` };
+}
+
 /** Shared pre-publication prose checks for the résumé's generated copy. */
 export function evaluateResumeProseChecks(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -791,6 +868,7 @@ export function evaluateResumeProseChecks(mainHtml) {
   return [
     checkResumeBulletSelfContainment(mainHtml),
     checkResumeBulletFocus(mainHtml),
+    checkResumeBulletLength(mainHtml),
     checkCompoundHyphenation(prose),
     checkParallelStructure(prose),
     checkReferenceClarity(prose),

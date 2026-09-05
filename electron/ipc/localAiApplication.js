@@ -257,7 +257,15 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
       // A queued job is also the manifest state of every active Local AI
       // revision. Its age says nothing about whether a user has an ongoing
       // high-quality authoring session, so retention must not delete it.
-      active = manifest?.version === LOCAL_AI_APPLICATION_VERSION
+      // The exemption only covers jobs some session can still act on:
+      // assertManifestCanvasOwnership rejects a manifest naming another canvas
+      // root on every status/discard/import path, and a manifest whose canvas
+      // file no longer exists (renamed or moved away) can never be polled or
+      // discarded, so neither can ever leave its non-terminal status.
+      const ownedHere = path.resolve(String(manifest?.canvasRoot || '')) === path.resolve(canvasRoot)
+        && (await fs.promises.lstat(path.resolve(String(manifest?.canvasFilePath || ''))).catch(() => null))?.isFile() === true;
+      active = ownedHere
+        && manifest?.version === LOCAL_AI_APPLICATION_VERSION
         && manifest?.id === entry.name
         && ['queued', 'revision-required', 'render-retry-required', 'invalid'].includes(manifest?.status);
     } catch { /* malformed jobs may be pruned once their directory ages out */ }
@@ -673,27 +681,46 @@ const SOURCE_GROUNDING_IDENTITY_STOPWORDS = new Set([
 // These are deliberately high-precision rather than a general semantic
 // similarity model. They cover modifiers that materially broaden a career
 // claim and therefore need literal support in that unit's bound quotes.
+//
+// The two sides are NOT symmetric on purpose. `claim` decides whether a
+// qualifier was asserted, so it stays narrow. `source` decides whether the
+// bound career-data quote states that same qualifier, so it must accept every
+// INFLECTION a person would actually write — career data says "flight route
+// optimizations" and "architecture decisions", not "optimization" and
+// "decided". A source side that only matched the claim's own word forms
+// rejected a bullet whose evidence plainly supported it and cost a whole
+// handoff round.
+//
+// The line an addition must not cross is SENSE, not part of speech. Widening
+// `source` is safe only while every added form is the same word meaning the
+// same thing; a homograph is a false acceptance, and these were caught being
+// exactly that: "regular expressions" is not "regularly", "cutting-edge" is
+// not a reduction, "saving parsed work to disk" is not a savings outcome,
+// "I want to grow my skills" is an aspiration, "the district leadership
+// approved" names other people, and "a day" is one single day. When in doubt,
+// leave the form out: a rejection now names the accepted forms, so the writer
+// can quote a passage that uses one.
 const SOURCE_GROUNDING_QUALIFIER_RULES = Object.freeze([
-  { label: 'daily frequency', claim: /\bdaily\b/iu, source: /\b(?:daily|each day|every day|day-to-day)\b/iu },
-  { label: 'weekly frequency', claim: /\bweekly\b/iu, source: /\b(?:weekly|each week|every week|week-to-week)\b/iu },
-  { label: 'monthly frequency', claim: /\bmonthly\b/iu, source: /\b(?:monthly|each month|every month|month-to-month)\b/iu },
-  { label: 'routine frequency', claim: /\b(?:routinely|regularly|repeatedly|consistently)\b/iu, source: /\b(?:routinely|regularly|repeatedly|consistently)\b/iu },
-  { label: 'absolute frequency', claim: /\b(?:always|never)\b/iu, source: /\b(?:always|never)\b/iu },
-  { label: 'comparative superiority', claim: /\b(?:beat|beats|beating|outperform(?:ed|s|ing)?|superior)\b/iu, source: /\b(?:beat|beats|beating|outperform(?:ed|s|ing)?|superior|better than)\b/iu },
-  { label: 'leadership ownership', claim: /\b(?:led|leading)\b/iu, source: /\b(?:led|lead|leading)\b/iu },
-  { label: 'direct ownership', claim: /\bown(?:ed|ing)?\b/iu, source: /\b(?:own|owned|owning|ownership|responsible for)\b/iu },
-  { label: 'management ownership', claim: /\bmanaged\b/iu, source: /\b(?:managed|managing|responsible for)\b/iu },
-  { label: 'decision authority', claim: /\b(?:decided|approved|authorized)\b/iu, source: /\b(?:decided|decision|approved|approval|authorized|authorization|chose|selected|made the call)\b/iu },
-  { label: 'production status', claim: /\bproduction(?:-grade)?\b/iu, source: /\bproduction(?:-grade)?\b/iu },
-  { label: 'at-scale status', claim: /\bat scale\b/iu, source: /\bat scale\b/iu },
-  { label: 'organization-wide scope', claim: /\b(?:district|company|organization|enterprise)-wide\b/iu, source: /\b(?:(?:district|company|organization|enterprise)-wide|(?:entire|whole) (?:district|company|organization|enterprise)|across the (?:district|company|organization|enterprise))\b/iu },
-  { label: 'improvement outcome', claim: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, source: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu },
-  { label: 'reduction outcome', claim: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu, source: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu },
-  { label: 'increase outcome', claim: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu, source: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu },
-  { label: 'savings outcome', claim: /\b(?:saved|savings)\b/iu, source: /\b(?:saved|savings)\b/iu },
-  { label: 'acceleration outcome', claim: /\b(?:accelerat(?:e|ed|es|ing|ion)|faster)\b/iu, source: /\b(?:accelerat(?:e|ed|es|ing|ion)|faster)\b/iu },
-  { label: 'optimization outcome', claim: /\boptimiz(?:e|ed|es|ing|ation)\b/iu, source: /\boptimiz(?:e|ed|es|ing|ation)\b/iu },
-  { label: 'guaranteed outcome', claim: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu, source: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu },
+  { label: 'daily frequency', claim: /\bdaily\b/iu, source: /\b(?:daily|each day|every day|every single day|day-to-day|per day)\b/iu, accepts: 'daily, each/every day, every single day, day-to-day, per day' },
+  { label: 'weekly frequency', claim: /\bweekly\b/iu, source: /\b(?:weekly|each week|every week|week-to-week|per week)\b/iu, accepts: 'weekly, each/every week, week-to-week, per week' },
+  { label: 'monthly frequency', claim: /\bmonthly\b/iu, source: /\b(?:monthly|each month|every month|month-to-month|per month)\b/iu, accepts: 'monthly, each/every month, month-to-month, per month' },
+  { label: 'routine frequency', claim: /\b(?:routinely|regularly|repeatedly|consistently)\b/iu, source: /\b(?:routinely|regularly|repeatedly|consistently|on a regular basis|as a matter of routine)\b/iu, accepts: 'routinely, regularly, repeatedly, consistently, on a regular basis' },
+  { label: 'absolute frequency', claim: /\b(?:always|never)\b/iu, source: /\b(?:always|never|(?:without|not|nor)\s+ever)\b/iu, accepts: 'always, never, without/not/nor ever' },
+  { label: 'comparative superiority', claim: /\b(?:beat|beats|beating|outperform(?:ed|s|ing)?|superior)\b/iu, source: /\b(?:beat|beats|beaten|beating|outperform(?:ed|s|ing|ance)?|superior(?:ity)?|better than)\b/iu, accepts: 'beat/beats/beaten/beating, outperform(ed/s/ing/ance), superior(ity), better than' },
+  { label: 'leadership ownership', claim: /\b(?:led|leading)\b/iu, source: /\b(?:led|lead|leads|leading)\b/iu, accepts: 'led, lead(s), leading' },
+  { label: 'direct ownership', claim: /\bown(?:ed|ing)?\b/iu, source: /\b(?:own|owns|owned|owning|ownership|responsible for)\b/iu, accepts: 'own(s/ed/ing), ownership, responsible for' },
+  { label: 'management ownership', claim: /\bmanaged\b/iu, source: /\b(?:manage|manages|managed|managing|management|responsible for)\b/iu, accepts: 'manage(s/d/ing), management, responsible for' },
+  { label: 'decision authority', claim: /\b(?:decided|approved|authorized)\b/iu, source: /\b(?:decide|decides|decided|deciding|decision|decisions|approve|approves|approved|approving|approval|approvals|authoriz(?:e|es|ed|ing|ation|ations)|authoris(?:e|es|ed|ing|ation|ations)|chose|choose|chooses|choosing|select|selects|selected|selecting|made the call)\b/iu, accepts: 'decide(s/d/ing), decision(s), approve(s/d), approval(s), authorize/authorization(s), chose/choose, select(ed), made the call' },
+  { label: 'production status', claim: /\bproduction(?:-grade)?\b/iu, source: /\bproduction(?:-grade)?\b/iu, accepts: 'production, production-grade' },
+  { label: 'at-scale status', claim: /\bat scale\b/iu, source: /\bat\s+(?:(?:the|a|an)\s+)?(?:district|company|organi[sz]ation|enterprise|production|national|regional|global|web|internet|large|larger|significant|full|massive)?\s*scale\b/iu, accepts: 'at scale, or at <district/company/organization/enterprise/production/national/regional/global/web/internet/large/significant/full/massive> scale' },
+  { label: 'organization-wide scope', claim: /\b(?:district|company|organization|enterprise)-wide\b/iu, source: /\b(?:(?:district|company|organi[sz]ation|enterprise)[\s-]?wide|(?:entire|whole) (?:district|company|organi[sz]ation|enterprise)|across the (?:district|company|organi[sz]ation|enterprise))\b/iu, accepts: 'district/company/organization/enterprise-wide (hyphen or space), entire/whole <org>, across the <org>' },
+  { label: 'improvement outcome', claim: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, source: /\bimprov(?:e|ed|es|ing|ement|ements)\b/iu, accepts: 'improve(d/s/ing), improvement(s)' },
+  { label: 'reduction outcome', claim: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:ed|ing)?|cut)\b/iu, source: /\b(?:reduc(?:e|ed|es|ing|tion|tions)|lower(?:s|ed|ing)?|cut|cuts)\b/iu, accepts: 'reduce(d/s/ing), reduction(s), lower(s/ed/ing), cut(s)' },
+  { label: 'increase outcome', claim: /\b(?:increas(?:e|ed|es|ing)|grew|raised)\b/iu, source: /\b(?:increas(?:e|ed|es|ing)|grew|growth|raised|raises)\b/iu, accepts: 'increase(d/s/ing), grew, growth, raised, raises' },
+  { label: 'savings outcome', claim: /\b(?:saved|savings)\b/iu, source: /\b(?:saves|saved|savings)\b/iu, accepts: 'saves, saved, savings' },
+  { label: 'acceleration outcome', claim: /\b(?:accelerat(?:e|ed|es|ing|ion)|faster)\b/iu, source: /\b(?:accelerat(?:e|ed|es|ing|ion|ions)|faster)\b/iu, accepts: 'accelerate(d/s/ing), acceleration(s), faster' },
+  { label: 'optimization outcome', claim: /\boptimiz(?:e|ed|es|ing|ation|ations)\b/iu, source: /\boptimi[sz](?:e|ed|es|ing|ation|ations)\b/iu, accepts: 'optimize(d/s/ing), optimization(s) (either spelling)' },
+  { label: 'guaranteed outcome', claim: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu, source: /\b(?:ensur(?:e|ed|es|ing)|guarantee(?:d|s|ing)?)\b/iu, accepts: 'ensure(d/s/ing), guarantee(d/s/ing)' },
 ]);
 
 const CAREER_ASSERTION_ACTION_RE = /\b(?:am|was|were|had|worked|built|created|developed|delivered|implemented|used|applied|evaluated|handled|ran|wrote|designed|maintained|migrated|automated|researched|tested|modified|packaged|containerized|integrated|led|managed|owned|decided|approved|authorized|improved|reduced|increased|saved|accelerated|optimized|ensured)\b/iu;
@@ -736,7 +763,14 @@ function assertSupportedSourceQualifiers(finalText, sourceQuotes, unit) {
   for (const rule of SOURCE_GROUNDING_QUALIFIER_RULES) {
     const match = finalText.match(rule.claim);
     if (match && !rule.source.test(sourceText)) {
-      throw new Error(`${unit} uses unsupported ${rule.label} (\u201c${match[0]}\u201d); its bound career-data quotes must state that qualifier.`);
+      // Name the forms that would satisfy the rule. Matching is by literal
+      // word form, not meaning, so "its quotes must state that qualifier" left
+      // the writer guessing which wordings count and cost a revision round.
+      throw new Error(
+        `${unit} uses unsupported ${rule.label} (\u201c${match[0]}\u201d); its bound career-data quotes must state that qualifier `
+        + `in one of these forms: ${rule.accepts}. Matching is on the literal word form, not on meaning, so either quote a passage `
+        + 'that uses one of them or drop the qualifier from the bullet.',
+      );
     }
   }
 }
@@ -808,6 +842,70 @@ function argumentRoleMatchesResumeRole(evidenceRole, role) {
   return !role.company || tokenCoverage(role.company, descriptor) >= 1;
 }
 
+// A rejection record carries one `error` string, and the waiting session
+// rewrites result.json from it. Reporting one defect per round when several
+// were already visible in the same bytes turns each additional defect into
+// another full authoring round; numbering them makes it explicit that the
+// revision has to address all of them at once. Newlines are collapsed by the
+// feedback writer's cleanText, so the separator has to survive that.
+function joinValidationFailures(failures) {
+  const list = failures.map(text => String(text || '').trim()).filter(Boolean);
+  if (list.length <= 1) return list[0] || '';
+  return `Local AI result has ${list.length} independent validation failures; correct all of them in one revision: `
+    + list.map((text, index) => `(${index + 1}) ${text}`).join(' ');
+}
+
+// Aggregation happens at more than one depth (per grounding entry, per
+// grounding family, per validation family). Carrying the parts on the error
+// keeps the final message ONE flat numbered list — nesting the prefix inside
+// itself produced a record with two "(1)" markers, which reads as more
+// confusing than the single defect it replaced.
+class LocalAiValidationFailures extends Error {
+  constructor(failures) {
+    super(joinValidationFailures(failures));
+    this.name = 'LocalAiValidationFailures';
+    this.failures = failures;
+  }
+}
+
+function throwValidationFailures(failures) {
+  const flat = failures.flatMap(failure => (Array.isArray(failure) ? failure : [failure]))
+    .map(text => String(text || '').trim()).filter(Boolean);
+  throw flat.length === 1 ? new Error(flat[0]) : new LocalAiValidationFailures(flat);
+}
+
+// The rejection record is bounded, and now that one record carries every defect
+// the aggregate can exceed that bound. Cutting mid-sentence hid whole defects
+// AND truncated the surviving one's instruction, so pack whole defects and say
+// how many were left out — a report that silently drops findings is worse than
+// one that admits it did.
+const MAX_REJECTION_ERROR_CHARS = 12_000;
+
+export function boundedRejectionError(error, max = MAX_REJECTION_ERROR_CHARS) {
+  const parts = validationFailureParts(error).map(text => String(text || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const whole = joinValidationFailures(parts);
+  if (whole.length <= max) return whole;
+  const omissionRoom = 160;
+  const kept = [];
+  let used = 0;
+  for (const part of parts) {
+    const cost = part.length + 5;
+    if (used + cost > max - omissionRoom) break;
+    kept.push(part);
+    used += cost;
+  }
+  // Always report at least one whole-ish defect, even if a single defect is
+  // itself longer than the budget.
+  if (!kept.length) return `${parts[0].slice(0, max - omissionRoom)} … 1 defect was truncated; ${parts.length - 1} more not listed.`;
+  const omitted = parts.length - kept.length;
+  return `${joinValidationFailures(kept)} … ${omitted} more defect(s) omitted from this record; fix the listed ones and the next rejection lists the rest.`;
+}
+
+/** Flatten an already-aggregated rejection back into its individual defects. */
+function validationFailureParts(error) {
+  return Array.isArray(error?.failures) ? error.failures : [String(error?.message || error)];
+}
+
 function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter, coverLetterArgument }) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Local AI qualityReview.sourceGrounding must cover every final résumé bullet and cover-letter paragraph.');
@@ -819,7 +917,23 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
       const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
       throw new Error(`Local AI qualityReview.sourceGrounding.${label} must bind every final ${unit} exactly once.`);
     }
-    return entries.map((entry, index) => {
+    // Every entry is checked independently, and all of their failures are
+    // reported together. Throwing on the first one turned a result with three
+    // unsupported bullets into three separate rewrite-and-wait rounds, each
+    // revealing exactly one more defect the app had already seen.
+    const entryFailures = [];
+    const validated = entries.map((entry, index) => {
+      try {
+        return validateEntry(entry, index);
+      } catch (error) {
+        entryFailures.push(...validationFailureParts(error));
+        return null;
+      }
+    });
+    if (entryFailures.length) throwValidationFailures(entryFailures);
+    return validated;
+
+    function validateEntry(entry, index) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
         throw new Error(`Local AI qualityReview.sourceGrounding.${label}[${index}] must be an object.`);
       }
@@ -850,24 +964,37 @@ function sanitizeSourceGrounding(raw, { careerData, resumeEvidence, coverLetter,
         identityTokens: careerIdentityTokens(resumeEvidence),
       });
       return { [finalField]: finalText, [quotesField]: sourceQuotes };
-    });
+    }
   };
   const resumeBullets = resumeBulletsWithRoles(resumeEvidence);
-  const resumeBulletsGrounding = validateEntries(raw.resumeBullets, resumeBullets.map(item => item.text), 'resumeBullets', 'bullet', 'careerDataQuotes');
-  const coverLetterParagraphs = validateEntries(raw.coverLetterParagraphs,
+  // The bullet bindings, the paragraph bindings and the argument bindings read
+  // different parts of the same submitted object, so all three are graded
+  // before any of them reports. Running them in sequence meant a defect in the
+  // bullets hid every paragraph and argument defect behind it.
+  const groundingFailures = [];
+  const gradeGrounding = (run) => {
+    try { return run(); } catch (error) { groundingFailures.push(...validationFailureParts(error)); return null; }
+  };
+  const resumeBulletsGrounding = gradeGrounding(() =>
+    validateEntries(raw.resumeBullets, resumeBullets.map(item => item.text), 'resumeBullets', 'bullet', 'careerDataQuotes'));
+  const coverLetterParagraphs = gradeGrounding(() => validateEntries(raw.coverLetterParagraphs,
     (Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : []).map(normalizeSourceGroundingText),
-    'coverLetterParagraphs', 'paragraph', 'careerDataQuotes');
+    'coverLetterParagraphs', 'paragraph', 'careerDataQuotes'));
   const argumentEntries = [coverLetterArgument?.primaryEvidence, coverLetterArgument?.secondaryEvidence].filter(Boolean);
   for (const [index, argument] of argumentEntries.entries()) {
-    const matched = resumeBullets.find(bullet => argumentEvidenceMatchesBullet(argument.evidence, bullet.text));
-    if (!matched) {
-      throw new Error(`Local AI coverLetterArgument evidence ${index + 1} does not match a final résumé bullet.`);
-    }
-    if (!argumentRoleMatchesResumeRole(argument.evidenceRole, matched)) {
-      const matchedRole = matched.company ? `${matched.title} at ${matched.company}` : matched.title;
-      throw new Error(`Local AI coverLetterArgument evidenceRole ${index + 1} must identify the matched résumé role (${matchedRole}).`);
-    }
+    gradeGrounding(() => {
+      const matched = resumeBullets.find(bullet => argumentEvidenceMatchesBullet(argument.evidence, bullet.text));
+      if (!matched) {
+        throw new Error(`Local AI coverLetterArgument evidence ${index + 1} does not match a final résumé bullet.`);
+      }
+      if (!argumentRoleMatchesResumeRole(argument.evidenceRole, matched)) {
+        const matchedRole = matched.company ? `${matched.title} at ${matched.company}` : matched.title;
+        throw new Error(`Local AI coverLetterArgument evidenceRole ${index + 1} must identify the matched résumé role (${matchedRole}).`);
+      }
+      return matched;
+    });
   }
+  if (groundingFailures.length) throwValidationFailures(groundingFailures);
   return { resumeBullets: resumeBulletsGrounding, coverLetterParagraphs };
 }
 
@@ -967,17 +1094,30 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
   if (typeof raw.outputBundleRoot !== 'string') throw new Error('Local AI result must include outputBundleRoot.');
   const output = resolveLocalOutputBundleRoot(raw.outputBundleRoot, projectRoot);
   const resumeMainHtml = assertRetainedResumeRoleBullets(sanitizeResumeMainHtml(raw.resumeMainHtml));
+  // Deferred, not thrown: résumé prose is graded from resumeMainHtml alone, so
+  // a failure here blocks nothing below it. Throwing immediately meant a
+  // result with one résumé defect and one cover-letter defect could never
+  // report both, and the writer paid a round to discover the second.
   const resumeProseFailures = evaluateResumeProseChecks(resumeMainHtml).filter(check => !check.passed);
-  if (resumeProseFailures.length) {
-    throw new Error(`Local AI résumé failed editorial checks: ${resumeProseFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
-  }
+  const resumeProseFailure = resumeProseFailures.length
+    ? `Local AI résumé failed editorial checks: ${resumeProseFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`
+    : '';
   const resumeEvidence = extractResumeEvidence(resumeMainHtml);
-  const coverLetter = authorLocalCoverLetterEnvelope(
-    sanitizeCoverLetter(raw.coverLetter),
-    resumeMainHtml,
-    job,
-  );
-  const coverLetterArgument = sanitizeCoverLetterArgument(raw.coverLetterArgument);
+  // These three are STRUCTURAL: nothing below can be graded without them, so
+  // they still fail fast. They must not swallow the prose defect the app has
+  // already measured, though — that would spend a round re-discovering it.
+  let coverLetter;
+  let coverLetterArgument;
+  try {
+    coverLetter = authorLocalCoverLetterEnvelope(
+      sanitizeCoverLetter(raw.coverLetter),
+      resumeMainHtml,
+      job,
+    );
+    coverLetterArgument = sanitizeCoverLetterArgument(raw.coverLetterArgument);
+  } catch (error) {
+    throwValidationFailures([resumeProseFailure, ...validationFailureParts(error)].filter(Boolean));
+  }
   const coverPlan = localCoverLetterPlan(coverLetterArgument);
   const hasTrustedCareerData = Object.prototype.hasOwnProperty.call(options || {}, 'careerData');
   const careerData = hasTrustedCareerData ? cleanText(options.careerData, MAX_CAREER_DATA_CHARS) : '';
@@ -995,21 +1135,46 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job = {}
       companyName: job?.company || '',
     }),
   ].filter(check => !check.passed);
+  // The cover-letter checks, the dash-punctuation assert and the quality
+  // review all read artifacts that are already built above, so none of them
+  // depends on the others passing. Evaluating all three and reporting their
+  // failures together is what keeps a result with one prose defect and one
+  // source-grounding defect to a single revision round instead of two: the
+  // first-throw order used to hide the second defect until the first was
+  // fixed, which is exactly how a four-round handoff happens.
+  const failures = [];
+  if (resumeProseFailure) failures.push(resumeProseFailure);
   if (coverFailures.length) {
-    throw new Error(`Local AI cover letter failed required checks: ${coverFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
+    failures.push(`Local AI cover letter failed required checks: ${coverFailures.map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
   }
-  assertCandidateDashPunctuation({ resumeMainHtml, coverLetter });
-  return {
-    resumeMainHtml,
-    coverLetter,
-    coverLetterArgument,
-    qualityReview: sanitizeQualityReview(raw.qualityReview, {
+  try {
+    assertCandidateDashPunctuation({ resumeMainHtml, coverLetter });
+  } catch (error) {
+    // checkPunctuationStyle already inspects the letter's dashes. Reporting the
+    // same em dash from both gates told the writer there were two independent
+    // defects and sent them hunting for a second one that did not exist.
+    const letterDashAlreadyReported = coverFailures.some(check => check.id === 'punctuation-style');
+    failures.push(...validationFailureParts(error)
+      .filter(text => !(letterDashAlreadyReported && String(text).startsWith('Cover-letter copy'))));
+  }
+  let qualityReview = null;
+  try {
+    qualityReview = sanitizeQualityReview(raw.qualityReview, {
       required: hasTrustedCareerData,
       careerData,
       resumeEvidence,
       coverLetter,
       coverLetterArgument,
-    }, expectedChecklistVersion),
+    }, expectedChecklistVersion);
+  } catch (error) {
+    failures.push(...validationFailureParts(error));
+  }
+  if (failures.length) throwValidationFailures(failures);
+  return {
+    resumeMainHtml,
+    coverLetter,
+    coverLetterArgument,
+    qualityReview,
     outputBundleRoot: output.relative,
     outputBundleRootPath: output.resolved,
   };
@@ -1129,6 +1294,14 @@ async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetP
   let fontsLoaded = true;
   let renderError = null;
   let layout = null;
+  let missingFontFaces = [];
+  // The compact retry only ever runs because the default-density attempt
+  // measurably overflowed, so that first measurement is a real, trustworthy
+  // observation of a résumé that does not fit. Keep it. Reporting the retry's
+  // unverifiable state instead threw away a finding the writer can act on
+  // ("2 pages against a 1-page target") and replaced it with a render-retry
+  // advisory that tells them the draft needs no rewrite — the opposite of true.
+  let verified = null;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const variantAttrs = density === 'compact'
@@ -1139,9 +1312,17 @@ async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetP
       pageCount = rendered.pageCount;
       layout = rendered.layout || null;
       fontsLoaded = rendered.fontsLoaded !== false;
+      missingFontFaces = Array.isArray(rendered.missingFontFaces) ? rendered.missingFontFaces : [];
       bytes = fontsLoaded ? rendered.bytes : null;
       renderError = null;
-      attempts.push({ attempt, density, pageCount, fontsLoaded, layout, contentUtilization: resumeTypeAreaUtilization(layout) });
+      attempts.push({
+        attempt, density, pageCount, fontsLoaded, layout,
+        contentUtilization: resumeTypeAreaUtilization(layout),
+        missingFontFaces,
+      });
+      if (fontsLoaded && Number.isFinite(pageCount)) {
+        verified = { density, compactApplied, bytes, pageCount, layout };
+      }
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
       bytes = null;
@@ -1162,11 +1343,26 @@ async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetP
     break;
   }
 
+  // Fall back to the last attempt this loop actually verified. `density` is
+  // restored with it so the returned variantAttrs describe the document the
+  // reported page count was measured from; the unusable attempt stays visible
+  // in `attempts` rather than being reported as the outcome.
+  if ((!fontsLoaded || renderError || !Number.isFinite(pageCount)) && verified) {
+    logger.warn(
+      `[LocalAI] Résumé attempt ${attempts.length} was not verifiable (${renderError || `missing face(s): ${missingFontFaces.join(', ') || 'unreported'}`}); `
+      + `reporting the verified ${verified.density || 'default'}-density measurement of ${verified.pageCount} page(s) instead.`,
+    );
+    ({ density, compactApplied, bytes, pageCount, layout } = verified);
+    fontsLoaded = true;
+    renderError = null;
+    missingFontFaces = [];
+  }
+
   const variantAttrs = density === 'compact'
     ? `${baseVariantAttrs} data-density="compact"`
     : baseVariantAttrs;
   return {
-    mainHtml, variantAttrs, bytes, pageCount, fontsLoaded, renderError,
+    mainHtml, variantAttrs, bytes, pageCount, fontsLoaded, renderError, missingFontFaces,
     attempts, compactApplied, layout, contentUtilization: resumeTypeAreaUtilization(layout),
   };
 }
@@ -1176,11 +1372,15 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
     const rendered = await renderPdf(buildCoverLetterDocument({ letter, variantAttrs, docId }), { signal });
     const fontsLoaded = rendered.fontsLoaded !== false;
     const pageCount = Number.isFinite(rendered.pageCount) ? rendered.pageCount : null;
+    const missingFontFaces = Array.isArray(rendered.missingFontFaces) ? rendered.missingFontFaces : [];
     return {
       bytes: fontsLoaded ? rendered.bytes : null,
       pageCount,
       fontsLoaded,
-      renderError: fontsLoaded ? null : 'Web fonts were unavailable while rendering the cover-letter PDF.',
+      missingFontFaces,
+      renderError: fontsLoaded
+        ? null
+        : `The cover-letter render window reported unresolved font face(s): ${missingFontFaces.join(', ') || 'face detail unreported'}.`,
       centered: false,
       // The letter prints onto the same `main.page` surface as the résumé, so
       // the renderer's probe reports the letter's OWN type area and the shared
@@ -1193,7 +1393,7 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
     if (error?.name === 'AbortError') throw error;
     const renderError = error?.message || String(error);
     logger.warn(`[LocalAI] Cover-letter PDF render failed: ${renderError}`);
-    return { bytes: null, pageCount: null, fontsLoaded: null, renderError, centered: false, layout: null, contentUtilization: null };
+    return { bytes: null, pageCount: null, fontsLoaded: null, missingFontFaces: [], renderError, centered: false, layout: null, contentUtilization: null };
   }
 }
 
@@ -1222,6 +1422,8 @@ function localAiHandoffEvent({ type, resultRaw, revisionRound = null, resumeFit 
         density: attempt?.density === 'compact' ? 'compact' : 'default',
         pageCount: Number.isFinite(attempt?.pageCount) ? attempt.pageCount : null,
         fontsLoaded: attempt?.fontsLoaded === false ? false : attempt?.fontsLoaded === true ? true : null,
+        missingFontFaces: (Array.isArray(attempt?.missingFontFaces) ? attempt.missingFontFaces : [])
+          .filter(Boolean).slice(0, 6).map(face => cleanText(face, 80)),
         error: attempt?.error ? cleanText(attempt.error, 280) : null,
       })).slice(0, 4),
       layout: resumeFit.layout ? {
@@ -1330,7 +1532,7 @@ async function writeLocalAiRejectionFeedback({ root, dir, jobId, resultRaw, erro
       // Untrusted: a validation message can quote model-authored prose (the
       // generic-language check embeds the offending phrase verbatim). Bound and
       // strip it exactly like every other echoed string in this module.
-      error: cleanText(error?.message || error, 12_000).replace(/\s+/g, ' ').trim(),
+      error: cleanText(boundedRejectionError(error), MAX_REJECTION_ERROR_CHARS).replace(/\s+/g, ' ').trim(),
       rejectedAt: new Date().toISOString(),
       // Retain legacy top-level fields for older writer sessions, and preserve
       // the complete trusted measurement in priorMeasured for the host's
@@ -1751,11 +1953,22 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   });
   const resumeHandoffFit = { ...resumeFit, targetPageCount };
   const coverLetterHandoffFit = { ...coverLetterFit, targetPageCount: 1 };
+  // State the observation, not a diagnosis. A false `fontsLoaded` means the
+  // render window's readiness predicate rejected at least one face; naming the
+  // faces is the only part of that the app actually measured.
+  const unverifiedReason = (fit) => {
+    if (fit.renderError) return `: ${fit.renderError}`;
+    if (fit.fontsLoaded === false) {
+      const faces = Array.isArray(fit.missingFontFaces) ? fit.missingFontFaces.filter(Boolean) : [];
+      return `: the render window reported unresolved font face(s): ${faces.join(', ') || 'face detail unreported'}`;
+    }
+    return '';
+  };
   const verificationIssues = [
     ...(!resumeFit.bytes || resumeFit.fontsLoaded !== true || resumeFit.pageCount == null
-      ? [`résumé layout could not be verified${resumeFit.renderError ? `: ${resumeFit.renderError}` : resumeFit.fontsLoaded === false ? ': web fonts were unavailable' : ''}`] : []),
+      ? [`résumé layout could not be verified${unverifiedReason(resumeFit)}`] : []),
     ...(!coverLetterFit.bytes || coverLetterFit.fontsLoaded !== true || coverLetterFit.pageCount == null
-      ? [`cover-letter layout could not be verified${coverLetterFit.renderError ? `: ${coverLetterFit.renderError}` : coverLetterFit.fontsLoaded === false ? ': web fonts were unavailable' : ''}`] : []),
+      ? [`cover-letter layout could not be verified${unverifiedReason(coverLetterFit)}`] : []),
   ];
   if (verificationIssues.length) {
     // Renderer errors can include unbounded engine output. This feedback is
@@ -1890,7 +2103,12 @@ async function importLocalApplicationJobUnlocked({ jobId, canvasFilePath, sender
   if (!resumePdf) {
     missingArtifacts.push('résumé PDF');
     if (resumeFit.renderError) logger.warn(`[LocalAI] Resume PDF unavailable: ${resumeFit.renderError}`);
-    else if (resumeFit.fontsLoaded === false) logger.warn('[LocalAI] Resume PDF unavailable: web fonts did not load.');
+    else if (resumeFit.fontsLoaded === false) {
+      logger.warn(
+        '[LocalAI] Resume PDF unavailable: the render window reported unresolved font face(s): '
+        + `${(resumeFit.missingFontFaces || []).join(', ') || 'face detail unreported'}.`,
+      );
+    }
   }
   if (!coverPdf) {
     missingArtifacts.push('cover-letter PDF');

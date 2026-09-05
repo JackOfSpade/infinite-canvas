@@ -962,6 +962,21 @@ export function registerFilesystemHandlers() {
       }
     });
 
+    // The `access` above yielded, so a concurrent start for the same path (two
+    // document nodes bound to one file mounting in the same flush) may have
+    // registered its own watcher meanwhile. Fold this sender into the winning
+    // entry and close the duplicate — leaving it open orphans a watch that
+    // still fires, delivering every external save twice. The re-check happens
+    // before the error listener is attached so a duplicate can never tear down
+    // the surviving entry.
+    const registered = activeWatchers.get(filePath);
+    if (registered) {
+      try { watcher.close(); } catch { /* ignore */ }
+      registered.clients.set(sender, (registered.clients.get(sender) || 0) + 1);
+      ensureSenderCleanup(sender);
+      return;
+    }
+
     watcher.on('error', (err) => {
       logger.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
       const entry = activeWatchers.get(filePath);

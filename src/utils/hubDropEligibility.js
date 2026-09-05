@@ -55,9 +55,12 @@ export function hubHasAcceptedInitialDrop(hub) {
 //     ledger would silently write new résumés from the OLD files' figures.
 //   • queries / queryCacheKey / queryModel / queryCount — LLM search queries
 //     generated from the old profile.
+//   • jobPreferencePlan / jobPreferencesInterpretation — the AI's reading of
+//     the retained raw Job Preferences against the old profile. The user text
+//     stays, but the next profile must receive a fresh interpretation.
 //   • canonicalLocation — inferred FROM the profile whenever preferredLocation
 //     is blank.
-// Deliberately NOT cleared: targetRole, preferredLocation, searchLocation,
+// Deliberately NOT cleared: targetRole, jobPreferences, preferredLocation, searchLocation,
 // remoteResidences, maxAgeDays, collectionLimits, enabledSourceIds — the search settings the
 // user is keeping when they swap career files.
 export function buildJobHubCareerClearPatch() {
@@ -77,6 +80,17 @@ export function buildJobHubCareerClearPatch() {
     queryCacheKey: null,
     queryModel: null,
     queryCount: null,
+    jobPreferencePlan: null,
+    jobPreferencesInterpretation: null,
+    activeTargetRole: null,
+    activeJobPreferences: null,
+    pendingJobPreferences: null,
+    pendingJobPreferencesInterpretation: null,
+    pendingJobPreferencePlan: null,
+    preferenceMatchedCount: null,
+    preferenceFilteredCount: null,
+    preferenceEvaluation: null,
+    preferenceCandidatePool: null,
     canonicalLocation: null,
     locationSnapshot: null,
   };

@@ -1,7 +1,8 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, collapseLogRepeats, filterJobsByAge, getJobSearchTransientKeysForSave, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
+import { redactNodeForIssueReport } from '../test-dependencies.js';
 import { __loadJobAnalysisSnapshotForTests } from '../test-dependencies.js';
-import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
+import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
 import { sanitizeLastRunReceipt } from '../test-dependencies.js';
@@ -23,6 +24,29 @@ import { clipReportText } from '../test-dependencies.js';
 
 export default [
 {
+    name: 'issue reports redact Job Preferences and retain only safe job counts',
+    run: () => {
+      const secret = 'private preference text must never appear';
+      const redacted = redactNodeForIssueReport({
+        id: 'jobhub-private', type: 'jobhub', data: {
+          jobPreferences: secret,
+          activeJobPreferences: secret,
+          pendingJobPreferences: secret,
+          jobPreferencePlan: { general: [{ text: secret }] },
+          jobPreferencesInterpretation: { summary: secret },
+          preferenceEvaluation: { accepted: [{ evidence: secret }] },
+          preferenceCandidatePool: [{ title: secret, description: secret }],
+          scoredJobs: [{ title: secret }, { title: 'another job' }],
+          hubState: 'done',
+        },
+      });
+      const serialized = JSON.stringify(redacted);
+      assert(!serialized.includes(secret), 'issue-report renderer payload never includes raw Job Preferences or candidate evidence');
+      assert(redacted.data.scoredJobsCount === 2 && redacted.data.preferenceCandidatePoolCount === 1,
+        'issue-report renderer payload retains safe counts for diagnostics');
+    },
+},
+{
     name: 'job recovery diagnostics survive restart without in-memory pipeline telemetry',
     run: () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-recovery-report-'));
@@ -32,7 +56,7 @@ export default [
       try {
         fs.writeFileSync(path.join(dir, 'canvas.jobs-run.json'), JSON.stringify({
           runId: 'interrupted-run', stage: 'gathered', lastUpdated: 1_700_000_000_000,
-          inputs: { nodeId },
+          inputs: { nodeId, jobPreferences: 'private preference text must never appear' },
           sources: { google: { status: 'done' }, linkedin: { status: 'blocked' } },
         }), 'utf8');
         fs.writeFileSync(path.join(dir, 'canvas.jobs-staging.jsonl'),
@@ -42,6 +66,7 @@ export default [
           createdAt: 1_700_000_000_100, jobs: [{ title: 'must never appear' }],
           descriptionRecoveryJobs: [{}], profile: { workHistory: [{}], skills: ['x', 'y'] },
           prompt: 'manual AI prompt must never appear', response: 'manual AI response must never appear',
+          jobPreferences: 'private preference text must never appear',
         }), 'utf8');
         fs.writeFileSync(analysisPaths.lastSuccessJsonPath, JSON.stringify({
           runId: 'older-run', sourceHubId: 'deleted-hub', canvasFilePath: path.join(dir, 'other.json'),
@@ -58,7 +83,7 @@ export default [
           && recovery.includes('⚠️ canvas differs from this report'),
         'recovery diagnostics retain stage, source/staging counts, and hub/canvas correlation after restart');
         assert(!recovery.includes('must never appear') && !recovery.includes('also private'),
-          'recovery diagnostics never export raw job content');
+          'recovery diagnostics never export raw job content or Job Preferences');
         assert(!recovery.includes('manual AI prompt') && !recovery.includes('manual AI response'),
           'recovery diagnostics never export prompt or response text');
 
@@ -159,6 +184,89 @@ export default [
           && !capped.markdown.includes('### Scoring'),
         'assessment is ordered before the long pipeline and survives when the detailed scoring subsection is clipped');
 
+        // A current, non-stale board is part of the claimed completion only
+        // when it names this source in its saved combine provenance and its
+        // rendered result count still agrees with both the merge receipt and a
+        // single-source run. This catches a board whose stale marker was lost
+        // or whose visible cascade/count was manually changed after Combine.
+        const boardComplete = generateMarkdown({
+          description: 'Verify the completed source reached its current board.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'current-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'current-board', hubState: 'done', resultCount: 16, mergeUnique: 16,
+              combineSignature: `${nodeId}=current-fingerprint`, connectedSourceHubIds: [nodeId], stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'current-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const boardCompleteAssessment = boardComplete.slice(boardComplete.indexOf('## Job Completion Assessment'), boardComplete.indexOf('## Job Search Pipeline'));
+        assert(boardCompleteAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && boardCompleteAssessment.includes('1/1 correlate to this source run'),
+        'a non-stale single-source board with matching merge and run counts remains fully verified');
+
+        const boardCountMismatch = generateMarkdown({
+          description: 'A non-stale board has the wrong visible result count.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'count-mismatch-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'count-mismatch-board', hubState: 'done', resultCount: 15, mergeUnique: 15,
+              combineSignature: `${nodeId}=current-fingerprint`, connectedSourceHubIds: [nodeId], stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'count-mismatch-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const boardCountAssessment = boardCountMismatch.slice(boardCountMismatch.indexOf('## Job Completion Assessment'), boardCountMismatch.indexOf('## Job Search Pipeline'));
+        assert(boardCountAssessment.includes('⚠️ **INDETERMINATE**')
+          && boardCountAssessment.includes('Job Board `count-mismatch-board` results 15 ≠ current run 16')
+          && !boardCountAssessment.includes('✅ **VERIFIED COMPLETE**'),
+        'a non-stale one-source board with a mismatched result count cannot inherit the search-only green verdict');
+
+        const boardSourceMismatch = generateMarkdown({
+          description: 'A board edge points at this run but its combine baseline does not.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'source-mismatch-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'source-mismatch-board', hubState: 'done', resultCount: 16, mergeUnique: 16,
+              combineSignature: 'other-source=old-fingerprint', connectedSourceHubIds: [nodeId], stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'source-mismatch-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const boardSourceAssessment = boardSourceMismatch.slice(boardSourceMismatch.indexOf('## Job Completion Assessment'), boardSourceMismatch.indexOf('## Job Search Pipeline'));
+        assert(boardSourceAssessment.includes('⚠️ **INDETERMINATE**')
+          && boardSourceAssessment.includes('lacks combined-source correlation for hub `completion-hub`')
+          && !boardSourceAssessment.includes('✅ **VERIFIED COMPLETE**'),
+        'a connected non-stale board whose saved combine source omits this run cannot be certified as current');
+
+        // Clearing a connected board intentionally removes its combine receipt
+        // and visible cascade. The completion report must not treat that empty
+        // consumer as evidence that the finished source still reached a board.
+        const clearedBoard = generateMarkdown({
+          description: 'A connected Job Board was explicitly cleared after this run completed.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'cleared-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'cleared-board', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'cleared-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const clearedBoardAssessment = clearedBoard.slice(clearedBoard.indexOf('## Job Completion Assessment'), clearedBoard.indexOf('## Job Search Pipeline'));
+        assert(clearedBoardAssessment.includes('⚠️ **INDETERMINATE**')
+          && clearedBoardAssessment.includes('Job Board `cleared-board` is `empty`, not done')
+          && !clearedBoardAssessment.includes('✅ **VERIFIED COMPLETE**'),
+        'an explicitly cleared connected board cannot certify that the completed source remains consumed');
+
         telemetry.pipeline = { ...telemetry.pipeline, runId: 'pipeline-token-mismatch' };
         const mixedRun = generateMarkdown({
           description: 'Do not combine mismatched run telemetry.', filterCode: 'FULL',
@@ -230,6 +338,64 @@ export default [
           && zeroAssessment.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree'),
         'completion assessment verifies an explicitly completed zero-result run without impossible scoring/taxonomy telemetry');
 
+        // A connected board that has never been combined remains in its normal
+        // empty state. It has no result cascade to reconcile when this search
+        // itself produced zero jobs, so its edge must not downgrade the
+        // independently receipt/snapshot-proven completion.
+        const zeroWithPristineBoard = generateMarkdown({
+          description: 'A zero-result run does not require an untouched connected board to Combine.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'pristine-zero-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'pristine-zero-board', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], renderedCardCount: 0, stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'pristine-zero-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const pristineZeroAssessment = zeroWithPristineBoard.slice(zeroWithPristineBoard.indexOf('## Job Completion Assessment'), zeroWithPristineBoard.indexOf('## Job Listing Link Diagnostics'));
+        assert(pristineZeroAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && !pristineZeroAssessment.includes('Job Board `pristine-zero-board` is `empty`, not done'),
+        'a pristine connected Job Board does not make a fully evidenced zero-result run indeterminate');
+
+        const zeroWithHiddenBoardCard = generateMarkdown({
+          description: 'A hidden card means an empty board is not pristine.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'hidden-card-zero-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'hidden-card-zero-board', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], renderedCardCount: 1, stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'hidden-card-zero-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const hiddenCardZeroAssessment = zeroWithHiddenBoardCard.slice(zeroWithHiddenBoardCard.indexOf('## Job Completion Assessment'), zeroWithHiddenBoardCard.indexOf('## Job Listing Link Diagnostics'));
+        assert(hiddenCardZeroAssessment.includes('⚠️ **INDETERMINATE**')
+          && hiddenCardZeroAssessment.includes('Job Board `hidden-card-zero-board` is `empty`, not done'),
+        'a board with hidden or orphaned cards cannot use the pristine empty-board exemption');
+
+        const zeroWithPositiveSibling = generateMarkdown({
+          description: 'A connected positive sibling means an empty board is not pristine.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'positive-sibling', 'multi-source-zero-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'multi-source-zero-board', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId, 'positive-sibling'], renderedCardCount: 0, stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'positive-sibling', type: 'jobhub', data: {} }, { id: 'multi-source-zero-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const positiveSiblingZeroAssessment = zeroWithPositiveSibling.slice(zeroWithPositiveSibling.indexOf('## Job Completion Assessment'), zeroWithPositiveSibling.indexOf('## Job Listing Link Diagnostics'));
+        assert(positiveSiblingZeroAssessment.includes('⚠️ **INDETERMINATE**')
+          && positiveSiblingZeroAssessment.includes('Job Board `multi-source-zero-board` is `empty`, not done'),
+        'an uncombined positive sibling cannot be hidden behind a zero-result source exemption');
+
         const staleBoardResult = generateMarkdown({
           description: 'Search completed but the attached board still shows its prior run.', filterCode: 'JOBS',
           filterStats: {
@@ -249,8 +415,11 @@ export default [
         'focused JOBS reports retain compact stale-board semantics after their heavy node payload is filtered out');
         const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
         assert(issueReporterSource.includes('jobBoardStates: allJobBoardStates.slice(0, 25)')
-          && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length'),
-        'the renderer stamps bounded board state before JOBS/RECOVERY filters remove the node payload');
+          && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length')
+          && issueReporterSource.includes('combineSignature: typeof node.data?.combineSignature')
+          && issueReporterSource.includes('mergeUnique: Number.isFinite(Number(node.data?.mergeStats?.unique))')
+          && issueReporterSource.includes('connectedSourceHubIds:'),
+        'the renderer stamps bounded board count, merge, and source-correlation facts before JOBS/RECOVERY filters remove the node payload');
 
         // These process-global stage records do not carry run tokens.  If an
         // older populated run left them behind, the newer explicit-zero proof
@@ -268,6 +437,79 @@ export default [
           && !staleZeroAssessment.includes('search/recovery 0 ≠ scoring input 16')
           && !staleZeroAssessment.includes('scored 16 ≠ saved score-ready 0'),
         'a current explicit-zero run ignores uncorrelated scoring/taxonomy telemetry left by a prior run');
+
+        // Preference filtering differs from a zero-result search: the saved
+        // snapshot intentionally retains its post-history candidate pool for a
+        // later preference edit, while terminal score-ready count is zero.
+        // Recovery diagnostics must accept the receipt and avoid falsely
+        // comparing that retained pool with a scoring stage that was skipped.
+        const preferenceFilteredRunId = 'completion-run-preference-filtered';
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId: preferenceFilteredRunId, sourceHubId: nodeId, canvasFilePath: canvas,
+          createdAt: Date.now(), jobs: [{}, {}],
+          preferenceEvaluation: { counts: { input: 2, accepted: 0, filtered: 2 } },
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId: preferenceFilteredRunId, nodeId, startedAt: Date.now() - 5_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'preference-filtered', scoreReadyCount: 0 }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 2, deduped: 2, kept: 2, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
+          sources: {},
+        }), 'utf8');
+        telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId: preferenceFilteredRunId };
+        telemetry.search = { ts: Date.now() - 4_000, queries: 1, raw: 2, deduped: 2, ageDropped: 0, roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 2, runId: preferenceFilteredRunId };
+        telemetry.resolves = {};
+        const preferenceFilteredReport = generateMarkdown({
+          description: 'Verify a completed preference-filtered run.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const preferenceFilteredAssessment = preferenceFilteredReport.slice(preferenceFilteredReport.indexOf('## Job Completion Assessment'), preferenceFilteredReport.indexOf('## Job Listing Link Diagnostics'));
+        assert(preferenceFilteredReport.includes('all post-history jobs filtered by Job Preferences; scoring intentionally skipped')
+          && preferenceFilteredAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && preferenceFilteredAssessment.includes('Scoring: intentionally skipped — Job Preferences filtered every post-history candidate.')
+          && preferenceFilteredAssessment.includes('Taxonomy: intentionally skipped — no preference-accepted jobs reached the board.')
+          && !preferenceFilteredAssessment.includes('terminal score-ready 0 ≠ saved score-ready 2'),
+        'preference-filtered receipts remain recovery-valid and reconcile their retained candidate pool without inventing a scoring mismatch');
+
+        const preferenceFilteredWithPristineBoard = generateMarkdown({
+          description: 'A preference-filtered run does not require an untouched connected board to Combine.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'pristine-preference-board'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'pristine-preference-board', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], renderedCardCount: 0, stale: false,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'pristine-preference-board', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const pristinePreferenceAssessment = preferenceFilteredWithPristineBoard.slice(preferenceFilteredWithPristineBoard.indexOf('## Job Completion Assessment'), preferenceFilteredWithPristineBoard.indexOf('## Job Listing Link Diagnostics'));
+        assert(pristinePreferenceAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && !pristinePreferenceAssessment.includes('Job Board `pristine-preference-board` is `empty`, not done'),
+        'a pristine connected board does not make a fully evidenced preference-filtered run indeterminate');
+
+        // A preference-filtered receipt has zero score-ready jobs by design,
+        // but its candidate pool is the only recovery copy of listings the
+        // user may later reconsider. Do not let a truncated snapshot receive
+        // the same green completion verdict merely because scoring was skipped.
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId: preferenceFilteredRunId, sourceHubId: nodeId, canvasFilePath: canvas,
+          createdAt: Date.now(), gatheredJobCount: 0, jobs: [{}],
+          preferenceEvaluation: { counts: { input: 2, accepted: 0, filtered: 2 } },
+        }), 'utf8');
+        const truncatedPreferenceReport = generateMarkdown({
+          description: 'Detect a truncated preference candidate pool.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const truncatedPreferenceAssessment = truncatedPreferenceReport.slice(truncatedPreferenceReport.indexOf('## Job Completion Assessment'), truncatedPreferenceReport.indexOf('## Job Listing Link Diagnostics'));
+        assert(truncatedPreferenceAssessment.includes('⚠️ **INDETERMINATE**')
+          && truncatedPreferenceAssessment.includes('saved preference candidate pool 1 ≠ post-history candidates 2'),
+        'preference-filtered completion requires a complete retained candidate pool, without comparing it to score-ready zero');
 
         const jobsBackend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
         const freshRunResetStart = jobsBackend.indexOf('// Reset per-run state at search START');
@@ -367,6 +609,10 @@ export default [
             google: {
               count: 11, providerGathered: 13, relevanceDropped: 2,
               stopReason: 'end-of-results',
+              revealOutcomes: [{
+                queryIndex: 1, queryTotal: 1, exit: 'end-of-list', count: 191, iterations: 29,
+                query: 'PRIVATE QUERY', url: 'https://private.example/?token=SECRET_URL_TOKEN',
+              }],
               warning: { code: 'rate-limit', severity: 'block', evidence: 'PRIVATE WARNING EVIDENCE' },
               url: 'https://private.example/?token=SECRET_URL_TOKEN',
               jobs: [{ title: 'PRIVATE JOB TITLE' }],
@@ -382,7 +628,9 @@ export default [
           && recovery.includes('previous-process receipt — live pipeline telemetry is unavailable in this process')
           && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 4 kept')
           && recovery.includes('`google`: 11 returned')
-          && recovery.includes('warning rate-limit (block)'),
+          && recovery.includes('warning rate-limit (block)')
+          && recovery.includes('`google` scroll reveal: q1/1 191 card(s) after 29 reveal pass(es) — board end marker reached')
+          && recovery.includes('✅ every query reached the board end marker'),
         'a prior-process receipt preserves terminal status, timing/funnel, source warning codes, and provenance');
         for (const secret of ['PRIVATE WARNING EVIDENCE', 'SECRET_URL_TOKEN', 'PRIVATE JOB TITLE', 'PRIVATE QUERY', 'PRIVATE PROFILE', 'PRIVATE PROMPT', 'PRIVATE RESPONSE', 'PRIVATE ERROR BODY']) {
           assert(!recovery.includes(secret), `terminal receipt must redact ${secret}`);
@@ -425,9 +673,20 @@ export default [
         source: 'google', title: 'AI Platform Architect', company: 'Aalo Atomics', location: 'Austin, TX',
         url: legacyUrl, matchScore: 70,
       };
+      const directWithBlankRawQuery = {
+        source: 'google', title: 'Healthy Direct Link', company: 'Acme', location: 'Toronto, ON',
+        url: 'https://careers.example.test/job/healthy',
+        googleCardUrl: 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=HealthyDirectId',
+      };
+      const missingDirect = {
+        source: 'google', title: 'Missing Direct Link', company: 'Peraton', location: 'Virginia', url: '',
+        googleCardUrl: 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=MissingDirectId',
+      };
       const nodes = [
         { id: 'job-card', type: 'jobcard', data: jobData },
         { id: 'board', type: 'jobboard', data: { results: [{ ...jobData }] } },
+        { id: 'direct-card', type: 'jobcard', data: directWithBlankRawQuery },
+        { id: 'missing-card', type: 'jobcard', data: missingDirect },
       ];
       const base = {
         description: 'Google listing links open a broken page.', nodes, edges: [], drawings: [],
@@ -441,16 +700,20 @@ export default [
       }).markdown;
       for (const report of [full, focused]) {
         const section = report.split('## Job Listing Link Diagnostics')[1]?.split('\n## ')[0] || '';
-        assert(section.includes('Unique job rows inspected: 1')
+        assert(section.includes('Unique job rows inspected: 3')
           && section.includes('1 internal Google route(s) exposed as public')
-          && section.includes('1 legacy `ibp=htl;jobs`')
-          && section.includes('1 blank search query')
-          && section.includes('q=empty · htidocid=present'),
+          && section.includes('1 direct Apply-on URL(s)')
+          && section.includes('1 missing direct Apply-on URL(s) (1 retain a Google identity fallback)')
+          && section.includes('3 legacy `ibp=htl;jobs`')
+          && section.includes('3 blank raw search query')
+          && section.includes('"Missing Direct Link"')
+          && section.includes('public=missing-direct (Google fallback available)')
+          && !section.includes('"Healthy Direct Link"'),
         'FULL/JOBLINK must surface the structural Google link defect and dedupe card/board copies');
         assert(!section.includes('SecretOpaqueId'),
           'job-link diagnostics must never export opaque query/fragment values');
       }
-      return { unique: 1, blankQuery: 1 };
+      return { unique: 3, blankQuery: 3 };
     },
   },
 {
@@ -577,7 +840,7 @@ export default [
     // window auto-detects success 5 minutes later). Before this, the platform
     // that actually misbehaved printed nothing but the bare positive verdict —
     // the one platform a bug report couldn't diagnose.
-    name: 'session trace surfaces a preserved prior NOT-CONNECTED verdict only when it adds information the current verdict lacks',
+    name: 'session trace labels a prior NOT-CONNECTED verdict as historical and superseded by the current connected confirmation',
     run: () => {
       const platforms = [{ id: 'glassdoor', name: 'Glassdoor' }];
 
@@ -599,8 +862,9 @@ export default [
       });
       assert(reconnected.includes('HTTP status: `auto-detected`'),
         'the current positive trace still renders alongside the preserved negative');
-      assert(reconnected.includes('⚠️ preserved prior NOT-CONNECTED verdict'),
-        'a preserved negative verdict on a currently-connected platform is surfaced');
+      assert(reconnected.includes('ℹ️ historical NOT-CONNECTED verdict; current cached status is connected')
+        && !reconnected.includes('⚠️ preserved prior NOT-CONNECTED verdict'),
+      'a prior negative is retained as historical evidence without presenting it as a conflicting current warning');
       assert(reconnected.includes('without auth redirect or sign-in body')
         && !reconnected.includes('token=secret'),
       'the preserved negative reason renders but its URL query token is redacted, same as every other trace field');
@@ -619,7 +883,7 @@ export default [
           lastNegative: { reason: 'no auth redirect', trace: { status: 200 }, ts: clobberedTs },
         },
       });
-      assert(!stillDown.includes('preserved prior NOT-CONNECTED verdict'),
+      assert(!stillDown.includes('historical NOT-CONNECTED verdict'),
         'a currently-disconnected platform does not repeat lastNegative — its own trace already states the reason');
 
       // Disk-restored shape (selectRestorableStatuses / persistStatusCache):
@@ -633,7 +897,7 @@ export default [
           lastNegative: { reason: 'restored: prior session read not-connected', ts: clobberedTs },
         },
       });
-      assert(restored.includes('⚠️ preserved prior NOT-CONNECTED verdict')
+      assert(restored.includes('ℹ️ historical NOT-CONNECTED verdict; current cached status is connected')
         && restored.includes('restored: prior session read not-connected'),
       'a disk-restored entry with no lastTrace at all still surfaces its preserved negative verdict');
       assert(!restored.includes('target:') && !restored.includes('HTTP status:'),
@@ -643,7 +907,7 @@ export default [
       const clean = renderSessionTraceBlocks(platforms, {
         glassdoor: { connected: true, lastTrace: { target: 'https://www.glassdoor.com/member/home', status: 200 } },
       });
-      assert(!clean.includes('preserved prior NOT-CONNECTED verdict'),
+      assert(!clean.includes('historical NOT-CONNECTED verdict'),
         'a platform with no recorded lastNegative renders exactly as before');
       return { ok: true };
     },
@@ -986,8 +1250,10 @@ export default [
       }) + '\n';
       const foldedFull = enforceClipboardMarkdownCap(foldedFilterBase, foldedEvents, [], cap);
       assert(foldedFull.markdown.includes(`event log selected all ${foldedEvents.length} line(s) before clipboard capping`)
-        && foldedFull.markdown.includes(`of ${foldedEvents.length} event line(s)`),
-      'Clipboard cap: the rewritten FULL summary counts raw captured lines, not folded run lines');
+        && foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${distinctEvents.length + 1} rendered event line(s)`)
+        && foldedFull.markdown.includes(`after folding ${teardownBurst.length} repeated line(s) from ${foldedEvents.length} captured line(s) into 1 run line(s)`)
+        && !foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${foldedEvents.length} event line(s)`),
+      'Clipboard cap: the rewritten FULL summary distinguishes raw captured events from fully retained post-fold lines');
 
       const foldedHard = enforceClipboardMarkdownCap(giantBase, foldedEvents, logs, cap);
       assert(foldedHard.hardTruncated && foldedHard.markdown.length <= cap,
@@ -3476,10 +3742,10 @@ export default [
       'zero-new disposition clears every prior result summary');
       assert(!renderer.includes('data.rerunNotice ? (')
         && !renderer.includes("title: 'No new jobs'")
-        && doneState.includes("noNewResults ? 'new jobs'")
+        && doneState.includes("jobsLabel(count, 'new job', 'new jobs')")
         && doneState.includes('Math.max')
         && doneState.includes('found')
-        && doneState.includes('score-ready')
+        && doneState.includes('ready to score')
         && !doneState.includes('${gatheredCount} scraped → ${scrapedCount} kept'),
       'zero-new completion has no notice/toast, shows 0 new jobs, and labels reconciled collection/scoring counts instead of rendering an impossible scraped-to-kept funnel');
       assert(backend.includes('rawCount: relevanceFunnel.raw')
@@ -3553,6 +3819,7 @@ export default [
       const backgroundStart = renderer.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
       const backgroundEnd = renderer.indexOf('const handleJobsSettingsChange = useCallback', backgroundStart);
       const backgroundPath = renderer.slice(backgroundStart, backgroundEnd);
+      const preferenceEvaluationStart = renderer.indexOf('const evaluatePreferencesForRun = useCallback');
       const pipelineStart = renderer.indexOf('const runPipeline = useCallback');
       const pipelineEnd = renderer.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipelinePath = renderer.slice(pipelineStart, pipelineEnd);
@@ -3560,6 +3827,9 @@ export default [
         && pipelinePath.includes('const processingToken = processingRunsRef.current.start();\n    if (!processingToken) return;\n    // This is a new top-level search')
         && pipelinePath.includes('gatheredCountRef.current = 0'),
       'a post-run USAJobs append preserves the aggregate gathered counter, while a newly owned top-level pipeline resets it');
+      assert(preferenceEvaluationStart >= 0 && preferenceEvaluationStart < backgroundStart
+        && backgroundPath.includes('evaluatePreferencesForRun'),
+      'the background USAJobs callback may depend on Job Preferences evaluation only after that callback has initialized, avoiding a render-time temporal-dead-zone crash');
       const sourcesReadyStart = backgroundPath.indexOf("if (currentState === 'sources-ready')");
       const sourcesReadyEnd = backgroundPath.indexOf("} else if (currentState === 'done')", sourcesReadyStart);
       const sourcesReadyPath = backgroundPath.slice(sourcesReadyStart, sourcesReadyEnd);
@@ -3662,8 +3932,9 @@ export default [
       const searchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const finishStart = searchRenderer.indexOf('const finishScoringAndSpawn');
       const finishEnd = searchRenderer.indexOf('const runScoringAndSpawn', finishStart);
-      assert(!searchRenderer.slice(finishStart, finishEnd).includes('appendJobsHistory'),
-        'scoring completion alone does not write seen-history');
+      assert(finishStart >= 0 && finishEnd > finishStart
+        && !searchRenderer.slice(finishStart, finishEnd).includes('appendJobsHistory'),
+      'scoring completion alone does not write seen-history');
       const resumeStart = searchRenderer.indexOf('const resumeScoring = useCallback');
       const resumeEnd = searchRenderer.indexOf('const handleDiscardResume', resumeStart);
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
@@ -4336,6 +4607,60 @@ export default [
         'a source skipped during an in-flight search must not be re-blocked by the backend final warning list');
 
       return { zipAction: jobSourceWarningAction(zipPartial), remaining: finalWarnings.map(w => w.sourceId) };
+  },
+},
+{
+    name: 'Job diagnostics: repeated ZipRecruiter detail misses retain a bounded aggregate warning',
+    run: () => {
+      const first = {
+        code: 'description-detail-miss', severity: 'warn',
+        evidence: 'ZipRecruiter could not recover a full description for "Chief Architect".',
+        suggestion: 'Retry ZipRecruiter later.',
+        affectedCount: 1, affectedTitles: ['Chief Architect'],
+      };
+      const second = {
+        code: 'description-detail-miss', severity: 'warn',
+        evidence: 'ZipRecruiter could not recover a full description for "Infrastructure Solutions Architect".',
+        affectedCount: 1, affectedTitles: ['Infrastructure Solutions Architect'],
+      };
+      let aggregated = mergeDescriptionDetailMissWarning(first, second);
+      for (const title of ['Chief Architect', 'Third affected role', 'Fourth affected role']) {
+        aggregated = mergeDescriptionDetailMissWarning(aggregated, {
+          code: 'description-detail-miss', severity: 'warn', affectedCount: 1, affectedTitles: [title],
+        });
+      }
+      assert(aggregated.code === 'description-detail-miss' && aggregated.severity === 'warn'
+        && aggregated.affectedCount === 5
+        && JSON.stringify(aggregated.affectedTitles) === JSON.stringify([
+          'Chief Architect', 'Infrastructure Solutions Architect', 'Third affected role',
+        ]),
+      'the first non-blocking warning remains authoritative while later misses add an exact count and three-title bounded sample');
+      const blocked = { code: 'cloudflare-hard-block', severity: 'block', evidence: 'Blocked.' };
+      assert(mergeDescriptionDetailMissWarning(blocked, second) === blocked,
+        'a later detail miss never overwrites an existing blocking warning');
+
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search, resolves: telemetry.resolves };
+      Object.assign(telemetry, {
+        nodeId: 'aggregate-detail-miss', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 531, deduped: 531, ageDropped: 0, historyDropped: 0, kept: 67,
+          bySource: { ziprecruiter: { count: 531, warning: aggregated } },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['aggregate-detail-miss']), null, null);
+        assert(report.includes('ziprecruiter (description-detail-miss/warn, 531 row(s) still returned)')
+          && report.includes('5 listings affected')
+          && report.includes('"Chief Architect"')
+          && report.includes('"Infrastructure Solutions Architect"')
+          && report.includes('"Third affected role"')
+          && !report.includes('Fourth affected role'),
+        'the FULL pipeline report shows the exact aggregate count and bounded title samples without changing the warning severity or source outcome');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { affected: aggregated.affectedCount, samples: aggregated.affectedTitles.length };
     },
   },
 {
@@ -4399,12 +4724,22 @@ export default [
       'tree bands express hiring-fit ranges without percentage/probability notation');
       assert(scoreCalls.length === 3 && scoreCalls.every(call => call.includes('careerData:')),
         'every renderer score handoff, including saved-job re-analysis, includes raw career evidence alongside the compact profile');
-      assert(snapshotWrites.length >= 3 && snapshotWrites.every(call => call.includes('careerData: data.careerData')),
+      assert(snapshotWrites.length >= 3 && snapshotWrites.every(call => /\bcareerData\b/.test(call)),
         'saved-scrape snapshots retain raw career evidence for resumed scoring');
+      const parseStart = search.indexOf('const parseResult = await window.electronAPI.parseCareerData');
+      const queryStart = search.indexOf('// Step 2: Query construction', parseStart);
+      const freshCareerWindow = search.slice(parseStart, queryStart);
+      const interpretationStart = search.indexOf('window.electronAPI?.interpretJobPreferences', queryStart);
+      const interpretationEnd = search.indexOf('if (cancelled()) return;', interpretationStart);
+      const interpretation = search.slice(interpretationStart, interpretationEnd);
+      assert(freshCareerWindow.includes("activeCareerData = parseResult.careerData || ''")
+        && interpretation.includes('careerData: activeCareerData'),
+      'a fresh career-file parse must pass its newly extracted career data to Job Preferences interpretation instead of waiting for React state to commit');
       assert(search.includes('const careerData = snapshot?.careerData || data.careerData || \'\';')
         && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
-        && search.includes('careerData,\n          jobs: savedJobs'),
+        && /careerData,\s+activeTargetRole/.test(search)
+        && search.includes('jobs: jobsToEvaluate,'),
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
       assert(search.includes('function isSavedAnalysisForCurrentHub')
         && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath)')
@@ -4463,9 +4798,7 @@ export default [
     run: () => {
       const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
-      const handlerStart = search.indexOf('const handleReanalyze = useCallback') >= 0
-        ? search.indexOf('const handleReanalyze = useCallback')
-        : search.indexOf('const handleReanalyzeHiringFit = useCallback');
+      const handlerStart = search.indexOf('const handleReanalyze = useCallback');
       const handlerEnd = search.indexOf('// Drop the hub\'s career identity', handlerStart);
       assert(handlerStart >= 0 && handlerEnd > handlerStart,
         'the search hub owns a dedicated saved-results re-analysis handler');
@@ -4474,29 +4807,29 @@ export default [
       // A score-only retry belongs on the completed hub. It must not be an
       // unlocked-looking control while a module is locked, and it must remain
       // distinct from Re-run Search (which intentionally starts a scrape).
-      assert((doneState.includes('onReanalyze') || doneState.includes('onReanalyzeHiringFit'))
-        && doneState.includes('Re-analyze Hiring Fit')
+      assert(doneState.includes('onReanalyze')
+        && doneState.includes('Re-evaluate Saved Jobs')
         && /!locked\s*&&/.test(doneState),
-      'done hubs expose Re-analyze Hiring Fit only when the module is unlocked');
-      assert(search.includes('onReanalyze={handleReanalyze}')
-        || search.includes('onReanalyzeHiringFit={handleReanalyzeHiringFit}'),
+      'done hubs expose Re-evaluate Saved Jobs only when the module is unlocked');
+      assert(search.includes('onReanalyze={handleReanalyze}'),
         'the completed search hub wires its re-analysis action into the done state');
+      assert(search.includes("val.slice(0, 4000)")
+        && (search.match(/maxLength=\{4000\}/g) || []).length >= 1
+        && (doneState.match(/maxLength=\{4000\}/g) || []).length >= 1
+        && doneState.includes('Job Preferences'),
+      'Job Preferences preserve the backend-supported 4,000-character limit in both renderer states');
 
       // The saved cards are the scoring input. A re-analysis must never call a
       // search endpoint or the board-owned seen-history writer; otherwise the
       // original cards can be history-suppressed before their fit is refreshed.
-      assert((/existingScoredJobs\s*=\s*Array\.isArray\((?:data|liveData)\.scoredJobs\)/.test(handler)
+      assert(/existingScoredJobs\s*=\s*Array\.isArray\((?:data|liveData)\.scoredJobs\)/.test(handler)
         && /jobsToReanalyze/.test(handler)
-        && /scoreJobs\(\{[\s\S]*?jobs:\s*jobsToReanalyze/.test(handler))
-        || (/previousJobs\s*=\s*Array\.isArray\(liveData\.scoredJobs\)/.test(handler)
-          && /runScoringAndSpawn\(\{[\s\S]*?jobs:\s*previousJobs\.map\(withoutHiringFitFields\)/.test(handler)),
+        && /evaluatePreferencesForRun\(\{[\s\S]*?jobs:\s*jobsToReanalyze/.test(handler)
+        && /scoreJobs\(\{[\s\S]*?jobs:\s*preferenceResult\.jobs/.test(handler),
       're-analysis submits a prepared copy of the currently displayed scored jobs directly to scoreJobs');
       const scoreCallAt = handler.indexOf('window.electronAPI.scoreJobs({');
-      const sanitizerStart = search.indexOf('function withoutHiringFitFields');
-      const sanitizerEnd = search.indexOf('function reanalysisRestorePatch', sanitizerStart);
-      const preparation = scoreCallAt >= 0
-        ? handler.slice(0, scoreCallAt)
-        : search.slice(sanitizerStart, sanitizerEnd);
+      assert(scoreCallAt >= 0, 're-analysis reaches scoreJobs from inside the handler');
+      const preparation = handler.slice(0, scoreCallAt);
       assert(['matchScore', 'reasoning', 'careerDirection', 'fitAssessment', 'requirementAssessments']
         .every(field => preparation.includes(field)),
       're-analysis strips prior hiring-fit-derived fields before submission so a replacement placeholder cannot retain stale assessment evidence');
@@ -4507,15 +4840,22 @@ export default [
         && !handler.includes('runPipeline'),
       're-analysis neither scrapes nor appends the existing listings to seen history');
 
-      // Never blank the durable input before the replacement score result is
-      // accepted. On a request error or a user cancellation, the old cards
-      // must remain available and the hub must settle back to done instead of
-      // trapping the user in a scoring state.
-      assert(!/scoredJobs:\s*\[\s*\]/.test(handler)
-        && (/scoreResult\.scoredJobs/.test(handler) || handler.includes('runScoringAndSpawn({'))
+      // Job Preferences may legitimately filter every saved candidate, but
+      // only AFTER they have been evaluated. Any request error or cancellation
+      // must restore the prior cards and settle the hub back to done instead of
+      // trapping the user in a processing state.
+      const firstPreferenceEvaluation = handler.indexOf('evaluatePreferencesForRun({');
+      const emptyAfterPreferences = handler.indexOf('scoredJobs: [],', firstPreferenceEvaluation);
+      assert(firstPreferenceEvaluation >= 0
+        && (emptyAfterPreferences < 0 || emptyAfterPreferences > firstPreferenceEvaluation)
+        && (/scoreResult\.scoredJobs/.test(handler) || handler.includes('runScoringAndSpawn({') || handler.includes('finishScoringAndSpawn({'))
         && /hubState:\s*'done'/.test(handler)
         && /catch\s*\(/.test(handler),
-      're-analysis replaces scores only after success and restores done state without clearing old cards on failure/cancel');
+      'saved-job re-evaluation only clears jobs after preference evaluation and restores done state without losing old cards on failure/cancel');
+      assert(/scrapedCount:\s*0,/.test(handler)
+        && /scrapedCount:\s*preferenceResult\.jobs\.length,/.test(handler)
+        && doneState.includes('const scoreReadyCount = validCount(scrapedCount)'),
+      're-analysis preserves the original found total but recomputes the score-ready funnel from the current preference-accepted rows, including zero when all are filtered');
 
       // Board freshness is driven by the module fingerprint. A changed score
       // and a changed user-visible assessment must both make Re-combine
@@ -5936,6 +6276,14 @@ export default [
         selectionMismatches: 1,
         blockingModalsDismissed: 2,
         blockingModalFailures: 1,
+        googleApplyLinksCaptured: 15,
+        googleApplyLinksMissing: 2,
+        googleApplyLinkMissSamples: [{
+          itemIndex: 9,
+          title: 'Junior Solutions Architect',
+          preferredSource: 'Peraton Careers',
+          candidateLabels: [],
+        }],
         modalSamples: [
           {
             itemIndex: 3,
@@ -5997,12 +6345,13 @@ export default [
         null,
       );
       assert(report.includes('Browser card traversal (bounded batch summaries)')
-        && report.includes('Google for Jobs · strategy=list-card-panel · panel="span.OOyDTc, span.ejCXj" · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · blocking-popup-dismissed 2 · blocking-popup-dismiss-failed 1 · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
+        && report.includes('Google for Jobs · strategy=list-card-panel · panel="span.OOyDTc, span.ejCXj" · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · blocking-popup-dismissed 2 · blocking-popup-dismiss-failed 1 · direct-apply 15/17 captured · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
         && report.includes('#7 key=Systems Architect at Example reason=card-not-found')
         && report.includes('#16 key=Principal Systems Architect at Example reason=panel-timeout')
         && report.includes('Blocking popup handling:')
         && report.includes('#3 · stage=before-card · signature=glassdoor-job-alert · control=aria-label-close · outcome=dismissed')
         && report.includes('⚠️ #4 · stage=after-card · signature=glassdoor-job-alert · control=none · outcome=missing-control')
+        && report.includes('#9 direct Apply-on URL missing · "Junior Solutions Architect" · preferred=Peraton Careers · visible candidates=none after bounded wait')
         && report.includes('Click transition samples (expected → hit):')
         && report.includes('#1 · physical #1/108 expected key=google-card-1 title=First Systems Architect → hit key=google-card-1 title=First Systems Architect via primary → selected title=First Systems Architect [selection verified]')
         && report.includes('⚠️ #2 · physical #5/108 · 3 physical cards skipped since previous expected key=google-card-2 title=Second Systems Architect → hit key=google-card-3 title=Third Systems Architect via data-share-url [MISMATCH] → selected title=Fourth Systems Architect [SELECTION MISMATCH]'),
@@ -6877,6 +7226,20 @@ export default [
   },
 },
 {
+    name: 'Job Board: preference-filtered legacy rows never reach display input',
+    run: () => {
+      const stats = {};
+      const out = unionScoredJobs([[
+        { title: 'Accepted', company: 'Acme', url: 'https://jobs/acme/accepted', matchScore: 80 },
+        { title: 'Rejected', company: 'Acme', url: 'https://jobs/acme/rejected', matchScore: 99, preferenceAssessment: { status: 'filtered' } },
+      ]], stats);
+      assert(out.length === 1 && out[0].title === 'Accepted'
+        && stats.totalIncoming === 1 && stats.preferenceFilteredSkipped === 1,
+      'a filtered row is excluded before merge accounting and card construction');
+      return stats;
+    },
+  },
+{
     name: 'Job Board: equal-score duplicates only prefer compensation research in the identical market context',
     run: () => {
       const base = {
@@ -6959,12 +7322,13 @@ export default [
       } }];
       assert(moduleFingerprint(assessed) !== moduleFingerprint(reassessed),
         'fingerprint: compensation verdict/explanation changes invalidate a board');
-      assert(moduleFingerprint(null).startsWith('5:0:'), 'fingerprint: nullish → v5 empty fingerprint');
+      assert(moduleFingerprint(null).startsWith('6:0:'), 'fingerprint: nullish → v6 empty fingerprint');
       // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
       assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
       assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe current baseline');
       assert(!isLegacyCombineSignature('hub-1=3:1:123'), 'v3 boards must be rechecked so compensation-aware v4 fingerprints can mark them stale');
       assert(!isLegacyCombineSignature('hub-1=4:1:123'), 'v4 boards must be rechecked so fit-audit-aware v5 fingerprints can mark them stale');
+      assert(!isLegacyCombineSignature('hub-1=5:1:123'), 'v5 boards must be rechecked so Job Preferences-aware v6 fingerprints can mark them stale');
       assert(!isLegacyCombineSignature(combineSignature([{ id: 'A', fingerprint: moduleFingerprint(a) }])),
         'current-format signature is not legacy');
       assert(!isLegacyCombineSignature('') && !isLegacyCombineSignature(null),
@@ -7054,15 +7418,17 @@ export default [
       const canSupplyTerminalBoardInput = (module) => (
         module.hubState === 'done' && (module.count > 0 || (
           !module.aiSkipped && !module.collectionOnly && !module.testMode
-          && module.resultDisposition === 'empty-complete'
+          && (module.resultDisposition === 'empty-complete' || module.resultDisposition === 'preference-filtered')
         ))
       );
       assert(!canSupplyTerminalBoardInput({ hubState: 'done', count: 0 })
         && !canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'scored' })
         && !canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'empty-complete', collectionOnly: true })
         && canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'empty-complete' })
+        && canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'preference-filtered' })
+        && !canSupplyTerminalBoardInput({ hubState: 'done', count: 0, resultDisposition: 'preference-filtered', collectionOnly: true })
         && canSupplyTerminalBoardInput({ hubState: 'done', count: 1 }),
-      'only an explicitly authoritative empty completion can replace stale results; legacy/recovery zeroes cannot, while positive scored jobs remain mergeable');
+      'only explicit terminal zero dispositions can replace stale results; legacy/recovery or collection-only zeroes cannot, while positive scored jobs remain mergeable');
 
       // The component-level transition clears the prior cascade only after the
       // user explicitly accepts its empty terminal input. Lock that wiring in
@@ -7079,7 +7445,7 @@ export default [
         && boardSource.includes('if (nextStale) hideBoardChildren()')
         && boardSource.includes('function isExplicitlyUnscoredModule(data)')
         && boardSource.includes('data?.aiSkipped || data?.collectionOnly || data?.testMode')
-        && boardSource.includes("m.resultDisposition === 'empty-complete'")
+        && boardSource.includes("m.resultDisposition === 'empty-complete' || m.resultDisposition === 'preference-filtered'")
         && boardSource.includes('m.hasPositiveResults || m.isAuthoritativeEmpty')
         && boardSource.includes("n.data?.resultDisposition || ''")
         && boardSource.includes('emptyReplacementPrompt')
@@ -7096,12 +7462,13 @@ export default [
       'board tracks scored terminal zero-result modules, excludes explicitly unscored completions, and confirms an undoable empty replacement before deleting stale children');
       assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
         'stale zero-result boards expose a truthful action rather than a dead Re-combine button');
-      assert(jobSearchSource.includes("resultDisposition: 'scored'")
+      assert(jobSearchSource.includes("resultDisposition = 'scored'")
         && (jobSearchSource.match(/resultDisposition: 'empty-complete'/g) || []).length >= 2
         && jobSearchSource.includes("resultDisposition: 'collection-only'")
+        && jobSearchSource.includes("resultDisposition: 'preference-filtered'")
         && jobSearchSource.includes("resultDisposition: 'incomplete'")
         && jobSearchSource.includes('resultDisposition: null'),
-      'Job Search explicitly stamps scored, authoritative-empty, collection-only, and incomplete outcomes and clears provenance for a new/reset run');
+      'Job Search explicitly stamps scored, authoritative-empty, preference-filtered, collection-only, and incomplete outcomes and clears provenance for a new/reset run');
       assert(boardSource.includes('result card${emptyReplacementPrompt.resultCardCount === 1')
         && boardSource.includes('group${emptyReplacementPrompt.resultGroupCount === 1')
         && boardSource.includes('Undo restores them.')
@@ -8474,6 +8841,263 @@ export default [
       assert(snap.includes('JSON.stringify(e.pageState).slice(0, 240)')
         && snap.includes('JSON.stringify(String(e.panelSelector).slice(0, 180))'),
       'JSON blobs and selectors keep their bare slice — a marker would corrupt the value');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Clipboard cap folds repeated log bursts and never leaves a fence open',
+    run: () => {
+      // A deep paginating walk emits one near-identical progress pair per page.
+      // Before folding, 54 of a real report's 93 retained log lines were these,
+      // crowding out whole diagnostic sections.
+      const walk = [];
+      for (let page = 1; page <= 15; page++) {
+        const ts = `23:${String(page).padStart(2, '0')}`;
+        walk.push(`[${ts}:08.719] INFO  [BrowserScraper] Glassdoor q1 descriptions: 30/30 expanded (sel: x)`);
+        walk.push(`[${ts}:08.733] INFO  [BrowserScraper] Glassdoor page ${page}: 30 new jobs (${page * 30} total)`);
+      }
+      const warn = '[23:18:16.782] WARN  [BrowserScraper] glassdoor: denied the list-panel request with HTTP 502';
+      const done = '[00:25:03.941] INFO  [BrowserScraper] Glassdoor done: 612 jobs (completed)';
+      const folded = collapseLogRepeats([...walk, warn, done]);
+      assert(folded.lines.length < walk.length,
+        'Clipboard log fold: a repeated progress shape must shrink the block');
+      assert(folded.lines.includes(warn),
+        'Clipboard log fold: WARN lines always pass through verbatim — a swallowed error is the most valuable line here');
+      assert(folded.lines.includes(done) && folded.lines.includes(walk[0]) && folded.lines.includes(walk.at(-1)),
+        'Clipboard log fold: the first and last occurrences of a folded shape survive so the walk stays readable');
+      assert(folded.lines.some(l => l.includes('repeat(s) elided') && l.includes('Glassdoor page #')),
+        'Clipboard log fold: the summary names the shape it stands for');
+      assert(collapseLogRepeats(folded.lines).foldedLineCount === 0,
+        'Clipboard log fold: a second pass over already-folded lines is a no-op');
+
+      // Distinct messages must never be merged just because they repeat nearby.
+      const distinct = Array.from({ length: 12 }, (_, i) => `[00:00:0${i % 10}.000] INFO  [A] step ${'x'.repeat(i + 1)} ran`);
+      assert(collapseLogRepeats(distinct).foldedLineCount === 0,
+        'Clipboard log fold: lines whose non-numeric shape differs are never folded together');
+
+      // Fenced blocks: the base carries ```json/```html samples. A cut inside
+      // one used to swallow the omission marker and render the whole tail as code.
+      const rows = (n, ch) => Array.from({ length: n }, (_, i) => `- row ${i} ${ch.repeat(40)}`).join('\n');
+      const fenced = '# R\n## Kept\n' + rows(60, 'A') + '\n\n## Samples\n```html\n' + rows(200, 'B') + '\n```\n\n## Tail\nbody\n';
+      const cut = enforceClipboardMarkdownCap(fenced, ['E1', 'E2'], ['L1', 'L2'], 6_000);
+      const fenceCount = (cut.markdown.match(/^ {0,3}```/gm) || []).length;
+      assert(cut.hardTruncated && cut.markdown.length <= 6_000,
+        `Clipboard fence balance: output still respects the cap (${cut.markdown.length} <= 6000)`);
+      assert(fenceCount % 2 === 0,
+        'Clipboard fence balance: a cut inside a fenced block must be closed, or the omission note renders as code');
+      assert(cut.markdown.includes('Report content after this point was omitted by the clipboard cap'),
+        'Clipboard fence balance: the omission marker survives the cut it describes');
+      return { foldedLineCount: folded.foldedLineCount, fenceCount };
+    },
+  },
+{
+    name: 'Clipboard hard cap grows its tail proportionally, not as a cliff',
+    run: () => {
+      // A base one char past the floor path used to forfeit (ceiling - floor)
+      // chars of static diagnostics immediately — that cliff is what cost a real
+      // report six whole sections plus a mid-section cut.
+      const cap = 50_000;
+      const events = Array.from({ length: 40 }, (_, i) => `EVENT ${i} ${'x'.repeat(40)}`);
+      const logs = Array.from({ length: 40 }, (_, i) => `LOG ${i} ${'y'.repeat(60)}`);
+      const tailish = 'Z'.repeat(200);
+      const sections = (n) => Array.from({ length: n }, (_, i) => `## S${i}\n${tailish}\n`).join('');
+      const marginal = '# Bug Report\n' + sections(160);
+      const out = enforceClipboardMarkdownCap(marginal, events, logs, cap);
+      assert(out.markdown.length <= cap, 'Clipboard proportional tail: output respects the cap');
+      // With a small overflow the static base must keep far more than half the cap.
+      const staticKept = out.markdown.length - (cap - Math.floor(cap * 0.5));
+      assert(staticKept > 0, 'Clipboard proportional tail: a marginal overflow keeps a majority static prefix');
+      assert(out.markdown.includes('## S0') && out.markdown.includes('## S100'),
+        'Clipboard proportional tail: a marginal overflow must not discard a third of the static sections');
+      return { length: out.markdown.length };
+    },
+  },
+{
+    name: 'Job-run receipt and report carry API source corpus coverage',
+    run: () => {
+      // The extractors measure the provider's own corpus size precisely so that
+      // "44 of 973" cannot read as "44 of 44". Every hop used to drop it.
+      const sanitized = sanitizeLastRunReceipt({
+        runId: 'hub-1', nodeId: 'hub',
+        terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 5 },
+        sources: { usajobs: { count: 44, providerGathered: 44, providerTotal: 973, truncated: true, relevanceDropped: 0 } },
+      });
+      assert(sanitized.sources.usajobs.providerTotal === 973 && sanitized.sources.usajobs.truncated === true,
+        'Receipt sanitizer retains the provider corpus size and the truncation flag');
+      const clean = sanitizeLastRunReceipt({
+        runId: 'hub-1', nodeId: 'hub',
+        terminal: { status: 'completed', outcome: 'populated' },
+        sources: { usajobs: { count: 44, providerGathered: 44, relevanceDropped: 0 } },
+      });
+      assert(!('providerTotal' in clean.sources.usajobs) && !('truncated' in clean.sources.usajobs),
+        'Receipt sanitizer omits coverage fields a source never reported rather than inventing a zero');
+
+      // queryFanOut is the hop that dropped them first; the wrapper below reads
+      // them straight off its return value.
+      const jobsSrc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(jobsSrc.includes('return { items, warning, gathered, providerGathered, providerTotal, truncated,'),
+        'queryFanOut returns the corpus-coverage facts its caller reads');
+      assert(jobsSrc.includes('if (data.providerTotal != null) bySource[sid].providerTotal = data.providerTotal;'),
+        'per-source telemetry carries providerTotal for API sources, the twin of claimedTotal for browser sources');
+      assert(jobsSrc.includes('const capDropped = rawJobs.length - jobs.length;'),
+        'the per-platform cap is measured where it is applied, not derived from a figure that also includes cross-query dedup');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Completion assessment reconciles gather coverage, preferences and the history write',
+    run: () => {
+      const snap = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+      // Every other check in this reconciliation is downstream of search.kept, so
+      // a source that returned a tenth of its corpus used to reconcile perfectly.
+      assert(snap.includes('const shortSources = coverageBySource.filter'),
+        'the assessment reconciles per-source gather coverage, not only the stages after collection');
+      assert(snap.includes('Gather completeness is unproven for'),
+        'a green verdict states when gather completeness was NOT proven instead of implying it');
+      // Job Preferences legitimately remove rows between admission and scoring.
+      assert(snap.includes('const expectedAfterPreferences = expected == null'),
+        'preference-filtered rows are subtracted before comparing against the scorer input');
+      assert(snap.includes('preference-filtered = ${expectedAfterPreferences} ≠ scoring input'),
+        'the subtraction is stated in the gap text rather than applied silently');
+      // The board-displayed seen-history write is the run's last stage.
+      assert(snap.includes('const historyWriteFailed = !!historyWrite?.error;')
+        && snap.includes('- Seen-history write:'),
+      'the board-displayed seen-history write is both reconciled and rendered');
+      // The phase stamped at the end of the GATHER must not be labelled as the run.
+      assert(snap.includes('- Live search stage:') && !snap.includes('- Live pipeline:'),
+        'the gather-stage phase is named for what it measures, since scoring and taxonomy run after it');
+      return { ok: true };
+    },
+  },
+{
+    name: 'Frozen run inputs survive a completed save; interrupted runs still shed them',
+    run: () => {
+      const interrupted = getJobSearchTransientKeysForSave('scoring');
+      const done = getJobSearchTransientKeysForSave('done');
+      assert(interrupted.includes('activeJobPreferences') && interrupted.includes('jobPreferencePlan')
+        && interrupted.includes('jobPreferencesInterpretation'),
+      'an interrupted run sheds BOTH halves of its frozen Job Preferences, never just the text');
+      assert(!done.includes('activeJobPreferences') && !done.includes('jobPreferencePlan')
+        && !done.includes('jobPreferencesInterpretation'),
+      'a completed run keeps the frozen pair its late-source append and re-analysis paths read together');
+      assert(done.includes('pendingJobs') && done.includes('scrapeWarnings') && done.includes('errorMessage'),
+        'a completed run still sheds ordinary in-session buffers');
+
+      // The client age backstop must never be narrower than the day-granular
+      // server bound it backs up: boards publish date-only postings at midnight.
+      const now = new Date(2026, 8, 3, 21, 42);
+      const dayStamp = (offset) => {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T00:00:00.0000`;
+      };
+      assert(filterJobsByAge([{ posted: dayStamp(21) }], 21, now).length === 1,
+        'a date-only posting on the boundary day is kept, matching the server DatePosted window');
+      assert(filterJobsByAge([{ posted: dayStamp(22) }], 21, now).length === 0,
+        'a date-only posting past the window is still dropped');
+      assert(filterJobsByAge([{ posted: new Date(now.getTime() - 22 * 86400000).toISOString() }], 21, now).length === 0,
+        'a posting carrying a real time of day keeps the exact comparison');
+
+      // The report must never echo a transient value that can hold documents.
+      const report = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(report.includes('const ECHOABLE_TRANSIENT_STRING_KEYS = new Set(')
+        && report.includes('value withheld'),
+      'the leaked-state diagnostic proves presence without exporting career-document text');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job completion assessment recognizes exhausted browser walk (empty-page) as verified complete',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-completion-empty-page-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-hub-zr';
+      const runId = 'completion-run-zr-42';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: Array.from({ length: 154 }, () => ({})),
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId, startedAt: Date.now() - 10_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 154 }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 442, deduped: 442, kept: 154, relevanceDropped: 0, ageDropped: 4, roleDropped: 281, historyDropped: 2, descriptionEvidenceDropped: 1 },
+          sources: {
+            ziprecruiter: {
+              count: 442, providerGathered: 445, providerTotal: 499,
+              relevanceDropped: 0, stopReason: 'empty-page',
+            },
+          },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, startedAt: Date.now() - 10_000, ts: Date.now(), runId },
+          search: {
+            ts: Date.now() - 9_000, queries: 1, raw: 442, deduped: 442, ageDropped: 4,
+            roleDropped: 281, historyDropped: 2, relevanceDropped: 0, kept: 154, runId,
+            bySource: {
+              ziprecruiter: {
+                count: 442, unique: 442, providerGathered: 445, claimedTotal: 499,
+                pagesWalked: 24, stopReason: 'empty-page',
+              },
+            },
+          },
+          resolves: {},
+          scoring: { ts: Date.now() - 7_000, input: 154, selectedForScoring: 154, scored: 154, placeholders: 0, unscored: 0, batches: 11, failedBatches: 0 },
+          bucketing: { ts: Date.now() - 6_000, input: 154, roleCount: 10, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [] },
+          history: { boardDisplay: { input: 154, written: 153 } },
+        });
+
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]), [{
+          id: 'board-node-1', hubState: 'done', resultCount: 154, mergeUnique: 154,
+          renderedCardCount: 154, combineSignature: `${nodeId}=test-fingerprint`,
+          connectedSourceHubIds: [nodeId], stale: false,
+        }]);
+
+        assert(assessment.includes('✅ **VERIFIED COMPLETE**'), `expected VERIFIED COMPLETE, got:\n${assessment}`);
+        assert(assessment.includes('gathered all 445 reachable row(s) (board advertised ~499; ended at empty-page)'),
+          'coverage reflects that the source exhausted reachable rows at empty-page');
+        assert(!assessment.includes('no scroll-backed Google source'),
+          'unqueried Google source note is omitted when other sources are present');
+        assert(!assessment.includes('INDETERMINATE'),
+          'exhausted source does not cause an INDETERMINATE verdict');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'summarizeScoringInputQuality matches filterJobsByDescriptionEvidence normalization',
+    run: () => {
+      // 350 chars of text + 60 chars of whitespace = 410 raw chars, but collapses to 351 chars (< 400).
+      const whitespaceJob = {
+        source: 'ziprecruiter',
+        title: 'Architect',
+        snippet: 'word '.repeat(70) + '\n\n   \n\n' + 'tail '.repeat(10),
+      };
+      const evidence = filterJobsByDescriptionEvidence([whitespaceJob]);
+      assert(evidence.dropped.length === 1, 'whitespace-inflated snippet is dropped by filterJobsByDescriptionEvidence');
+      assert(evidence.quality.short === 1, `quality summary must record short=1, got ${JSON.stringify(evidence.quality)}`);
+      assert(evidence.quality.empty === 0 && evidence.quality.deferred === 0, 'non-empty dropped job is not empty or deferred');
+
+      // Job with description instead of snippet
+      const descJob = {
+        source: 'ziprecruiter',
+        title: 'Short Desc Architect',
+        description: 'Only 50 chars in description field for this test.',
+      };
+      const descEvidence = filterJobsByDescriptionEvidence([descJob]);
+      assert(descEvidence.dropped.length === 1, 'short description is dropped');
+      assert(descEvidence.quality.short === 1, `quality summary records short=1 for description field, got ${JSON.stringify(descEvidence.quality)}`);
       return { ok: true };
     },
   },

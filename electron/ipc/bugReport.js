@@ -52,6 +52,27 @@ function truncateDiagnosticText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+// These values contain user-authored preference text or research evidence.
+// The diagnostic only needs to identify a stale persisted field, not its value.
+const PRIVATE_JOB_PREFERENCE_TRANSIENT_KEYS = new Set([
+  'activeJobPreferences', 'pendingJobPreferences', 'jobPreferencePlan',
+  'pendingJobPreferencePlan', 'jobPreferencesInterpretation',
+  'pendingJobPreferencesInterpretation', 'preferenceEvaluation',
+  'preferenceCandidatePool',
+]);
+
+// This section only has to prove a transient key SURVIVED the save; the value
+// is never the evidence. Echoing it by default was a leak waiting on the right
+// hubState: `pendingCareerData` holds the user's raw career documents, so a
+// leaked-state report on a non-`sources-ready` hub would have exported the
+// first 60 characters of their résumé — name, and often email — into an
+// artifact whose whole contract is that career data never leaves the machine.
+// Inverted to an allowlist so a transient key added later cannot leak by
+// default: only these short, non-document status strings are quoted.
+const ECHOABLE_TRANSIENT_STRING_KEYS = new Set([
+  'errorMessage', 'rerunOutcome', 'rerunNotice', 'pendingTargetRole',
+]);
+
 // Native Chrome challenge telemetry is intentionally metadata-only. In
 // particular, Cloudflare challenge URLs can carry short-lived query tokens, so
 // reports name the origin/path and never copy a query string from the native
@@ -723,8 +744,18 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
           // this section's purpose — it would falsely read "✅ Clean".)
           for (const key of getJobSearchTransientKeysForSave(d.hubState)) {
             const v = d[key];
-            if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length}`); }
-            else if (v) hits.push(v === true ? `${key}=true` : typeof v === 'string' ? `${key}="${truncateDiagnosticText(v, 60)}"` : `${key}=set`);
+            if (PRIVATE_JOB_PREFERENCE_TRANSIENT_KEYS.has(key)) {
+              if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length} private item(s)`); }
+              else if (v) hits.push(`${key}=set (private)`);
+            }
+            else if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length}`); }
+            else if (v === true) hits.push(`${key}=true`);
+            else if (typeof v === 'string') {
+              hits.push(ECHOABLE_TRANSIENT_STRING_KEYS.has(key)
+                ? `${key}="${truncateDiagnosticText(redactReportUrlsInText(v), 60)}"`
+                : `${key}=set (${v.length} chars, value withheld)`);
+            }
+            else if (v) hits.push(`${key}=set`);
           }
         }
         if (n.type === 'sellhub' && d.platformFitPending) hits.push('platformFitPending=true');
@@ -2231,6 +2262,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
           resultCount: node.data?.resultCount,
           stale: node.data?.stale,
           staleReason: node.data?.staleReason,
+          combineSignature: node.data?.combineSignature,
+          mergeUnique: node.data?.mergeStats?.unique,
         }));
     try {
       jobCompletionAssessmentMarkdown = buildJobCompletionAssessment(
@@ -2255,9 +2288,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   try { marketplaceModuleRollupMarkdown = buildMarketplaceModuleRollup(nodes); }
   catch { /* never break the report on diagnostic failure */ }
 
+  // This canvas is known to have sell-hub nodes (filterStats flag), but the codes
+  // that drop the `nodes` section take the plan state with it. Say so — an empty
+  // section here would otherwise read as "no price-drop plans exist".
   let sellHubPriceDropRollupMarkdown = '';
-  if (hasSellNodes) try { sellHubPriceDropRollupMarkdown = buildSellHubPriceDropRollup(nodes); }
-    catch { /* never break the report on diagnostic failure */ }
+  if (hasSellNodes) {
+    if (sectionOmitted('nodes')) sellHubPriceDropRollupMarkdown = '\n## SellHub Price-Drop Plans\n*(omitted by filter code — needs the node payload)*\n';
+    else try { sellHubPriceDropRollupMarkdown = buildSellHubPriceDropRollup(nodes); }
+      catch { /* never break the report on diagnostic failure */ }
+  }
 
   let scraperAdaptationMarkdown = '';
   if (hasJobNodes || hasSellNodes) try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }

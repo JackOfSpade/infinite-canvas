@@ -1,9 +1,31 @@
 import { assert } from './testHelpers.js';
 import { readFileSync } from 'node:fs';
-import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
+import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
 import { attachCompensationRemoteResidences, emptyReplacementIneligibilityReason, moduleFingerprint, normalizeJobMatchScore, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
+import { compareJobsByFitAndPreference } from '../../src/nodes/jobsearch/buildJobTree.js';
 
 export default [
+  {
+    name: 'Job Board treats manual-AI cancellation as control flow, not a combine failure',
+    run() {
+      assert(isJobBoardUserCancellation({ success: false, error: 'Manual AI job cancelled' })
+        && isJobBoardUserCancellation(new Error('Manual AI job cancelled'))
+        && isJobBoardUserCancellation({ errorCode: 'JOB_TASK_CANCELLED' })
+        && !isJobBoardUserCancellation({ success: false, error: 'Taxonomy response was invalid' }),
+      'only explicit user-cancellation envelopes/errors may bypass board failure handling');
+
+      const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const taxonomyCancellation = board.indexOf('stage=taxonomy');
+      const taxonomyFailure = board.indexOf('Bucketing failed; preserving prior board');
+      const compensationCancellation = board.indexOf('stage=compensation');
+      const compensationFailure = board.indexOf('Compensation research failed; preserving prior board');
+      assert(taxonomyCancellation >= 0 && taxonomyCancellation < taxonomyFailure
+        && compensationCancellation >= 0 && compensationCancellation < compensationFailure
+        && board.includes('stage=pipeline'),
+      'all board stages must recognize manual cancellation before logging a failure or raising the outer failure toast');
+      return { neutralCancellation: true, stages: ['taxonomy', 'compensation', 'pipeline'] };
+    },
+  },
   {
     name: 'Job Board taxonomy validation rejects incomplete API output before board replacement',
     run() {
@@ -116,7 +138,7 @@ export default [
       };
       assert(moduleFingerprint([base]) !== moduleFingerprint([changedGap]),
         'a changed rendered fit-audit status/gap must mark the board stale for Re-combine');
-      assert(moduleFingerprint([base]).startsWith('5:'), 'fit-audit-aware fingerprints use the current v5 format');
+      assert(moduleFingerprint([base]).startsWith('6:'), 'fit-audit-aware fingerprints use the current v6 format');
 
       const rejectedEvidenceCountOnly = {
         ...base,
@@ -157,6 +179,45 @@ export default [
       assert(moduleFingerprint([hiddenCoverageA]) === moduleFingerprint([hiddenCoverageB]),
         'malformed coverage values hidden by the card must not stale a board');
       return { fingerprintChanged: true };
+    },
+  },
+  {
+    name: 'Job Board keeps hiring fit primary and uses Job Preferences only as a stable within-fit tie-break',
+    run() {
+      const fitFirst = { title: 'Higher fit', matchScore: 91, preferenceAssessment: { preferenceScore: -50 } };
+      const preferenceFirst = { title: 'Preferred equal fit', matchScore: 80, preferenceAssessment: { preferenceScore: 20 } };
+      const neutralEqualFit = { title: 'Neutral equal fit', matchScore: 80, preferenceAssessment: { preferenceScore: 0 } };
+      const stableA = { title: 'Original first', matchScore: 70, preferenceAssessment: { preferenceScore: 5 } };
+      const stableB = { title: 'Original second', matchScore: 70, preferenceAssessment: { preferenceScore: 5 } };
+      const ordered = [neutralEqualFit, stableA, preferenceFirst, fitFirst, stableB]
+        .sort(compareJobsByFitAndPreference);
+      assert(ordered[0] === fitFirst && ordered[1] === preferenceFirst && ordered[2] === neutralEqualFit,
+        'a higher hiring fit must always win; only equal-fit rows are ordered by the preference score');
+      assert(ordered[3] === stableA && ordered[4] === stableB,
+        'a complete fit/preference tie must preserve source order without an invented lexical tie-break');
+      const changedPreference = {
+        ...neutralEqualFit,
+        preferenceAssessment: {
+          preferenceScore: 12, status: 'accepted', summary: 'Matches Job Preferences',
+          matches: [{ preferenceId: 'free-lunch', outcome: 'confirmed', source: 'web', sourceDate: '2026-08-31', verifiedAt: '2026-09-03T12:00:00.000Z' }],
+        },
+      };
+      assert(moduleFingerprint([neutralEqualFit]) !== moduleFingerprint([changedPreference]),
+        'a changed card-visible Job Preferences assessment must make Re-combine available');
+      const refreshedEvidence = {
+        ...changedPreference,
+        preferenceAssessment: {
+          ...changedPreference.preferenceAssessment,
+          matches: [{ ...changedPreference.preferenceAssessment.matches[0], verifiedAt: '2026-09-04T12:00:00.000Z' }],
+        },
+      };
+      assert(moduleFingerprint([changedPreference]) !== moduleFingerprint([refreshedEvidence]),
+        'updated independently verified preference evidence must make Re-combine available');
+      const tree = readFileSync(new URL('../../src/nodes/jobsearch/buildJobTree.js', import.meta.url), 'utf8');
+      assert(tree.includes('preferenceAssessment: job.preferenceAssessment')
+        && tree.includes('.sort(compareJobsByFitAndPreference)'),
+      'tree construction must preserve the preference assessment and use the shared comparator for cards');
+      return { orderedTitles: ordered.map(job => job.title), preferenceFingerprintChanged: true };
     },
   },
   {

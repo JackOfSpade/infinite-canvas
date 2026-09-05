@@ -14,7 +14,7 @@ import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree'
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
-import { isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
+import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 
 function createManualAiRunId(nodeId) {
   const entropy = globalThis.crypto?.randomUUID?.()
@@ -138,15 +138,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [connectedSig, id]);
 
   // Positive scored jobs always remain mergeable, even from an older canvas
-  // that predates resultDisposition. A zero-result module is mergeable only
-  // when Job Search explicitly marked it `empty-complete`; recovery/error
-  // branches can also end in `done` with an empty array but must never erase a
-  // board. Collection-only/test completions are likewise never empty inputs.
+  // that predates resultDisposition. An empty module is mergeable only when
+  // Job Search explicitly recorded a terminal zero: either no score-ready jobs
+  // existed (`empty-complete`) or Job Preferences deliberately filtered every
+  // score-ready candidate (`preference-filtered`). Recovery/error branches can
+  // also end in `done` with an empty array but must never erase a board.
+  // Collection-only/test completions are likewise never empty inputs.
   const mergeableModules = useMemo(
     () => connectedModules.map((m) => ({
       ...m,
       hasPositiveResults: m.count > 0,
-      isAuthoritativeEmpty: m.isScored && m.resultDisposition === 'empty-complete',
+      isAuthoritativeEmpty: m.isScored
+        && (m.resultDisposition === 'empty-complete' || m.resultDisposition === 'preference-filtered'),
     })),
     [connectedModules],
   );
@@ -443,6 +446,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         `[JobBoard] Combined ${completedModules.length} completed module(s): ` +
         `${perModule.map((p) => p.count).join('+')}=${mergeStats.totalIncoming} → ` +
         `${mergeStats.unique} unique (${mergeStats.duplicatesRemoved} dup removed, ` +
+        // Without this term the printed equation silently stops balancing:
+        // incoming − duplicates ≠ unique whenever preference-filtered rows were
+        // skipped, and the missing count appeared in no other line.
+        `${mergeStats.preferenceFilteredSkipped || 0} preference-filtered skipped, ` +
         `${mergeStats.collisionUpgrades} score-upgrade(s), ` +
         `${mergeStats.collisionAssessmentUpgrades} assessment-upgrade(s))`
       );
@@ -470,6 +477,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           return;
         }
         if (!res?.success) {
+          if (isJobBoardUserCancellation(res)) {
+            EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=taxonomy`);
+            return;
+          }
           const error = new Error(res?.error || 'Job Board taxonomy generation failed.');
           error.code = res?.errorCode;
           throw error;
@@ -483,6 +494,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!taxonomyCheck.valid) throw new Error(`Job Board taxonomy was invalid: ${taxonomyCheck.reason}`);
       } catch (err) {
         if (cancelled() || !getNode(id)) return;
+        if (isJobBoardUserCancellation(err)) {
+          EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=taxonomy`);
+          return;
+        }
         // Do not replace the existing board when its required taxonomy could
         // not be generated. Clearing only happens after this whole try block.
         EventLogger.error('[JobBoard] Bucketing failed; preserving prior board:', err);
@@ -516,6 +531,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           return;
         }
         if (!compensationResult?.success || !Array.isArray(compensationResult.jobs)) {
+          if (isJobBoardUserCancellation(compensationResult)) {
+            EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=compensation`);
+            return;
+          }
           const error = new Error(compensationResult?.error || 'Job Board compensation research failed.');
           error.code = compensationResult?.errorCode;
           throw error;
@@ -523,6 +542,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         union = compensationResult.jobs;
       } catch (err) {
         if (cancelled() || !getNode(id)) return;
+        if (isJobBoardUserCancellation(err)) {
+          EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=compensation`);
+          return;
+        }
         // Like failed taxonomy, a failed research invocation must leave the
         // previously displayed board intact rather than replacing it with a
         // partial set of cards.
@@ -597,6 +620,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       completeManualAiRun(manualAiRunId);
     } catch (err) {
       if (cancelled() || !getNode(id)) return;
+      if (isJobBoardUserCancellation(err)) {
+        EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=pipeline`);
+        return;
+      }
       EventLogger.error('[JobBoard] Combine failed:', err);
       addToast({ title: 'Combine failed', description: err?.message || String(err), type: 'error' });
     } finally {

@@ -26,23 +26,26 @@ import { logger } from '../logger.js';
  * (Opus vs Sonnet vs Haiku vs Fable) is a Settings choice, not a hard-code.
  *
  * The Gemini column below (TASK_MODELS) stays literal, per-task, and is NOT
- * user-selectable — the Gemini path is a capability-ladder CASCADE (pro →
- * flash → lite, geminiModels.js) that self-upgrades/downgrades per call
+ * user-selectable — the Gemini path is a capability-ladder CASCADE
+ * (GEMINI_TIER_LADDER, geminiModels.js) that self-upgrades/downgrades per call
  * based on live entitlement + 429s, so there's no single "the model" to
  * expose a picker for the way Claude has one resolved id per family.
  *
- * Gemini choices, in short:
- *   - Gemini 3.7 Flash: preferred for Sonnet/Opus-quality tasks on the API-key
- *     path — the newest Flash generation. It is the HEAD of a cascade, not the
- *     only model: callGemini walks the capability ladder (pro → flash → lite)
- *     from here, and whether the Pro tier is available is decided by a live
- *     entitlement probe per credential rather than a hard-coded exclusion (see
- *     geminiEntitlement.js). On a free-tier key Pro reports `limit: 0` and stays
- *     out; on a billing-enabled key it joins the head of the chain with no code
- *     change.
- *   - Gemini 3.5 Flash-Lite: matches the `light` group's tasks — the newest
- *     Lite generation. Lite-preferred tasks deliberately never climb to Pro:
- *     the author chose the cheap tier on purpose.
+ * Read the Gemini ids below as a PREFERENCE RECORD — which quality tier the
+ * author judged the task to need — not as the model that will serve the call.
+ * orderGeminiModels discards its `preferredModel` argument outright (`void
+ * preferredModel`) and builds ONE global chain from GEMINI_TIER_LADDER, so
+ * every Gemini task enters at the same head and every entitled tier is offered
+ * to all of them:
+ *   - Gemini 3.7 Flash: recorded for Sonnet/Opus-quality tasks on the API-key
+ *     path — the newest Flash generation. Whether the Pro tier is in the chain
+ *     at all is decided by a live entitlement probe per credential rather than a
+ *     hard-coded exclusion (see geminiEntitlement.js). On a free-tier key Pro
+ *     reports `limit: 0` and stays out; on a billing-enabled key it joins the
+ *     chain with no code change.
+ *   - Gemini 3.5 Flash-Lite: recorded for the `light` group's tasks — the newest
+ *     Lite generation. It records the cheap tier as sufficient; because the chain
+ *     is global it does not hold those tasks below an entitled Pro.
  */
 const TASK_MODELS = {
   'vision-product-analysis':   { gemini: 'gemini-3.7-flash' },
@@ -68,6 +71,10 @@ const TASK_MODELS = {
   // market evidence; a separate structured pass extracts comparable ranges.
   'job-compensation-research':  { gemini: 'gemini-3.7-flash' },
   'job-compensation-assessment': { gemini: 'gemini-3.7-flash' },
+  'job-preference-interpretation': { gemini: 'gemini-3.7-flash' },
+  'job-preference-evaluation': { gemini: 'gemini-3.7-flash' },
+  'job-preference-research': { gemini: 'gemini-3.7-flash' },
+  'job-preference-research-assessment': { gemini: 'gemini-3.7-flash' },
   'text-polish':               { gemini: 'gemini-3.5-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
@@ -96,6 +103,9 @@ const TASK_GROUPS = {
   'job-scoring':                 { group: 'judgment' },
   'job-compensation-research':   { group: 'judgment' },
   'job-compensation-assessment': { group: 'judgment' },
+  'job-preference-evaluation': { group: 'judgment' },
+  'job-preference-research': { group: 'judgment' },
+  'job-preference-research-assessment': { group: 'judgment' },
 
   // Extraction — faithful structured capture and organization of supplied
   // material. Query generation and bucketing shape retrieval/presentation,
@@ -106,6 +116,7 @@ const TASK_GROUPS = {
   'job-query-generation':      { group: 'extraction' },
   'job-taxonomy-plan':         { group: 'extraction' },
   'job-taxonomy-classify':     { group: 'extraction' },
+  'job-preference-interpretation': { group: 'extraction' },
   'default':                   { group: 'extraction' },
 
   // light — page status classify, text polish, platform-fit: short
@@ -219,6 +230,10 @@ const TASK_MAX_TOKENS = {
   // headroom through roughly 17 normal rows before the ceiling applies.
   'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
     Math.min(12288, 2048 + itemCount * 600),
+  'job-preference-interpretation': 4096,
+  'job-preference-evaluation': ({ itemCount = 10 } = {}) => Math.min(12288, 2048 + itemCount * 800),
+  'job-preference-research': 4096,
+  'job-preference-research-assessment': 2048,
   'text-polish':               1024,  // light edit
   'default':                   2048,
 };
@@ -279,11 +294,12 @@ export function providerForTask(task, settings = getAISettings()) {
 }
 
 /**
- * The model id that will actually serve `task` — the same choice
- * checkPromptFits / callLLMText make, exposed so a caller can size work to
- * that model BEFORE the call (e.g. jobScoringBatchSize). Returns the PRIMARY
- * model; a Gemini cascade may use any compatible fallback, but those share the
- * window/output limits the sizing depends on.
+ * The model id `task` is SIZED against — the same choice checkPromptFits /
+ * callLLMText make, exposed so a caller can size work before the call (e.g.
+ * jobScoringBatchSize). On Claude this is the id that will serve. On Gemini it
+ * is only the recorded per-task preference: orderGeminiModels builds one global
+ * chain and any compatible model in it may serve, but those share the
+ * window/output limits the sizing depends on, so it remains the right budget.
  */
 export function modelForTask(task, settings = getAISettings()) {
   if (isNonApiJobTask(task)) return NON_API_AI_TRANSPORT;
@@ -624,7 +640,13 @@ export async function callLLMText(prompt, opts = {}) {
   let retriedForCap = false;
   for (;;) {
     try {
-      return await attempt();
+      const result = await attempt();
+      // Native provider schemas establish the wire shape, but some callers
+      // also supply deterministic domain validation (exact ids, grounded
+      // citations, and so on). Manual handoffs already run this check before
+      // accepting a paste; API responses must obey the same contract.
+      responseValidator?.(result);
+      return result;
     } catch (err) {
       // Atomic tasks benefit from a one-time raised-cap retry. Chunkable callers
       // (job scoring) deliberately disable it so their own split/reconcile path
@@ -798,7 +820,9 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   let retriedForCap = false;
   for (;;) {
     try {
-      return await attempt();
+      const result = await attempt();
+      responseValidator?.(result);
+      return result;
     } catch (err) {
       const raised = retryOnTruncation && !retriedForCap
         ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })
@@ -846,7 +870,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   if (isWordDoc(filePath)) {
     const text = await extractWordText(filePath);
     return callLLMText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${text}`,
-      { signal, task, hints, responseSchema, cachedPrefix, excludeModels });
+      { signal, task, hints, responseSchema, cachedPrefix, excludeModels, retryOnTruncation, responseValidator });
   }
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
@@ -872,7 +896,9 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   let retriedForCap = false;
   for (;;) {
     try {
-      return await attempt();
+      const result = await attempt();
+      responseValidator?.(result);
+      return result;
     } catch (err) {
       const raised = retryOnTruncation && !retriedForCap
         ? raisedCapAfterTruncation(err, { signal, usedCap: maxTok, task, hints: capHints, provider, model })

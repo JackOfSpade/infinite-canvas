@@ -3,7 +3,7 @@ import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
 
-import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
+import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
 
 export default [
 {
@@ -219,7 +219,20 @@ export default [
         `Google Apply-on selection must prefer the card's via-provider and remove only Google tracking params (got ${selected})`);
       assert(selectGoogleApplyUrl([{ label: 'Apply on Google', href: 'https://google.com/search?udm=8' }]) === '',
         'Google internal routes must never be promoted to the public apply URL');
-      return { selected };
+      const dom = new JSDOM(`<main>
+        <a id="accessible" aria-label="Apply on Peraton Careers" href="https://careers.example.test/job/42"></a>
+        <section aria-hidden="true"><a id="hidden" aria-label="Apply on Wrong" href="https://wrong.example.test"></a></section>
+      </main>`, { url: 'https://www.google.com/search?udm=8' });
+      const visible = dom.window.document.getElementById('accessible');
+      Object.defineProperty(visible, 'offsetWidth', { configurable: true, value: 100 });
+      const hidden = dom.window.document.getElementById('hidden');
+      Object.defineProperty(hidden, 'offsetWidth', { configurable: true, value: 100 });
+      const accessibleCandidates = extractGoogleApplyCandidatesFromDocument(dom.window.document);
+      assert(accessibleCandidates.length === 1
+        && accessibleCandidates[0].label === 'Apply on Peraton Careers'
+        && selectGoogleApplyUrl(accessibleCandidates, 'Peraton Careers') === 'https://careers.example.test/job/42',
+      'Google apply-link extraction must honor aria-label-only controls and ignore hidden cached panels');
+      return { selected, accessibleCandidates: accessibleCandidates.length };
     },
   },
 {
@@ -826,6 +839,11 @@ export default [
       assert(normal.includes('queuedModuleRun'), 'Transient jobhub save rules: default state should strip queuedModuleRun');
       assert(normal.includes('scrapeWarnings'), 'Transient jobhub save rules: default state should strip scrapeWarnings');
       assert(normal.includes('pendingTargetRole'), 'Transient jobhub save rules: default state should strip pendingTargetRole');
+      assert(normal.includes('pendingJobPreferences') && normal.includes('pendingJobPreferencesInterpretation')
+        && normal.includes('pendingJobPreferencePlan') && normal.includes('activeJobPreferences'),
+      'Transient jobhub save rules: interrupted runs must not retain frozen Job Preferences outside their manifest');
+      assert(normal.includes('pendingCareerData') && !sourcesReady.includes('pendingCareerData'),
+        'Transient jobhub save rules: queued career text is stripped, while a durable paused run keeps the evidence needed to resume');
       assert(normal.includes('rerunOutcome') && normal.includes('rerunNotice'), 'Transient jobhub save rules: zero-new rerun notice should be session-only');
       assert(!sourcesReady.includes('scrapeWarnings'), 'Transient jobhub save rules: sources-ready should preserve scrapeWarnings');
       assert(sourcesReady.includes('errorMessage') && sourcesReady.includes('isRateLimit') && sourcesReady.includes('rerunNotice'), 'Transient jobhub save rules: sources-ready should still strip banners/notices');
@@ -837,6 +855,8 @@ export default [
     run: () => {
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('queued'), 'Transient state constants: missing queued');
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('searching'), 'Transient state constants: missing searching');
+      assert(TRANSIENT_PROCESSING_HUB_STATES.includes('interpreting-preferences'), 'Transient state constants: missing Job Preferences interpretation');
+      assert(TRANSIENT_PROCESSING_HUB_STATES.includes('evaluating-preferences'), 'Transient state constants: missing Job Preferences evaluation');
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('researching'), 'Transient state constants: missing researching');
       assert(SELLHUB_TRANSIENT_KEYS.includes('platformFitPending'), 'Transient state constants: missing platformFitPending');
       assert(SELLHUB_TRANSIENT_KEYS.includes('queuedModuleRun'), 'Transient state constants: missing queuedModuleRun');
@@ -852,6 +872,10 @@ export default [
       const nodes = [
         { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old', rerunOutcome: 'no-new-results', rerunNotice: 'old notice', manualAiResume: { runId: 'resume-run', task: 'job-scoring' } } },
         { id: 'reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 3 }, data: { hubState: 'scoring', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], scoredJobs: [{ title: 'Saved result' }], resultCount: 1 } },
+        // Job Preferences are asynchronous pipeline phases too. A crash in
+        // either phase must not reload an empty hub with an old frozen plan.
+        { id: 'interpreting-preferences-hub', type: 'jobhub', position: { x: 0, y: 5 }, data: { hubState: 'interpreting-preferences', activeJobPreferences: 'Avoid web development', pendingJobPreferences: 'Avoid web development', pendingJobPreferencePlan: { version: 1 }, pendingJobPreferencesInterpretation: { version: 1 } } },
+        { id: 'evaluating-preferences-hub', type: 'jobhub', position: { x: 0, y: 7 }, data: { hubState: 'evaluating-preferences', activeJobPreferences: 'Free lunch is required', pendingJobPreferences: 'Free lunch is required', pendingJobPreferencePlan: { version: 1 }, pendingJobPreferencesInterpretation: { version: 1 }, pendingJobs: [{ title: 'Saved transient listing' }] } },
         { id: 'job', type: 'jobcard', position: { x: 1, y: 1 }, style: { opacity: 0.3, width: 180 }, data: { title: 'A', isDropTarget: true } },
         { id: 'paused-hub', type: 'jobhub', position: { x: 9, y: 9 }, data: { hubState: 'sources-ready', pendingJobs: [1], scrapeWarnings: [{ sourceId: 'indeed' }] } },
         { id: 'clean-source', type: 'jobsourcecard', position: { x: 2, y: 2 }, data: { persistedProgress: { status: 'done' } } },
@@ -871,6 +895,8 @@ export default [
       const sanitized = sanitizeNodesForSave(nodes);
       const hub = sanitized.find(n => n.id === 'hub');
       const reanalyzingHub = sanitized.find(n => n.id === 'reanalyzing-hub');
+      const interpretingPreferencesHub = sanitized.find(n => n.id === 'interpreting-preferences-hub');
+      const evaluatingPreferencesHub = sanitized.find(n => n.id === 'evaluating-preferences-hub');
       const job = sanitized.find(n => n.id === 'job');
       assert(hub.data.hubState === 'empty', 'Serialization sanitizes transient state: active jobhub should reset to empty');
       assert(!('pendingJobs' in hub.data) && !('scrapeWarnings' in hub.data) && !('queuedModuleRun' in hub.data) && !('rerunOutcome' in hub.data) && !('rerunNotice' in hub.data), 'Serialization sanitizes transient state: jobhub transient buffers/notices should be stripped');
@@ -879,6 +905,15 @@ export default [
       assert(reanalyzingHub.data.hubState === 'done' && reanalyzingHub.data.scoredJobs.length === 1
         && !('pendingJobs' in reanalyzingHub.data) && !('scrapeWarnings' in reanalyzingHub.data) && !('queuedModuleRun' in reanalyzingHub.data),
       'Serialization restores interrupted re-analysis to done while stripping its transient buffers');
+      for (const preferenceHub of [interpretingPreferencesHub, evaluatingPreferencesHub]) {
+        assert(preferenceHub.data.hubState === 'empty'
+          && !('activeJobPreferences' in preferenceHub.data)
+          && !('pendingJobPreferences' in preferenceHub.data)
+          && !('pendingJobPreferencePlan' in preferenceHub.data)
+          && !('pendingJobPreferencesInterpretation' in preferenceHub.data)
+          && !('pendingJobs' in preferenceHub.data),
+        'Serialization resets interrupted Job Preferences phases and strips their non-durable renderer state');
+      }
       assert(!('isDropTarget' in job.data) && job.style.opacity === undefined && job.style.width === 180, 'Serialization sanitizes transient state: node transient UI state should be stripped');
       assert(!sanitized.some(n => n.id === 'clean-source'), 'Serialization sanitizes transient state: clean source card should be dropped');
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
@@ -1405,7 +1440,12 @@ export default [
         { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', resultCount: 3, resumeProfile: { id: 'P' } } },
         { id: 'L0', type: 'jobgroup', position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', label: 'Strong', childIds: ['c1'] } },
         { id: 'c1', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Mid', company: 'A', url: 'u1', matchScore: 60, resumeProfile: { id: 'P' } } },
-        { id: 'c2', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Top', company: 'B', url: 'u2', matchScore: 90 } },
+        { id: 'c2', type: 'jobcard', position: { x: 0, y: 0 }, data: {
+          hubId: 'hub', title: 'Top', company: 'B', url: 'u2', matchScore: 90,
+          googleCardUrl: 'https://google.example.test/card', applySource: 'Google', originHubId: 'hub',
+          compensationAssessment: { status: 'competitive' },
+          preferenceAssessment: { status: 'accepted', preferenceScore: 9 },
+        } },
         { id: 'c3', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Low', company: 'C', url: 'u3', matchScore: 30 } },
       ];
       const out = migrateLegacyJobHubResults(legacy);
@@ -1415,6 +1455,10 @@ export default [
       assert(Array.isArray(hub.data.scoredJobs) && hub.data.scoredJobs.length === 3, 'migration: hub should hold reconstructed scoredJobs');
       assert(hub.data.scoredJobs[0].matchScore === 90 && hub.data.scoredJobs[2].matchScore === 30, 'migration: scoredJobs sorted score-desc');
       assert(hub.data.scoredJobs[0].resumeProfile == null && hub.data.scoredJobs.find(j => j.url === 'u1').resumeProfile?.id === 'P', 'migration: per-card resumeProfile preserved');
+      assert(hub.data.scoredJobs[0].googleCardUrl === 'https://google.example.test/card'
+        && hub.data.scoredJobs[0].compensationAssessment?.status === 'competitive'
+        && hub.data.scoredJobs[0].preferenceAssessment?.preferenceScore === 9,
+      'migration: newer result assessments and identity URLs survive an old on-canvas card migration');
       assert(out.find(n => n.id === 'doc'), 'migration: unrelated nodes untouched');
 
       // Idempotent / new-model untouched: a hub with scoredJobs and no cascade is the same reference.
@@ -1940,6 +1984,40 @@ export default [
       assert(clone.data.locked === false && clone.draggable === undefined && clone.deletable === undefined, 'Node factory clone safety: clone should unlock');
       assert(clone.data.hubState === 'empty' && clone.data.isNew === false && !clone.data.queuedModuleRun, 'Node factory clone safety: active state/new flag should be sanitized');
 
+      const preferenceRunClone = cloneNode({
+        id: 'preferences-running', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          hubState: 'evaluating-preferences', inputLocked: true,
+          activeTargetRole: 'Product Manager', activeJobPreferences: 'Free lunch required',
+          pendingJobPreferences: 'Free lunch required', pendingJobPreferencePlan: { version: 1 },
+          pendingJobPreferencesInterpretation: { version: 1 }, pendingJobs: [{ title: 'Stale run job' }],
+          queuedModuleRun: { position: 1 }, errorMessage: 'stale error', scrapeWarnings: [{ sourceId: 'indeed' }],
+        },
+      }, 0, 0);
+      assert(preferenceRunClone.data.hubState === 'empty' && !preferenceRunClone.data.inputLocked
+        && !('activeJobPreferences' in preferenceRunClone.data)
+        && !('pendingJobPreferences' in preferenceRunClone.data)
+        && !('pendingJobPreferencePlan' in preferenceRunClone.data)
+        && !('pendingJobPreferencesInterpretation' in preferenceRunClone.data)
+        && !('pendingJobs' in preferenceRunClone.data)
+        && !('queuedModuleRun' in preferenceRunClone.data),
+      'Node factory clone safety: a copied preference-evaluation run must not retain another hub’s manual/IPC state or become input-locked without career data');
+
+      const pausedClone = cloneNode({
+        id: 'paused-source-run', type: 'jobhub', position: { x: 0, y: 0 },
+        data: { hubState: 'sources-ready', pendingJobs: [{ title: 'Awaiting original source card' }], scrapeWarnings: [{ sourceId: 'indeed' }] },
+      }, 0, 0);
+      assert(pausedClone.data.hubState === 'empty' && !('pendingJobs' in pausedClone.data) && !('scrapeWarnings' in pausedClone.data),
+        'Node factory clone safety: a copied paused source run must not keep recovery buffers whose source cards belong to the original hub');
+
+      const reanalysisClone = cloneNode({
+        id: 'reanalysis-running', type: 'jobhub', position: { x: 0, y: 0 },
+        data: { hubState: 'evaluating-preferences', scoredJobs: [{ title: 'Saved result' }], activeJobPreferences: 'Prefer remote' },
+      }, 0, 0);
+      assert(reanalysisClone.data.hubState === 'done' && reanalysisClone.data.scoredJobs.length === 1
+        && !('activeJobPreferences' in reanalysisClone.data),
+      'Node factory clone safety: an interrupted re-analysis preserves completed results but returns the clone to a terminal state');
+
       const group = {
         id: 'group-a',
         type: 'group',
@@ -2028,8 +2106,19 @@ export default [
         queryCacheKey: 'k',
         queryModel: 'm',
         queryCount: 1,
+        jobPreferencePlan: { summary: 'stale plan' },
+        jobPreferencesInterpretation: { summary: 'stale interpretation' },
+        activeJobPreferences: 'Large established companies only.',
+        pendingJobPreferences: 'Large established companies only.',
+        pendingJobPreferencesInterpretation: { summary: 'stale pending interpretation' },
+        pendingJobPreferencePlan: { summary: 'stale pending plan' },
+        preferenceMatchedCount: 3,
+        preferenceFilteredCount: 2,
+        preferenceEvaluation: { summary: 'stale evaluation' },
+        preferenceCandidatePool: [{ title: 'Stale candidate' }],
         canonicalLocation: 'X',
         targetRole: 'ROLE',
+        jobPreferences: 'Large established companies only.',
         preferredLocation: 'LOC',
         maxAgeDays: 7,
         collectionLimits: {},
@@ -2050,11 +2139,11 @@ export default [
       assert(getHubFileDropMode({ type: 'jobhub', data: merged }) === 'initial-input',
         'a cleared hub must route the next file drop as initial input, otherwise fresh career files land as nothing at all');
 
-      for (const settingKey of ['targetRole', 'preferredLocation', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
+      for (const settingKey of ['targetRole', 'jobPreferences', 'preferredLocation', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
         assert(!Object.prototype.hasOwnProperty.call(patch, settingKey),
           `clearing career files must not touch ${settingKey} — wiping search settings defeats the point of clearing in place instead of rebuilding the module`);
       }
-      assert(merged.targetRole === 'ROLE' && merged.preferredLocation === 'LOC' && merged.maxAgeDays === 7
+      assert(merged.targetRole === 'ROLE' && merged.jobPreferences === 'Large established companies only.' && merged.preferredLocation === 'LOC' && merged.maxAgeDays === 7
         && merged.enabledSourceIds.length === 1 && merged.batchScoring === true,
       'a cleared hub that loses its role, location, age window or platform selection forces the user to re-enter every search setting');
 
@@ -2062,7 +2151,7 @@ export default [
       // is silently reused against the NEW files. achievements is the worst case —
       // JobCardNode mines only when the ledger is absent, so a stale ledger would
       // write new résumés from the old files' figures.
-      for (const cacheKey of ['achievements', 'achievementsMining', 'queries', 'queryCacheKey', 'queryModel', 'queryCount', 'canonicalLocation']) {
+      for (const cacheKey of ['achievements', 'achievementsMining', 'queries', 'queryCacheKey', 'queryModel', 'queryCount', 'jobPreferencePlan', 'jobPreferencesInterpretation', 'activeJobPreferences', 'pendingJobPreferences', 'pendingJobPreferencesInterpretation', 'pendingJobPreferencePlan', 'preferenceMatchedCount', 'preferenceFilteredCount', 'preferenceEvaluation', 'preferenceCandidatePool', 'canonicalLocation']) {
         assert(patch[cacheKey] === null,
           `clearing career files must null ${cacheKey} — it is derived from the old files with no fingerprint keying, so a survivor (the unkeyed achievements ledger above all) would silently seed the next run from the previous person's history`);
       }
@@ -2299,6 +2388,14 @@ export default [
       assert(rerun.includes('effectivePaths.length === 0 && !data.resumeProfile')
         && rerun.includes('startProcessingWithProfile(data.resumeProfile'),
       'the retained-profile action re-enters the pipeline without requiring the cancelled run\'s file path');
+      assert(rerun.includes('if (platformsVerifying)')
+        && rerun.includes('Re-run deferred — selected platform connection verification is still pending')
+        && rerun.includes("title: 'Checking Connections'"),
+      'a done-state rerun must not read the auth cache while its selected platform is still in the startup verification queue');
+      assert(source.includes('platformsVerifying={platformsVerifying}')
+        && doneState.includes('disabled={platformsVerifying}')
+        && doneState.includes('Checking connections'),
+      'the done-state Re-run button must expose and disable for the same verification guard enforced by the handler');
 
       assert(!source.includes('const cancelBatchScoring = useCallback')
         && !source.includes('Economy scoring')
@@ -2958,7 +3055,7 @@ export default [
         'Job board relevance filtering: exact multi-word role remains eligible',
       );
       assert(
-        jobRelevanceMatch('Customer Support Systems & Analytics Architect', 'Customer Service Coordinator', new Set()),
+        jobRelevanceMatch('Customer Support Specialist', 'Customer Service Coordinator', new Set()),
         'Job board relevance filtering: customer support is an adjacent customer-service role',
       );
       assert(

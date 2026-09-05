@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { assert, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA } from '../../electron/ipc/localAiApplication.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, boundedRejectionError } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -1796,6 +1796,428 @@ export default [
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'Local AI render: screen-only page guides cannot fail the print font-readiness gate',
+    async run() {
+      // Reproduces the exact failure that stranded a real job. renderPdf swaps
+      // the ATS-safe families onto the root and inline-substitutes every
+      // element that exists at that instant; renderGuides() then rewrites the
+      // overlay's innerHTML from a rAF (document.fonts.ready / loadingdone /
+      // ResizeObserver / a data-density MutationObserver), so the regenerated
+      // folio carries its own stack and never received the substitution. The
+      // overlay is display:none in print, so nothing in it reaches the PDF.
+      const evaluatePredicate = (guideMarkup) => {
+        const dom = new JSDOM('<!doctype html><html><body></body></html>', { runScripts: 'outside-only' });
+        const { window } = dom;
+        const document = window.document;
+        for (const [token, value] of [
+          ['--ff-display', 'Georgia, "Times New Roman", serif'],
+          ['--ff-body', 'Arial, "Helvetica Neue", sans-serif'],
+          ['--ff-mono', 'Menlo, Consolas, "Courier New", monospace'],
+        ]) document.documentElement.style.setProperty(token, value);
+        document.body.innerHTML = '<section data-ic-document-panel="resume"><div class="ic-page-stage">'
+          + '<main class="page"><p style="font-family: Arial, &quot;Helvetica Neue&quot;, sans-serif">Body copy</p></main>'
+          + guideMarkup
+          + '</div></section>';
+        window.document.fonts = { check: () => true, ready: Promise.resolve() };
+        return window.eval(webFontFacesReadyExpression({ details: true }));
+      };
+      const staleFolio = '<div class="ic-page-guides" data-ic-page-guides>'
+        + '<span class="ic-page-folio" style="font-family: &quot;IBM Plex Mono&quot;, &quot;SF Mono&quot;, Menlo, monospace">Page 2</span></div>';
+      const withGuides = evaluatePredicate(staleFolio);
+      assert(withGuides.loaded === true && withGuides.missingFaces.length === 0,
+        `a regenerated page-guide folio must not fail print font readiness, got ${JSON.stringify(withGuides)}`);
+      // The exclusion must be scoped to the overlay, never to document text:
+      // an unexpected face inside main.page still has to fail the gate.
+      const inPageMarkup = '<div class="ic-page-guides" data-ic-page-guides></div>';
+      const dom = new JSDOM('<!doctype html><html><body></body></html>', { runScripts: 'outside-only' });
+      dom.window.document.documentElement.style.setProperty('--ff-body', 'Arial, sans-serif');
+      dom.window.document.body.innerHTML = '<section data-ic-document-panel="resume"><main class="page">'
+        + '<p style="font-family: &quot;IBM Plex Mono&quot;, monospace">Body copy</p></main>' + inPageMarkup + '</section>';
+      dom.window.document.fonts = { check: () => true, ready: Promise.resolve() };
+      const inPage = dom.window.eval(webFontFacesReadyExpression({ details: true }));
+      assert(inPage.loaded === false && inPage.missingFaces.some(face => face.includes('unexpected')),
+        `an unexpected face inside the printed page must still fail the gate, got ${JSON.stringify(inPage)}`);
+      const source = fs.readFileSync(new URL('../../electron/ipc/resumeHtml.js', import.meta.url), 'utf8');
+      assert(/\.ic-page-folio \{[^}]*font: 8\.5px\/1\.3 var\(--ff-mono\)/.test(source)
+        && !/\.ic-page-folio \{[^}]*IBM Plex Mono/.test(source),
+      'the page-guide folio must read the mono token so the ATS-safe substitution reaches it, not a literal stack');
+      return { guardedFaces: withGuides.missingFaces.length, unguardedDetected: inPage.missingFaces.length };
+    },
+  },
+  {
+    name: 'Local AI render: a transient font-readiness failure retries and never discards a verified measurement',
+    async run() {
+      const renderSource = fs.readFileSync(new URL('../../electron/ipc/resumeRender.js', import.meta.url), 'utf8');
+      assert(renderSource.includes('renderPdfOnce')
+        && /if \(first\.fontsLoaded !== false\) return first;/.test(renderSource)
+        && renderSource.includes('missingFontFaces'),
+      'renderPdf must retry a failed font-readiness verdict once and return the failing face descriptors');
+      const localSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      // The compact retry only runs because the default attempt overflowed, so
+      // its measurement is real. Reporting the unverifiable retry instead sent
+      // "the AI draft does not need another rewrite" for a résumé measured at
+      // two pages against a one-page target.
+      assert(/let verified = null;/.test(localSource)
+        && /verified = \{ density, compactApplied, bytes, pageCount, layout \};/.test(localSource)
+        && /\(\(!fontsLoaded \|\| renderError \|\| !Number\.isFinite\(pageCount\)\) && verified\)/.test(localSource),
+      'the résumé fit loop must fall back to the last attempt it actually verified');
+      assert(!/web fonts were unavailable/.test(localSource)
+        && localSource.includes('the render window reported unresolved font face(s)'),
+      'render-retry feedback must report the observed faces rather than assert an unobserved network cause');
+      const syncSource = fs.readFileSync(new URL('../../electron/ipc/applicationSync.js', import.meta.url), 'utf8');
+      assert(!/Reconnect to the internet/.test(syncSource)
+        && syncSource.includes('could not resolve the application fonts'),
+      'Sync must not diagnose a font-readiness failure as a lost internet connection');
+      return { retryPresent: true };
+    },
+  },
+  {
+    name: 'Local AI validation: independent families report every defect in one rejection',
+    async run() {
+      const id = crypto.randomUUID();
+      const root = path.join(os.tmpdir(), 'local-ai-project');
+      // One résumé-prose defect and one cover-letter defect in the same bytes.
+      // Before aggregation the résumé family threw first and the cover-letter
+      // failure stayed invisible until the next round, which is how a handoff
+      // reaches four rounds for two defects.
+      let message = '';
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: ['I would welcome the chance to talk about that work.'] },
+          coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
+        }, id, root);
+      } catch (error) { message = String(error?.message || error); }
+      assert(message.includes('independent validation failures'),
+        `two independent families must be reported together, got ${JSON.stringify(message.slice(0, 400))}`);
+      assert(message.includes('(1)') && message.includes('(2)'),
+        'an aggregated rejection must number its defects so the revision addresses all of them');
+      assert(message.includes('direct-welcome-closing'),
+        `the cover-letter defect must survive aggregation, got ${JSON.stringify(message.slice(0, 400))}`);
+      // The dash gate is a third aggregation depth: three independent dash
+      // defects across both documents used to cost three rounds.
+      let dashMessage = '';
+      let dashFailures = null;
+      try {
+        assertCandidateDashPunctuation({
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built a pipeline \u2014 it worked.</li><li>Ran it daily - every day.</li></ul></article></main>',
+          coverLetter: { name: 'A', contact: [], salutation: 'Dear Team,', recipient: '', paragraphs: ['A letter \u2014 with a dash.'], closing: 'Sincerely,', signatureTitle: '' },
+        });
+      } catch (error) { dashMessage = String(error?.message || error); dashFailures = error?.failures || null; }
+      assert(Array.isArray(dashFailures) && dashFailures.length === 3,
+        `every dash defect across both documents must be reported at once, got ${JSON.stringify(dashFailures)}`);
+      assert(/Résumé copy contains an em dash/.test(dashMessage) && /Cover-letter copy contains an em dash/.test(dashMessage),
+        'the aggregated dash message must name both surfaces');
+      let singleDash = '';
+      let singleFailures = 'unset';
+      try {
+        assertCandidateDashPunctuation({
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built a pipeline \u2014 it worked.</li></ul></article></main>',
+        });
+      } catch (error) { singleDash = String(error?.message || error); singleFailures = error?.failures; }
+      assert(singleFailures === undefined
+        && singleDash === 'Résumé copy contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.',
+      `a lone dash defect must keep its original message byte-for-byte, got ${JSON.stringify(singleDash)}`);
+      const localSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert(localSource.includes('function joinValidationFailures')
+        && /const entryFailures = \[\];/.test(localSource),
+      'source-grounding entries must be graded independently rather than failing on the first one');
+      // Aggregation happens at three depths, so the record must still read as
+      // ONE flat numbered list: a nested prefix produced two “(1)” markers.
+      const trustedCareerData = 'Built supported systems. A concise factual letter.';
+      const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+      const fabricated = {
+        version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: validResumeMain,
+        coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+      };
+      // Two grounding families broken at once: a bullet quote and a paragraph
+      // quote that appear nowhere in the trusted career data.
+      fabricated.qualityReview.sourceGrounding.resumeBullets[0].careerDataQuotes = ['Absent bullet provenance sentence.'];
+      fabricated.qualityReview.sourceGrounding.coverLetterParagraphs[0].careerDataQuotes = ['Absent paragraph provenance sentence.'];
+      let grounding = '';
+      try {
+        validateLocalApplicationResult(fabricated, id, root, {}, { careerData: trustedCareerData });
+      } catch (error) { grounding = String(error?.message || error); }
+      assert((grounding.match(/not an exact quote/g) || []).length === 2,
+        `both grounding families must report together, got ${JSON.stringify(grounding.slice(0, 400))}`);
+      // A bounded record must never cut a defect mid-sentence or drop one
+      // without saying so — a report that hides findings is worse than one
+      // that admits it truncated.
+      const many = Array.from({ length: 40 }, (_, index) => `Defect ${index + 1}: ${'x'.repeat(400)}`);
+      const bounded = boundedRejectionError(Object.assign(new Error('ignored'), { failures: many }));
+      assert(bounded.length <= 12_000, `the bounded record must fit its cap, got ${bounded.length}`);
+      assert(/more defect\(s\) omitted from this record/.test(bounded),
+        'a bounded record must say how many defects it left out');
+      assert(!/x{399}[^x]x/.test(bounded) && bounded.includes('Defect 1:'),
+        'the bounded record must keep whole defects rather than cutting one mid-sentence');
+      const small = boundedRejectionError(Object.assign(new Error('ignored'), { failures: ['Only defect.'] }));
+      assert(small === 'Only defect.', `a record that fits must be unchanged, got ${JSON.stringify(small)}`);
+      // One em dash is one defect: checkPunctuationStyle and the dash gate both
+      // read the letter, and reporting both sent the writer hunting for a
+      // second problem that did not exist.
+      let dashCount = '';
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: validResumeMain,
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: ['A letter \u2014 with one dash.'] },
+          coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
+        }, id, root);
+      } catch (error) { dashCount = String(error?.message || error); }
+      assert(!/independent validation failures/.test(dashCount)
+        && !/Cover-letter copy contains an em dash/.test(dashCount),
+      `one em dash must be reported once, got ${JSON.stringify(dashCount.slice(0, 300))}`);
+      // A structural failure must not discard a prose defect already measured.
+      let structural = '';
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: [] },
+          coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
+        }, id, root);
+      } catch (error) { structural = String(error?.message || error); }
+      assert(/failed editorial checks/.test(structural),
+        `a structural throw must carry the already-measured résumé defect, got ${JSON.stringify(structural.slice(0, 300))}`);
+      const markers = grounding.match(/\(\d+\)/g) || [];
+      assert(!grounding || new Set(markers).size === markers.length,
+        `an aggregated rejection must be one flat numbered list, got markers ${JSON.stringify(markers)}`);
+      assert((grounding.match(/independent validation failures/g) || []).length <= 1,
+        'the aggregate preamble must never nest inside itself');
+      return { aggregated: true, markers: markers.length };
+    },
+  },
+  {
+    name: 'Local AI grounding: qualifier evidence is accepted in the word forms career data actually uses',
+    async run() {
+      // The real rejection: a bullet said "optimization" while its bound quote
+      // said "flight route optimizations", and the source regex could not match
+      // its own plural.
+      const identityTokens = [];
+      const accepted = [
+        ['Researched and tested shortest path algorithms for flight route optimization.',
+          ['Modified A* to account for the curvature of the Earth for flight route optimizations at Boeing.']],
+        ['Decided the integration boundary for the district reporting pipeline.',
+          ['Owned the architecture decisions for the district reporting pipeline at Thomson.']],
+        ['Led the connector rollout across the reporting stack.',
+          ['I lead the connector rollout across the reporting stack at Thomson.']],
+        ['Managed the nightly extract schedule for student records.',
+          ['Held management of the nightly extract schedule for student records at Thomson.']],
+        // Fix A: plural "optimizations" in a bullet must now trigger the gate
+        // AND be satisfied by a quote that also uses the plural.
+        ['Built route optimizations for domestic flight legs using the district scheduler.',
+          ['Modified A* to account for the curvature of the Earth for flight route optimizations at Boeing.']],
+        // Fix B: a "never" claim must be grounded by "without ever" in the quote.
+        ['Built a focus-preserving overlay that never interrupts the active workflow.',
+          ['Built a status overlay without ever interrupting your focus or active workflow.']],
+      ];
+      // A widened source side must never cross a SENSE boundary: these are the
+      // homographs an inflection sweep picks up, and every one of them is a
+      // different word from the qualifier it would have grounded.
+      const homographs = [
+        ['Regularly parsed vendor logs with the shared parser library.',
+          ['Wrote regular expressions for the vendor log parser library at Thomson.'], 'routine frequency'],
+        ['Led the reporting migration into the district database.',
+          ['Helped with the reporting migration after district leadership approved the database schedule.'], 'leadership ownership'],
+        ['Cut reporting ingestion latency for the district database.',
+          ['Used cutting-edge tooling to watch reporting ingestion latency on the district database.'], 'reduction outcome'],
+        ['Saved the reporting team hours of manual database work.',
+          ['Wrote the reporting job that keeps saving parsed database work to disk for the team.'], 'savings outcome'],
+        // Bare "ever" without a negation word must not ground a "never" claim:
+        // "better than ever" is a positive superlative, not a negation.
+        ['Shipped a status bar widget that never blocked user focus.',
+          ['The status bar widget felt better than ever after the focus work landed.'], 'absolute frequency'],
+        // A plural bullet ("optimizations") with no optimization word in the
+        // quote must still be rejected now that the claim gate fires on the plural.
+        ['Built route optimizations for domestic flight legs using the district scheduler.',
+          ['Researched shortest path algorithms for domestic flight routes and rendered them on a globe at Boeing.'], 'optimization outcome'],
+      ];
+      for (const [finalText, quotes, label] of homographs) {
+        let rejected = '';
+        try { assertSourceQuoteLinksFinalText(finalText, quotes, 'resumeBullets', 0, { identityTokens }); }
+        catch (error) { rejected = String(error?.message || error); }
+        assert(rejected.includes(`unsupported ${label}`),
+          `a homograph must not ground a ${label} claim: ${finalText}`);
+      }
+      for (const [finalText, quotes] of accepted) {
+        assertSourceQuoteLinksFinalText(finalText, quotes, 'resumeBullets', 0, { identityTokens });
+      }
+      let rejected = false;
+      try {
+        assertSourceQuoteLinksFinalText(
+          'Researched shortest path algorithms for flight route optimization.',
+          ['Researched shortest path algorithms and rendered flight routes on a globe at Boeing.'],
+          'resumeBullets', 0, { identityTokens },
+        );
+      } catch (error) { rejected = /unsupported optimization outcome/.test(String(error?.message || error)); }
+      assert(rejected, 'a qualifier the bound quotes never state must still be rejected');
+      return { accepted: accepted.length };
+    },
+  },
+  {
+    name: 'Local AI cover letter: the closing check accepts every documented shape and says what would pass',
+    async run() {
+      const shouldPass = [
+        'I welcome a conversation about how my release-workflow experience could support the team’s deployment process.',
+        'I welcome a conversation about applying my MCP server experience to the agent integrations this role owns.',
+        'I welcome a conversation about bringing my Python integration work to the data pipelines your agents draw on.',
+        'I welcome a conversation about where the connector work I built at Thomson would fit the systems this team already runs.',
+        'I welcome a conversation about how the MCP server I built could shorten the path to your first production agent.',
+        'I welcome a conversation about how my pipeline experience supports your ingestion backlog.',
+        // An anchored demonstrative names the asset; only a bare one does not.
+        'I welcome a conversation about using that MCP server experience to connect agents with client systems.',
+        // A hyphenated head modifier is a real descriptor, not a filler.
+        'I welcome a conversation about how that same-day pipeline experience could support your backlog.',
+      ];
+      for (const paragraph of shouldPass) {
+        const result = checkDirectWelcomeClosing([paragraph]);
+        assert(result.passed, `a closing that names a candidate asset and its target work must pass: ${paragraph}`);
+      }
+      const shouldFail = [
+        ['I welcome a conversation about applying that work.', 'a bare demonstrative is not a candidate asset'],
+        ['I welcome a conversation about applying the engineering practice this team uses.', 'an employer-facing “the” phrase is not a candidate asset'],
+        ['I welcome a conversation about connecting the data pipelines those agents draw on.', 'an employer artifact is not a candidate asset'],
+        ['I welcome a conversation about using my experience.', 'an asset and a verb with no employer-facing target point nowhere'],
+        ['I welcome a discussion about compensation, benefits, and how my experience applies to my salary expectations.', 'a candidate-facing target is not the target work'],
+        ['I welcome a conversation about that kind of work and bringing more of it into my life.', 'a filler descriptor is still a bare demonstrative'],
+        // The floor is on the HEAD modifier, not the first token: "broader"
+        // does not rescue "kind of work", and a light-noun frame always puts
+        // `of` or a light noun next to the asset noun.
+        ['I welcome a conversation about how that broader kind of work could support your backlog.', 'a leading adjective does not rescue a light-noun frame'],
+        ['I welcome a conversation about how that same work could support your backlog.', 'a light modifier names nothing'],
+        ['I look forward to discussing this next phase of work and using it to grow.', 'a filler descriptor plus inward intent must not pass'],
+        ['I would welcome a conversation about how that combination could support the WAVES rebuild.', 'conditional register'],
+        ['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'employer-choice close'],
+        ['I look forward to learning more about the team.', 'inward-facing close'],
+      ];
+      for (const [paragraph, why] of shouldFail) {
+        assert(!checkDirectWelcomeClosing([paragraph]).passed, `${why} must still be rejected: ${paragraph}`);
+      }
+      // The observation has to be executable: the same check failed twice in a
+      // row on a real handoff because the message described the goal but never
+      // the construction, so the revision missed it again.
+      const detail = checkDirectWelcomeClosing(['I welcome a conversation about applying that work.']).detail;
+      assert(detail.includes('possessive, an authorship clause, or a demonstrative that carries its own descriptor')
+        && detail.includes('the connector I built')
+        && detail.includes('never a bare demonstrative'),
+      `the rejection must name the accepted construction, got ${JSON.stringify(detail)}`);
+      return { passing: shouldPass.length, rejecting: shouldFail.length };
+    },
+  },
+  {
+    name: 'Local AI résumé: the 180-character bullet budget is enforced by the app, not only by an unreachable design-system script',
+    async run() {
+      const role = (li) => `<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights">${li}</ul></article></main>`;
+      const within = 'Built the reporting pipeline that merged four district systems into one nightly extract.';
+      const over = `${within} It also handled retries, backfills, schema drift, and a reconciliation report for every run and every source system involved.`;
+      assert(checkResumeBulletLength(role(`<li>${within}</li>`)).passed,
+        'a bullet inside the budget must pass');
+      const rejected = checkResumeBulletLength(role(`<li>${over}</li>`));
+      assert(!rejected.passed && /visible characters \(budget 180\)/.test(rejected.detail),
+        `an over-budget bullet must be named with its measured length, got ${JSON.stringify(rejected.detail)}`);
+      // The .tradeoff clause carries the tighter sub-budget, measured without
+      // its label span — the label nests inside .tradeoff, and a naive
+      // same-tag match would stop at the label's own closing tag.
+      const longTradeoff = `<li>Short bullet body. <span class="tradeoff"><span class="annotation-label">Tradeoff</span> ${'x'.repeat(120)}</span></li>`;
+      const tradeoffRejected = checkResumeBulletLength(role(longTradeoff));
+      assert(!tradeoffRejected.passed && /tradeoff annotation \(budget 100\)/.test(tradeoffRejected.detail),
+        `an over-budget tradeoff clause must be reported, got ${JSON.stringify(tradeoffRejected.detail)}`);
+      assert(checkResumeBulletLength(role('<li>Short bullet body. <span class="tradeoff"><span class="annotation-label">Tradeoff</span> kept the nightly window under ten minutes</span></li>')).passed,
+        'a tradeoff inside its sub-budget must pass');
+      assert(evaluateResumeProseChecks(role(`<li>${over}</li>`)).some(check => check.id === 'resume-bullet-length' && !check.passed),
+        'the budget check must run inside the shared pre-publication résumé prose checks');
+      // `.tradeoff` legitimately nests the allowlisted `.nowrap` span, and a
+      // lazy same-tag match stopped at the first nested close tag — measuring a
+      // fragment and passing an over-budget clause.
+      const clause = 'kept p99 under <span class="nowrap">10 ms</span> by trading write throughput for read latency across the entire nightly reconciliation window every run';
+      const nested = checkResumeBulletLength(role(`<li>Chose a datastore.<span class="tradeoff"><span class="annotation-label"> · trade-off: </span>${clause}</span></li>`));
+      assert(!nested.passed && /123-character tradeoff annotation/.test(nested.detail),
+        `a nested span must not truncate the measured tradeoff clause, got ${JSON.stringify(nested.detail)}`);
+      // The budget counts visible characters the way the design system's own
+      // gate does: tags strip to nothing, so a mid-token tag adds no character.
+      const midToken = extractResumeEvidence(role('<li>Cut <b data-achievement-id="a1">p99</b>-latency on the district ingest path.</li>'));
+      assert(midToken.roles[0].bullets[0].budgetText.includes('p99-latency'),
+        'the budget measurement must not insert a space at a mid-token tag boundary');
+      return { enforced: true };
+    },
+  },
+  {
+    name: 'Local AI cover letter: employer introductions are accepted in every frame the contract describes',
+    async run() {
+      const employers = ['Thomson School District'];
+      const shouldPass = [
+        'My work as a data engineer at Thomson School District built the reporting pipeline.',
+        'My work as a data engineer for Thomson School District built the reporting pipeline.',
+        'At Thomson School District I served as the data engineer who built the reporting pipeline.',
+        'Thomson School District hired me as a data engineer to build the reporting pipeline.',
+        'At Thomson School District my role covered the reporting pipeline.',
+      ];
+      for (const paragraph of shouldPass) {
+        assert(checkPriorEmployerOpening([paragraph], employers).passed,
+          `a sentence that names the candidate's role or relationship must pass: ${paragraph}`);
+      }
+      for (const paragraph of [
+        'Thomson School District runs a reporting pipeline that needed integration work.',
+        'The reporting pipeline at Thomson School District needed integration work.',
+        // The employer-first branches must assert a ROLE. "as" is also a
+        // conjunction and "I am" is also a bare copula; admitting either made
+        // the check fire on any first-person aside near the employer's name.
+        'At Thomson School District, latency doubled as traffic grew.',
+        'At Thomson School District the rollout stalled, as everyone predicted.',
+        'A friend at Thomson School District mentioned the opening, so I am writing today.',
+        'For Thomson School District the hiring bar is famously high, and I am glad it is.',
+        'Thomson School District once ran a science fair that brought me to this field.',
+      ]) {
+        assert(!checkPriorEmployerOpening([paragraph], employers).passed,
+          `an employer named with no candidate relationship must still be rejected: ${paragraph}`);
+      }
+      // The letter-wide off-posting budget is 2; the message used to quote the
+      // per-paragraph budget of 1, so obeying it literally still failed.
+      const tourParagraphs = ['I used Redis here.', 'I used Kafka here.', 'I used Terraform here.'];
+      const tour = checkAnchorRelevance(tourParagraphs, 'a posting about data pipelines', '');
+      if (!tour.passed) {
+        assert(/keep at most 2 off-posting tool names in the whole letter/.test(tour.detail),
+          `the letter-wide observation must quote the letter-wide budget, got ${JSON.stringify(tour.detail)}`);
+      }
+      return { frames: shouldPass.length };
+    },
+  },
+  {
+    name: 'Local AI contract: the routine states the rules the app actually enforces',
+    async run() {
+      // Markdown prose wraps, so every assertion below runs against a
+      // whitespace-normalized copy — the same convention the version-2
+      // contract assertions earlier in this file use.
+      const routine = fs.readFileSync(new URL('../../local_ai/LOCAL_AI_APPLICATION_ROUTINE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+      // Every one of these was enforced by a hard reject while the contract
+      // either omitted it or described something softer, so a writer obeying
+      // the contract literally could still be rejected.
+      for (const [label, needle] of [
+        ['exact sentence-length threshold', 'keep every sentence to 40 words or fewer'],
+        ['semicolon ban', 'Use no semicolon anywhere in the'],
+        ['double hyphen', 'for a double hyphen between'],
+        ['modifier-insertion stock phrases', 'more than basic presence'],
+        ['primary line of defense', 'the primary line of defense'],
+        ['exact foundation', 'exact foundation'],
+        ['letter-wide off-posting budget', 'at most two tool names may be off-posting'],
+        ['letter figure boundary', 'The letter carries at most three figures in total'],
+        ['bullet character budget', '180 visible characters'],
+        ['literal-form qualifier matching', 'The match is on the literal word form'],
+        ['closing construction', 'authorship clause'],
+      ]) {
+        assert(routine.includes(needle), `the routine must state the enforced ${label}`);
+      }
+      const skill = fs.readFileSync(new URL('../../Job Application Design System/SKILL.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+      const style = fs.readFileSync(new URL('../../Job Application Design System/STYLE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+      assert(skill.includes('authorship clause') && style.includes('authorship clause'),
+        'the design references must carry the same closing construction as the routine and the validator');
+      return { documented: true };
     },
   },
 ];

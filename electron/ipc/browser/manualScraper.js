@@ -94,6 +94,12 @@ const DETAIL_BLOCK_PROBE_CARDS = 2;
 const ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES = 1;
 const ZIPRECRUITER_APPCAST_RESTRICTED_BACKOFF_MS = 6_000;
 const ZIPRECRUITER_APPCAST_RESTRICTED_MAX_BACKOFF_MS = 15_000;
+// A source warning must stay compact enough for the renderer and diagnostics,
+// but a first-only title made repeated, independently retained description
+// misses look like a single affected listing. Keep a small title-only sample;
+// URLs and page text remain in the private scraper telemetry rather than the
+// source warning payload.
+const DESCRIPTION_DETAIL_MISS_SAMPLE_LIMIT = 3;
 
 // Cooldown BETWEEN queries (not before the first). Firing N back-to-back
 // full-page navigations to different search URLs is a velocity signal that
@@ -117,6 +123,52 @@ function countDistinctJobs(jobs) {
     count++;
   }
   return count;
+}
+
+function boundedDescriptionMissTitles(values) {
+  const unique = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const title = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!title || unique.includes(title)) continue;
+    unique.push(title);
+    if (unique.length >= DESCRIPTION_DETAIL_MISS_SAMPLE_LIMIT) break;
+  }
+  return unique;
+}
+
+/**
+ * Preserve the existing first warning's code/severity/evidence while making
+ * repeated non-blocking navigation-detail misses visible as one bounded
+ * source-level warning. This intentionally aggregates only this precise
+ * warning code: a later partial miss must never overwrite a higher-priority
+ * block, navigation, or selector warning.
+ */
+export function mergeDescriptionDetailMissWarning(existing, incoming) {
+  const isMiss = warning => warning?.code === 'description-detail-miss';
+  if (!existing) return incoming || null;
+  if (!incoming || !isMiss(existing) || !isMiss(incoming)) return existing;
+  const existingCount = Math.max(1, Math.floor(Number(existing.affectedCount) || 1));
+  const incomingCount = Math.max(1, Math.floor(Number(incoming.affectedCount) || 1));
+  return {
+    ...existing,
+    affectedCount: existingCount + incomingCount,
+    affectedTitles: boundedDescriptionMissTitles([
+      ...(Array.isArray(existing.affectedTitles) ? existing.affectedTitles : []),
+      ...(Array.isArray(incoming.affectedTitles) ? incoming.affectedTitles : []),
+    ]),
+  };
+}
+
+function descriptionDetailMissWarning(sourceName, title) {
+  const sampleTitle = String(title || 'an untitled listing').replace(/\s+/g, ' ').trim().slice(0, 120)
+    || 'an untitled listing';
+  return {
+    code: 'description-detail-miss', severity: 'warn',
+    evidence: `${sourceName} could not recover a full description for "${sampleTitle}" after its bounded detail-page wait. The listing was retained with its available list fields.`,
+    suggestion: `Retry ${sourceName} later or open the listing directly; the board may have delayed or restricted the detail page.`,
+    affectedCount: 1,
+    affectedTitles: [sampleTitle],
+  };
 }
 
 // ── Per-source configs ────────────────────────────────────────────────────────
@@ -690,6 +742,46 @@ export function selectGoogleApplyUrl(candidates, preferredSource = '') {
   if (valid.length === 0) return '';
   const preferred = normalizedApplySource(preferredSource);
   return (preferred && valid.find(item => item.source === preferred)?.url) || valid[0].url;
+}
+
+/**
+ * Read the visible Apply-on anchors from Google's active detail document.
+ *
+ * Kept as a self-contained exported function so Puppeteer can serialize it
+ * into the page and fixture tests can exercise the shipped DOM contract. The
+ * accessible name matters: some Google builds put "Apply on …" only in
+ * aria-label while leaving both title and visible anchor text empty.
+ */
+export function extractGoogleApplyCandidatesFromDocument(root = globalThis.document) {
+  return Array.from(root?.querySelectorAll?.('a[href]') || [])
+    .filter(anchor => !anchor.hidden)
+    .filter(anchor => !anchor.closest('[aria-hidden="true"]'))
+    .filter(anchor => !anchor.closest('[data-share-url]'))
+    .filter(anchor => !!(anchor.offsetWidth || anchor.offsetHeight || anchor.getClientRects().length))
+    .map(anchor => ({
+      href: anchor.href || '',
+      label: (
+        anchor.getAttribute('aria-label')
+        || anchor.getAttribute('title')
+        || anchor.textContent
+        || ''
+      ).replace(/\s+/g, ' ').trim(),
+    }))
+    .filter(candidate => /^Apply on\b/i.test(candidate.label));
+}
+
+async function waitForGoogleApplyDestination(page, preferredSource, timeoutMs = 1_500) {
+  const deadline = Date.now() + timeoutMs;
+  let candidates = [];
+  while (true) {
+    candidates = await page.evaluate(extractGoogleApplyCandidatesFromDocument).catch(() => []);
+    const url = selectGoogleApplyUrl(candidates, preferredSource);
+    if (url || Date.now() >= deadline) return { url, candidates };
+    // The description often paints before the detail panel's outbound controls.
+    // Poll only rows that still lack a usable destination, keeping the normal
+    // happy path free of any extra delay.
+    await new Promise(resolve => setTimeout(resolve, 120));
+  }
 }
 
 /**
@@ -3264,15 +3356,16 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag (job ${i + 1}/${enhanced.length}): url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
             }
           }
-          if (!text && !descWarning) {
+          if (!text) {
             // The listing remains useful/relevant, but the scoring input is
             // incomplete. Report this explicitly instead of treating the source as
-            // clean merely because list extraction succeeded.
-            descWarning = {
-              code: 'description-detail-miss', severity: 'warn',
-              evidence: `${overlayBase.srcName} could not recover a full description for "${job.title || 'an untitled listing'}" after its bounded detail-page wait. The listing was retained with its available list fields.`,
-              suggestion: `Retry ${overlayBase.srcName} later or open the listing directly; the board may have delayed or restricted the detail page.`,
-            };
+            // clean merely because list extraction succeeded. Multiple misses can
+            // occur across both this page and later pages; retain only a bounded
+            // title sample while counting every miss for the source warning.
+            descWarning = mergeDescriptionDetailMissWarning(
+              descWarning,
+              descriptionDetailMissWarning(overlayBase.srcName, job.title),
+            );
           }
           // A ZipRecruiter estimated-pay chip can be internally contradictory
           // ("$65K/hr") even when the detail JD states the actual annual base
@@ -3395,6 +3488,9 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let selectionMismatchCount = 0;
   let blockingModalsDismissed = 0;
   let blockingModalFailures = 0;
+  let googleApplyLinksCaptured = 0;
+  let googleApplyLinksMissing = 0;
+  const googleApplyLinkMissSamples = [];
   const failureSamples = [];
   const modalSamples = [];
   const firstTransitionSamples = [];
@@ -4054,18 +4150,23 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // destination exposed by its "Apply on …" controls. This becomes the
       // user-facing job.url while googleCardUrl remains the click/dedup key.
       if (sourceId === 'google' && !selectionAssessment.selectionMismatch) {
-        const applyCandidates = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]'))
-          .filter(anchor => !anchor.closest('[aria-hidden="true"]'))
-          .filter(anchor => !anchor.closest('[data-share-url]'))
-          .filter(anchor => !!(anchor.offsetWidth || anchor.offsetHeight || anchor.getClientRects().length))
-          .map(anchor => ({
-            href: anchor.href || '',
-            label: (anchor.getAttribute('title') || anchor.textContent || '').replace(/\s+/g, ' ').trim(),
-          }))
-          .filter(candidate => /^Apply on\b/i.test(candidate.label)))
-          .catch(() => []);
-        const applyUrl = selectGoogleApplyUrl(applyCandidates, job.applySource);
-        if (applyUrl) enhanced[i] = { ...enhanced[i], url: applyUrl };
+        const applyResult = await waitForGoogleApplyDestination(page, job.applySource);
+        if (applyResult.url) {
+          enhanced[i] = { ...enhanced[i], url: applyResult.url };
+          googleApplyLinksCaptured++;
+        } else {
+          googleApplyLinksMissing++;
+          if (googleApplyLinkMissSamples.length < 4) {
+            googleApplyLinkMissSamples.push({
+              itemIndex: i + 1,
+              title: String(job.title || '(untitled)').replace(/\s+/g, ' ').trim().slice(0, 100),
+              preferredSource: String(job.applySource || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+              candidateLabels: [...new Set((applyResult.candidates || [])
+                .map(candidate => String(candidate?.label || '').replace(/\s+/g, ' ').trim().slice(0, 80))
+                .filter(Boolean))].slice(0, 3),
+            });
+          }
+        }
       }
 
       let gotDescription = false;
@@ -4170,6 +4271,9 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     selectionMismatchSamples,
     blockingModalsDismissed,
     blockingModalFailures,
+    googleApplyLinksCaptured,
+    googleApplyLinksMissing,
+    googleApplyLinkMissSamples,
     modalSamples,
     failureSamples,
     transitionSamples: [...transitionSamplesByIndex.values()].sort((a, b) => a.itemIndex - b.itemIndex),
@@ -4583,7 +4687,7 @@ async function revealEndOfListReached(page, sourceId) {
 
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, { maxPages, jobsPerPlatform, existingJobs = 0 }) {
   const isScroll = SCROLL_SOURCES.has(sourceId);
-  if (!isScroll) return;
+  if (!isScroll) return null;
 
   let prevCount = -1;
   let iterations = 0;
@@ -4706,6 +4810,7 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     // a no-growth streak. Only the first is proof the list was fully revealed.
     exit,
   }, { updateActive: false });
+  return { exit, iterations, count };
 }
 
 /**
@@ -5598,6 +5703,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Exact requests that reached the navigation step. The task list is only
       // a plan: a source can hit its useful-result cap at q1/12.
       const executedQueries        = [];
+      // Scroll-backed sources (currently Google) have a source-owned terminal
+      // signal that is more precise than the generic `completed` stop reason.
+      // Keep one bounded outcome per executed query so the durable receipt can
+      // later distinguish a real end marker from a no-growth plateau.
+      const revealOutcomes         = [];
 
       // Fresh, fully-isolated Chrome for THIS platform (torn down before the next).
       platform = await launchScrapePlatformBrowser({
@@ -5891,7 +6001,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // For scroll sources, pre-load content up to the per-query target
         // before running the extractor. Paginated sources skip this.
         if (SCROLL_SOURCES.has(sourceId)) {
-          await preloadContent(page, sourceId, task.extractorJS, overlayBase, signal, {
+          const revealOutcome = await preloadContent(page, sourceId, task.extractorJS, overlayBase, signal, {
             // `??` not `||` — task.options.maxPages is already the resolved,
             // always-finite ceiling (resolvePageCeiling), but fall back to the
             // same backstop if a task was ever built without it so this never
@@ -5900,6 +6010,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             jobsPerPlatform,
             existingJobs: allJobs.length,
           });
+          if (revealOutcome) {
+            revealOutcomes.push({
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              ...revealOutcome,
+            });
+          }
           if (signal?.aborted) { earlyExit = true; break; }
           await injectOverlay(page);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Extracting jobs…' });
@@ -6250,7 +6367,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               const probeJobs = jobsToExpand.slice(0, DETAIL_BLOCK_PROBE_CARDS);
               const restJobs = jobsToExpand.slice(probeJobs.length);
               const probeResult = await expandDescriptions(
-                page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal,
+                page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + probeJobs.length, signal,
                 buildPhysicalCardWalkPlan(extracted, probeJobs),
               );
               const probeReBlocked = ['description-rate-limited', 'description-panel-http-error']
@@ -6387,7 +6504,17 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // A partial detail page is actionable but does not invalidate a relevant
           // list row. Preserve the row, continue the source, and surface this as a
           // warning in the result rather than converting it into a clean finish.
-          if (descWarning && !sourceSiteChangedWarning) sourceSiteChangedWarning = descWarning;
+          if (descWarning) {
+            // The miss-aggregating merge is first-wins for every pair that is not
+            // (miss, miss), so a later page's block-severity detail warning would
+            // be dropped and the source would finish 'done' with no Solve action.
+            // Same rule the pagination/challenge writers below use: a block may
+            // replace a non-block, never the reverse.
+            sourceSiteChangedWarning = descWarning.severity === 'block'
+              && (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block')
+              ? descWarning
+              : mergeDescriptionDetailMissWarning(sourceSiteChangedWarning, descWarning);
+          }
           if (['description-rate-limited', 'description-panel-http-error'].includes(descWarning?.code)) {
             // Stamping the clock on every arm is what re-arms a failed
             // cooldown re-probe: the probe clears the code before attempting,
@@ -6759,6 +6886,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         relevanceDropped: 0,
         preCapRelevanceDropped: 0,
         relevanceRejected: [],
+        revealOutcomes: revealOutcomes.slice(0, 20),
       };
       results.push(result);
       onResult?.(result);

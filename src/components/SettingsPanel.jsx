@@ -12,7 +12,7 @@ import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
-import { updateModalCount } from './modalStack';
+import { updateModalCount, useModalStackCount } from './modalStack';
 import { ConfirmDialog } from './ConfirmDialog';
 
 const SPEED_OPTIONS = [
@@ -639,6 +639,7 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
  * Sections: AI, Marketplace Monitors, Animation Speed, View, Keyboard Shortcuts.
  */
 export function SettingsPanel({ isOpen, onClose, settings, updateSetting, updateShortcut, resetShortcuts }) {
+  const { addToast } = useToast();
   const [capturingId, setCapturingId] = useState(null);
   const [aiSettings, setAiSettings] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
@@ -654,6 +655,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   useLayoutEffect(() => {
     watchUrlsByPlatformRef.current = watchUrlsByPlatform;
   }, [watchUrlsByPlatform]);
+
+  const modalCount = useModalStackCount();
 
   // Register with the global modal stack while open — unlike Dialog/ConfirmDialog,
   // this component stays mounted at all times (returns null when !isOpen further
@@ -706,10 +709,33 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
             ...(res.telemetry ? { telemetry: res.telemetry } : {}),
           },
         }));
+      } else {
+        addToast({
+          title: `${provider} availability check failed`,
+          description: res?.error || 'The check returned no result.',
+          type: 'error',
+        });
       }
-    } catch { /* ignore — leave prior status */ }
+    } catch (err) {
+      addToast({ title: `${provider} availability check failed`, description: err?.message || String(err), type: 'error' });
+    }
     finally { setCheckingProvider(null); }
-  }, []);
+  }, [addToast]);
+
+  // handleSafe resolves { success:false, error } instead of rejecting, so a
+  // failed store write is otherwise invisible to this panel — the optimistic
+  // state keeps showing the new value under "Settings are saved automatically".
+  // Callers must invoke this OUTSIDE their setState updaters (see below).
+  const persistSettings = useCallback(async (updates) => {
+    try {
+      const res = await window.electronAPI.updateSettings(updates);
+      if (!res?.success) {
+        addToast({ title: 'Setting not saved', description: res?.error || 'The write was rejected.', type: 'error' });
+      }
+    } catch (err) {
+      addToast({ title: 'Setting not saved', description: err?.message || String(err), type: 'error' });
+    }
+  }, [addToast]);
 
   const updateAISetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !aiSettings) return;
@@ -720,8 +746,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     // whole stale section would clobber those concurrent writes. IPC is outside
     // the setState updater so it fires exactly once (strict/concurrent mode may
     // invoke updaters twice, which would double-write).
-    window.electronAPI.updateSettings({ ai: { [key]: value } });
-  }, [aiSettings]);
+    persistSettings({ ai: { [key]: value } });
+  }, [aiSettings, persistSettings]);
 
   // Sets ONE live API group's Claude family (Judgment/Extraction/Light — llm.js
   // TASK_GROUPS). Persist only the changed group. Sending the entire local
@@ -741,8 +767,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       ...prev,
       claudeModels: { ...(prev?.claudeModels || {}), [group]: token },
     }));
-    window.electronAPI.updateSettings({ ai: { claudeModels: { [group]: token } } });
-  }, [aiSettings]);
+    persistSettings({ ai: { claudeModels: { [group]: token } } });
+  }, [aiSettings, persistSettings]);
 
   const updateJobsSetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !jobsSettings) return;
@@ -752,8 +778,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     // diceApiKey / glassdoorLocIds that the main process refreshed at runtime
     // (saveDiceApiKey on a Dice 500, saveGlassdoorLocId on a location resolve).
     // Posting the full snapshot would revert those; a single-key payload doesn't.
-    window.electronAPI.updateSettings({ jobs: { [key]: value } });
-  }, [jobsSettings]);
+    persistSettings({ jobs: { [key]: value } });
+  }, [jobsSettings, persistSettings]);
 
   const updateMarketplaceWatchUrls = useCallback((platformId, urls) => {
     if (!window.electronAPI?.updateSettings) return;
@@ -762,15 +788,18 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     setWatchUrlsByPlatform(next);
     // IPC must stay outside the React updater: Strict/concurrent rendering may
     // replay updater functions, which previously issued duplicate writes.
-    window.electronAPI.updateSettings({ marketplaceWatchUrls: next });
-  }, []);
+    persistSettings({ marketplaceWatchUrls: next });
+  }, [persistSettings]);
 
-  // Close on Escape (also cancels capturing)
+  // Close on Escape (also cancels capturing). Gated on being the TOP modal:
+  // this panel contributes 1 to the stack itself, so a nested ConfirmDialog
+  // pushes the count to 2 — without the guard one keypress was handled by both
+  // listeners and dismissing the confirmation also closed the whole panel.
   useEscapeToClose((e) => {
     if (capturingId) { setCapturingId(null); return; }
     e.preventDefault();
     onClose();
-  }, { enabled: isOpen });
+  }, { enabled: isOpen && modalCount <= 1 });
 
   // Reset capturing when panel closes
   useEffect(() => {

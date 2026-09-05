@@ -30,7 +30,6 @@ import {
   nextWakeMs,
 } from './rateLimiter.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
-import { JOB_COLLECTION_PAGE_CEILING } from '../../src/utils/jobCollectionLimits.js';
 
 // Queue dispatch cadence. These are housekeeping intervals, not rate limits —
 // the rate limiter (cooldowns) governs actual request pacing. The idle poller
@@ -152,20 +151,13 @@ function processQueue() {
     activeCount++;
     activeDomains.set(domain, (activeDomains.get(domain) || 0) + 1);
 
-    // A task with `options.paginate` walks multiple result pages in ONE stealth
-    // session (date-bounded deep pagination); it occupies a single queue slot for
-    // the whole sequence, so domain gating / concurrency apply to the source, not
-    // each page. Everything else runs the one-shot path unchanged.
-    const run = options.paginate
-      ? executeScrapePaginated(extractorJS, options)
-      : executeScrape(url, extractorJS, options);
-    run
+    executeScrape(url, extractorJS, options)
       .then(resolve)
       // Always reject — never swallow. This task was already spliced out of
       // `queue` above, so it is NOT one of the tasks closeAllPages() drains
       // and rejects directly (that path only covers tasks still sitting in
       // `queue`, never yet dispatched). A task already active/dispatched when
-      // shutdown starts settles its `run` promise exactly once (async
+      // shutdown starts settles its executeScrape promise exactly once (async
       // functions can't double-settle), so there is no double-reject risk —
       // suppressing the reject here previously left THIS task's caller (e.g.
       // scrapeMultiple) awaiting a promise that would never resolve or
@@ -263,12 +255,11 @@ export async function enrichTimeoutError(page, error) {
 }
 
 /**
- * Shared anti-bot check used by both executeScrape and executeScrapePaginated:
- * bound-read the page body, run detectAntiBotSignal, log a warning on a hit,
- * and otherwise feed the body-size baseline on a clean non-empty read. Kept
- * as one function so a future tuning of the check (a new severity class, a
- * new field passed to detectAntiBotSignal, a timing-window fix) can't land in
- * one call site and not the other.
+ * Anti-bot check for a scraped page: bound-read the page body, run
+ * detectAntiBotSignal, log a warning on a hit, and otherwise feed the body-size
+ * baseline on a clean non-empty read. Kept as its own function so a future
+ * tuning of the check (a new severity class, a new field passed to
+ * detectAntiBotSignal, a timing-window fix) stays in one place.
  *
  * @param {object} args
  * @param {import('puppeteer').Page} args.page
@@ -280,10 +271,9 @@ export async function enrichTimeoutError(page, error) {
  * @param {number} args.expectedMinItems
  * @param {string} args.sourceKey - budget/rate-limiter/label key
  * @param {object|null} args.yieldStats
- * @param {string} [args.logSuffix] - appended to the warning log line (paginated adds "(p0)")
  * @returns {Promise<object|null>} the warning, or null on a clean read
  */
-async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, itemsExtracted, expectedMinItems, sourceKey, yieldStats, logSuffix = '' }) {
+async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, itemsExtracted, expectedMinItems, sourceKey, yieldStats }) {
   let warning = null;
   try {
     // Clamp to what's left of the budget (minus a small margin) so a stuck
@@ -303,7 +293,7 @@ async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, ite
       yieldStats,
     });
     if (warning) {
-      logger.warn(`[BrowserPool] Anti-bot signal on ${url}${logSuffix}: ${warning.code} — ${warning.evidence}`);
+      logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
     } else if (itemsExtracted > 0 && html) {
       // Clean response with real items — feed the body-size baseline so
       // future suspicious-empty checks are judged against this source's norm.
@@ -541,6 +531,18 @@ async function executeScrape(url, extractorJS, options = {}) {
           if (Date.now() >= readinessDeadline) break;  // budget spent — take freshest
           await new Promise(res => setTimeout(res, READINESS.POLL_MS));
         }
+        // The readiness loop also breaks on abort/shutdown, and nothing below
+        // re-checked it: by then the abort handler has closed the page, so the
+        // fallback evaluate throws → `extractorResult = []` and the anti-bot
+        // detector reads the empty body as a `suspicious-empty` THROTTLE — a
+        // signal the site never sent, which then RESOLVED as a successful scrape
+        // and got charged to this domain's cooldown (and shown on the source
+        // card). Take the catch path instead, which records nothing for an
+        // abort/shutdown — the same decision as the pre-navigation checks above,
+        // whose error messages these mirror.
+        if (options.signal?.aborted) throw new Error('Aborted');
+        if (isShuttingDown) throw new Error('Browser pool is shutting down');
+
         // Time-to-ready for the budget learner — only the clean positive-stable
         // case (recorded below, after anti-bot detection rules out a block).
         const stableElapsedMs = settledPositively ? Date.now() - scrapeStart : null;
@@ -664,309 +666,6 @@ async function executeScrape(url, extractorJS, options = {}) {
   }
 }
 
-// ── Same-session paginating scrape (date-bounded deep pagination) ────────────
-/** Jittered human "reading" pause (triangular ≈ gaussian — uniform is detectable). */
-function jitteredDelay(min, max) {
-  const t = (Math.random() + Math.random()) / 2; // central-tendency, not flat
-  return Math.round(min + t * (max - min));
-}
-
-/**
- * Drive ONE stealth page through up to `maxPages` result pages of a single
- * source, navigating page→page in the SAME context like a human clicking
- * "Next". Keeping the session means the anti-bot clearance cookie
- * (cf_clearance / session) and referer chain persist across pages — materially
- * safer than a fresh context per page, which re-faces the bot challenge and
- * looks like a visitor teleporting straight to page N (a bot tell). Speed is
- * deliberately traded away: a jittered "reading" pause separates page loads,
- * and we stop the instant a hard block appears (never paginate into a tripwire).
- *
- * Stays domain-agnostic — it knows nothing about job dates. The CALLER owns the
- * "should we keep paging?" decision via `onPageScraped`, which returns
- * { stop, reason }. The job pipeline's callback (makeJobPageStop, in
- * electron/ipc/jobPageStop.js) reports one of three data-driven reasons:
- * `empty-page` (a page extracted zero rows — terminal, lossless), `age-window`
- * (two consecutive pages conclusively outside the caller's look-back window),
- * or `no-new-jobs` (the pager has stopped advancing / re-serving seen rows).
- * browserPool itself only stops independently for a hard anti-bot block or the
- * `maxPages` ceiling — with the hub's page count now defaulting to "All", that
- * ceiling is a BACKSTOP against a runaway pager, not the expected way a
- * well-behaved walk ends.
- *
- * Mirrors executeScrape's per-page readiness + anti-bot block; the shared
- * READINESS constants (scrapeBudget.js) keep the two loops from drifting — the
- * same arrangement authWindows' captcha loop uses.
- *
- * options (beyond executeScrape's): nextUrl(pageIndex)→url, maxPages,
- *   onPageScraped({items,warning,pageIndex})→{stop,reason}, pageDelayMs:[min,max].
- * @returns {{ data: any[], warning: object|null, pagesWalked: number, stopReason: string }}
- */
-async function executeScrapePaginated(extractorJS, options = {}) {
-  const {
-    timeoutMs = 30000,
-    waitFor = null,
-    scrollFirst = false,
-    dismissCookies = true,
-    referer = null,
-    maxPages: maxPagesOption = 1,
-    nextUrl,
-    onPageScraped = null,
-    pageDelayMs = [4000, 9000],
-    expectedMinItems = 0,
-    // When set, p>0 iterations click this selector instead of navigating to a
-    // new URL. Glassdoor uses "Show more" infinite-scroll rather than page
-    // params, so URL pagination is broken — one load + N button clicks instead.
-    loadMoreSelector = null,
-  } = options;
-  // Defensive: a `null`/non-finite maxPages (e.g. a caller forwarding an
-  // un-resolved "All" pagesPerPlatform straight through) must fall back to the
-  // shared backstop, NOT the `= 1` destructuring default — that default only
-  // triggers for `undefined`, so an explicit `maxPages: null` would otherwise
-  // survive as literal `null` and make `p < maxPages` false on the very first
-  // iteration, silently returning a 0-page "success" instead of scraping.
-  const maxPages = Number.isFinite(maxPagesOption) && maxPagesOption > 0
-    ? Math.floor(maxPagesOption)
-    : JOB_COLLECTION_PAGE_CEILING;
-
-  if (typeof nextUrl !== 'function') throw new Error('executeScrapePaginated requires options.nextUrl');
-  const domain = extractDomain(nextUrl(0));
-  const sourceKey = options.sourceLabel || domain;
-  const countItems = (r) => Array.isArray(r)
-    ? r.length
-    : (r && typeof r === 'object' && Array.isArray(r.items) ? r.items.length : (r ? -1 : 0));
-
-  const pageId = randomUUID();
-  let page = null;
-  let abortHandler = null;
-  const all = [];
-  let strongest = null;
-  let pagesWalked = 0;
-  let stopReason = 'ceiling';
-  // Accumulated extraction-yield stats ({ seen, noFields }) across pages, so a
-  // partial per-card drop is visible even when items.length stays > 0. For
-  // load-more (cumulative DOM) the extractor's counts are already running totals,
-  // so replace rather than sum; for real page navigations, sum across pages.
-  let aggYieldStats = null;
-  // Tracks how many items the extractor had returned before the last "Show
-  // more" click — used to slice out only the newly-loaded items so we don't
-  // push the full accumulated list on every load-more iteration.
-  let loadMorePrevCount = 0;
-
-  try {
-    if (isShuttingDown) throw new Error('Browser pool is shutting down');
-    page = await createStealthPage();
-    pageHandles.set(pageId, { page, startTime: Date.now() });
-    if (options.signal) {
-      abortHandler = () => safeClose(page, 2000);
-      options.signal.addEventListener('abort', abortHandler, { once: true });
-    }
-    if (referer) {
-      await page.evaluateOnNewDocument((ref) => {
-        Object.defineProperty(document, 'referrer', { get: () => ref });
-      }, referer);
-    }
-
-    for (let p = 0; p < maxPages; p++) {
-      if (isShuttingDown || options.signal?.aborted) { stopReason = 'aborted'; break; }
-
-      // Load-more mode: p>0 clicks a "Show more" button instead of navigating.
-      const useLoadMore = loadMoreSelector != null && p > 0;
-
-      const url = nextUrl(p);
-      const { timeoutMs: budgetMs, firstBeatMs } = resolveBudget(sourceKey, timeoutMs);
-      const pageStart = Date.now();
-
-      let pageResponse = null;
-      if (useLoadMore) {
-        // Click the "Show more" button and wait a beat for the XHR to settle.
-        const clicked = await page.evaluate((sel) => {
-          const btn = document.querySelector(sel);
-          if (!btn || btn.disabled) return false;
-          btn.click();
-          return true;
-        }, loadMoreSelector).catch(() => false);
-        if (!clicked) { stopReason = 'empty-page'; break; }
-        // Fixed pre-poll wait — gives the XHR response time to land before
-        // the readiness loop starts counting stable items.
-        await new Promise(r => setTimeout(r, 3000));
-      } else {
-        page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
-        try {
-          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: Math.max(5000, budgetMs - READINESS.NAV_HEADROOM_MS) });
-        } catch (e) {
-          if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !/timeout/i.test(e?.message || '')) throw e;
-        }
-        // Cookie/consent banner only appears once per session — dismiss on page 0.
-        if (p === 0 && dismissCookies) await dismissCookieBanner(page);
-        if (waitFor) {
-          try {
-            const selectorWait = Math.min(READINESS.SELECTOR_WAIT_MS, Math.max(2000, budgetMs - READINESS.READINESS_HEADROOM_MS));
-            await page.waitForSelector(waitFor, { timeout: selectorWait });
-          } catch { /* extractor may still find content */ }
-        }
-        if (scrollFirst) await humanScroll(page, 3); else await humanMouseMove(page);
-      }
-
-      // Readiness: poll the extractor until its item count stabilizes (shared
-      // READINESS constants with executeScrape). Per-page deadline off pageStart.
-      const readinessDeadline = pageStart + budgetMs - READINESS.READINESS_HEADROOM_MS;
-      // Load-more: already waited 3s after clicking; seed lastCount at the
-      // previous accumulated total so we don't settle before new items arrive.
-      if (!useLoadMore) await new Promise(r => setTimeout(r, firstBeatMs));
-      let extractorResult = null, lastCount = useLoadMore ? loadMorePrevCount : -2, stableReads = 0, zeroReads = 0, settledPositively = false;
-      // See executeScrape's matching evalErrStreak — a persistently-throwing
-      // extractor otherwise silently masquerades as "zero results, success."
-      let evalErrStreak = 0, lastEvalErrMsg = null;
-      // See executeScrape's matching siteChangedError — a SITE_CHANGED throw is
-      // DEFERRED (kept out of the generic evalErrStreak path) so it can be
-      // reconciled against this page's anti-bot check below instead of being
-      // silently coerced into an empty page.
-      let siteChangedError = null;
-      while (true) {
-        // See executeScrape's matching check — a force-closed page during
-        // shutdown would otherwise keep getting polled until the deadline.
-        if (isShuttingDown || options.signal?.aborted) break;
-        let r = null;
-        try { r = await page.evaluate(extractorJS); }
-        catch (evalErr) {
-          if (/SITE_CHANGED/i.test(evalErr?.message || '')) {
-            siteChangedError = evalErr;
-            if (Date.now() >= readinessDeadline) break;
-            await new Promise(res => setTimeout(res, READINESS.POLL_MS));
-            continue;
-          }
-          lastEvalErrMsg = evalErr?.message || String(evalErr);
-          if (++evalErrStreak === READINESS.STABLE_READS) {
-            logger.warn(`[BrowserPool] ${sourceKey} (paginated p${p}): extractor threw ${evalErrStreak}x in a row — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
-          }
-        }
-        if (r != null) {
-          evalErrStreak = 0;
-          siteChangedError = null;
-          extractorResult = r;
-          const count = countItems(r);
-          if (count === -1) break;
-          if (count > 0) {
-            zeroReads = 0;
-            if (count === lastCount) { if (++stableReads >= READINESS.STABLE_READS) { settledPositively = true; break; } }
-            else { stableReads = 0; lastCount = count; }
-          } else if (++zeroReads >= READINESS.MAX_ZERO_READS) break;
-        }
-        if (Date.now() >= readinessDeadline) break;
-        await new Promise(res => setTimeout(res, READINESS.POLL_MS));
-      }
-      const stableElapsedMs = settledPositively ? Date.now() - pageStart : null;
-      // Skip the re-run when a SITE_CHANGED is already deferred — re-running would
-      // just re-throw, and we want anti-bot detection below to run on the page we
-      // already have (see executeScrape's matching guard).
-      if (extractorResult == null && !siteChangedError) {
-        try { extractorResult = await page.evaluate(extractorJS); }
-        catch (evalErr) {
-          if (/SITE_CHANGED/i.test(evalErr?.message || '')) siteChangedError = evalErr;
-          else extractorResult = [];
-        }
-      }
-      const allExtracted = Array.isArray(extractorResult)
-        ? extractorResult
-        : (Array.isArray(extractorResult?.items) ? extractorResult.items : []);
-      const pageYieldStats = (extractorResult && !Array.isArray(extractorResult) && extractorResult.yieldStats) || null;
-      if (pageYieldStats) {
-        if (!aggYieldStats) aggYieldStats = { seen: 0, noFields: 0 };
-        if (useLoadMore) {                                  // cumulative counts → take the latest
-          aggYieldStats.seen = pageYieldStats.seen || 0;
-          aggYieldStats.noFields = pageYieldStats.noFields || 0;
-        } else {                                            // per-page counts → sum
-          aggYieldStats.seen += pageYieldStats.seen || 0;
-          aggYieldStats.noFields += pageYieldStats.noFields || 0;
-        }
-      }
-      // Load-more: the extractor returns all visible DOM items (old + new) — slice
-      // to get only the items added by this "Show more" click.
-      const pageItems = useLoadMore ? allExtracted.slice(loadMorePrevCount) : allExtracted;
-      if (useLoadMore) loadMorePrevCount = allExtracted.length;
-
-      // Anti-bot detection: load-more clicks are in-page XHR (no navigation, no
-      // HTTP status, URL unchanged) — skip detector for those iterations and only
-      // run it for real page loads.
-      const warning = useLoadMore ? null : await runAntiBotCheck({
-        page,
-        startTs: pageStart,
-        budgetMs,
-        url,
-        pageResponse,
-        itemsExtracted: allExtracted.length,
-        expectedMinItems,
-        sourceKey,
-        // Per-page (not aggregated) stats so seen/itemsExtracted share a basis.
-        yieldStats: pageYieldStats,
-        logSuffix: ` (p${p})`,
-      });
-
-      // Resolve a deferred SITE_CHANGED throw now that this page's anti-bot
-      // detection (if any) has run — same reconciliation as executeScrape's
-      // single-page path (see the comment there). A high-confidence block is
-      // handled by the ordinary severity === 'block' branch below; anything
-      // else means this is real selector drift, so propagate the throw instead
-      // of silently recording the page as empty. Load-more clicks have no
-      // anti-bot check to consult (in-page XHR, no navigation) so a deferred
-      // SITE_CHANGED there always rethrows.
-      if (siteChangedError && warning?.severity !== 'block') {
-        throw siteChangedError;
-      }
-
-      // Load-more clicks are not separate HTTP requests — only feed the rate
-      // limiter for real navigations so throttle signals aren't inflated.
-      const severity = warning?.severity;
-      if (!useLoadMore) {
-        recordOutcome(domain, severity === 'block' ? 'block' : severity === 'throttle' ? 'throttle' : 'ok');
-        if (stableElapsedMs != null && severity !== 'block') recordReady(sourceKey, stableElapsedMs);
-      }
-
-      if (warning && (!strongest || (warning.severity === 'block' && strongest.severity !== 'block'))) strongest = warning;
-      all.push(...pageItems);
-      pagesWalked = p + 1;
-
-      if (severity === 'block') { stopReason = 'blocked'; break; }     // never paginate into a wall
-
-      // Caller decides the date-cutoff / no-new-jobs stop.
-      let decision = null;
-      if (onPageScraped) {
-        try { decision = await onPageScraped({ items: pageItems, warning, pageIndex: p }); }
-        catch (e) { logger.warn('[BrowserPool] onPageScraped threw (non-fatal):', e?.message || String(e)); }
-      }
-      if (decision?.stop) { stopReason = decision.reason || 'caller-stop'; break; }
-      if (p + 1 >= maxPages) { stopReason = 'ceiling'; break; }
-
-      // Human "reading" pause before turning the page; longer if throttled.
-      let delay = jitteredDelay(pageDelayMs[0], pageDelayMs[1]);
-      if (severity === 'throttle') delay *= 2;
-      await new Promise(r => setTimeout(r, delay));
-    }
-  } catch (error) {
-    const isAborted = options.signal?.aborted || error?.message === 'Aborted' || isShuttingDown;
-    if (!isAborted) {
-      logger.error(`[BrowserPool] Paginated scrape failed for ${sourceKey}:`, error);
-      recordOutcome(domain, 'error');
-    }
-    if (all.length === 0) {
-      // Fold timeout page-state into the error before we close the page, so a
-      // 0-gather paginated timeout is as diagnosable as the single-page path.
-      if (!isAborted) await enrichTimeoutError(page, error);
-      pageHandles.delete(pageId);
-      if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
-      await safeClose(page, 2000);
-      throw error;   // total failure with nothing gathered → surface it
-    }
-    stopReason = isAborted ? 'aborted' : 'error';   // partial gather → keep what we have
-  } finally {
-    if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
-    pageHandles.delete(pageId);
-    await safeClose(page, 2000);
-  }
-
-  return { data: all, warning: strongest, pagesWalked, stopReason, yieldStats: aggYieldStats };
-}
-
 // ── Process Exit Cleanup ────────────────────────────────────────────────────
 /**
  * Forcefully close all active pages in the pool.
@@ -1040,7 +739,7 @@ function idFor(signal) {
 export function queueScrape(url, extractorJS, options = {}) {
   // Deduplication: if an identical task is already processing (queued OR
   // active), reuse its promise. Must cover every field that changes the
-  // task's behavior or result shape — omitting sourceLabel/paginate/timeoutMs/
+  // task's behavior or result shape — omitting sourceLabel/timeoutMs/
   // referer/signal previously let two calls that only differed in one of
   // those get incorrectly coupled: the SECOND caller's own options (including
   // its AbortSignal) were silently discarded in favor of the FIRST caller's,
@@ -1053,7 +752,6 @@ export function queueScrape(url, extractorJS, options = {}) {
   const cacheKey = [
     url, extractorJS,
     options.sourceLabel || '',
-    options.paginate ? 1 : 0,
     options.timeoutMs || 0,
     options.referer || '',
     options.scrollFirst || false,
@@ -1116,11 +814,6 @@ export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
         const data = wrapped?.data ?? null;
         const warning = wrapped?.warning ?? null;
         const result = { id: task.id, success: true, data, warning, yieldStats: wrapped?.yieldStats ?? null };
-        // Paginated tasks also report how far they walked and why they stopped.
-        if (wrapped && wrapped.pagesWalked != null) {
-          result.pagesWalked = wrapped.pagesWalked;
-          result.stopReason = wrapped.stopReason;
-        }
         onProgress?.(result);
         return result;
       } catch (err) {

@@ -1095,6 +1095,13 @@ async function settleWithin(promise, timeoutMs, label) {
 }
 
 export async function refreshDiceApiKey(signal = null) {
+  // Bail BEFORE starting anything for a caller that is already cancelled.
+  // Starting the refresh here would run a ~15s bundle fetch plus (on failure) a
+  // VISIBLE Chrome fallback for a run the user already stopped, and none of it
+  // is cancellable — the work is shared between callers, so it must stay
+  // caller-agnostic. Rejecting matches awaitPromiseOrAbort's own pre-aborted
+  // shape, which warmDiceApiKey rethrows.
+  if (signal?.aborted) throw (signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
   if (_diceRefreshInFlight) return awaitPromiseOrAbort(_diceRefreshInFlight, signal);
 
   _diceRefreshInFlight = (async () => {
@@ -1114,7 +1121,15 @@ export async function refreshDiceApiKey(signal = null) {
     }
   })();
 
-  return awaitPromiseOrAbort(_diceRefreshInFlight, signal);
+  // Keep one handler permanently attached to the shared promise: every caller
+  // reaches it through awaitPromiseOrAbort, which DETACHES on abort without
+  // observing it, so a later rejection (e.g. the browser fallback finding no
+  // Chrome installed) would otherwise escape as a global unhandledRejection.
+  // Callers still receive the real outcome through their own awaits.
+  const inFlight = _diceRefreshInFlight;
+  inFlight.catch(() => {});
+
+  return awaitPromiseOrAbort(inFlight, signal);
 }
 
 async function _fetchDiceKeyFromBundle() {

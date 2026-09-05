@@ -16,8 +16,8 @@
  *     {
  *       version, runId, startedAt, lastUpdated,
  *       stage: 'searching' | 'gathered',
- *       inputs: { queries, profileFingerprint, targetRole, canonicalLocation,
- *                 maxAgeDays, nodeId },
+ *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
+ *                 jobPreferencePlan, canonicalLocation, maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
  *                                queries: { [query]: { lastPage } } } }
  *     }
@@ -40,7 +40,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 
-const MANIFEST_VERSION = 1;
+const MANIFEST_VERSION = 2;
 const STAGING_SUFFIX = '.jobs-staging.jsonl';
 const MANIFEST_SUFFIX = '.jobs-run.json';
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
@@ -136,6 +136,32 @@ function receiptToken(value, max = 80) {
   return /^[a-zA-Z0-9_.:/-]+$/.test(text) ? text.slice(0, max) : null;
 }
 
+const RECEIPT_REVEAL_EXITS = new Set([
+  'end-of-list',
+  'plateau',
+  'iteration-ceiling',
+  'target-reached',
+  'aborted',
+]);
+
+function sanitizeReceiptRevealOutcomes(values) {
+  const outcomes = [];
+  for (const value of (Array.isArray(values) ? values : []).slice(0, 20)) {
+    const queryIndex = receiptNumber(value?.queryIndex, null);
+    const queryTotal = receiptNumber(value?.queryTotal, null);
+    const exit = receiptToken(value?.exit, 32);
+    if (!(queryIndex > 0) || !(queryTotal > 0) || queryIndex > queryTotal || !RECEIPT_REVEAL_EXITS.has(exit)) continue;
+    outcomes.push({
+      queryIndex,
+      queryTotal,
+      exit,
+      count: receiptNumber(value?.count),
+      iterations: receiptNumber(value?.iterations),
+    });
+  }
+  return outcomes;
+}
+
 function sanitizeReceiptSource(source = {}) {
   const warning = source.warning && typeof source.warning === 'object'
     ? {
@@ -143,13 +169,23 @@ function sanitizeReceiptSource(source = {}) {
         ...(receiptToken(source.warning.severity, 24) ? { severity: receiptToken(source.warning.severity, 24) } : {}),
       }
     : null;
+  const revealOutcomes = sanitizeReceiptRevealOutcomes(source.revealOutcomes);
   return {
     count: receiptNumber(source.count),
     providerGathered: receiptNumber(source.providerGathered),
+    // Numbers only, same as every other field here: the provider's own corpus
+    // size for this query plus the walk's own truncation flag. They are what
+    // separates "this source has 44 postings" from "this source has 973 and we
+    // read 44", which no other retained field can express.
+    ...(Number.isFinite(Number(source.providerTotal)) && Number(source.providerTotal) >= 0
+      ? { providerTotal: receiptNumber(source.providerTotal) }
+      : {}),
+    ...(source.truncated === true ? { truncated: true } : {}),
     relevanceDropped: receiptNumber(source.relevanceDropped),
     ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),
     ...(receiptToken(source.stopReason) ? { stopReason: receiptToken(source.stopReason) } : {}),
     ...(warning && Object.keys(warning).length > 0 ? { warning } : {}),
+    ...(revealOutcomes.length > 0 ? { revealOutcomes } : {}),
   };
 }
 
@@ -164,7 +200,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   const terminalStatus = ['completed', 'failed', 'aborted'].includes(receipt?.terminal?.status)
     ? receipt.terminal.status
     : 'completed';
-  const terminalOutcome = ['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
+  const terminalOutcome = ['zero', 'populated', 'collection-only', 'preference-filtered', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
     ? receipt.terminal.outcome
     : 'unknown';
   // The initial search funnel can legitimately be smaller than the terminal
@@ -258,10 +294,103 @@ async function readManifest(canvasFilePath) {
   if (!files) return null;
   try {
     const raw = await fs.promises.readFile(files.manifest, 'utf8');
-    return JSON.parse(raw);
+    const manifest = JSON.parse(raw);
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null;
+    // Version-1 manifests predate Job Preferences. Materializing neutral
+    // defaults here lets all recovery consumers use one contract, while still
+    // keeping the old run's ordinary query/location semantics intact.
+    const inputs = manifest.inputs && typeof manifest.inputs === 'object' && !Array.isArray(manifest.inputs)
+      ? manifest.inputs
+      : {};
+    return {
+      ...manifest,
+      inputs: {
+        ...inputs,
+        jobPreferences: sanitizeJobPreferences(inputs.jobPreferences),
+        jobPreferencePlan: sanitizeJobPreferencePlan(inputs.jobPreferencePlan),
+      },
+    };
   } catch {
     return null; // missing or corrupt → treated as "no run"
   }
+}
+
+// The preference plan comes from model output, but becomes durable recovery
+// input. Keep the persisted form deliberately small and data-only: a corrupt
+// or future plan must not make a saved canvas impossible to resume, and we do
+// not retain arbitrary model payloads merely because they happened to be
+// adjacent to the useful plan fields.
+function manifestText(value, max = 1000) {
+  return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+function manifestTextList(value, { maxItems = 30, maxItemLength = 280 } = {}) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => manifestText(item, maxItemLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function sanitizeManifestPreferenceRows(value, strict) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 30).flatMap((row, index) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return [];
+    const criterion = manifestText(row.criterion, 600);
+    if (!criterion) return [];
+    const id = manifestText(row.id, 100) || `${strict ? 'strict' : 'soft'}-${index + 1}`;
+    const category = manifestText(row.category, 100);
+    return [{ id, criterion, ...(category ? { category } : {}) }];
+  });
+}
+
+/**
+ * Make a durable, backwards-compatible subset of the preference interpreter's
+ * model result. This is intentionally exported for regression tests; callers
+ * should keep treating a null plan as "interpret again" rather than a failed
+ * recovery.
+ */
+export function sanitizeJobPreferencePlan(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const directionValue = value.direction && typeof value.direction === 'object' && !Array.isArray(value.direction)
+    ? value.direction
+    : {};
+  const direction = {
+    summary: manifestText(directionValue.summary, 1000),
+    roleDirections: manifestTextList(directionValue.roleDirections),
+    avoidDirections: manifestTextList(directionValue.avoidDirections),
+    explorationEnabled: directionValue.explorationEnabled === true,
+  };
+  const plan = {
+    // Plans are intentionally normalized to the only format this build can
+    // resume. Future versions fall back to their raw Job Preferences text.
+    version: 1,
+    summary: manifestText(value.summary, 1000),
+    direction,
+    softPreferences: sanitizeManifestPreferenceRows(value.softPreferences, false),
+    strictRequirements: sanitizeManifestPreferenceRows(value.strictRequirements, true),
+    warnings: manifestTextList(value.warnings, { maxItems: 10, maxItemLength: 500 }),
+    targetRoleConflict: value.targetRoleConflict === true,
+    targetRoleConflictReason: value.targetRoleConflict === true
+      ? manifestText(value.targetRoleConflictReason, 1000)
+      : '',
+  };
+  const meaningful = plan.summary
+    || plan.direction.summary
+    || plan.direction.roleDirections.length > 0
+    || plan.direction.avoidDirections.length > 0
+    || plan.direction.explorationEnabled
+    || plan.softPreferences.length > 0
+    || plan.strictRequirements.length > 0
+    || plan.warnings.length > 0
+    || plan.targetRoleConflict;
+  return meaningful ? plan : null;
+}
+
+export function sanitizeJobPreferences(value) {
+  // The renderer bounds this input, but IPC callers and old canvases can bypass
+  // it. Match the backend cap so manifests remain small and deterministic.
+  return typeof value === 'string' ? value.trim().slice(0, 4000) : '';
 }
 
 /**
@@ -269,7 +398,7 @@ async function readManifest(canvasFilePath) {
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, canonicalLocation = '', maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
+export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return null;
   const sources = {};
@@ -278,7 +407,17 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     version: MANIFEST_VERSION,
     runId, startedAt, lastUpdated: startedAt,
     stage: 'searching',
-    inputs: { queries, profileFingerprint, targetRole, canonicalLocation, maxAgeDays, collectionLimits, nodeId },
+    inputs: {
+      queries,
+      profileFingerprint,
+      targetRole,
+      jobPreferences: sanitizeJobPreferences(jobPreferences),
+      jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
+      canonicalLocation,
+      maxAgeDays,
+      collectionLimits,
+      nodeId,
+    },
     sources,
   };
   const ok = await withManifestLock(files.manifest, async () => {

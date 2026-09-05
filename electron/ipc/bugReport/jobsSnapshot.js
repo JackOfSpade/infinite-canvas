@@ -97,6 +97,7 @@ function googleLinkShape(row) {
     missingId: !!parsed && !idPresent,
     webhp: parsed?.pathname === '/webhp',
     route: parsed ? `${parsed.hostname}${parsed.pathname}` : '(invalid)',
+    identityFallbackAvailable: !!identityUrl && !!parsed && idPresent,
   };
 }
 
@@ -122,12 +123,20 @@ export function buildJobLinkSnapshot(nodes) {
     }
     const shapes = sourceRows.map(row => ({ row, ...googleLinkShape(row) }));
     const count = field => shapes.filter(shape => shape[field]).length;
-    lines.push(`- \`google\`: ${sourceRows.length} total · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing public URL(s)`);
-    lines.push(`  - Identity-route health: ${count('legacy')} legacy \`ibp=htl;jobs\` · ${count('blankQuery')} blank search query · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
-    const affected = shapes.filter(shape => shape.publicInternal || shape.blankQuery || shape.webhp).slice(0, 3);
+    const fallbackCount = shapes.filter(shape => shape.publicMissing && shape.identityFallbackAvailable).length;
+    lines.push(`- \`google\`: ${sourceRows.length} total · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing direct Apply-on URL(s)${fallbackCount ? ` (${fallbackCount} retain a Google identity fallback)` : ''}`);
+    lines.push(`  - Identity-route health: ${count('legacy')} legacy \`ibp=htl;jobs\` · ${count('blankQuery')} blank raw search query (title/company/location are synthesized when fallback opening is needed) · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
+    // Missing public destinations and broken identities are actionable. A blank
+    // raw q on its own is ordinary current Google markup: click-time repair
+    // safely synthesizes it, so it must not crowd actually linkless rows out of
+    // this three-item diagnostic sample.
+    const affected = shapes
+      .filter(shape => shape.publicInternal || shape.publicMissing || shape.missingId || shape.webhp)
+      .sort((a, b) => Number(b.publicMissing) - Number(a.publicMissing))
+      .slice(0, 3);
     for (const shape of affected) {
       const title = historyReportValue(shape.row.title, '(untitled)', 100);
-      lines.push(`  - ⚠️ "${title.replace(/"/g, "'")}" — route \`${shape.route}\` · q=${shape.blankQuery ? 'empty' : 'present'} · htidocid=${shape.missingId ? 'missing' : 'present'} · public=${shape.publicInternal ? 'internal-google' : shape.publicMissing ? 'missing' : 'direct'}`);
+      lines.push(`  - ⚠️ "${title.replace(/"/g, "'")}" — route \`${shape.route}\` · q=${shape.blankQuery ? 'empty' : 'present'} · htidocid=${shape.missingId ? 'missing' : 'present'} · public=${shape.publicInternal ? 'internal-google' : shape.publicMissing ? (shape.identityFallbackAvailable ? 'missing-direct (Google fallback available)' : 'missing') : 'direct'}`);
     }
   }
   return `
@@ -172,7 +181,7 @@ function readLastRunReceiptSnapshot(canvasFilePath) {
   const outcome = raw?.terminal?.outcome;
   if (!receiptIdentifier(raw.runId, '')
     || !['completed', 'failed', 'aborted'].includes(status)
-    || !['zero', 'populated', 'collection-only', 'incomplete', 'unknown'].includes(outcome)) return { exists: true, invalid: true };
+    || !['zero', 'populated', 'collection-only', 'preference-filtered', 'incomplete', 'unknown'].includes(outcome)) return { exists: true, invalid: true };
   const receipt = sanitizeLastRunReceipt(raw);
   return { exists: true, receipt };
 }
@@ -210,6 +219,33 @@ function receiptHubCorrelation(nodeId, currentNodeIds) {
     : `⚠️ hub \`${safeId}\` is not present in this canvas`;
 }
 
+function revealCoverageFact(source) {
+  const outcomes = Array.isArray(source?.revealOutcomes) ? source.revealOutcomes : [];
+  if (outcomes.length === 0) return { retained: false, proven: false, outcomes: [], queryTotal: null };
+  const queryTotal = Math.max(0, ...outcomes.map(outcome => Number(outcome?.queryTotal) || 0));
+  const byQuery = new Map(outcomes.map(outcome => [Number(outcome?.queryIndex), outcome]));
+  const proven = queryTotal > 0
+    && byQuery.size === queryTotal
+    && Array.from({ length: queryTotal }, (_, index) => byQuery.get(index + 1)?.exit === 'end-of-list').every(Boolean);
+  return { retained: true, proven, outcomes, queryTotal };
+}
+
+function revealOutcomeLabel(outcome) {
+  const exit = receiptIdentifier(outcome?.exit, 'unknown');
+  const meaning = exit === 'end-of-list'
+    ? 'board end marker reached'
+    : exit === 'plateau'
+      ? 'no-growth plateau; coverage unproven'
+      : exit === 'iteration-ceiling'
+        ? 'reveal safety ceiling reached; coverage unproven'
+        : exit === 'target-reached'
+          ? 'configured job target reached; coverage intentionally bounded'
+          : exit === 'aborted'
+            ? 'aborted before coverage could be proven'
+            : 'coverage unproven';
+  return `q${outcome?.queryIndex || '?'}/${outcome?.queryTotal || '?'} ${outcome?.count ?? '?'} card(s) after ${outcome?.iterations ?? '?'} reveal pass(es) — ${meaning}`;
+}
+
 function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
   if (!receiptState?.exists) {
     return '- Last terminal run receipt: absent — completion of any prior-process run is **unknown**; this build has no durable terminal evidence for it.';
@@ -230,6 +266,8 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
       ? 'score-ready jobs retained'
       : receipt.terminal?.outcome === 'collection-only'
         ? 'collection-only; scoring intentionally skipped'
+        : receipt.terminal?.outcome === 'preference-filtered'
+          ? 'all post-history jobs filtered by Job Preferences; scoring intentionally skipped'
         : receipt.terminal?.outcome === 'incomplete'
           ? 'incomplete; no authoritative scored result'
       : 'result count unknown';
@@ -238,7 +276,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
   const provenance = !livePhase
     ? 'previous-process receipt — live pipeline telemetry is unavailable in this process'
     : liveRunId && liveRunId === receipt.runId
-      ? `this-process receipt — live pipeline phase \`${String(livePhase).replace(/`/g, "'")}\` belongs to this run`
+      ? `this-process receipt — live search-stage phase \`${String(livePhase).replace(/`/g, "'")}\` belongs to this run`
       : `prior/other-run receipt — this process retains an uncorrelated pipeline phase \`${String(livePhase).replace(/`/g, "'")}\`${liveRunId ? ` for run \`${liveRunId}\`` : ''}`;
   const cleanup = receipt.cleanup?.attempted
     ? receipt.cleanup.cleared === true
@@ -263,12 +301,24 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
   if (sources.length) {
     const rows = sources.map(([sourceId, source]) => {
       const parts = [`${source.count} returned`, `${source.providerGathered} provider-gathered`, `${source.relevanceDropped} relevance-dropped`];
+      // State the provider's own corpus size whenever the receipt retained it.
+      // Without this the row reads the same whether the walk was exhaustive or
+      // stopped a tenth of the way in.
+      if (Number.isFinite(Number(source.providerTotal))) {
+        parts.push(`${source.providerGathered} of ${source.providerTotal} reported by the provider`);
+      }
+      if (source.truncated === true) parts.push('⚠️ walk truncated by a failed page');
       if (source.sponsoredDropped) parts.push(`${source.sponsoredDropped} sponsored-dropped`);
       if (source.stopReason) parts.push(`stop ${receiptIdentifier(source.stopReason, 'omitted')}`);
       if (source.warning?.code) parts.push(`warning ${receiptIdentifier(source.warning.code, 'omitted')}${source.warning.severity ? ` (${receiptIdentifier(source.warning.severity, 'omitted')})` : ''}`);
       return `\`${receiptIdentifier(sourceId, 'unknown')}\`: ${parts.join(' · ')}`;
     });
     lines.push(`  - Sources (${sources.length}): ${rows.join('; ')}`);
+    for (const [sourceId, source] of sources) {
+      const reveal = revealCoverageFact(source);
+      if (!reveal.retained) continue;
+      lines.push(`  - \`${receiptIdentifier(sourceId, 'unknown')}\` scroll reveal: ${reveal.outcomes.map(revealOutcomeLabel).join('; ')} · ${reveal.proven ? '✅ every query reached the board end marker' : '⚠️ result-set coverage was not proven'}`);
+    }
   }
   return lines.join('\n');
 }
@@ -345,6 +395,12 @@ function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, c
   }
   const snapshot = parsed.value;
   const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : 0;
+  // Same rule as currentSavedSnapshotFact: since preference-aware snapshots,
+  // `snapshot.jobs` is the retained candidate POOL and `gatheredJobCount` is the
+  // score-ready input count. Reading the pool as "score-ready" made one report
+  // state two different score-ready figures. Older snapshots carry no separate
+  // pool, so they keep the historic jobs-length semantics.
+  const scoreReady = nonnegativeCount(snapshot.gatheredJobCount) ?? jobs;
   const sourceFoundRaw = Number(snapshot.sourceGatheredCount);
   const legacySourceFoundRaw = Number(
     snapshot.searchFunnel?.relevanceKept ?? snapshot.searchFunnel?.raw,
@@ -355,9 +411,10 @@ function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, c
   const sourceFound = Number.isFinite(sourceFoundCandidate)
     ? Math.max(jobs, Math.max(0, Math.floor(sourceFoundCandidate)))
     : jobs;
-  const jobCountLabel = sourceFound !== jobs
-    ? `${sourceFound} found → ${jobs} score-ready job(s)`
-    : `${jobs} score-ready job(s)`;
+  const jobCountLabel = (sourceFound !== scoreReady
+    ? `${sourceFound} found → ${scoreReady} score-ready job(s)`
+    : `${scoreReady} score-ready job(s)`)
+    + (jobs !== scoreReady ? ` · ${jobs} retained for preference re-evaluation` : '');
   const recoveryJobs = Array.isArray(snapshot.descriptionRecoveryJobs) ? snapshot.descriptionRecoveryJobs.length : 0;
   const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
   const recordedCanvas = snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath || null;
@@ -381,6 +438,21 @@ function recordedRunToken(value) {
   return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
 }
 
+// Job Board's durable provenance is the canonical combine signature
+// (`sourceHubId=fingerprint|…`).  Keep this parser deliberately local to the
+// diagnostic seam: the fingerprint is opaque here; only a bounded source-id
+// index is needed to establish whether a board actually consumed this run.
+function sourceHubIdsFromCombineSignature(value) {
+  const ids = new Set();
+  for (const part of String(value || '').split('|')) {
+    const separator = part.lastIndexOf('=');
+    if (separator <= 0) continue;
+    const id = part.slice(0, separator).trim();
+    if (/^[A-Za-z0-9_.:-]{1,180}$/.test(id)) ids.add(id);
+  }
+  return [...ids].slice(0, 25);
+}
+
 // Return only the metadata needed for the compact completion reconciliation.
 // This deliberately shares the ownership rule used by the full recovery
 // section: a legacy directory-scoped snapshot is usable only when it names the
@@ -398,7 +470,13 @@ function currentSavedSnapshotFact(canvasFilePath, currentNodeIds) {
     return { state: 'invalid' };
   }
   const snapshot = parsed.value;
-  const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
+  const candidatePoolJobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
+  // New preference-aware snapshots intentionally retain every post-history
+  // candidate so a later edit can re-evaluate previously filtered listings.
+  // `gatheredJobCount` remains the score-ready input count. Older snapshots
+  // have no separate pool, so retain their historic jobs-length semantics.
+  const savedScoreReadyJobs = nonnegativeCount(snapshot.gatheredJobCount);
+  const jobs = savedScoreReadyJobs ?? candidatePoolJobs;
   const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
   const canvasMatches = !snapshot.canvasFilePath && !snapshot.snapshotContext?.canvasFilePath
     ? null
@@ -406,6 +484,7 @@ function currentSavedSnapshotFact(canvasFilePath, currentNodeIds) {
   return {
     state: 'parseable',
     jobs,
+    candidatePoolJobs,
     runId: recordedRunToken(snapshot.runId),
     hubPresent: !nodeId ? null : !!currentNodeIds?.has?.(nodeId),
     canvasMatches,
@@ -460,6 +539,16 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const searchKept = nonnegativeCount(telemetry?.search?.kept);
   const recovered = telemetry ? recoveryMergeNet(telemetry) : null;
   const expected = searchKept == null ? null : searchKept + recovered;
+  // Job Preferences legitimately remove rows between search admission and the
+  // scorer. Reconciling `expected` straight against the scorer input therefore
+  // reported every partially-filtered run as INDETERMINATE. Subtract only what
+  // was actually recorded, and state the subtraction in the rendered lines so
+  // it is never a silent adjustment that could hide a real shortfall.
+  const preferences = telemetry?.preferences || null;
+  const preferenceFiltered = nonnegativeCount(preferences?.filtered);
+  const expectedAfterPreferences = expected == null
+    ? null
+    : Math.max(0, expected - (preferenceFiltered || 0));
   const scoring = telemetry?.scoring || null;
   const scoreInput = nonnegativeCount(scoring?.selectedForScoring ?? scoring?.input);
   const scored = nonnegativeCount(scoring?.scored);
@@ -485,6 +574,21 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     && expected === 0
     && snapshot.state === 'parseable'
     && snapshot.jobs === 0;
+  // Preference filtering happens deliberately after search/history admission.
+  // Its saved snapshot keeps that candidate pool so a future preference edit
+  // can re-evaluate it without scraping again; it is therefore not a
+  // score-ready snapshot and must not be compared to terminal scoreReady=0.
+  const completedPreferenceFiltered = receiptCompleted
+    && receipt?.terminal?.outcome === 'preference-filtered'
+    && expected != null
+    && snapshot.state === 'parseable'
+    // A preference-filtered terminal has zero score-ready rows, but it must
+    // still retain the complete post-history candidate pool. Without this
+    // check a truncated snapshot could be reported as complete while silently
+    // losing listings the user needs for a later preference edit.
+    && snapshot.candidatePoolJobs != null
+    && snapshot.candidatePoolJobs === expected;
+  const completedWithoutScoring = completedZeroResult || completedPreferenceFiltered;
   const runTokens = [
     // Keep these independently: a stale search stamp and a newer pipeline
     // stamp can otherwise be collapsed by `pipeline || search` and make a
@@ -495,93 +599,331 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     ['snapshot', snapshot.runId],
   ].filter(([, token]) => !!token);
   const distinctRunTokens = [...new Set(runTokens.map(([, token]) => token))];
-  const boards = (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25).map(board => ({
-    id: receiptIdentifier(board?.id, 'unknown'),
-    hubState: receiptIdentifier(board?.hubState, 'empty'),
-    resultCount: nonnegativeCount(board?.resultCount),
-    stale: board?.stale === true,
-    staleReason: String(board?.staleReason || '').replace(/[\r\n`]/g, ' ').slice(0, 120),
-  }));
+  const boards = (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25).map(board => {
+    const combinedSourceHubIds = sourceHubIdsFromCombineSignature(board?.combineSignature);
+    const connectedSourceHubIds = [...new Set((Array.isArray(board?.connectedSourceHubIds) ? board.connectedSourceHubIds : [])
+      .map(id => String(id || '').trim())
+      .filter(id => /^[A-Za-z0-9_.:-]{1,180}$/.test(id)))].slice(0, 25);
+    return {
+      id: receiptIdentifier(board?.id, 'unknown'),
+      hubState: receiptIdentifier(board?.hubState, 'empty'),
+      resultCount: nonnegativeCount(board?.resultCount),
+      mergeUnique: nonnegativeCount(board?.mergeUnique),
+      renderedCardCount: nonnegativeCount(board?.renderedCardCount),
+      stale: board?.stale === true,
+      staleReason: String(board?.staleReason || '').replace(/[\r\n`]/g, ' ').slice(0, 120),
+      combinedSourceHubIds,
+      connectedSourceHubIds,
+    };
+  });
   const totalBoards = nonnegativeCount(jobBoardStateCount) ?? boards.length;
+  const activeSourceHubId = telemetry?.nodeId || receipt?.nodeId || null;
+  const relevantBoards = activeSourceHubId
+    ? boards.filter(board => board.combinedSourceHubIds.includes(activeSourceHubId)
+      || board.connectedSourceHubIds.includes(activeSourceHubId))
+    : [];
+  // Retain the pre-existing global stale-board warning even when an older
+  // compact report lacks provenance fields. A stale cascade is explicitly
+  // hidden and always deserves its refresh verdict; only a *non-stale* board
+  // needs the stricter source/count proof below to participate in VERIFIED.
   const staleBoards = boards.filter(board => board.stale);
 
+  // Gather coverage is the one stage every check below is downstream of: each
+  // reconciliation compares counts that all descend from `search.kept`, so a
+  // source that returned a tenth of its corpus reconciles perfectly. Read the
+  // provider's own corpus size where a source reported one — browser sources
+  // publish `claimedTotal`, API sources `providerTotal` — so an incomplete
+  // gather can no longer pass as a verified-complete run.
+  const coverageBySource = (() => {
+    const merged = new Map();
+    for (const bag of [telemetry?.search?.bySource, receipt?.sources]) {
+      if (!bag || typeof bag !== 'object') continue;
+      for (const [sourceId, source] of Object.entries(bag).slice(0, 25)) {
+        const total = Number(source?.providerTotal ?? source?.claimedTotal);
+        const gathered = Number(source?.providerGathered ?? source?.gathered ?? source?.count);
+        const stopReason = String(source?.stopReason || source?.stop || '').trim();
+        const stopReasons = stopReason ? stopReason.split('/').map(s => s.trim().toLowerCase()) : [];
+        const isExhausted = source?.truncated !== true
+          && stopReasons.length > 0
+          && stopReasons.every(r => r === 'empty-page' || r === 'end-of-results');
+
+        if (merged.has(sourceId)) {
+          const existing = merged.get(sourceId);
+          if (!existing.stopReason && stopReason) {
+            existing.stopReason = stopReason;
+            existing.isExhausted = isExhausted;
+          }
+          continue;
+        }
+
+        merged.set(sourceId, {
+          id: receiptIdentifier(sourceId, 'unknown'),
+          total: Number.isFinite(total) && total >= 0 ? total : null,
+          gathered: Number.isFinite(gathered) && gathered >= 0 ? gathered : null,
+          truncated: source?.truncated === true,
+          stopReason: stopReason || null,
+          isExhausted,
+        });
+      }
+    }
+    return [...merged.values()];
+  })();
+  // Only an OBSERVED shortfall counts. A source that reported no corpus size is
+  // recorded as unproven, never as incomplete — the report states what it knows.
+  // A source that ran until the board returned no further results (empty-page /
+  // end-of-results) without being truncated reached its reachable boundary;
+  // drifting headline totals (claimedTotal) do not turn that into a shortfall.
+  const shortSources = coverageBySource.filter(source => (
+    source.truncated || (
+      source.total != null && source.gathered != null && source.gathered < source.total
+      && !source.isExhausted
+    )
+  ));
+  const unprovenSources = coverageBySource.filter(source => source.total == null && !source.truncated);
+
+  // A late source (the background USAJobs refresh) can append to an ALREADY
+  // completed run. The terminal receipt is written once, under the manifest
+  // lock, and that manifest is trashed by the same clean finish — so the receipt
+  // legitimately keeps the pre-append count and cannot be amended afterwards.
+  // Treating that as a conflict made every appended run INDETERMINATE and hid
+  // whatever the real gaps were. Only an INCREASE is explained this way; rows
+  // disappearing after the receipt is still a genuine conflict.
+  const postCompletionAppend = receiptScoreReady != null && scored != null && scored > receiptScoreReady
+    && snapshot.state === 'parseable' && snapshot.jobs === scored;
+
+  // The board-displayed seen-history write is the run's LAST stage: scoring and
+  // taxonomy can all agree while it fails, and the only consequence a user sees
+  // is the same listings coming back on the next search. It was rendered in the
+  // pipeline section but never reconciled here, so a failed write still earned a
+  // green verdict.
+  const historyWrite = telemetry?.history?.boardDisplay || null;
+  const historyWriteFailed = !!historyWrite?.error;
+
+  // `scored` is THIS hub's scoring run; `taxonomyInput` is whatever the board
+  // bucketed, and a board may legitimately combine several source hubs — the
+  // documented Combine feature, and the board checks below already carve out
+  // that case. Comparing the two directly therefore made every multi-hub board
+  // permanently INDETERMINATE and buried whatever the real gaps were. When the
+  // taxonomy input matches a multi-hub board's own union, the two numbers are
+  // measuring different things by design and reconcile through the board.
+  const unionTaxonomyBoard = taxonomyInput == null ? null : relevantBoards.find(board => (
+    !board.stale && board.combinedSourceHubIds.length > 1 && board.resultCount === taxonomyInput
+  )) || null;
+
   const gaps = [];
-  if (pipelinePhase && pipelinePhase !== 'completed') gaps.push(`live pipeline is \`${pipelinePhase}\``);
+  if (historyWriteFailed) {
+    gaps.push(`the board-displayed seen-history write failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s)`);
+  }
+  for (const source of shortSources) {
+    gaps.push(source.total != null && source.gathered != null
+      ? `\`${source.id}\` gathered ${source.gathered} of ${source.total} rows the provider reported${source.truncated ? ' (walk truncated)' : ''}`
+      : `\`${source.id}\` walk was truncated before the provider's result set ended`);
+  }
+  if (pipelinePhase && pipelinePhase !== 'completed') gaps.push(`live search stage is \`${pipelinePhase}\``);
   if (receiptState.exists && !receiptCompleted) gaps.push('terminal receipt is not completed');
   if (receiptCompleted && !receiptCleanupConfirmed) gaps.push('terminal cleanup was not confirmed');
   if (expected != null && expected < 0) gaps.push(`search/recovery produced an impossible negative input (${expected})`);
-  if (!completedZeroResult) {
-    if (expected != null && scoreInput != null && expected !== scoreInput) gaps.push(`search/recovery ${expected} ≠ scoring input ${scoreInput}`);
+  if (expected != null && snapshot.state === 'parseable' && snapshot.candidatePoolJobs != null
+    && snapshot.candidatePoolJobs !== expected) {
+    gaps.push(`saved preference candidate pool ${snapshot.candidatePoolJobs} ≠ post-history candidates ${expected}`);
+  }
+  if (!completedWithoutScoring) {
+    if (expectedAfterPreferences != null && scoreInput != null && expectedAfterPreferences !== scoreInput) {
+      gaps.push(preferenceFiltered
+        ? `search/recovery ${expected} − ${preferenceFiltered} preference-filtered = ${expectedAfterPreferences} ≠ scoring input ${scoreInput}`
+        : `search/recovery ${expected} ≠ scoring input ${scoreInput}`);
+    }
     if (scoreInput != null && scored != null && scoreInput !== scored) gaps.push(`scored ${scored}/${scoreInput}`);
     if ((placeholders || 0) > 0) gaps.push(`${placeholders} placeholder score(s)`);
     if ((unscored || 0) > 0) gaps.push(`${unscored} unscored job(s)`);
     if ((failedBatches || 0) > 0) gaps.push(`${failedBatches} failed scoring batch(es)`);
     if (taxonomy?.error) gaps.push('taxonomy reported an error');
-    if (scored != null && taxonomyInput != null && scored !== taxonomyInput) gaps.push(`scored ${scored} ≠ taxonomy input ${taxonomyInput}`);
+    if (scored != null && taxonomyInput != null && scored !== taxonomyInput && !unionTaxonomyBoard) {
+      gaps.push(`scored ${scored} ≠ taxonomy input ${taxonomyInput}`);
+    }
     if ((taxonomyMissing || 0) > 0 || (taxonomyDuplicated || 0) > 0) {
       gaps.push(`taxonomy missing ${taxonomyMissing || 0}, duplicated ${taxonomyDuplicated || 0}`);
     }
     if (snapshot.state === 'parseable' && scored != null && snapshot.jobs != null && scored !== snapshot.jobs) {
       gaps.push(`scored ${scored} ≠ saved score-ready ${snapshot.jobs}`);
     }
-    if (receiptScoreReady != null && scored != null && receiptScoreReady !== scored) {
+    if (receiptScoreReady != null && scored != null && receiptScoreReady !== scored && !postCompletionAppend) {
       gaps.push(`terminal score-ready ${receiptScoreReady} ≠ scored ${scored}`);
     }
   }
-  if (receiptScoreReady != null && snapshot.state === 'parseable' && snapshot.jobs != null && receiptScoreReady !== snapshot.jobs) {
+  if (!completedPreferenceFiltered && !postCompletionAppend && receiptScoreReady != null
+    && snapshot.state === 'parseable' && snapshot.jobs != null && receiptScoreReady !== snapshot.jobs) {
     gaps.push(`terminal score-ready ${receiptScoreReady} ≠ saved score-ready ${snapshot.jobs}`);
   }
   if (distinctRunTokens.length > 1) {
     gaps.push(`run tokens disagree (${runTokens.map(([source, token]) => `${source} \`${token}\``).join(', ')})`);
   }
   if (snapshot.canvasMatches === false || snapshot.hubPresent === false) gaps.push('saved snapshot belongs to a different canvas/hub');
+  // A board is a downstream consumer, not merely a visual decoration. Only
+  // inspect boards that declare this source hub either in their saved combine
+  // signature or in the current-canvas edge snapshot. Stale boards retain an
+  // intentionally hidden *previous* cascade and get their own refresh verdict;
+  // a non-stale board must instead prove that its result count still describes
+  // the completed source run.
+  const boardExpectedCount = completedWithoutScoring
+    ? 0
+    : (postCompletionAppend ? scored : (snapshot.jobs ?? receiptScoreReady ?? scored));
+  for (const board of relevantBoards) {
+    if (board.stale) continue;
+    // A terminal run with zero board-ready rows has nothing for a
+    // never-combined board to consume. An edge alone establishes that the board
+    // is connected, not that it has already run Combine. Requiring this very
+    // narrow pristine-empty shape to be `done` falsely turns a receipt/snapshot
+    // backed vacuous completion into INDETERMINATE. Keep inspecting any board
+    // with a prior combine receipt, card, or additional input: those can expose
+    // an unmarked stale cascade or an uncombined positive sibling.
+    const pristineEmptyBoardForNoBoardRows = completedWithoutScoring
+      && board.hubState === 'empty'
+      && board.resultCount === 0
+      && board.mergeUnique == null
+      && board.renderedCardCount === 0
+      && board.combinedSourceHubIds.length === 0
+      && board.connectedSourceHubIds.length === 1
+      && board.connectedSourceHubIds[0] === activeSourceHubId;
+    if (pristineEmptyBoardForNoBoardRows) continue;
+    if (board.hubState !== 'done') {
+      gaps.push(`Job Board \`${board.id}\` is \`${board.hubState}\`, not done`);
+      continue;
+    }
+    const combinedThisSource = board.combinedSourceHubIds.includes(activeSourceHubId);
+    if (!combinedThisSource) {
+      gaps.push(`Job Board \`${board.id}\` lacks combined-source correlation for hub \`${activeSourceHubId}\``);
+      continue;
+    }
+    if (board.resultCount == null) {
+      gaps.push(`Job Board \`${board.id}\` did not retain a result count`);
+      continue;
+    }
+    if (board.mergeUnique == null) {
+      gaps.push(`Job Board \`${board.id}\` did not retain merge-count provenance`);
+    } else if (board.resultCount !== board.mergeUnique) {
+      gaps.push(`Job Board \`${board.id}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}`);
+    }
+    // A one-source board has no legitimate cross-module dedup adjustment, so
+    // its visible count must equal this run's score-ready result. Multi-source
+    // boards instead validate their renderer-side merge receipt above.
+    if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null
+      && board.resultCount !== boardExpectedCount) {
+      gaps.push(`Job Board \`${board.id}\` results ${board.resultCount} ≠ current run ${boardExpectedCount}`);
+    }
+  }
 
   const requiredFactsPresent = pipelinePhase === 'completed' && receiptCompleted && receiptCleanupConfirmed
     && expected != null
-    && (completedZeroResult || (scoreInput != null && scored != null && taxonomyInput != null))
+    && (completedWithoutScoring || (scoreInput != null && scored != null && taxonomyInput != null))
     && snapshot.state === 'parseable' && snapshot.jobs != null
     // A count coincidence across an old snapshot and a new in-memory run must
     // never earn a green verdict. At least two independently retained run
     // tokens must identify the same run before calling it VERIFIED.
     && runTokens.length >= 2 && distinctRunTokens.length === 1;
   const searchVerified = requiredFactsPresent && gaps.length === 0;
+  // Everything downstream of the gather can reconcile perfectly while the
+  // gather itself was partial, so the green verdict states which of the two it
+  // actually proved rather than implying both.
+  // Same rule as gather coverage: an unretained last stage is not a proven one.
+  const historyQualifier = historyWrite || completedWithoutScoring
+    ? ''
+    : ' The board-displayed seen-history write was not retained in this process, so this verdict does not prove those listings were recorded as seen.';
+  const hasExhaustedReachable = coverageBySource.some(source => source.isExhausted && source.gathered < source.total);
+  const coverageQualifier = unprovenSources.length === 0 && coverageBySource.length > 0
+    ? (hasExhaustedReachable
+      ? ' Every source gathered its full reachable result set.'
+      : ' Every source gathered its full reported result set.')
+    : unprovenSources.length > 0
+      ? ` Gather completeness is unproven for ${unprovenSources.length} source(s) (${unprovenSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size, so this verdict covers the stages after collection.`
+      : ' No per-source gather coverage was retained, so this verdict covers the stages after collection.';
   const verdict = searchVerified && staleBoards.length > 0
-    ? `⚠️ **SEARCH COMPLETE; BOARD REFRESH REQUIRED** — search stages agree, but ${staleBoards.length} Job Board${staleBoards.length === 1 ? ' has' : 's have'} stale inputs.`
+    ? `⚠️ **SEARCH COMPLETE; BOARD REFRESH REQUIRED** — search stages agree, but ${staleBoards.length} Job Board${staleBoards.length === 1 ? ' has' : 's have'} stale inputs.${coverageQualifier}${historyQualifier}`
     : searchVerified
-    ? '✅ **VERIFIED COMPLETE** — every reconciled stage agrees.'
+    ? `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
     ? '- Search + recovery: not retained in this process.'
-    : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''} = ${expected} expected scoring input.`;
+    : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''}${preferenceFiltered ? ` − ${preferenceFiltered} removed by Job Preferences` : ''} = ${expectedAfterPreferences} expected scoring input.`;
   const scoringLine = completedZeroResult
     ? '- Scoring: not required — zero score-ready jobs.'
+    : completedPreferenceFiltered
+      ? '- Scoring: intentionally skipped — Job Preferences filtered every post-history candidate.'
     : !scoring
     ? '- Scoring: not retained in this process.'
     : `- Scoring: input ${scoreInput ?? '?'} → scored ${scored ?? '?'} · placeholders ${placeholders ?? '?'} · unscored ${unscored ?? '?'} · failed batches ${failedBatches ?? '?'}.`;
   const taxonomyLine = completedZeroResult
     ? '- Taxonomy: not required — zero scored jobs.'
+    : completedPreferenceFiltered
+      ? '- Taxonomy: intentionally skipped — no preference-accepted jobs reached the board.'
     : !taxonomy
     ? '- Taxonomy: not retained in this process.'
-    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}.`;
+    : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${unionTaxonomyBoard.id}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), so it exceeds this hub's ${scored ?? '?'} scored job(s) by design` : ''}.`;
   const receiptLine = !receiptState.exists
     ? '- Terminal receipt: absent — prior-process completion cannot be proven.'
     : !receipt
       ? '- Terminal receipt: present but invalid.'
-      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}.`;
+      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}.`;
   const snapshotLine = snapshot.state === 'parseable'
-    ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s) · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
+    ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
     : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
   const runCorrelationLine = runTokens.length < 2
     ? '- Run correlation: insufficient retained run tokens — cannot verify this is one run.'
     : distinctRunTokens.length === 1
       ? `- Run correlation: ✅ ${runTokens.map(([source]) => source).join(' + ')} agree on \`${distinctRunTokens[0]}\`.`
       : `- Run correlation: ⚠️ ${runTokens.map(([source, token]) => `${source}=\`${token}\``).join(', ')}.`;
+  // Stated, never asserted: a user deleting a card they applied to is the
+  // documented workflow, so fewer cards than results is normal and only the
+  // reverse (more cards than the board claims) would be structurally wrong.
+  const renderedCardFacts = relevantBoards
+    .filter(board => board.renderedCardCount != null && board.resultCount != null)
+    .map(board => `\`${board.id}\` ${board.renderedCardCount}/${board.resultCount} on canvas`
+      + (board.renderedCardCount > board.resultCount ? ' ⚠️ more cards than results' : ''));
+
+  // Rendered whether or not it is a gap: "not retained" is a real answer here,
+  // because a run that never reached this stage is not the same as one that did.
+  const historyLine = !historyWrite
+    ? '- Seen-history write: not retained in this process.'
+    : historyWrite.error
+      ? `- Seen-history write: ❌ failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) — these listings will be offered again on the next search.`
+      : historyWrite.skipped
+        ? `- Seen-history write: deferred (${receiptIdentifier(historyWrite.skipped, 'reason omitted')}).`
+        : `- Seen-history write: ✅ ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) → ${nonnegativeCount(historyWrite.written) ?? 0} new row(s).`;
+
   const boardLine = totalBoards === 0
     ? '- Job Board consumers: none recorded.'
-    : staleBoards.length === 0
-      ? `- Job Board consumers: ${totalBoards} recorded · no stale board state.`
-      : `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${board.id}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`;
+    : staleBoards.length > 0
+      ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${board.id}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
+      : relevantBoards.length === 0
+        ? `- Job Board consumers: ${totalBoards} recorded · none correlate to this source run.`
+        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`;
+  const googleSource = telemetry?.search?.bySource?.google || receipt?.sources?.google || null;
+  const googleReveal = googleSource ? revealCoverageFact(googleSource) : null;
+  const googleCoverage = !googleSource
+    ? (coverageBySource.length === 0 ? 'no scroll-backed Google source was recorded for this run' : null)
+    : !googleReveal.retained
+      ? '⚠️ Google reveal outcome was not retained — pipeline completion proves every collected row was processed, not that the visible Google result list was exhausted'
+      : googleReveal.proven
+        ? `✅ Google ${googleReveal.outcomes.map(revealOutcomeLabel).join('; ')}`
+        : `⚠️ Google ${googleReveal.outcomes.map(revealOutcomeLabel).join('; ')}`;
+  // Every source, not just the scroll-backed one. A run made entirely of API
+  // sources previously produced the bare "no scroll-backed Google source"
+  // line, which reads as a clean result but is really "nothing about coverage
+  // was checked".
+  const perSourceCoverage = coverageBySource.map((source) => {
+    if (source.truncated) return `⚠️ \`${source.id}\` walk truncated before the result set ended`;
+    if (source.total == null) return `\`${source.id}\` reported no corpus size — coverage unproven`;
+    if (source.gathered == null) return `\`${source.id}\` provider reported ${source.total}; rows gathered were not retained`;
+    if (source.isExhausted && source.gathered < source.total) {
+      return `✅ \`${source.id}\` gathered all ${source.gathered} reachable row(s) (board advertised ~${source.total}; ended at ${source.stopReason})`;
+    }
+    return source.gathered < source.total
+      ? `⚠️ \`${source.id}\` gathered ${source.gathered} of ${source.total} reported`
+      : `✅ \`${source.id}\` gathered ${source.gathered} of ${source.total} reported`;
+  });
+  const coverageItems = [...perSourceCoverage, ...(googleCoverage ? [googleCoverage] : [])];
+  const coverageLine = `- Source coverage: ${coverageItems.length > 0 ? coverageItems.join(' · ') : 'no source coverage was recorded for this run'}.`;
 
   if (!telemetry && !receiptState.exists && snapshot.state === 'unavailable') return '';
   return `
@@ -589,14 +931,16 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
 > Compact, cap-safe reconciliation of the search/recovery funnel, scoring, taxonomy, terminal receipt, and the owned saved score-ready snapshot. Detailed per-job evidence remains in Job Search Pipeline and the uncapped saved report.
 
 - ${verdict}
-- Live pipeline: ${pipelinePhase || 'not retained'}.
+- Live search stage: ${pipelinePhase || 'not retained'} _(this phase is stamped when the GATHER ends; scoring and taxonomy run after it — the terminal receipt below is what marks the whole run finished)._
 ${receiptLine}
 ${searchLine}
 ${scoringLine}
 ${taxonomyLine}
 ${snapshotLine}
 ${runCorrelationLine}
+${historyLine}
 ${boardLine}
+${coverageLine}
 `;
 }
 
@@ -1701,7 +2045,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const collectedBeforeFinalAudit = Number(v.count || 0) + Number(v.finalRelevanceDropped || 0);
         const limit = v.cap?.limit;
         const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
-        lines.push(`  - \`${k}\`: collected ${collectedBeforeFinalAudit} of ${v.gathered} in-window provider-returned candidate(s) ⚠️ (per-platform job limit${capLabel} — ${overflow} more were not gathered; increase or clear the Jobs per platform setting on the Job Search card to widen.)`);
+        // Only name the per-platform limit when one was actually enforced. With
+        // "All" set there is no setting to widen, and the shortfall is the
+        // source's own accounting (cross-query dedup), not a truncation.
+        const cause = Number.isFinite(limit)
+          ? `per-platform job limit${capLabel} — ${overflow} more were not gathered; increase or clear the Jobs per platform setting on the Job Search card to widen.`
+          : `${overflow} candidate(s) did not reach the run; no per-platform job limit was in effect, so this is the source's own pre-admission accounting rather than a truncation.`;
+        lines.push(`  - \`${k}\`: collected ${collectedBeforeFinalAudit} of ${v.gathered} in-window provider-returned candidate(s) ⚠️ (${cause})`);
+      }
+      // Reported separately so it can never be read as a cap: the same listing
+      // returned by two of this run's queries is removed once, by design.
+      for (const [k, v] of entries) {
+        if (Number(v.crossQueryDuplicates) > 0) {
+          lines.push(`  - \`${k}\`: ${v.crossQueryDuplicates} row(s) removed as cross-query duplicates before the per-platform limit (measured at the dedup itself; expected when one run issues several queries).`);
+        }
+        if (Number(v.unattributedShortfall) > 0) {
+          lines.push(`  - \`${k}\`: ⚠️ ${v.unattributedShortfall} row(s) unaccounted for between the provider count and the retained set — neither the per-platform cap nor cross-query dedup explains them.`);
+        }
       }
       const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
       // jobRelevanceRejection is a pure function of (title, query): same inputs,
@@ -1785,7 +2145,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         if (!warning) return '';
         const evidence = historyReportValue(warning.evidence, '', 220);
         const suggestion = historyReportValue(warning.suggestion, '', 160);
-        const parts = [evidence, suggestion && `Suggested: ${suggestion}`].filter(Boolean);
+        const affectedCount = Math.max(0, Math.floor(Number(warning.affectedCount) || 0));
+        const affectedTitles = [...new Set((Array.isArray(warning.affectedTitles) ? warning.affectedTitles : [])
+          .map(title => historyReportValue(title, '', 100))
+          .filter(Boolean))].slice(0, 3);
+        // Only description-detail-miss owns this compact aggregation contract.
+        // Do not infer a count for older warnings or differently-shaped source
+        // failures, where a number would look more authoritative than it is.
+        const impact = warning.code === 'description-detail-miss' && affectedCount > 0
+          ? `${affectedCount} listing${affectedCount === 1 ? '' : 's'} affected${affectedTitles.length ? ` (sample${affectedTitles.length === 1 ? '' : 's'}: ${affectedTitles.map(title => `"${title}"`).join(', ')})` : ''}.`
+          : '';
+        const parts = [evidence, impact, suggestion && `Suggested: ${suggestion}`].filter(Boolean);
         return parts.length > 0 ? ` — ${parts.join(' ')}` : '';
       };
       const expectedSkipCodes = new Set(['country-source-skipped', 'config-missing']);
@@ -2167,7 +2537,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             issues.push(`⚠ company missing: ${q.companyEmpty}/${q.total} (${Math.round((q.companyEmpty / q.total) * 100)}%) — company selector may be intermittent`);
           }
           if (q.urlMissing > 0) {
-            issues.push(`🔥 url missing: ${q.urlMissing}/${q.total} — broken card link, breaks dedup`);
+            issues.push(src === 'google'
+              ? `⚠ direct Apply-on URL missing: ${q.urlMissing}/${q.total} — Open listing uses the preserved Google htidocid fallback; within-source dedup remains intact`
+              : `🔥 url missing: ${q.urlMissing}/${q.total} — broken card link, breaks dedup`);
           }
           // Empty descriptions: a high rate means enrichment broke for most jobs
           // (e.g. LinkedIn's guest authwall stops enrichment after a few requests,
@@ -2572,6 +2944,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // cases where it found a blocker but could not clear it.
         const blockingModalsDismissed = Number(e.blockingModalsDismissed ?? 0);
         const blockingModalFailures = Number(e.blockingModalFailures ?? 0);
+        const googleApplyLinksCaptured = Number(e.googleApplyLinksCaptured ?? 0);
+        const googleApplyLinksMissing = Number(e.googleApplyLinksMissing ?? 0);
         // The post-click selected-card probe is separate from the pre-click
         // hit-test. A correct physical hit does not, by itself, prove that the
         // board activated that same row after its event handler ran.
@@ -2619,6 +2993,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           Number.isFinite(selectionMismatches) ? `selection-mismatches ${selectionMismatches}` : null,
           blockingModalsDismissed > 0 ? `blocking-popup-dismissed ${blockingModalsDismissed}` : null,
           blockingModalFailures > 0 ? `blocking-popup-dismiss-failed ${blockingModalFailures}` : null,
+          (googleApplyLinksCaptured > 0 || googleApplyLinksMissing > 0)
+            ? `direct-apply ${googleApplyLinksCaptured}/${googleApplyLinksCaptured + googleApplyLinksMissing} captured`
+            : null,
           titleBypassed > 0 ? `title-bypassed ${titleBypassed} (intentional, page-local)` : null,
           abortLabel,
         ].filter(Boolean).join(' · ');
@@ -2647,6 +3024,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           if (Array.isArray(e.modalSamples) && e.modalSamples.length > modalSamples.length) {
             lines.push(`      - _${e.modalSamples.length - modalSamples.length} additional popup-handling sample(s) omitted from the bounded trace._`);
           }
+        }
+        const applyMissSamples = Array.isArray(e.googleApplyLinkMissSamples)
+          ? e.googleApplyLinkMissSamples.slice(0, 4)
+          : [];
+        for (const sample of applyMissSamples) {
+          const index = Number(sample?.itemIndex);
+          const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
+          const title = historyReportValue(sample?.title, '(untitled)', 100);
+          const provider = historyReportValue(sample?.preferredSource, '(unrecorded provider)', 80);
+          const labels = Array.isArray(sample?.candidateLabels) && sample.candidateLabels.length
+            ? ` · visible candidates=${sample.candidateLabels.map(label => JSON.stringify(historyReportValue(label, '', 80))).join(', ')}`
+            : ' · visible candidates=none after bounded wait';
+          lines.push(`    - ⚠️ ${position} direct Apply-on URL missing · "${title.replace(/"/g, "'")}" · preferred=${provider}${labels}`);
         }
         // Failures alone cannot diagnose a visible "every other card" jump:
         // all clicks can succeed while the browser resolves a neighbouring
@@ -2765,7 +3155,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   const revealRuns = originPool.filter(e => e?.phase === 'reveal-finished');
   if (revealRuns.length > 0) {
     lines.push('\n### Scroll reveal');
-    for (const e of revealRuns.slice(0, 6)) {
+    // Newest-last: one outcome is emitted per query, so a 12-query run would
+    // otherwise print only the first six and silently drop the later plateau
+    // this section exists to surface.
+    for (const e of revealRuns.slice(-6)) {
       const count = Number(e.count) || 0;
       const viaMarker = e.exit === 'end-of-list';
       // State the observation; do NOT assert the cause. A small corpus plateaus
@@ -2776,6 +3169,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           ? `ended on a no-growth plateau, NOT the board's end-of-list marker — completeness is unproven${count > 0 && count < 60 ? ' (and this count is far below the 174-194 range every high-volume query exhausted at, which is the signature of a reveal that never loaded)' : ''}`
           : `ended: ${e.exit || 'unknown'}`;
       lines.push(`- \`${e.sourceId || '?'}\`: revealed ${count} card(s) over ${Number(e.iterations) || 0} pass(es) — ${note}`);
+    }
+    if (revealRuns.length > 6) {
+      lines.push(`- _${revealRuns.length - 6} earlier reveal outcome(s) omitted from the bounded trail._`);
     }
   }
 
@@ -3271,14 +3667,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const attempt = latestResolvedResumeAttempt(t, sourceId, t.search?.ts);
       return sum + (resolvedResumeCount(attempt) || 0);
     }, 0);
-    const sessionGathered = (t.search?.kept || 0) +
-      Object.values(t.resolves || {}).reduce((sum, r) => {
-        const m = r?.merge;
-        const cumulative = Number(r?.cumulativeMergeNet);
-        return sum + (r?.hasMergeTelemetry === true && Number.isFinite(cumulative)
-          ? cumulative
-          : (m != null ? (m.pendingAfter - m.pendingBefore) : (r?.kept || 0)));
-      }, 0) + resumeOnlyGathered;
+    // recoveryMergeNet owns that precedence rule for the compact completion
+    // verdict too — one accounting shared by both so the two sections of the
+    // same report cannot disagree about what this session gathered.
+    const sessionGathered = (t.search?.kept || 0) + recoveryMergeNet(t) + resumeOnlyGathered;
     const carried = s.input - sessionGathered;
     if (carried > 0) {
       lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
@@ -3571,8 +3963,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push(`  - **${band.label}** — ${band.count} job${band.count === 1 ? '' : 's'}`);
         }
       }
-      // Salary ranges (second level) — just the labels the AI chose.
-      if (Array.isArray(b.salaryRangeLabels) && b.salaryRangeLabels.length > 0) {
+      // Salary ranges (second level), with the same deterministic placement
+      // counts the bands and roles already carry. A label list alone said which
+      // buckets the model invented but not whether any job landed in them —
+      // an empty or lopsided partition read identically to a good one.
+      if (Array.isArray(b.salaryRangeSummary) && b.salaryRangeSummary.length > 0) {
+        lines.push('- Salary ranges (second level — deterministic placement, same helper the canvas uses):');
+        for (const range of b.salaryRangeSummary) {
+          lines.push(`  - **${range.label}** — ${range.count} job${range.count === 1 ? '' : 's'}`);
+        }
+      } else if (Array.isArray(b.salaryRangeLabels) && b.salaryRangeLabels.length > 0) {
+        // Older telemetry carried labels only.
         lines.push(`- Salary ranges (second level): ${b.salaryRangeLabels.map(s => `"${s}"`).join(', ')}`);
       }
       if (Array.isArray(b.taxonomyRepairs) && b.taxonomyRepairs.length > 0) {

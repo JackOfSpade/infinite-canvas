@@ -942,7 +942,11 @@ async function runGeminiAvailabilityCheck(settings) {
     // Surfaced separately from `models` so a denied Pro tier reads as "not
     // entitled on this plan" rather than as a failing model in the chain.
     tierEntitlement: entitlementSnapshot(scope),
-    hasQuotaStats: quotaStatsMap !== null,
+    // Derived from the folded rows, not from the fetch succeeding: the stats map
+    // is keyed by the AI Studio ids (and describes generativelanguage quota), so
+    // on the Vertex endpoint no row can ever receive stats and the panel would
+    // otherwise claim Cloud Monitoring figures it has nothing to render.
+    hasQuotaStats: models.some((m) => !!m.quotaStats),
     endpoint: apiKey ? 'ai-studio' : 'vertex',
   };
 }
@@ -1138,9 +1142,10 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     genConfig.meta.fallback = { attempts: 0, preferredModel: model };
   }
 
-  // Honor the per-task preference, then cascade down the capability ladder
-  // (pro → flash → lite) through every compatible model. Known
-  // rate-limited/unreachable endpoints move to the tail as a last resort.
+  // Cascade down the shared capability ladder (GEMINI_TIER_LADDER) through every
+  // compatible model; `model` is a recorded per-task preference that
+  // orderGeminiModels does not act on. Known rate-limited/unreachable endpoints
+  // move to the tail as a last resort.
   //
   // `entitledTiersFor` is a pure cache read — it never blocks this call. The
   // refresh below fires a single minimal probe in the BACKGROUND when a gated
@@ -1149,29 +1154,37 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   // probe: a Vertex project can also lack access to a Pro model, and without
   // its background probe it would never enter the Pro tier unless the user
   // happened to click Settings → Check availability first.
-  const _now = Date.now();
   const usingVertex = !apiKey;
-  const entitledTiers = usingVertex ? new Set() : entitledTiersFor(scope, _now);
+  // Shared by both passes: the retry pass must derive its order from exactly the
+  // same inputs as the first one, or a later change to the ordering inputs would
+  // silently apply to only one of them.
+  const computeModelOrder = (now, logPrefix = '') => {
+    const entitledTiers = usingVertex ? new Set() : entitledTiersFor(scope, now);
+    const scopeSuppression = suppressionMapForScope(
+      scope,
+      now,
+      usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
+    );
+    const order = usingVertex
+      ? orderVertexGeminiModels(scopeSuppression, now, { excludeModels: genConfig.excludeModels })
+      : orderGeminiModels(model, scopeSuppression, now, {
+        entitledTiers,
+        responseSchema: !!genConfig.responseSchema,
+        grounding: grounded,
+        excludeModels: genConfig.excludeModels,
+      });
+    const cooling = order.filter(m => scopeSuppression.has(m));
+    if (cooling.length > 0 && cooling.length < order.length) {
+      logger.info(`[Gemini] ${logPrefix}Deferring ${cooling.length} suppressed model(s): ${cooling.join(', ')}`);
+    }
+    return order;
+  };
+
+  const _now = Date.now();
   if (!usingVertex) {
     refreshEntitlementInBackground(scope, (m) => probeGemini(apiKey, m), _now);
   }
-  const scopeSuppression = suppressionMapForScope(
-    scope,
-    _now,
-    usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
-  );
-  const modelOrder = usingVertex
-    ? orderVertexGeminiModels(scopeSuppression, _now, { excludeModels: genConfig.excludeModels })
-    : orderGeminiModels(model, scopeSuppression, _now, {
-      entitledTiers,
-      responseSchema: !!genConfig.responseSchema,
-      grounding: grounded,
-      excludeModels: genConfig.excludeModels,
-    });
-  const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
-  if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
-    logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
-  }
+  const modelOrder = computeModelOrder(_now);
 
   // One pass over a fallback chain: try every model in `order` in turn.
   // Failures are folded into the shared `attemptedErrors` (the running
@@ -1341,25 +1354,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
 
     // Recompute fresh — suppressions may have expired during the wait, and a
     // stale `modelOrder` would just re-run the same (still-cooling) ordering.
-    const now2 = Date.now();
-    const entitledTiers2 = usingVertex ? new Set() : entitledTiersFor(scope, now2);
-    const scopeSuppression2 = suppressionMapForScope(
-      scope,
-      now2,
-      usingVertex ? VERTEX_GEMINI_MODEL_FALLBACKS : undefined,
-    );
-    const modelOrder2 = usingVertex
-      ? orderVertexGeminiModels(scopeSuppression2, now2, { excludeModels: genConfig.excludeModels })
-      : orderGeminiModels(model, scopeSuppression2, now2, {
-        entitledTiers: entitledTiers2,
-        responseSchema: !!genConfig.responseSchema,
-        grounding: grounded,
-        excludeModels: genConfig.excludeModels,
-      });
-    const _cooling2 = modelOrder2.filter(m => scopeSuppression2.has(m));
-    if (_cooling2.length > 0 && _cooling2.length < modelOrder2.length) {
-      logger.info(`[Gemini] Retry pass: deferring ${_cooling2.length} still-suppressed model(s): ${_cooling2.join(', ')}`);
-    }
+    const modelOrder2 = computeModelOrder(Date.now(), 'Retry pass: ');
 
     const secondPassErrors = [];
     const secondResult = await runFallbackPass(modelOrder2, secondPassErrors);
@@ -1392,13 +1387,23 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   // "quota" trips enhanceLLMError's message sniff downstream, falsely tagging
   // isRateLimit and titling the hub banner "Usage Limit Reached". The non-quota
   // wording below must therefore avoid "quota"/"429"/"rate limit" substrings.
+  // A pass where the provider never answered (per-model timeout → 'aborted',
+  // overload/5xx → 'server') sets none of the counters above, so without its own
+  // branch it fell through to the request-rejection wording below and told the
+  // user the app had sent a malformed request when nothing was ever rejected.
+  // Report the observed classification counts instead of naming a cause.
+  const noAnswerCount = attemptedErrors.filter(
+    (e) => e.classification === 'server' || e.classification === 'aborted'
+  ).length;
   const quotaSummary = noQuotaCount > 0
     ? `${noQuotaCount} model(s) have no quota allocated for this credential/project`
     : dailyQuotaCount > 0
       ? `${dailyQuotaCount} model(s) exhausted their daily quota`
       : hasRateLimit
         ? 'Usage limits or quotas may have been exceeded on the fallback models'
-        : 'Every model rejected the request itself (no usage-limit failures were seen) — this points at a malformed request or an API change, not exhausted limits';
+        : noAnswerCount > 0
+          ? `${noAnswerCount} of ${attemptedErrors.length} attempt(s) failed before the model answered (provider server error or timeout); no usage-limit failures were seen`
+          : 'Every model rejected the request itself (no usage-limit failures were seen) — this points at a malformed request or an API change, not exhausted limits';
   const finalError = new Error(`All Gemini models failed. ${quotaSummary}.\n\nDetails:\n${errorDetails}`);
   if (hasRateLimit) {
     finalError.isRateLimit = true;

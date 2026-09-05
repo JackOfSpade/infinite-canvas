@@ -1,7 +1,9 @@
 export const TRANSIENT_PROCESSING_HUB_STATES = [
   'queued',
   'parsing',
+  'interpreting-preferences',
   'querying',
+  'evaluating-preferences',
   'searching',
   'scoring',
   'analyzing',
@@ -13,6 +15,28 @@ const JOBSEARCH_TRANSIENT_KEYS = [
   'scrapeWarnings',
   'pendingJobs',
   'pendingTargetRole',
+  // These freeze the active run's Job Preferences while scraping. Recovery
+  // reads the manifest instead; retaining them after an interrupted hub is
+  // reset to empty risks applying an old person's plan to the next run.
+  'activeJobPreferences',
+  // The interpreted half of that same frozen pair. Stripping only the TEXT left
+  // a reloaded hub holding the previous run's PLAN with no text to check it
+  // against, and the post-run readers (late-USAJobs refresh, done-state append,
+  // resume scoring) take them as a pair — `data.activeJobPreferences ??
+  // data.jobPreferences` fell through to whatever is currently in the textarea
+  // while `data.jobPreferencePlan` still supplied the OLD interpretation, so new
+  // listings were screened under a plan the visible text no longer describes.
+  // Dropping both is safe: evaluateJobPreferences re-derives a plan from raw
+  // text, and runPipeline always re-interprets at the start of a fresh run.
+  'jobPreferencePlan',
+  'jobPreferencesInterpretation',
+  'pendingJobPreferences',
+  'pendingJobPreferencesInterpretation',
+  'pendingJobPreferencePlan',
+  // `sources-ready` deliberately keeps its pending career data so it can
+  // resume after a restart. In every other state this is stale queue state and
+  // often a second large copy of careerData, so strip it with the run buffer.
+  'pendingCareerData',
   'errorMessage',
   'isRateLimit',
   // A healthy history-suppressed re-run explanation belongs only to the
@@ -64,8 +88,18 @@ export const SELLHUB_TRANSIENT_KEYS = [
   'platformFitPending',
 ];
 
+// A hub that FINISHED owns its frozen run values the same way a paused
+// 'sources-ready' hub does: the late-source append and re-analysis paths read
+// `activeJobPreferences` + `jobPreferencePlan` together as "the generation these
+// results came from". Only an INTERRUPTED run (a state that is itself rewritten
+// to 'empty' on save) has to shed them, which is what the strip was written for.
+const JOBSEARCH_DONE_TRANSIENT_KEYS = JOBSEARCH_TRANSIENT_KEYS.filter(key => (
+  key !== 'activeJobPreferences' && key !== 'jobPreferencePlan' && key !== 'jobPreferencesInterpretation'
+));
+
 export function getJobSearchTransientKeysForSave(hubState) {
-  return hubState === 'sources-ready'
-    ? JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS
-    : JOBSEARCH_TRANSIENT_KEYS;
+  if (hubState === 'sources-ready') return JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS;
+  return TRANSIENT_PROCESSING_HUB_STATES.includes(hubState)
+    ? JOBSEARCH_TRANSIENT_KEYS
+    : JOBSEARCH_DONE_TRANSIENT_KEYS;
 }

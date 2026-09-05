@@ -2,7 +2,7 @@ import React from 'react';
 
 const inputClass = 'min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25';
 
-function LocationInputs({ value, onChange, fixedCountry = null, countryPlaceholder = 'Country (required)', residence = false }) {
+function LocationInputs({ value, onChange, fixedCountry = null, countryPlaceholder = 'Country (required)', residence = false, disabled = false }) {
   const update = (field, next) => onChange?.({ ...value, [field]: next });
   const cityLabel = residence ? 'Your city while working remotely' : 'Search city';
   const subdivisionLabel = residence ? 'Your state or province while working remotely' : 'Search state or province';
@@ -16,7 +16,8 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         onChange={(e) => update('city', e.target.value)}
         placeholder={residence ? 'Your city (optional)' : 'City (optional)'}
         aria-label={cityLabel}
-        className={inputClass}
+        disabled={disabled}
+        className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`}
       />
       <input
         type="text"
@@ -25,7 +26,8 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         onChange={(e) => update('subdivision', e.target.value)}
         placeholder={residence ? 'Your state / province' : 'State / province (optional)'}
         aria-label={subdivisionLabel}
-        className={inputClass}
+        disabled={disabled}
+        className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`}
       />
       <input
         type="text"
@@ -36,7 +38,8 @@ function LocationInputs({ value, onChange, fixedCountry = null, countryPlacehold
         readOnly={!!fixedCountry}
         aria-readonly={!!fixedCountry}
         aria-label={countryLabel}
-        className={`${inputClass} col-span-2 ${fixedCountry ? 'text-white/40 cursor-default' : ''}`}
+        disabled={disabled}
+        className={`${inputClass} col-span-2 ${fixedCountry ? 'text-white/40 cursor-default' : ''} disabled:cursor-not-allowed disabled:opacity-50`}
       />
     </div>
   );
@@ -49,11 +52,12 @@ export function JobSearchLocationFields({
   remoteResidences,
   setRemoteResidence,
   compact = false,
+  disabled = false,
 }) {
   return (
     <div className={`w-full flex flex-col gap-1.5 ${compact ? '' : 'text-[10px] text-white/40'}`}>
       <p className="text-[10px] text-blue-200/60 font-medium">Search location</p>
-      <LocationInputs value={searchLocation} onChange={setSearchLocation} />
+      <LocationInputs value={searchLocation} onChange={setSearchLocation} disabled={disabled} />
 
       <div className="pt-1 border-t border-white/5">
         <p className="text-[10px] text-blue-200/60 font-medium mb-1">Remote salary comparison</p>
@@ -66,6 +70,7 @@ export function JobSearchLocationFields({
               onChange={(next) => setRemoteResidence?.('usa', next)}
               fixedCountry="United States"
               residence
+              disabled={disabled}
             />
           </div>
           <div>
@@ -75,6 +80,7 @@ export function JobSearchLocationFields({
               onChange={(next) => setRemoteResidence?.('canada', next)}
               fixedCountry="Canada"
               residence
+              disabled={disabled}
             />
           </div>
           <div>
@@ -84,6 +90,7 @@ export function JobSearchLocationFields({
               onChange={(next) => setRemoteResidence?.('other', next)}
               countryPlaceholder="Your country (optional)"
               residence
+              disabled={disabled}
             />
           </div>
         </div>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 import { RefreshCw, Target, Bot, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
@@ -27,6 +27,9 @@ export function JobSearchDoneState({
   testMode = false,
   resumeSummary,
   locked = false,
+  platformsVerifying = false,
+  verifyDone = 0,
+  verifyTotal = 0,
   // Action props
   onRerun,
   // Reassesses the saved listings only; it does not scrape or run the
@@ -53,12 +56,23 @@ export function JobSearchDoneState({
   // tweak it before re-running without going back to empty state.
   targetRole = '',
   setTargetRole,
+  // Natural-language directions, preferences, and deal-breakers for the
+  // AI. Kept separate from the literal target-role gate.
+  jobPreferences = '',
+  setJobPreferences,
+  preferenceMatchedCount = null,
+  preferenceFilteredCount = null,
+  jobPreferencePlan = null,
+  preferenceEvaluation = null,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
   // A completed run with no eligible results replaces the old result set.
   rerunOutcome = null,
+  resultDisposition = null,
 }) {
   const { addToast } = useToast();
+  const targetRoleHelpId = useId();
+  const preferencesHelpId = useId();
   // `testMode` is retained only for old persisted hubs. New runs record the
   // actual scoring behavior through `aiSkipped` / `collectionOnly`.
   const skippedAi = aiSkipped || collectionOnly || testMode;
@@ -77,6 +91,25 @@ export function JobSearchDoneState({
       .filter((value) => value != null),
   );
   const scoreReadyCount = validCount(scrapedCount) ?? displayedGatheredCount;
+  const matchedPreferenceCount = validCount(preferenceMatchedCount);
+  const filteredPreferenceCount = validCount(preferenceFilteredCount);
+  const preferencesFilteredRun = resultDisposition === 'preference-filtered';
+  const preferencePlan = jobPreferences.trim()
+    ? (preferenceEvaluation?.preferencePlan || jobPreferencePlan || null)
+    : null;
+  const preferenceSummary = typeof preferencePlan?.summary === 'string' ? preferencePlan.summary.trim() : '';
+  const preferenceCounts = preferenceEvaluation?.counts || null;
+  const filteredAudits = Array.isArray(preferenceEvaluation?.audits)
+    ? preferenceEvaluation.audits.filter((audit) => audit?.status === 'filtered')
+    : [];
+  const jobsLabel = (value, singular, plural = `${singular}s`) => `${value} ${value === 1 ? singular : plural}`;
+  const resultLabel = preferencesFilteredRun
+    ? `${jobsLabel(count, 'job')} matched your preferences`
+    : noNewResults
+      ? jobsLabel(count, 'new job', 'new jobs')
+      : skippedAi
+        ? jobsLabel(count, 'job collected', 'jobs collected')
+        : jobsLabel(count, 'job scored', 'jobs scored');
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
@@ -84,17 +117,53 @@ export function JobSearchDoneState({
       {/* Result count */}
       <div className="text-emerald-400 text-2xl font-bold">{count}</div>
       <p className="text-white/40 text-xs">
-        {noNewResults ? 'new jobs' : skippedAi ? 'jobs collected' : 'jobs scored'}
+        {resultLabel}
       </p>
 
       {/* Keep the current run's found → score-ready funnel visible even when
           no jobs survive into the new result set. */}
       {(displayedGatheredCount > 0 || scoreReadyCount > 0) && (
         <p className="text-white/25 text-[10px] mt-0.5">
-          {displayedGatheredCount !== scoreReadyCount
-            ? `${displayedGatheredCount} found → ${scoreReadyCount} score-ready`
-            : `${displayedGatheredCount} found`}
+          {[
+            `${jobsLabel(displayedGatheredCount, 'job')} found`,
+            matchedPreferenceCount != null && `${jobsLabel(matchedPreferenceCount, 'job')} matched your preferences`,
+            displayedGatheredCount !== scoreReadyCount && `${jobsLabel(scoreReadyCount, 'job')} ready to score`,
+          ].filter(Boolean).join(' → ')}
         </p>
+      )}
+      {filteredPreferenceCount != null && filteredPreferenceCount > 0 && (
+        <p className="text-white/25 text-[9px]">
+          {jobsLabel(filteredPreferenceCount, 'job')} filtered by your preferences
+        </p>
+      )}
+
+      {(preferenceSummary || filteredAudits.length > 0 || preferenceCounts) && (
+        <details className="w-full mt-1 px-2 py-1 rounded border border-violet-500/15 bg-violet-500/5 text-[9px] text-white/40">
+          <summary className="cursor-pointer text-violet-200/70">
+            {preferenceSummary || 'Job Preferences evaluated'}
+          </summary>
+          <div className="mt-1 space-y-1 leading-snug">
+            {preferenceCounts && (
+              <p>
+                {jobsLabel(preferenceCounts.accepted ?? matchedPreferenceCount ?? 0, 'job')} matched
+                {Number.isFinite(preferenceCounts.filtered) && ` · ${jobsLabel(preferenceCounts.filtered, 'job')} filtered`}
+              </p>
+            )}
+            {filteredAudits.length > 0 && (
+              <div>
+                <p className="text-white/30">Filtered reasons</p>
+                <ul className="list-disc pl-3">
+                  {filteredAudits.slice(0, 4).map((audit, index) => (
+                    <li key={`${audit.title || 'job'}-${index}`}>
+                      {audit.title || 'Job'}{audit.company ? ` — ${audit.company}` : ''}: {audit.summary || 'did not meet your preferences'}
+                    </li>
+                  ))}
+                </ul>
+                {filteredAudits.length > 4 && <p>+{filteredAudits.length - 4} more</p>}
+              </div>
+            )}
+          </div>
+        </details>
       )}
 
       {/* AI model used for query generation */}
@@ -133,20 +202,25 @@ export function JobSearchDoneState({
               onClick={onReanalyze}
               onPointerDown={(e) => e.stopPropagation()}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-violet-500/15 text-violet-300/90 hover:bg-violet-500/25 text-[10px] transition-colors border border-violet-500/20"
-              title="Re-score the displayed jobs with the saved career profile; does not search or scrape again"
+              title="Re-evaluate saved jobs with your current Job Preferences and hiring fit; does not search or scrape again"
             >
               <RefreshCw size={9} />
-              Re-analyze Hiring Fit
+              Re-evaluate Saved Jobs
             </button>
           )}
           <button
             onClick={onRerun}
             onPointerDown={(e) => e.stopPropagation()}
-            className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15"
-            title="Clear old results and re-run the search with the same resume"
+            disabled={platformsVerifying}
+            className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15 disabled:cursor-wait disabled:opacity-50"
+            title={platformsVerifying
+              ? 'Waiting for the selected job platform connection check'
+              : 'Clear old results and re-run the search with the same resume'}
           >
-            <RefreshCw size={9} />
-            Re-run Search
+            <RefreshCw size={9} className={platformsVerifying ? 'animate-spin' : ''} />
+            {platformsVerifying
+              ? `Checking connections${verifyTotal > 0 ? ` (${verifyDone}/${verifyTotal})` : ''}…`
+              : 'Re-run Search'}
           </button>
         </div>
       )}
@@ -167,18 +241,35 @@ export function JobSearchDoneState({
       {/* Target role + Look back — both feed the next Re-run Search */}
       {!locked && (
         <div className="nodrag w-full mt-2 flex flex-col items-stretch gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
-          <div className="flex items-center gap-1.5 text-[10px] text-white/40">
-            <Target size={10} className="text-purple-300/70 shrink-0" />
+          <label className="flex flex-col gap-1 text-[10px] text-white/40">
+            <span className="flex items-center gap-1.5"><Target size={10} aria-hidden="true" className="text-purple-300/70 shrink-0" />Target role <span className="text-white/25">(optional)</span></span>
             <input
               type="text"
               data-native-undo="true"
               value={targetRole}
               onChange={(e) => setTargetRole?.(e.target.value)}
               placeholder="Target role (optional)"
+              aria-describedby={targetRoleHelpId}
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
-              title="Blank: AI generates best-fit search variations. Set: skips variation generation and searches this exact role once. Applies on next Re-run Search."
             />
-          </div>
+            <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role on the next re-run.</span>
+          </label>
+          <label className="flex flex-col gap-1 text-[10px] text-white/40">
+            <span>Job Preferences <span className="text-white/25">(optional)</span></span>
+            <textarea
+              data-native-undo="true"
+              value={jobPreferences}
+              onChange={(e) => setJobPreferences?.(e.target.value)}
+              rows={3}
+              maxLength={4000}
+              placeholder="E.g. Help me pivot away from web development; large established companies only."
+              aria-describedby={preferencesHelpId}
+              className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25 leading-snug"
+            />
+            <span id={preferencesHelpId} className="text-[9px] leading-snug text-white/25">
+              Applies on the next re-run and saved-job re-evaluation. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
+            </span>
+          </label>
           <JobSearchLocationFields
             searchLocation={searchLocation}
             setSearchLocation={setSearchLocation}
@@ -186,10 +277,7 @@ export function JobSearchDoneState({
             setRemoteResidence={setRemoteResidence}
             compact
           />
-          <div
-            className="flex items-center justify-center gap-1.5 text-[10px] text-white/40"
-            title="Maximum posting age (in days) to consider on the next search"
-          >
+          <label className="flex items-center justify-center gap-1.5 text-[10px] text-white/40">
             <span>Look back</span>
             <input
               type="number"
@@ -198,10 +286,11 @@ export function JobSearchDoneState({
               max={180}
               value={maxAgeDays}
               onChange={(e) => setMaxAgeDays?.(e.target.value)}
+              aria-label="Maximum posting age in days"
               className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
             />
             <span>days</span>
-          </div>
+          </label>
           <JobCollectionLimitsControl
             collectionLimits={collectionLimits}
             setCollectionLimits={setCollectionLimits}

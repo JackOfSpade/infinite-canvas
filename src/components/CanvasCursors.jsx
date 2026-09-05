@@ -1,16 +1,11 @@
 import React, { useState, useImperativeHandle, forwardRef } from 'react';
 import { NestedCanvasIcon } from './CanvasToolbar';
 
-export const CanvasCursors = forwardRef(({ eraserSize, placementMode }, ref) => {
-  const [eraserPos, setEraserPos] = useState({ x: -999, y: -999 });
+export const CanvasCursors = forwardRef(({ placementMode }, ref) => {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [nestedDragPos, setNestedDragPos] = useState(null);
 
   useImperativeHandle(ref, () => ({
-    updateEraser: (pos) => setEraserPos(prev => {
-      if (prev.x === pos.x && prev.y === pos.y) return prev;
-      return pos;
-    }),
     updateMouse: (pos) => setMousePos(prev => {
       if (prev.x === pos.x && prev.y === pos.y) return prev;
       return pos;
@@ -36,22 +31,6 @@ export const CanvasCursors = forwardRef(({ eraserSize, placementMode }, ref) => 
             </span>
           )}
         </div>
-      )}
-
-      {eraserPos.x !== -999 && (
-        <div
-          className="fixed pointer-events-none z-[9998]"
-          style={{
-            left:   eraserPos.x - eraserSize,
-            top:    eraserPos.y - eraserSize,
-            width:  eraserSize * 2,
-            height: eraserSize * 2,
-            borderRadius: '50%',
-            border: '1.5px solid rgba(255,255,255,0.7)',
-            boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
-            background: 'rgba(255,255,255,0.04)',
-          }}
-        />
       )}
 
       {nestedDragPos && (

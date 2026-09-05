@@ -380,7 +380,10 @@ export function detectAntiBotSignal(ctx = {}) {
   //       and none were malformed (seen === itemsExtracted, noFields === 0) — the
   //       page genuinely had that few listings, not silently-dropped ones.
   if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems && yieldStats) {
-    const claimed = Number(yieldStats.claimedTotal);
+    // An absent header is reported as either a missing key or an explicit null
+    // (extractors initialise claimedTotal = null); Number(null) is 0, which would
+    // impersonate a site-declared total of zero and suppress every warning.
+    const claimed = yieldStats.claimedTotal == null ? NaN : Number(yieldStats.claimedTotal);
     if (Number.isFinite(claimed) && claimed >= 0) {
       // (a) The site declares its own total — authoritative, and takes EXCLUSIVE
       // precedence: suppress only if we extracted everything it claims, or it

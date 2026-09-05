@@ -1,4 +1,4 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, enqueueStatusCheckAction, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckActionQueueDepth, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 
 export default [
   {
@@ -816,65 +816,6 @@ export default [
       assert(await head === undefined && await follower === 'follower',
         'an early-aborted queue slot preserves mutual exclusion and does not wedge its follower');
       assert(ranQueued === false, 'the aborted queue slot must remain skipped after reaching its turn');
-      return { ok: true, order: order.join(',') };
-    },
-  },
-{
-    name: 'status-check action queue serializes Check All + Check buttons and dedupes rapid same-button clicks',
-    run: async () => {
-      const order = [];
-      let releaseA;
-      const aGate = new Promise(r => { releaseA = r; });
-      const before = getStatusCheckActionQueueDepth();
-
-      const a = enqueueStatusCheckAction('check-all:marketplacecard:hub-a', async () => {
-        order.push('A-card-1');
-        await aGate;
-        order.push('A-card-2');
-        return 'a';
-      });
-      const duplicateA = enqueueStatusCheckAction('check-all:marketplacecard:hub-a', async () => {
-        order.push('A-duplicate');
-      });
-      const c = enqueueStatusCheckAction('card:marketplace-card-c', async () => {
-        order.push('C-single-check');
-        return 'c';
-      });
-      const duplicateC = enqueueStatusCheckAction('card:marketplace-card-c', async () => {
-        order.push('C-duplicate');
-      });
-      const b = enqueueStatusCheckAction('check-all:marketplacecard:hub-b', async () => {
-        order.push('B-card-1');
-        order.push('B-card-2');
-        return 'b';
-      });
-      const d = enqueueStatusCheckAction('card:marketplace-card-d', async () => {
-        order.push('D-single-check');
-        return 'd';
-      });
-
-      assert(a.enqueued && !duplicateA.enqueued && c.enqueued && !duplicateC.enqueued && b.enqueued && d.enqueued,
-        'rapid duplicate Check All / Check clicks are deduped while different actions queue');
-      assert(c.queuedBehind === 1, `single Check queues behind the complete Check All batch — got ${c.queuedBehind}`);
-      assert(b.queuedBehind === 2 && d.queuedBehind === 3,
-        `alternating Check All / Check actions retain FIFO positions — got ${b.queuedBehind}, ${d.queuedBehind}`);
-      assert(getStatusCheckActionQueueDepth() === before + 4, 'queue depth counts unique actions only');
-      await new Promise(r => setTimeout(r, 0));
-      assert(order.join(',') === 'A-card-1', `single Check must not interleave with Check All — got [${order.join(',')}]`);
-
-      releaseA();
-      const [aResult, cResult, bResult, dResult] = await Promise.all([a.promise, c.promise, b.promise, d.promise]);
-      assert(aResult === 'a' && cResult === 'c' && bResult === 'b' && dResult === 'd', 'each action observes its own result');
-      assert(order.join(',') === 'A-card-1,A-card-2,C-single-check,B-card-1,B-card-2,D-single-check',
-        `alternating Check All / Check actions run FIFO without interleaving — got [${order.join(',')}]`);
-      assert(!order.includes('A-duplicate') && !order.includes('C-duplicate'), 'duplicate action bodies never run');
-      assert(getStatusCheckActionQueueDepth() === before, 'action queue depth returns to baseline');
-
-      const failed = enqueueStatusCheckAction('check-all:marketplacecard:hub-fail', async () => { throw new Error('boom'); });
-      const recovered = enqueueStatusCheckAction('card:marketplace-card-after-fail', async () => 'recovered');
-      const error = await failed.promise.catch(err => err.message);
-      assert(error === 'boom' && await recovered.promise === 'recovered', 'failed action does not wedge later buttons');
-      assert(getStatusCheckActionQueueDepth() === before, 'action queue drains after rejection path');
       return { ok: true, order: order.join(',') };
     },
   },

@@ -288,9 +288,12 @@ export default [
         showAllVerifySkills: true,
       });
       const fitDom = new JSDOM(fitHtml);
-      assert(!fitDom.window.document.querySelector('[data-ic-inferred-skill="skill-1"]')?.hidden
-        && !fitDom.window.document.querySelector('[data-ic-inferred-group]')?.hidden,
-      'page-fit mode must measure the largest all-verified résumé state');
+      // Bind before asserting: a missing node makes `?.hidden` undefined, which
+      // would satisfy a bare negation and hide a dropped injection.
+      const fitSkill = fitDom.window.document.querySelector('[data-ic-inferred-skill="skill-1"]');
+      const fitGroup = fitDom.window.document.querySelector('[data-ic-inferred-group]');
+      assert(fitSkill?.hidden === false && fitGroup?.hidden === false,
+        'page-fit mode must measure the largest all-verified résumé state');
       fitDom.window.close();
 
       const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'https://workspace.test/' });
@@ -526,8 +529,10 @@ export default [
       });
       const dom = new JSDOM(html);
       const { document } = dom.window;
-      assert(!document.querySelector('[data-ic-inferred-skill="skill-1"]')?.hidden, 'page-fit mode must reveal a merged verify skill');
-      assert(!document.querySelector('[data-ic-inferred-separator="join"]')?.hidden, 'page-fit mode must reveal the merged skill\'s join separator');
+      const merged = document.querySelector('[data-ic-inferred-skill="skill-1"]');
+      const join = document.querySelector('[data-ic-inferred-separator="join"]');
+      assert(merged?.hidden === false, 'page-fit mode must reveal a merged verify skill');
+      assert(join?.hidden === false, 'page-fit mode must reveal the merged skill\'s join separator');
       dom.window.close();
       return { ok: true };
     },

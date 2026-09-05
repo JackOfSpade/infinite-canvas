@@ -46,6 +46,10 @@ export default class Store {
   }
 
   get(key, defaultValue) {
+    // dot-prop treats a non-string path as "no path" — reads return the whole
+    // container (callers use a bare `.get()` to sweep a cache), while `has`
+    // reports false and `delete` is a no-op.
+    if (typeof key !== 'string') return defaultValue === undefined ? this._data : defaultValue;
     const value = getAtPath(this._data, key);
     return value === undefined ? defaultValue : value;
   }
@@ -59,10 +63,12 @@ export default class Store {
   }
 
   has(key) {
+    if (typeof key !== 'string') return false;
     return getAtPath(this._data, key) !== undefined;
   }
 
   delete(key) {
+    if (typeof key !== 'string') return;
     deleteAtPath(this._data, key);
   }
 

@@ -71,7 +71,11 @@ function detectCountryTarget(seg) {
 export function deriveLocationParam(struct, rawFallback = '') {
   if (!struct || typeof struct !== 'object') return normalizeLocationInput(rawFallback).boardReady;
   const city    = String(struct.city || '').trim();
-  const state   = String(struct.stateCode || '').trim();   // US 2-letter code OR non-US province/region name
+  // `stateCode` is the AI schema's field name; `subdivision` is the one the
+  // Job Search UI writes for the same value. Reading both keeps a hand-typed
+  // city+state target from silently losing its state (and, with it, the country
+  // that source applicability is decided on).
+  const state   = String(struct.stateCode || struct.subdivision || '').trim();   // US 2-letter code OR non-US province/region name
   const region  = String(struct.region || '').trim();
   const country = normalizeCountry(struct.country);          // canonical name ('' if none)
   const display = String(struct.display || '').trim();
@@ -534,12 +538,9 @@ function buildCountryRegex(country) {
 // doesn't say". See summarizeLocationAdherence for why absence isn't evidence.
 function buildForeignRegexes(targetCountry) {
   const out = [];
-  for (const [country, subs] of Object.entries(COUNTRY_SUBDIVISIONS)) {
+  for (const country of Object.keys(COUNTRY_SUBDIVISIONS)) {
     if (country === targetCountry) continue;
-    const parts = [`\\b${escapeRegExp(country.toLowerCase())}\\b`];
-    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${escapeRegExp(code)}(?=$|[, )])`);
-    for (const name of Object.values(subs)) parts.push(`\\b${escapeRegExp(name)}\\b`);
-    out.push({ country, re: new RegExp(`(?:${parts.join('|')})`, 'i') });
+    out.push({ country, re: buildCountryRegex(country) });
   }
   return out;
 }

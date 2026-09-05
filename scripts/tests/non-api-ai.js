@@ -11,6 +11,10 @@ const JOB_TASKS = [
   'job-taxonomy-classify',
   'job-compensation-research',
   'job-compensation-assessment',
+  'job-preference-interpretation',
+  'job-preference-evaluation',
+  'job-preference-research',
+  'job-preference-research-assessment',
 ];
 
 export default [
@@ -18,7 +22,7 @@ export default [
     name: 'non-API AI: job task allowlist is exact and jobs no longer primes Claude',
     run: () => {
       assert(JSON.stringify([...NON_API_JOB_TASKS].sort()) === JSON.stringify([...JOB_TASKS].sort()),
-        'the explicit non-API job-task allowlist covers every and only the eight job-domain LLM tasks');
+        'the explicit non-API job-task allowlist covers every and only the twelve job-domain LLM tasks, including Job Preferences interpretation and grounded verification');
       assert(JOB_TASKS.every(isNonApiJobTask)
         && !isNonApiJobTask('text-polish')
         && !isNonApiJobTask('vision-product-analysis'),
@@ -405,6 +409,21 @@ export default [
       assert(failure?.message === 'Score row index must match its requested job index.',
         'task-specific invariants run after JSON Schema validation and keep the request pending for a corrected paste');
       return { rejected: true };
+    },
+  },
+  {
+    name: 'structured API and manual calls apply the same semantic validator contract',
+    run: () => {
+      const llmSource = readFileSync(new URL('../../electron/ipc/llm.js', import.meta.url), 'utf8');
+      const textSection = llmSource.slice(llmSource.indexOf('export async function callLLMText'), llmSource.indexOf('export async function callLLMRaw'));
+      const visionSection = llmSource.slice(llmSource.indexOf('export async function callLLMVision'), llmSource.indexOf('export async function callLLMDocument'));
+      const documentSection = llmSource.slice(llmSource.indexOf('export async function callLLMDocument'), llmSource.indexOf('// Back-compat shim'));
+      assert(textSection.includes('responseValidator?.(result)')
+        && visionSection.includes('responseValidator?.(result)')
+        && documentSection.includes('responseValidator?.(result)')
+        && documentSection.includes('retryOnTruncation, responseValidator'),
+      'structured API replies run the same semantic validator as a manual paste, including the Word-document text fallback');
+      return { text: true, vision: true, document: true };
     },
   },
   {

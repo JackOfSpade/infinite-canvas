@@ -1,6 +1,592 @@
-import { assert, appendJobsHistory, buildJobRunCompletionReceipt, completeRunWithReceipt, fs, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readStagedJobs, sanitizeLastRunReceipt, startRun, writeLastRunReceipt } from '../test-dependencies.js';
+import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, completeRunWithReceipt, evaluateJobPreferences, fs, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'job preferences: every career direction is evaluable and listing provenance is code-owned',
+    run: async () => {
+      const directionOnly = {
+        version: 1,
+        summary: '',
+        direction: { summary: '', roleDirections: [], avoidDirections: ['Pivot away from web development'], explorationEnabled: true },
+        softPreferences: [], strictRequirements: [], warnings: [],
+        targetRoleConflict: false, targetRoleConflictReason: '',
+      };
+      let rejected = false;
+      try { validateJobPreferencePlanSubmission(directionOnly); } catch { rejected = true; }
+      assert(rejected, 'a direction-only plan must be rejected because post-history evaluation would otherwise skip it');
+
+      const valid = {
+        ...directionOnly,
+        softPreferences: [{ id: 'pivot', criterion: 'Pivot away from web development', category: 'role' }],
+      };
+      assert(validateJobPreferencePlanSubmission(valid).softPreferences.length === 1,
+        'a derived direction matching its soft role preference must be accepted');
+      const evaluated = await evaluateJobPreferences({
+        jobs: [
+          { title: 'Frontend Developer', url: 'https://jobs.example.test/frontend' },
+          { title: 'Web Developer', url: 'javascript:alert(1)' },
+        ],
+        jobPreferences: 'I want to pivot away from web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        callText: async (_prompt, options) => {
+          assert(options.task === 'job-preference-evaluation', `unexpected task ${options.task}`);
+          return { assessments: [
+            { index: 0, matches: [{ preferenceId: 'pivot', outcome: 'conflicts', evidence: 'Web role', evidenceQuote: 'Frontend Developer', sourceUrls: ['https://hallucinated.example.test'], sourceDate: '2099-01-01' }] },
+            { index: 1, matches: [{ preferenceId: 'pivot', outcome: 'confirmed', evidence: 'Adjacent role', evidenceQuote: 'Web Developer', sourceUrls: ['https://hallucinated.example.test'], sourceDate: '2099-01-01' }] },
+          ] };
+        },
+      });
+      const safe = evaluated.candidatePool.find(job => job.title === 'Frontend Developer')?.preferenceAssessment?.matches?.[0];
+      const unsafe = evaluated.candidatePool.find(job => job.title === 'Web Developer')?.preferenceAssessment?.matches?.[0];
+      assert(safe?.strict === false && safe?.outcome === 'conflicts'
+        && JSON.stringify(safe.sourceUrls) === JSON.stringify(['https://jobs.example.test/frontend'])
+        && safe.sourceDate === '' && safe.verifiedAt === '',
+      `listing evidence must retain only the validated listing URL, got ${JSON.stringify(safe)}`);
+      assert(unsafe?.outcome === 'confirmed' && unsafe.sourceUrls.length === 0 && unsafe.sourceDate === '',
+        `unsafe listing URLs and model-supplied provenance must be discarded, got ${JSON.stringify(unsafe)}`);
+
+      const unsupportedListingClaim = await evaluateJobPreferences({
+        jobs: [{ title: 'Backend Engineer', company: 'Example', snippet: 'Build APIs.' }],
+        jobPreferences: 'Prefer no web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        callText: async () => ({ assessments: [{ index: 0, matches: [{ preferenceId: 'pivot', outcome: 'conflicts', evidence: 'Model memory', evidenceQuote: 'Free catered lunch' }] }] }),
+      });
+      const unsupportedMatch = unsupportedListingClaim.jobs[0].preferenceAssessment.matches[0];
+      assert(unsupportedMatch.outcome === 'unverified' && unsupportedMatch.sourceUrls.length === 0,
+        `a confirmed/conflicting listing claim without a matching verbatim span must downgrade to unverified, got ${JSON.stringify(unsupportedMatch)}`);
+      let incompleteRejected = false;
+      try { validateJobPreferenceListingSubmission({ assessments: [{ index: 0, matches: [] }] }, [{ title: 'X' }], valid); } catch { incompleteRejected = true; }
+      assert(incompleteRejected, 'a partial/malformed listing assessment must be rejected instead of silently filtering strict jobs');
+
+      const groundedResearch = 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nExample Co provides free lunch to employees.';
+      const validResearch = {
+        assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page confirms the meal.', evidenceQuote: 'provides free lunch to employees', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }],
+      };
+      let foreignResearchRejected = false;
+      let unsupportedResearchRejected = false;
+      try {
+        validateJobPreferenceResearchSubmission({ ...validResearch, assessments: [{ ...validResearch.assessments[0], preferenceId: 'other-preference' }] }, { preferenceId: 'lunch', groundedResearch });
+      } catch (error) { foreignResearchRejected = error?.code === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'; }
+      try {
+        validateJobPreferenceResearchSubmission({ ...validResearch, assessments: [{ ...validResearch.assessments[0], evidenceQuote: 'Invented benefit' }] }, { preferenceId: 'lunch', groundedResearch });
+      } catch (error) { unsupportedResearchRejected = error?.code === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'; }
+      assert(foreignResearchRejected && unsupportedResearchRejected
+        && validateJobPreferenceResearchSubmission(validResearch, { preferenceId: 'lunch', groundedResearch }) === validResearch,
+      'grounded company research must return the requested preference with a quote and URL present in the prior research, rather than silently degrading a foreign or unsupported reply');
+
+      let apiValidationSurfaced = false;
+      try {
+        await evaluateJobPreferences({
+          jobs: [{ title: 'Program Manager', company: 'Response Validation Co' }],
+          jobPreferences: 'Free lunch is required.',
+          preferencePlan: {
+            version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+            softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+          },
+          callRaw: async () => groundedResearch,
+          callText: async (_prompt, options) => {
+            if (options.task === 'job-preference-evaluation') {
+              return { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed.' }] }] };
+            }
+            options.responseValidator({
+              assessments: [{ preferenceId: 'wrong-id', outcome: 'confirmed', evidence: 'Wrong response', evidenceQuote: 'provides free lunch to employees', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }],
+            });
+            return validResearch;
+          },
+        });
+      } catch (error) { apiValidationSurfaced = error?.code === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'; }
+      assert(apiValidationSurfaced,
+        'an invalid API research extraction must surface its structured-response error instead of silently becoming an unverified strict filter');
+
+      const strict = await evaluateJobPreferences({
+        jobs: [{ title: 'Web Developer', url: 'https://jobs.example.test/web' }],
+        jobPreferences: 'No web development.',
+        preferencePlan: {
+          ...directionOnly,
+          version: 1,
+          direction: { ...directionOnly.direction, avoidDirections: ['No web development'] },
+          strictRequirements: [{ id: 'no-web', criterion: 'No web development', category: 'role' }],
+        },
+        callRaw: () => { throw new Error('role evidence is listing-only'); },
+        callText: async () => ({ assessments: [{ index: 0, matches: [{ preferenceId: 'no-web', outcome: 'not_applicable', evidence: 'model escape hatch' }] }] }),
+      });
+      const strictMatch = strict.filteredJobs[0]?.preferenceAssessment.matches.find(match => match.preferenceId === 'no-web');
+      assert(strict.filteredJobs.length === 1 && strictMatch?.outcome === 'unverified',
+        'a strict non-confirmed outcome must normalize to unverified and fail closed');
+
+      const sameTitleDifferentCities = await evaluateJobPreferences({
+        jobs: [
+          { title: 'Software Engineer', company: 'Example', location: 'New York, NY', url: 'https://jobs.example.test/ny' },
+          { title: 'Software Engineer', company: 'Example', location: 'San Francisco, CA', url: 'https://jobs.example.test/sf' },
+        ],
+        jobPreferences: 'Prefer engineering roles.',
+        preferencePlan: { ...valid, strictRequirements: [] },
+        callRaw: () => { throw new Error('soft preferences must not research'); },
+        callText: async () => ({ assessments: [
+          { index: 0, matches: [{ preferenceId: 'pivot', outcome: 'confirmed', evidence: 'Software Engineer', evidenceQuote: 'Software Engineer' }] },
+          { index: 1, matches: [{ preferenceId: 'pivot', outcome: 'confirmed', evidence: 'Software Engineer', evidenceQuote: 'Software Engineer' }] },
+        ] }),
+      });
+      const auditLocations = sameTitleDifferentCities.preferenceEvaluation.audits.map(audit => audit.listingIdentity?.location);
+      assert(JSON.stringify(auditLocations) === JSON.stringify(['New York, NY', 'San Francisco, CA']),
+        `each audit must retain its listing identity so distinct same-title/company requisitions survive append merging, got ${JSON.stringify(sameTitleDifferentCities.preferenceEvaluation.audits)}`);
+      return { directionRejected: rejected, listingUrl: safe.sourceUrls[0], strictFailClosed: true, hallucinatedListingClaimDowngraded: true, groundedResearchValidated: true, apiValidationSurfaced, auditLocations };
+    },
+  },
+  {
+    name: 'job preferences: renderer append paths merge listing-aware audits and only new candidate counts',
+    run: async () => {
+      const [renderer, preferences] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('electron/ipc/jobPreferences.js'), 'utf8'),
+      ]);
+      assert(renderer.includes('const uniqueIdentifiedAudits = dedupJobsAcrossSources')
+        && renderer.includes('audit.listingIdentity')
+        && renderer.includes('const jobsToEvaluate = resultMode === \'append\'')
+        && renderer.includes('uniqueJobsAcrossSources(existingPreferencePool, savedJobs)')
+        && renderer.includes('gatheredDelta: resultMode === \'append\' ? jobsToEvaluate.length : null'),
+      'saved/late append recovery must assess only candidates not already represented and merge audits with the candidate pool identity policy');
+      assert(renderer.includes('preferenceMatchedDelta: scoreResult.preferenceMatchedCount ?? preferenceMatchedCount')
+        && renderer.includes('preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceCandidatePool')
+        && renderer.includes('gatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length')
+        && renderer.includes('Failed to save preference-filtered USAJobs snapshot')
+        && renderer.includes("'preference-filtered'"),
+      'append scoring and all-filtered late sources must retain preference recovery state, an accurate disposition, and source funnel volume');
+      assert(renderer.includes('const activeTargetRole = String(liveData.targetRole || \'\').trim()')
+        && renderer.includes('targetRole: (data.activeTargetRole ?? data.targetRole ?? \'\').trim()')
+        && renderer.includes('data.pendingTargetRole ?? data.activeTargetRole ?? data.targetRole ?? \'\'')
+        && preferences.includes('listingIdentity: listingIdentityForAudit(job)'),
+      'a run freezes Target role with its preferences across late and paused paths, and each emitted audit carries a bounded listing identity');
+      return { appendCandidateGate: true, listingAwareAudits: true, frozenTargetRole: true };
+    },
+  },
+  {
+    name: 'job preferences: raw notes without a plan re-interpret, and cancellation never becomes an unverified filter',
+    run: async () => {
+      const raw = 'No web development roles.';
+      const interpretedPlan = {
+        version: 1, summary: '',
+        direction: { summary: '', roleDirections: [], avoidDirections: ['No web development roles'], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [{ id: 'no-web', criterion: 'No web development roles', category: 'role' }],
+        warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+      };
+      const tasks = [];
+      const direct = await evaluateJobPreferences({
+        jobs: [{ title: 'Web Developer', snippet: 'Web Developer role' }], jobPreferences: raw,
+        // Recovery can preserve a bounded but stale/malformed plan. The raw
+        // user instruction is authoritative and must be interpreted again.
+        preferencePlan: { ...interpretedPlan, softPreferences: [], strictRequirements: [] },
+        callRaw: () => { throw new Error('role requirement uses listing evidence'); },
+        callText: async (_prompt, options) => {
+          tasks.push(options.task);
+          if (options.task === 'job-preference-interpretation') return interpretedPlan;
+          return { assessments: [{ index: 0, matches: [{ preferenceId: 'no-web', outcome: 'conflicts', evidence: 'Role title', evidenceQuote: 'Web Developer' }] }] };
+        },
+      });
+      assert(JSON.stringify(tasks) === JSON.stringify(['job-preference-interpretation', 'job-preference-evaluation']) && direct.filteredJobs.length === 1,
+        `missing plans must be re-interpreted before evaluation, got ${JSON.stringify({ tasks, direct: direct.counts })}`);
+
+      // A shape that normalization could turn into an empty plan is not a
+      // valid recovered/model submission. With raw user text still available
+      // it must be repaired through interpretation, never silently accepted.
+      let malformedRejected = false;
+      try {
+        validateJobPreferencePlanSubmission({ ...interpretedPlan, direction: 'not an object', softPreferences: 'not an array', strictRequirements: [] });
+      } catch { malformedRejected = true; }
+      const repairTasks = [];
+      const repaired = await evaluateJobPreferences({
+        jobs: [{ title: 'Web Developer' }], jobPreferences: raw,
+        preferencePlan: { ...interpretedPlan, direction: 'not an object', softPreferences: 'not an array', strictRequirements: [] },
+        callRaw: () => { throw new Error('role requirement uses listing evidence'); },
+        callText: async (_prompt, options) => {
+          repairTasks.push(options.task);
+          if (options.task === 'job-preference-interpretation') return interpretedPlan;
+          return { assessments: [{ index: 0, matches: [{ preferenceId: 'no-web', outcome: 'conflicts', evidence: 'Role title', evidenceQuote: 'Web Developer' }] }] };
+        },
+      });
+      assert(malformedRejected && JSON.stringify(repairTasks) === JSON.stringify(['job-preference-interpretation', 'job-preference-evaluation'])
+        && repaired.filteredJobs.length === 1,
+      'malformed direction/arrays must re-interpret raw Job Preferences instead of normalizing into a permissive empty plan');
+      let duplicateIdRejected = false;
+      try {
+        validateJobPreferencePlanSubmission({
+          ...interpretedPlan,
+          softPreferences: [{ id: 'no-web', criterion: 'Prefer product roles', category: 'role' }],
+        });
+      } catch { duplicateIdRejected = true; }
+      assert(duplicateIdRejected, 'preference ids must be unique across soft and strict items before evaluation maps model rows by id');
+
+      const conflictPlan = { ...interpretedPlan, targetRoleConflict: true, targetRoleConflictReason: 'The target role is explicitly avoided.' };
+      let repairedConflict = null;
+      try {
+        await evaluateJobPreferences({
+          jobs: [{ title: 'Web Developer' }], jobPreferences: raw, targetRole: 'Web Developer',
+          preferencePlan: { ...interpretedPlan, direction: 'not an object' },
+          callRaw: () => { throw new Error('must stop before research'); },
+          callText: async (_prompt, options) => options.task === 'job-preference-interpretation'
+            ? conflictPlan
+            : (() => { throw new Error('must stop before listing evaluation'); })(),
+        });
+      } catch (error) { repairedConflict = error; }
+      assert(repairedConflict?.code === 'JOB_PREFERENCE_TARGET_ROLE_CONFLICT',
+        'a target-role conflict found while repairing a plan must stop direct evaluation before listing work');
+
+      const softItems = Array.from({ length: 12 }, (_, index) => ({ id: `soft-${index}`, criterion: `Role signal ${index}`, category: 'role' }));
+      const softOrder = await evaluateJobPreferences({
+        jobs: [{ title: 'Role A' }, { title: 'Role B' }], jobPreferences: 'soft ranking',
+        preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: softItems, strictRequirements: [], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+        callRaw: () => { throw new Error('soft ranking must not research'); },
+        callText: async () => ({ assessments: [
+          { index: 0, matches: softItems.map((item, index) => ({ preferenceId: item.id, outcome: index === 0 ? 'confirmed' : 'conflicts', evidence: 'Role A', evidenceQuote: 'Role A' })) },
+          { index: 1, matches: softItems.map(item => ({ preferenceId: item.id, outcome: 'unverified', evidence: 'No evidence' })) },
+        ] }),
+      });
+      assert(softOrder.jobs[0].title === 'Role A' && softOrder.jobs[0].preferenceAssessment.preferenceScore > softOrder.jobs[1].preferenceAssessment.preferenceScore,
+        'one additional soft confirmation must outrank any number of soft conflicts, matching the documented lexicographic ordering');
+
+      const controller = new AbortController(); controller.abort(new Error('cancelled by test'));
+      let cancelled = false;
+      try {
+        await evaluateJobPreferences({
+          jobs: [{ title: 'Program Manager', company: 'Example', snippet: 'Programs' }], jobPreferences: 'Lunch must be provided.',
+          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+          signal: controller.signal,
+          callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
+            ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Missing' }] }] }
+            : { assessments: [] },
+          callRaw: async () => { throw new Error('should not be reached after cancellation'); },
+        });
+      } catch (error) { cancelled = error.message === 'cancelled by test'; }
+      assert(cancelled, 'cancellation must propagate rather than become a strict unverified filtering verdict');
+
+      // Some transports resolve despite receiving an abort. Check again after
+      // each awaited boundary so that late cancellation cannot cache or return
+      // a preference verdict.
+      const lateController = new AbortController();
+      let lateCancelled = false;
+      try {
+        await evaluateJobPreferences({
+          jobs: [{ title: 'Program Manager', company: 'Late Abort Co' }], jobPreferences: 'Lunch must be provided.',
+          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+          signal: lateController.signal,
+          callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
+            ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Missing' }] }] }
+            : { assessments: [] },
+          callRaw: async () => {
+            lateController.abort(new Error('late cancellation'));
+            return 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nFree lunch is provided.';
+          },
+        });
+      } catch (error) { lateCancelled = error.message === 'late cancellation'; }
+      assert(lateCancelled, 'a transport that resolves after abort must not turn cancellation into an assessment or cache entry');
+
+      const firstController = new AbortController();
+      const secondController = new AbortController();
+      const companyPlan = {
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+      };
+      let rawCalls = 0;
+      let markFirstResearchStarted;
+      const firstResearchStarted = new Promise(resolve => { markFirstResearchStarted = resolve; });
+      const sharedText = async (_prompt, options) => {
+        if (options.task === 'job-preference-evaluation') return { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed' }] }] };
+        return { assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page', evidenceQuote: 'Free lunch is provided.', sourceUrls: ['https://example.test/benefits'], sourceDate: '2099-01-01' }] };
+      };
+      const sharedRaw = (_prompt, options) => {
+        rawCalls += 1;
+        if (options.signal === firstController.signal) {
+          markFirstResearchStarted();
+          return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+        }
+        return Promise.resolve('Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nFree lunch is provided.');
+      };
+      const first = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: firstController.signal, callText: sharedText, callRaw: sharedRaw });
+      const firstSettled = first.then(() => null, error => error);
+      await firstResearchStarted;
+      const second = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: secondController.signal, callText: sharedText, callRaw: sharedRaw });
+      firstController.abort(new Error('first run cancelled'));
+      const [firstError, secondResult] = await Promise.all([firstSettled, second]);
+      const researchMatch = secondResult.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
+      assert(firstError?.message === 'first run cancelled' && secondResult.acceptedJobs.length === 1 && rawCalls === 2
+        && researchMatch?.sourceDate === '',
+        'a cancelled caller must not poison a concurrent identical preference lookup with a different AbortSignal');
+      return { reinterpreted: true, malformedPlanRepaired: true, cancellationPropagated: true, lateCancellationPropagated: true, independentConcurrentResearch: true };
+    },
+  },
+  {
+    name: 'job preferences: blank notes bypass AI while strict unresolved company requirements are independently checked and fail closed',
+    run: async () => {
+      const jobs = [{ title: 'Program Manager', company: 'Example Co', description: 'Own strategic programs.' }];
+      const neverCall = () => { throw new Error('blank preferences must not call AI'); };
+      const blank = await evaluateJobPreferences({
+        jobs,
+        jobPreferences: '',
+        preferencePlan: blankJobPreferencePlan(),
+        callText: neverCall,
+        callRaw: neverCall,
+      });
+      assert(blank.aiSkipped && blank.acceptedJobs.length === 1 && blank.filteredJobs.length === 0,
+        `blank Job Preferences must preserve all jobs without AI work, got ${JSON.stringify(blank.counts)}`);
+
+      let listingCalls = 0;
+      let groundedCalls = 0;
+      const strict = await evaluateJobPreferences({
+        jobs,
+        jobPreferences: 'The company must provide free lunch.',
+        preferencePlan: {
+          version: 1,
+          summary: 'Free lunch is mandatory.',
+          direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+          softPreferences: [],
+          strictRequirements: [{ id: 'lunch', criterion: 'Free lunch is a listed company perk', category: 'perk' }],
+          warnings: [],
+          targetRoleConflict: false,
+          targetRoleConflictReason: '',
+        },
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-preference-evaluation') {
+            listingCalls += 1;
+            return { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Listing does not mention meals.' }] }] };
+          }
+          throw new Error(`unexpected text task ${options.task}`);
+        },
+        callRaw: async () => {
+          groundedCalls += 1;
+          throw new Error('web research unavailable');
+        },
+      });
+      const match = strict.filteredJobs[0]?.preferenceAssessment?.matches?.[0];
+      assert(listingCalls === 1 && groundedCalls === 1
+        && strict.acceptedJobs.length === 0 && strict.filteredJobs.length === 1
+        && match?.outcome === 'unverified' && match?.source === 'none',
+      `strict unresolved company perks must attempt web research then filter fail-closed, got ${JSON.stringify({ listingCalls, groundedCalls, strict, match })}`);
+      const unsupportedResearch = await evaluateJobPreferences({
+        jobs,
+        jobPreferences: 'The company must provide free lunch.',
+        preferencePlan: {
+          version: 1, summary: '',
+          direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+          softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch is a listed company perk', category: 'perk' }],
+          warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+        },
+        callRaw: async () => 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nThe office is downtown.',
+        callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
+          ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not in listing.' }] }] }
+          : { assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Model claim', evidenceQuote: 'Free lunch is provided.', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }] },
+      });
+      const unsupportedResearchMatch = unsupportedResearch.filteredJobs[0]?.preferenceAssessment?.matches?.[0];
+      assert(unsupportedResearchMatch?.outcome === 'unverified' && unsupportedResearchMatch.sourceUrls.length === 0,
+        `a web verdict needs both a source URL and a verbatim grounded quote, got ${JSON.stringify(unsupportedResearchMatch)}`);
+      return { blankBypassed: true, strictResearchAttempted: groundedCalls, ungroundedResearchRejected: true };
+    },
+  },
+  {
+    name: 'job run staging: Job Preferences survive recovery while model plans are bounded to the durable contract',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-preferences-manifest-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const preferencePlan = {
+        version: 99,
+        summary: 'Explore a credible move away from web development.',
+        direction: {
+          summary: 'Career pivot with broad role exploration.',
+          roleDirections: ['Customer success', 'Implementation'],
+          avoidDirections: ['Web development'],
+          explorationEnabled: true,
+          privateModelTrace: 'do not persist',
+        },
+        softPreferences: [{ id: 'p1', criterion: 'Prefer established companies', category: 'company-size', raw: { unsafe: true } }],
+        strictRequirements: [{ id: 'r1', criterion: 'Free lunch must be a listed perk', category: 'benefits', explanation: 'do not persist' }],
+        warnings: ['Company-level evidence may need web research.'],
+        targetRoleConflict: true,
+        targetRoleConflictReason: 'The exact target role conflicts with your request to avoid web development.',
+        arbitraryModelPayload: { prompt: 'do not persist' },
+      };
+      try {
+        const run = await startRun(canvasPath, {
+          runId: 'preferences-run', startedAt: 100, nodeId: 'hub-1', sourceIds: ['indeed'],
+          jobPreferences: '  Help me pivot away from web development. Free lunch is a must.  ',
+          jobPreferencePlan: preferencePlan,
+        });
+        const state = await readRunState(canvasPath, 101);
+        const inputs = state?.manifest?.inputs || {};
+        assert(run?.runId === 'preferences-run' && inputs.jobPreferences === 'Help me pivot away from web development. Free lunch is a must.',
+          `recovery must retain the exact trimmed user preference text, got ${JSON.stringify(inputs)}`);
+        assert(inputs.jobPreferencePlan?.version === 1
+          && inputs.jobPreferencePlan?.direction?.explorationEnabled === true
+          && inputs.jobPreferencePlan?.strictRequirements?.[0]?.criterion === 'Free lunch must be a listed perk'
+          && inputs.jobPreferencePlan?.targetRoleConflict === true
+          && inputs.jobPreferencePlan?.targetRoleConflictReason === 'The exact target role conflicts with your request to avoid web development.'
+          && !('arbitraryModelPayload' in inputs.jobPreferencePlan)
+          && !('privateModelTrace' in inputs.jobPreferencePlan.direction)
+          && !('raw' in inputs.jobPreferencePlan.softPreferences[0]),
+        `recovery must preserve the usable plan but strip unrelated model payload, got ${JSON.stringify(inputs.jobPreferencePlan)}`);
+        assert(sanitizeJobPreferencePlan({ summary: 7, direction: 'invalid' }) === null,
+          'an invalid preference plan must become null so recovery safely re-interprets it');
+        const conflictOnly = sanitizeJobPreferencePlan({
+          targetRoleConflict: true,
+          targetRoleConflictReason: 'Avoid this exact role.',
+        });
+        assert(conflictOnly?.targetRoleConflict === true && conflictOnly.targetRoleConflictReason === 'Avoid this exact role.',
+          'a conflict-only persisted plan must not be erased as an otherwise-empty plan');
+        assert(sanitizeJobPreferences(`  ${'a'.repeat(5000)}  `).length === 4000,
+          'manifest persistence must cap bypassed Job Preferences input at the backend-safe length');
+        return { strictRequirements: inputs.jobPreferencePlan.strictRequirements.length, recovered: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'saved-scrape snapshots never normalize a malformed preference plan into a valid empty plan',
+    run: () => {
+      const rawPreferences = 'I must avoid web development roles.';
+      const malformed = {
+        version: 1,
+        summary: 'Looks meaningful but does not meet the durable contract.',
+        direction: { summary: '', roleDirections: ['Avoid web development'], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+      };
+      const valid = {
+        ...malformed,
+        softPreferences: [{ id: 'avoid-web', criterion: 'Avoid web development', category: 'role' }],
+      };
+      const malformedSnapshot = buildJobAnalysisSnapshot({
+        jobs: [], profile: {}, careerData: '', jobPreferences: rawPreferences, jobPreferencePlan: malformed,
+      }).snapshot;
+      const validSnapshot = buildJobAnalysisSnapshot({
+        jobs: [], profile: {}, careerData: '', jobPreferences: rawPreferences, jobPreferencePlan: valid,
+      }).snapshot;
+      assert(malformedSnapshot.jobPreferences === rawPreferences && malformedSnapshot.jobPreferencePlan === null
+        && validSnapshot.jobPreferencePlan?.softPreferences?.[0]?.id === 'avoid-web',
+      'saved-scrape recovery must re-interpret raw preferences when its old plan is malformed, but retain a valid plan without data loss');
+      return { malformedPlanDiscarded: true, validPlanRetained: true };
+    },
+  },
+  {
+    name: 'job preferences: preload and backend expose the interpreter and evaluator contract',
+    run: async () => {
+      const [preload, jobs] = await Promise.all([
+        fs.promises.readFile(path.resolve('electron/preload.js'), 'utf8'),
+        fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8'),
+      ]);
+      for (const [rendererMethod, channel] of [
+        ['interpretJobPreferences', 'interpret-job-preferences'],
+        ['evaluateJobPreferences', 'evaluate-job-preferences'],
+      ]) {
+        assert(preload.includes(`${rendererMethod}: (args) => ipcRenderer.invoke('${channel}', args)`),
+          `preload must expose ${rendererMethod} on its matching IPC channel`);
+        assert(jobs.includes(`handleSafe('${channel}'`),
+          `jobs backend must register ${channel}`);
+      }
+      const queryHandlerStart = jobs.indexOf("handleSafe('generate-job-queries'");
+      const queryHandlerEnd = jobs.indexOf("handleSafe('get-last-job-analysis-snapshot'", queryHandlerStart);
+      const queryHandler = jobs.slice(queryHandlerStart, queryHandlerEnd);
+      const renderer = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(queryHandler.includes('{ profile, careerData, targetRole')
+        && queryHandler.includes('jobPreferences, profile, careerData, targetRole: role')
+        && renderer.includes('careerData: activeCareerData,'),
+      'the raw-preferences query IPC fallback receives the same career context as the normal interpreter, while passing only the resulting role direction to query generation');
+      return { interpreter: true, evaluator: true, queryFallbackCareerContext: true };
+    },
+  },
+  {
+    name: 'job preferences: an exact-role conflict stops before search and all-filtered completion is described as preferences',
+    run: async () => {
+      const [search, done] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+      ]);
+      const pipelineStart = search.indexOf('// Step 2: Query construction');
+      const pipelineEnd = search.indexOf('// Step 3: Search', pipelineStart);
+      const pipeline = search.slice(pipelineStart, pipelineEnd);
+      const conflictAt = pipeline.indexOf('jobPreferencesInterpretation?.targetRoleConflict');
+      const queriesAt = pipeline.indexOf('window.electronAPI.generateJobQueries');
+      assert(conflictAt >= 0 && (queriesAt < 0 || conflictAt < queriesAt)
+        && pipeline.includes('Your Target role conflicts with your Job Preferences'),
+      'a clear Target role / Job Preferences contradiction must stop the pipeline before queries or a scrape begin');
+      assert(done.includes("resultDisposition === 'preference-filtered'")
+        && done.includes("${jobsLabel(count, 'job')} matched your preferences")
+        && done.includes('filtered by your preferences'),
+      'an all-filtered terminal state must explain that Job Preferences filtered the results, not imply a zero-result scrape');
+      const resumeStart = search.indexOf('const handleResumeRun = useCallback');
+      const resumeEnd = search.indexOf('const handleDiscardResume', resumeStart);
+      const resume = search.slice(resumeStart, resumeEnd);
+      assert(resume.includes("typeof offer.jobPreferences === 'string' ? offer.jobPreferences : ''")
+        && resume.includes('offer.jobPreferencePlan ?? offer.preferencePlan ?? null')
+        && !resume.includes('data.activeJobPreferences ?? data.jobPreferences')
+        && resume.includes('Failed to restore Job Preferences for this resumed search')
+        && resume.includes('This resumed search’s Target role conflicts with its Job Preferences'),
+      'crash resume must use the manifest’s frozen preferences and safely re-interpret durable raw text only when its saved plan is unavailable');
+      return { conflictBlocked: true, allFilteredCopy: true, resumePreferencesFrozen: true };
+    },
+  },
+  {
+    name: 'Job Preferences UI: labels, locked controls, live status, and singular counts stay clear',
+    run: async () => {
+      const [search, done, processing, locations, errorBanner] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchProcessingState.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/components/JobSearchLocationFields.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/components/HubErrorBanner.jsx'), 'utf8'),
+      ]);
+      assert(search.includes('Target role <span className="text-white/25">(optional)</span>')
+        && search.includes('Leave blank to generate best-fit search variations.')
+        && search.includes('aria-describedby={targetRoleHelpId}')
+        && search.includes('aria-describedby={jobPreferencesHelpId}')
+        && search.includes('disabled={!!data.locked}')
+        && search.includes('disabled={!!data.locked}\n                    className="w-10')
+        && search.includes('disabled={!!data.locked}\n                />'),
+      'empty Job Preferences controls must name Target role, explain a blank role, describe their help, and disable every editable setting when locked');
+      assert(locations.includes('disabled = false')
+        && locations.includes('disabled={disabled}'),
+      'structured location inputs must honor the parent locked state rather than remaining editable');
+      assert(done.includes('const jobsLabel =')
+        && done.includes("jobsLabel(count, 'job')")
+        && done.includes("jobsLabel(count, 'new job', 'new jobs')")
+        && done.includes('ready to score')
+        && done.includes('aria-describedby={targetRoleHelpId}'),
+      'completed result labels must pluralize every job count and retain labeled Target role guidance before a re-run');
+      assert(processing.includes('aria-label="Copy the Chrome launch command"')
+        && processing.includes('role="status" aria-live="polite"')
+        && processing.includes('aria-label="Cancel and reset job search"')
+        && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
+      'processing controls must be keyboard-operable and communicate changing work to assistive technology');
+      assert(errorBanner.includes('role="alert"') && errorBanner.includes('aria-label="Dismiss error"')
+        && !/AI Preferences|AI preferences|Job Brief|job brief/.test(`${search}\n${done}`),
+      'errors must announce themselves and the visible feature name must remain Job Preferences');
+      return { labels: true, locked: true, counts: true, status: true };
+    },
+  },
+  {
+    name: 'job run staging: pre-Job-Preferences manifests resume with neutral preference defaults',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-preferences-legacy-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const manifestPath = path.join(root, 'workspace.jobs-run.json');
+      try {
+        await fs.promises.writeFile(manifestPath, JSON.stringify({
+          version: 1,
+          runId: 'legacy-run',
+          startedAt: 1,
+          lastUpdated: 2,
+          stage: 'searching',
+          inputs: { nodeId: 'hub-1', queries: ['product manager'], canonicalLocation: 'Toronto' },
+          sources: { indeed: { status: 'pending', queries: {} } },
+        }), { encoding: 'utf8', mode: 0o600 });
+        const state = await readRunState(canvasPath, 3);
+        assert(state?.manifest?.inputs?.jobPreferences === '' && state.manifest.inputs.jobPreferencePlan === null,
+          `old manifests must receive neutral preference defaults, got ${JSON.stringify(state?.manifest?.inputs)}`);
+        return { legacyVersion: state.manifest.version, defaultsApplied: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'job run staging: a failed fresh start preserves the prior recoverable JSONL',
     run: async () => {
@@ -58,6 +644,10 @@ export default [
               count: 0, providerGathered: 39, relevanceDropped: 39, sponsoredDropped: 3,
               stopReason: 'feed-exhausted',
               warning: { code: 'safe-code', severity: 'info', evidence: 'MUST NOT PERSIST' },
+              revealOutcomes: [
+                { queryIndex: 1, queryTotal: 1, exit: 'end-of-list', count: 39, iterations: 7, url: 'https://MUST NOT PERSIST.example' },
+                { queryIndex: 2, queryTotal: 1, exit: 'MUST NOT PERSIST', count: 900, iterations: 900 },
+              ],
               jobs: [{ title: 'MUST NOT PERSIST', url: 'https://private.example' }],
             },
           },
@@ -71,7 +661,10 @@ export default [
           `completion must truthfully record cleanup, got ${JSON.stringify(completed)}`);
         assert(receipt?.terminal?.outcome === 'zero' && receipt?.funnel?.raw === 39
           && receipt?.sources?.remoteok?.relevanceDropped === 39
-          && receipt?.sources?.remoteok?.sponsoredDropped === 3,
+          && receipt?.sources?.remoteok?.sponsoredDropped === 3
+          && receipt?.sources?.remoteok?.revealOutcomes?.length === 1
+          && receipt.sources.remoteok.revealOutcomes[0].exit === 'end-of-list'
+          && receipt.sources.remoteok.revealOutcomes[0].count === 39,
           `receipt must retain safe RemoteOK aggregate facts, got ${JSON.stringify(receipt)}`);
         assert(!serialized.includes('MUST NOT PERSIST') && !('jobs' in receipt) && !('queries' in receipt) && !('profile' in receipt),
           `receipt must redact payload fields, got ${serialized}`);
@@ -126,7 +719,33 @@ export default [
         'an unknown terminal result count must stay absent rather than being coerced from null to zero');
       assert(sanitized.terminal.status === 'completed' && sanitized.terminal.outcome === 'collection-only',
         `collection-only completion must remain distinct from a genuine zero, got ${JSON.stringify(sanitized.terminal)}`);
-      return { failed: built.terminal.outcome, intentionalSkip: sanitized.terminal.outcome };
+      const preferenceFiltered = sanitizeLastRunReceipt({
+        runId: 'preferences-filtered',
+        terminal: { status: 'completed', outcome: 'preference-filtered' },
+      });
+      assert(preferenceFiltered.terminal.outcome === 'preference-filtered',
+        'completion receipts must preserve the Job Preferences all-filtered outcome');
+      return { failed: built.terminal.outcome, intentionalSkip: sanitized.terminal.outcome, preferenceFiltered: preferenceFiltered.terminal.outcome };
+    },
+  },
+  {
+    name: 'seen history never records a preference-filtered listing',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-preference-history-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        const result = await appendJobsHistory(canvasPath, [
+          { source: 'example', company: 'Acme', title: 'Accepted', location: 'Remote', url: 'https://example.test/accepted' },
+          { source: 'example', company: 'Acme', title: 'Filtered', location: 'Remote', url: 'https://example.test/filtered', preferenceAssessment: { status: 'filtered' } },
+        ]);
+        const history = await fs.promises.readFile(`${canvasPath.replace(/\.json$/i, '')}.jobs-history.csv`, 'utf8');
+        assert(result.written === 1 && result.preferenceFilteredSkipped === 1
+          && history.includes('Accepted') && !history.includes('Filtered'),
+        'strict-preference rejections are never converted into durable seen-history rows');
+        return { written: result.written, filtered: result.preferenceFilteredSkipped };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -134,8 +753,8 @@ export default [
     run: async () => {
       const source = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const awaited = source.match(/await completeJobRun\(/g) || [];
-      assert(awaited.length === 5,
-        `expected the five terminal job-run paths to await finalization, found ${awaited.length}`);
+      assert(awaited.length >= 6,
+        `expected every known terminal job-run path to await finalization, found only ${awaited.length}`);
       assert(!source.includes('void completeJobRun('),
         'terminal job-run finalization must not be fire-and-forget after a hub has published done');
 
@@ -143,6 +762,7 @@ export default [
         ['scored settlement', 'const completion = completeRun && jobRunId', 'updateGlobal(id, {'],
         ['lost legacy batch', "? await completeJobRun(terminalRunId, 'failed', 'incomplete')", 'updateGlobal(id, live ==='],
         ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp)", 'updateGlobal(currentId, {'],
+        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0)", 'updateGlobal(currentId, {'],
         ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only')", 'updateGlobal(currentId, {'],
         ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero')", 'updateGlobal(id, {'],
       ];

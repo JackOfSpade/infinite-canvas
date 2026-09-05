@@ -503,70 +503,47 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
     };
   }
 
-  if (sourceId === 'reverb') {
-    send('searching', 0);
-    try {
-      const result = await fetchReverbListings(query, signal);
-      const items = Array.isArray(result) ? result : (result?.items || []);
-      const warning = Array.isArray(result) ? null : (result?.warning || null);
-      send('done', items.length, warning);
-      // ACTIVE (asking prices): Reverb's sold Price Guide API was retired — see
-      // fetchReverbListings. Must match the category in buildApiTasks below.
-      return { sourceId, items, warning, category: 'active' };
-    } catch (error) {
-      send('error', 0);
-      return {
-        sourceId,
-        items: [],
-        warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
-        category: 'active',
-      };
-    }
-  }
-
-  if (sourceId === 'pricecharting') {
+  // API sources (no browser pool). Each `category` must match the bucket
+  // fetchApiMarketplaceSources's apiTasks table gives the same source, but the
+  // fetch calls stay per-source: the `{ category }` gate option those tasks pass
+  // is deliberately NOT forwarded here.
+  const apiSources = {
+    // ACTIVE (asking prices): Reverb's sold Price Guide API was retired — see
+    // fetchReverbListings.
+    reverb: { category: 'active', run: (s) => fetchReverbListings(query, s) },
     // Same normalization fetchApiMarketplaceSources applies before calling this
     // fetcher — PriceCharting's catalog search needs the canonical product name,
     // not a seller-style title (see priceChartingQuery). No category option is
-    // passed: same reasoning as the aptdeco-active branch below — a manual
-    // rescrape of this card means the item IS worth a collectible-price lookup,
-    // so the category gate (isPriceChartingApplicable) would only get in the way.
-    send('searching', 0);
-    try {
-      const result = await fetchPriceChartingComps(priceChartingQuery(query), signal);
-      const items = Array.isArray(result?.items) ? result.items : [];
-      const warning = result?.warning || null;
-      send(warning ? 'error' : 'done', items.length, warning, result?.url || null);
-      // Matches the 'sold' bucket fetchApiMarketplaceSources's apiTasks table gives it.
-      return { sourceId, items, warning, category: 'sold' };
-    } catch (error) {
-      send('error', 0);
-      return {
-        sourceId,
-        items: [],
-        warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
-        category: 'sold',
-      };
-    }
-  }
-
-  if (sourceId === 'aptdeco-active') {
+    // passed: same reasoning as aptdeco-active — a manual rescrape of this card
+    // means the item IS worth a collectible-price lookup, so the category gate
+    // (isPriceChartingApplicable) would only get in the way.
+    pricecharting: { category: 'sold', run: (s) => fetchPriceChartingComps(priceChartingQuery(query), s) },
     // A manual rescrape of an AptDeco card means the item IS furniture (a
     // non-furniture run auto-dismisses the card), so no category gate is needed.
+    'aptdeco-active': { category: 'active', run: (s) => fetchAptDecoComps(query, s) },
+  };
+  // hasOwn, not a bare lookup: an unknown id must reach the throw below rather
+  // than resolve an inherited Object property.
+  const apiSource = Object.hasOwn(apiSources, sourceId) ? apiSources[sourceId] : null;
+
+  if (apiSource) {
+    const { category } = apiSource;
     send('searching', 0);
     try {
-      const result = await fetchAptDecoComps(query, signal);
-      const items = Array.isArray(result?.items) ? result.items : [];
-      const warning = result?.warning || null;
+      // Reverb's fetcher can still return a bare array; the others always return
+      // { items, warning }. Unwrapping both shapes here covers either.
+      const result = await apiSource.run(signal);
+      const items = Array.isArray(result) ? result : (result?.items || []);
+      const warning = Array.isArray(result) ? null : (result?.warning || null);
       send(warning ? 'error' : 'done', items.length, warning, result?.url || null);
-      return { sourceId, items, warning, category: 'active' };
+      return { sourceId, items, warning, category };
     } catch (error) {
       send('error', 0);
       return {
         sourceId,
         items: [],
         warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
-        category: 'active',
+        category,
       };
     }
   }
@@ -860,6 +837,16 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     const missingLogins = computeMissingLogins(allTasks, sessionCache);
     if (missingLogins.length > 0) {
       const sourceWarnings = {};
+      const blockedWarning = {
+        code: 'preflight-blocked', severity: 'block',
+        evidence: `Run blocked — not logged in to: ${missingLogins.join(', ')}.`,
+        suggestion: `Price checks require login on all in-scope marketplaces. Log in to ${missingLogins.join(', ')} and re-run.`,
+      };
+      const sendBlocked = (sourceId, warning) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('price-source-progress', { nodeId, sourceId, status: 'error', count: 0, url: null, warning });
+        }
+      };
       for (const t of allTasks) {
         const platform = COMP_SOURCE_LOGIN_PLATFORM[t.id];
         const needsThis = platform && missingLogins.includes(platform);
@@ -867,15 +854,17 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
           code: 'login-required', severity: 'block',
           evidence: `${platform} is not logged in — price checks require login on all in-scope marketplaces (policy).`,
           suggestion: `Log in to ${platform} in Settings > Accounts, then re-run the price check.`,
-        } : {
-          code: 'preflight-blocked', severity: 'block',
-          evidence: `Run blocked — not logged in to: ${missingLogins.join(', ')}.`,
-          suggestion: `Price checks require login on all in-scope marketplaces. Log in to ${missingLogins.join(', ')} and re-run.`,
-        };
+        } : blockedWarning;
         sourceWarnings[t.id] = { code: warning.code, severity: warning.severity, evidence: warning.evidence };
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'error', count: 0, url: null, warning });
-        }
+        sendBlocked(t.id, warning);
+      }
+      // The renderer spawns a card per in-scope comp source, including the API
+      // ones — which aren't in allTasks and take no part in the login preflight.
+      // Nothing else on this path stamps them, so without a terminal here their
+      // cards stay at "waiting" for the rest of the session. Telemetry below
+      // still counts only the tasks that were actually preflighted.
+      for (const apiSourceId of enabledApiCompSourceIds()) {
+        sendBlocked(apiSourceId, blockedWarning);
       }
       logger.info(`[Marketplace][${nodeId}] Price check blocked by login preflight — missing: ${missingLogins.join(', ')}`);
       marketplaceTelemetry.scrape = {

@@ -227,9 +227,36 @@ function withTimeout(promise, ms, label, signal) {
  * combined application workspace. The generated tabs are switched inside the
  * isolated render window before font readiness/printing is measured. Omit for
  * a standalone résumé or cover-letter document.
- * @returns {Promise<{bytes: Uint8Array, pageCount: number, layout: {contentHeightPx: number, typeAreaHeightPx: number}|null}>}
+ * A false `fontsLoaded` verdict is retried once in a fresh window before it is
+ * returned: the predicate depends on what the document's own scripts have done
+ * to the DOM by the time it runs, and every caller treats the verdict as
+ * "withhold this PDF". `missingFontFaces` names the faces the predicate
+ * rejected, so callers report an observation instead of guessing at a cause.
+ *
+ * @returns {Promise<{bytes: Uint8Array, pageCount: number, fontsLoaded: boolean, missingFontFaces: string[], layout: {contentHeightPx: number, typeAreaHeightPx: number}|null}>}
  */
 export async function renderPdf(html, { signal, document = null } = {}) {
+  const first = await renderPdfOnce(html, { signal, document });
+  if (first.fontsLoaded !== false) return first;
+  // Font readiness is timing-sensitive: it depends on what the document's own
+  // scripts have done to the DOM by the time the predicate runs. Every caller
+  // treats a false verdict as "withhold this PDF", which for the Local AI path
+  // means stranding a job behind a manual retry the user has to notice and
+  // click. One fresh window costs about a second and clears the whole class of
+  // transient failure; a verdict that survives it is worth reporting.
+  logger.warn(
+    '[ResumeRender] Font readiness failed on the first render '
+    + `(missing face(s): ${first.missingFontFaces.join(', ') || 'unreported'}); retrying once in a fresh window.`,
+  );
+  throwIfAborted(signal);
+  const second = await renderPdfOnce(html, { signal, document });
+  if (second.fontsLoaded !== false) {
+    logger.info('[ResumeRender] The retry resolved every required face; using the retried render.');
+  }
+  return second;
+}
+
+async function renderPdfOnce(html, { signal, document = null } = {}) {
   throwIfAborted(signal);
 
   let tempDir = null;
@@ -393,7 +420,12 @@ export async function renderPdf(html, { signal, document = null } = {}) {
         + `Page count ${pageCount} was measured against fallback typefaces and does NOT reflect the real document — the fit loop will not act on it.`,
       );
     }
-    return { bytes: pdfBuffer, pageCount, fontsLoaded, layout };
+    // missingFontFaces travels with the verdict, not just into the log ring: a
+    // font-readiness failure withholds the whole bundle, and "web fonts were
+    // unavailable" on its own names a cause nobody observed. The caller writes
+    // this into the handoff record so the next reader sees which faces the
+    // predicate actually rejected.
+    return { bytes: pdfBuffer, pageCount, fontsLoaded, layout, missingFontFaces };
   } finally {
     signal?.removeEventListener('abort', onAbort);
     // A leaked hidden BrowserWindow keeps the whole Electron process alive

@@ -34,7 +34,7 @@ export function mergeSourceProgress(prev, payload) {
 
 // Statuses that represent a settled outcome for a source. Shared so a consumer
 // deciding "has the backend spoken?" cannot drift from this module's contract;
-// two private copies already exist (JobSearchNode, SellHubNode).
+// one private copy still exists (SellHubNode's TERMINAL_COMP_STATUSES).
 export const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
 export function isTerminalSourceStatus(status) {

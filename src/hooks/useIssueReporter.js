@@ -4,6 +4,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { applyBugReportCode } from '../utils/bugReportCodes';
 import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
+import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
 import { useIsMountedRef } from './useIsMountedRef';
 
 export function useIssueReporter({
@@ -185,13 +186,7 @@ export function useIssueReporter({
       // job carries a description + résumé) — 150+ of those would blow the report
       // size budget and crowd out the logs. Replace the array with a count; the
       // Node Diagnostics section surfaces `scoredJobs: N` from it.
-      const reportNodes = nodes.map(n => {
-        if (n.data && Array.isArray(n.data.scoredJobs)) {
-          const { scoredJobs, ...restData } = n.data;
-          return { ...n, data: { ...restData, scoredJobsCount: scoredJobs.length } };
-        }
-        return n;
-      });
+      const reportNodes = nodes.map(redactNodeForIssueReport);
       const nodeComponentStates = EventLogger.getNodeStates();
 
       // Local AI job state lives on job cards, and the fallback manager drives
@@ -212,14 +207,48 @@ export function useIssueReporter({
       // node-dump detail. Preserve a bounded, non-job-content summary so JOBS
       // and RECOVERY reports can still say that collection finished while a
       // connected board is intentionally hiding an obsolete cascade.
+      const nodeTypeById = new Map((allNodesDeep || []).map(node => [node?.id, node?.type]));
+      const connectedSourceHubIdsByBoard = new Map();
+      // Edges are scoped to the currently visible canvas.  That is still useful
+      // corroboration for a board on this level; the board's persisted combine
+      // signature remains the durable source provenance when a nested canvas
+      // is being reported from another level.
+      for (const edge of edges || []) {
+        const boardId = nodeTypeById.get(edge?.source) === 'jobboard'
+          ? edge.source
+          : nodeTypeById.get(edge?.target) === 'jobboard'
+            ? edge.target
+            : null;
+        const otherId = boardId === edge?.source ? edge?.target : edge?.source;
+        if (!boardId || nodeTypeById.get(otherId) !== 'jobhub') continue;
+        if (!connectedSourceHubIdsByBoard.has(boardId)) connectedSourceHubIdsByBoard.set(boardId, new Set());
+        connectedSourceHubIdsByBoard.get(boardId).add(otherId);
+      }
+      // Independent of anything the board recorded about itself: how many job
+      // cards for it are ACTUALLY on the canvas. `resultCount` and
+      // `mergeStats.unique` are both written from the same merge output, so
+      // comparing them can never fail; this is the only number the report can
+      // check the board's claim against. Board filters and collapsed groups set
+      // `hidden` rather than removing nodes, so this is stable across view state.
+      const renderedCardsByBoard = new Map();
+      for (const node of allNodesDeep || []) {
+        if (node?.type !== 'jobcard') continue;
+        const owner = node?.data?.hubId;
+        if (typeof owner !== 'string' || !owner) continue;
+        renderedCardsByBoard.set(owner, (renderedCardsByBoard.get(owner) || 0) + 1);
+      }
       const allJobBoardStates = (allNodesDeep || [])
         .filter(node => node?.type === 'jobboard')
         .map(node => ({
+          renderedCardCount: renderedCardsByBoard.get(node.id) ?? 0,
           id: typeof node.id === 'string' ? node.id : '',
           hubState: typeof node.data?.hubState === 'string' ? node.data.hubState : 'empty',
           resultCount: Number.isFinite(Number(node.data?.resultCount)) ? Math.max(0, Math.floor(Number(node.data.resultCount))) : null,
           stale: node.data?.stale === true,
           staleReason: typeof node.data?.staleReason === 'string' ? node.data.staleReason.slice(0, 120) : null,
+          combineSignature: typeof node.data?.combineSignature === 'string' ? node.data.combineSignature.slice(0, 4_000) : null,
+          mergeUnique: Number.isFinite(Number(node.data?.mergeStats?.unique)) ? Math.max(0, Math.floor(Number(node.data.mergeStats.unique))) : null,
+          connectedSourceHubIds: [...(connectedSourceHubIdsByBoard.get(node.id) || [])].slice(0, 25),
         }));
       const localApplications = (allNodesDeep || []).flatMap((n) => {
         const localApplication = n?.type === 'jobcard' ? n?.data?.localApplication : null;

@@ -1,26 +1,6 @@
-import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, isFacebookShareUrl, listingUrlMatchesPlatform, normalizeMarketplaceWatchUrls, resolveAttentionSourceUrls, scanSellerHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes } from '../test-dependencies.js';
+import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, normalizeMarketplaceWatchUrls, resolveAttentionSourceUrls, scanSellerHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes } from '../test-dependencies.js';
 
 export default [
-{
-    name: 'listingUrlMatchesPlatform: blocks cross-platform URLs, stays conservative on the unknowable',
-    run: () => {
-      // Clear match — incl. protocol-less (how listing URLs are stored) and www/subdomain.
-      assert(listingUrlMatchesPlatform('https://www.ebay.com/itm/123', 'ebay').ok, 'ebay itm URL matches ebay');
-      assert(listingUrlMatchesPlatform('www.ebay.com/itm/123', 'ebay').ok, 'protocol-less ebay URL matches');
-      assert(listingUrlMatchesPlatform('https://m.facebook.com/marketplace/item/1', 'facebook').ok, 'facebook subdomain matches');
-      assert(listingUrlMatchesPlatform('https://www.facebook.com/share/abc/', 'facebook').ok, 'facebook share URL matches');
-      // Clear mismatch — the bug the guard exists for (ebay link on a facebook card).
-      const m = listingUrlMatchesPlatform('https://www.ebay.com/itm/123', 'facebook');
-      assert(!m.ok, 'ebay URL on facebook card is a mismatch');
-      assert(m.expectedDomain === 'facebook.com' && m.actualHost === 'ebay.com', 'mismatch reports both hosts');
-      assert(!listingUrlMatchesPlatform('https://reverb.com/item/1', 'mercari').ok, 'reverb URL on mercari card is a mismatch');
-      // Conservative: never block when we can't be sure it's wrong.
-      assert(listingUrlMatchesPlatform('', 'ebay').ok, 'blank URL does not block');
-      assert(listingUrlMatchesPlatform('not a url', 'ebay').ok, 'unparseable URL does not block');
-      assert(listingUrlMatchesPlatform('https://www.ebay.com/itm/1', 'ebay-sold').ok, 'unknown platform id does not block');
-      return { ok: true };
-    },
-  },
 {
     name: 'resolveAttentionSourceUrls: binds each item to a real hub page, never a wrong one',
     run: () => {
@@ -430,22 +410,6 @@ export default [
       assert(s.unread === 1, `1 unread conversation counted (got ${s.unread})`);
       const empty = summarizeReadState('');
       assert(empty.read === 0 && empty.unread === 0, 'empty html → zero counts');
-      return { ok: true };
-    },
-  },
-{
-    name: 'isFacebookShareUrl: flags /share/<hash> links, not canonical item URLs',
-    run: () => {
-      // The weak-anchor shape this nudge exists for — incl. protocol-less + subdomain.
-      assert(isFacebookShareUrl('https://www.facebook.com/share/1FnDGdqNK1/'), 'share link flagged');
-      assert(isFacebookShareUrl('www.facebook.com/share/1FnDGdqNK1/'), 'protocol-less share link flagged');
-      assert(isFacebookShareUrl('https://m.facebook.com/share/abc'), 'subdomain share link flagged (no trailing slash)');
-      // Canonical listing URLs and everything else must NOT be flagged.
-      assert(!isFacebookShareUrl('https://www.facebook.com/marketplace/item/27086638057612157'), 'canonical item URL not flagged');
-      assert(!isFacebookShareUrl('https://www.ebay.com/itm/123'), 'non-facebook URL not flagged');
-      assert(!isFacebookShareUrl('https://www.facebook.com/share/'), 'empty share hash not flagged');
-      assert(!isFacebookShareUrl(''), 'blank not flagged');
-      assert(!isFacebookShareUrl('not a url'), 'unparseable not flagged');
       return { ok: true };
     },
   }

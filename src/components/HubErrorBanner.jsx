@@ -39,7 +39,7 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
     : isBillingDepleted ? 'Billing Credits Depleted' : 'Usage Limit Reached';
 
   return (
-    <div className="m-2 p-2 rounded-md bg-red-500/10 border border-red-500/30" onPointerDown={(e) => e.stopPropagation()}>
+    <div className="m-2 p-2 rounded-md bg-red-500/10 border border-red-500/30" role="alert" onPointerDown={(e) => e.stopPropagation()}>
       <div className="flex items-start gap-1.5">
         <AlertTriangle size={11} className="text-red-400 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
@@ -58,6 +58,7 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
           <div className="flex gap-1 mt-1.5 flex-wrap">
             {!locked && onRetry && (
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); onRetry(); }}
                 className="nodrag flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium transition-colors"
               >
@@ -66,6 +67,7 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
             )}
             {!locked && isRateLimit && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   document.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
@@ -77,6 +79,7 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
             )}
             {!locked && isBillingDepleted && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   // Route to the failing provider's own top-up page. If the
@@ -98,8 +101,10 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
         </div>
         {!locked && onDismiss && (
           <button
+            type="button"
             onClick={(e) => { e.stopPropagation(); onDismiss(); }}
             className="nodrag text-white/30 hover:text-white/60 shrink-0"
+            aria-label="Dismiss error"
             title="Dismiss"
           >
             <X size={11} />

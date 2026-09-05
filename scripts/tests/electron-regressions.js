@@ -393,6 +393,27 @@ export default [
     },
   },
   {
+    name: 'Electron smoke: sidebar module drag settles layout and avoids nested-canvas group routing',
+    run: () => {
+      const smoke = fs.readFileSync(path.resolve('scripts/electron-smoke.js'), 'utf8');
+      const helperAt = smoke.indexOf('async function waitForStableBox');
+      const safeTargetHelperAt = smoke.indexOf('async function findTopLevelModuleDropPosition');
+      const jobsAt = smoke.indexOf("step('exercise sidebar drag/drop panels and issue reporter')");
+      const dragAt = smoke.indexOf('await jobModuleCard.dragTo(', jobsAt);
+      const settledCardAt = smoke.indexOf("await waitForStableBox(jobModuleCard, 'Job Search module card')", jobsAt);
+      const settledPaneAt = smoke.indexOf("await waitForStableBox(canvasPane, 'canvas pane after opening Jobs sidebar')", jobsAt);
+      assert(helperAt >= 0 && jobsAt >= 0 && dragAt > jobsAt
+        && settledCardAt > jobsAt && settledPaneAt > settledCardAt && settledPaneAt < dragAt
+        && safeTargetHelperAt >= 0
+        && smoke.slice(jobsAt, dragAt).includes('const jobDropPosition = await findTopLevelModuleDropPosition(page);')
+        && smoke.slice(dragAt, dragAt + 200).includes('targetPosition: jobDropPosition')
+        && smoke.includes("jobHub.getByRole('textbox', { name: /^Target role/i })")
+        && !smoke.includes("input[placeholder^=\"Target role\"]"),
+      'the smoke must wait for sidebar/card geometry to settle, choose a point outside nested-canvas groups, and locate Target role through its accessible label rather than presentation copy');
+      return { stableBeforeDrag: true, avoidsGroup: true, accessibleTargetRole: true };
+    },
+  },
+  {
     name: 'canvas navigation trusts only dist in production and the configured Vite origin in development',
     run: () => {
       const distDir = path.join(path.sep, 'app', 'dist');

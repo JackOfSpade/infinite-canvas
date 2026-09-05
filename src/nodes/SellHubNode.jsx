@@ -122,10 +122,23 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // platform. With the hub→card edge now locked non-deletable on spawn, true
   // orphans only exist for pre-this-change cards — those fall back to manual
   // delete + respawn, which is fine.
-  const spawnedMarketplaceIds = getNodes()
-    .filter(n => n.type === 'marketplacecard' && n.data?.hubId === id)
-    .map(n => n.data?.platformId)
-    .filter(Boolean);
+  // Read through the store rather than a render-time getNodes() snapshot:
+  // spawning a sibling card leaves this hub's own node reference untouched, so
+  // a snapshot would never pick up the 2nd/3rd platform and its button would
+  // keep rendering as unspawned. Selected as a joined string so the default
+  // Object.is comparison doesn't see a fresh array on every store update.
+  const spawnedMarketplaceSignature = useStore(
+    useCallback((s) => s.nodes
+      .filter(n => n.type === 'marketplacecard' && n.data?.hubId === id)
+      .map(n => n.data?.platformId)
+      .filter(Boolean)
+      .sort()
+      .join('|'), [id])
+  );
+  const spawnedMarketplaceIds = useMemo(
+    () => (spawnedMarketplaceSignature ? spawnedMarketplaceSignature.split('|') : []),
+    [spawnedMarketplaceSignature]
+  );
   const priceDropScheduleStartedAt = useStore(
     useCallback((s) => oldestPriceDropCardCreatedAtIso(getConnectedHubCards({
       nodes: s.nodes,
@@ -137,12 +150,11 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
   const handleSpawnMarketplaceCard = useCallback((platformId) => {
     if (data.locked) return;
-    // Re-query live at click time instead of trusting the render-time
-    // spawnedMarketplaceIds closure — adding a sibling marketplacecard node
-    // doesn't change this hub's own node reference, so ReactFlow won't
-    // re-render SellHubNode and a rapid re-click could still see the
-    // pre-spawn snapshot (mirrors handleApplyPriceDropPlanToAll's live
-    // getNodes() re-query below).
+    // Re-query live at click time instead of trusting the subscribed
+    // spawnedMarketplaceIds closure — a rapid re-click can land before the
+    // store update has re-rendered this hub, so only a live read rules out a
+    // double spawn (mirrors handleApplyPriceDropPlanToAll's live getNodes()
+    // re-query below).
     const alreadySpawned = getNodes().some(n => (
       n.type === 'marketplacecard' && n.data?.hubId === id && n.data?.platformId === platformId
     ));

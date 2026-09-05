@@ -109,6 +109,30 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     return () => document.removeEventListener('job-source-warning-sync', onWarningSync);
   }, [data.hubId, data.sourceId]);
 
+  // "Score current results" on the owning hub means the user chose to proceed
+  // without resolving the remaining blocks. The hub empties its own warning
+  // list, but this card's warning is card-local, so without this the blocked
+  // card survives with a live Solve button whose recovered rows arrive at a hub
+  // that has already finished scoring. Settle exactly like the Skip button so
+  // the hub's clean-card dismissal can remove it.
+  useEffect(() => {
+    const onClearWarnings = (event) => {
+      if (event.detail?.hubId !== data.hubId) return;
+      setDismissed(true);
+      setProgress(prev => (prev?.warning ? {
+        ...prev,
+        status: isJobSourceWarningGating(prev.warning)
+          ? 'skipped'
+          : (prev.status === 'done' || prev.status === 'skipped'
+            ? prev.status
+            : ((prev.count || 0) > 0 ? 'done' : 'skipped')),
+        warning: null,
+      } : prev));
+    };
+    document.addEventListener('job-source-clear-warnings', onClearWarnings);
+    return () => document.removeEventListener('job-source-clear-warnings', onClearWarnings);
+  }, [data.hubId]);
+
   // Mirror progress into node data ONLY on terminal states (done / error / skipped).
   // The sanitizer keeps job-source cards only when persistedProgress carries
   // a warning or error, so writing intermediate 'searching' states is wasted

@@ -730,6 +730,59 @@ const VERIFY_CONCURRENCY = 4;
 // connections." This race guarantees every platform resolves so the pool drains.
 const VERIFY_HARD_TIMEOUT_MS = SESSION_VERIFY_TIMEOUT_MS + 10000; // 35s
 let _verifyingPlatforms = new Set();
+// Per-platform completion promises cover the gap between scheduling the startup
+// verifier and that platform reaching a worker.  Cache-only auth checks during
+// this window used to report a false logout: the Job Search done card could be
+// re-run while Indeed was still queued, then the identical retry succeeded as
+// soon as startup verification populated the cache.  Consumers can now await
+// only the platform(s) they need instead of waiting for the whole worker pool.
+const _platformVerificationDeferreds = new Map();
+
+function beginPlatformVerification(platformIds) {
+  _verifyingPlatforms = new Set(platformIds);
+  for (const platformId of platformIds) {
+    if (_platformVerificationDeferreds.has(platformId)) continue;
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    _platformVerificationDeferreds.set(platformId, { promise, resolve });
+  }
+}
+
+function finishPlatformVerification(platformId, notify) {
+  _verifyingPlatforms.delete(platformId);
+  try {
+    notify('accounts:verify-update', {
+      platformId,
+      connected: _statusCache[platformId]?.connected ?? false,
+    });
+  } catch (error) {
+    logger.warn(`[Accounts] Could not publish startup verify update for ${platformId}: ${error?.message || String(error)}`);
+  }
+  const deferred = _platformVerificationDeferreds.get(platformId);
+  if (deferred) {
+    _platformVerificationDeferreds.delete(platformId);
+    deferred.resolve();
+  }
+}
+
+export function schedulePlatformVerification() {
+  const platformIds = [
+    ...getSellMonitorPlatforms().map(platform => platform.id),
+    ...getJobLoginPlatforms().map(platform => platform.id),
+  ];
+  beginPlatformVerification(platformIds);
+  return platformIds;
+}
+
+export async function waitForPendingPlatformVerification(platformIds) {
+  const ids = [...new Set(Array.isArray(platformIds) ? platformIds.filter(Boolean) : [])];
+  const pending = ids
+    .map(platformId => _platformVerificationDeferreds.get(platformId)?.promise)
+    .filter(Boolean);
+  if (pending.length === 0) return [];
+  await Promise.all(pending);
+  return ids.filter(platformId => !_verifyingPlatforms.has(platformId));
+}
 
 // One record per startup verify run, surfaced by the bug report so "why is login
 // verification slow?" is answerable from explicit per-platform durations instead
@@ -758,7 +811,10 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   const jobIds  = getJobLoginPlatforms().map(p => p.id);
   const allIds  = [...sellIds, ...jobIds];
 
-  _verifyingPlatforms = new Set(allIds);
+  // Reuse deferreds created by schedulePlatformVerification() during the 2.5s
+  // renderer-mount grace period. Direct/test callers that did not pre-schedule
+  // still get the same waitable per-platform lifecycle here.
+  beginPlatformVerification(allIds);
   notify('accounts:verify-start', { platformIds: allIds });
   logger.info(`[Accounts] Startup verify: ${allIds.length} platforms (${allIds.join(', ')}), concurrency ${VERIFY_CONCURRENCY}`);
 
@@ -770,8 +826,7 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       const activePlatforms = [...activeLoginFlows.keys()];
       const connected = _statusCache[platformId]?.connected ?? false;
       logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight for ${activePlatforms.join(', ')}`);
-      _verifyingPlatforms.delete(platformId);
-      notify('accounts:verify-update', { platformId, connected });
+      finishPlatformVerification(platformId, notify);
       durations.push({
         platformId, ms: 0, connected, skipped: true,
         outcome: 'skipped-login-flow',
@@ -793,8 +848,7 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
     if (NATIVE_LOGIN_PLATFORMS.has(platformId) && shouldUseNativeRead(platformId)) {
       const connected = _statusCache[platformId]?.connected ?? false;
       logger.info(`[Accounts] Startup verify skipping ${platformId} — CDP-walled native-login+native-read platform; native read owns login state during Check All (kept prior: ${connected ? 'connected' : 'not connected'})`);
-      _verifyingPlatforms.delete(platformId);
-      notify('accounts:verify-update', { platformId, connected });
+      finishPlatformVerification(platformId, notify);
       durations.push({
         platformId, ms: 0, connected, skipped: true,
         outcome: 'skipped-native',
@@ -869,8 +923,7 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       });
       logger.warn(`[Accounts] Startup verify ${platformId} threw (${ms}ms):`, e?.message || String(e));
     }
-    _verifyingPlatforms.delete(platformId);
-    notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
+    finishPlatformVerification(platformId, notify);
   };
 
   // Bounded-concurrency pool: a fixed number of workers drain a shared queue.
@@ -1107,6 +1160,7 @@ export function registerAccountsHandlers() {
     if (!config) {
       return { platform: platformId, connected: false, error: 'Unknown platform' };
     }
+    await waitForPendingPlatformVerification([platformId]);
     const cache = await readStatusCache();
     const cached = cache[platformId];
     return {
@@ -1131,6 +1185,7 @@ export function registerAccountsHandlers() {
   handleSafe('check-job-platform-auth', async (_event, { platformId }) => {
     const config = getJobLoginConfig(platformId);
     if (!config) return { platform: platformId, connected: false, error: 'Unknown platform' };
+    await waitForPendingPlatformVerification([platformId]);
     const cache = await readStatusCache();
     const cached = cache[platformId];
     return {

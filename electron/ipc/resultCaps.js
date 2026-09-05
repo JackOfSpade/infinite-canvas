@@ -7,10 +7,12 @@ import { modelMeta } from './tokenWindow.js';
  *
  * The LLM-input caps (compsForPricing, jobScoringBatchSize) are the adaptive
  * part: they scale to how many quality results actually exist and stay bounded
- * by the downstream output-token budget. They mirror llm.js TASK_MAX_TOKENS,
- * whose price-synthesis / job-scoring caps grow ~linearly with item count
- * (≈200 tok/comp, ≈300 tok/job on top of a base) up to a 24576 hard cap — so a
- * comp set / scoring batch can never request a budget the model can't honor.
+ * by the downstream output-token budget. Only the price-synthesis lane is a
+ * true mirror: llm.js TASK_MAX_TOKENS['price-synthesis'] imports
+ * priceSynthesisMaxTokens() below, so the count fed and the budget granted are
+ * derived from the same constants (≈200 tok/comp on a base, 24576 hard cap) and
+ * cannot drift. The job-scoring lane's constants are a LOCAL conservative
+ * approximation, not shared with llm.js — see JOB_TOKENS_PER_JOB.
  * (Coordinates with tokenBudget.js, which self-calibrates that cap on churn.)
  *
  * Job collection breadth is deliberately NOT configured here. It is a persisted
@@ -30,6 +32,11 @@ const PRICE_SYNTH_TOKEN_HARD_CAP = 24576;
 const PRICE_BASE_TOKENS          = 3000;
 const PRICE_TOKENS_PER_COMP      = 200;
 const JOB_BASE_TOKENS            = 2500;
+// Local approximation only — llm.js grants job-scoring min(12000, 1600 + n*600),
+// which is stricter than these numbers imply, so byOutput below never binds and
+// SCORING_BATCH_CEILING is what limits the batch. Re-derive both from llm.js's
+// live formula before raising that ceiling, or a bigger batch will silently
+// request more output than the model is granted.
 const JOB_TOKENS_PER_JOB          = 300;
 // Headroom factor for the job-scoring batch budget (jobScoringBatchSize below).
 // The comp ceiling no longer applies a safety factor — it's derived exactly from
@@ -118,8 +125,8 @@ const JOB_OUT_TOKENS_PER_JOB = { claude: JOB_TOKENS_PER_JOB, gemini: JOB_TOKENS_
 // and rushes the reasoning, while a bigger batch has a larger truncation/retry
 // blast radius. Adaptive-thinking Claude can consume substantial hidden output
 // on the detailed evidence schema, so it shares the proven 15-job ceiling with
-// Gemini. Keeping each batch below the job-scoring formula's 32k clamp avoids
-// a single oversized first batch holding an entire run at 0/M.
+// Gemini. Keeping each batch below the job-scoring formula's live 12000-token
+// clamp avoids a single oversized first batch holding an entire run at 0/M.
 const SCORING_BATCH_CEILING = { claude: 15, gemini: 15, default: 15 };
 
 /**

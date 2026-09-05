@@ -949,8 +949,18 @@ async function syncWorkspace(payload) {
       // of these two named documents, and `renderPdf` uses a no-preload window.
       const rendered = await renderPdf(mergedHtml, { document: documentKind });
       if (rendered.fontsLoaded === false) {
+        // Name the faces, not a cause. The predicate reports which faces the
+        // render window could not resolve; it cannot tell a network failure
+        // from a face the document asks for and the ATS-safe PDF substitution
+        // does not cover, and "reconnect to the internet" sent the user after
+        // the wrong thing when it was the latter.
+        const faces = (Array.isArray(rendered.missingFontFaces) ? rendered.missingFontFaces : []).filter(Boolean);
         throw Object.assign(
-          new Error('The application fonts are unavailable. Reconnect to the internet and retry Sync so the existing PDF is not replaced with fallback typography.'),
+          new Error(
+            'The render window could not resolve the application fonts'
+            + `${faces.length ? ` (${faces.join(', ')})` : ''}. `
+            + 'Retry Sync so the existing PDF is not replaced with fallback typography.',
+          ),
           { statusCode: 503 },
         );
       }

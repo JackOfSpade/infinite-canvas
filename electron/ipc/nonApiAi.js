@@ -34,6 +34,10 @@ export const NON_API_JOB_TASKS = new Set([
   'job-taxonomy-classify',
   'job-compensation-research',
   'job-compensation-assessment',
+  'job-preference-interpretation',
+  'job-preference-evaluation',
+  'job-preference-research',
+  'job-preference-research-assessment',
 ]);
 
 const pendingRequests = new Map();
@@ -560,6 +564,16 @@ export async function requestNonApiAi({
     record.reject = reject;
     record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));
     pendingRequests.set(record.requestId, record);
+    // The durable-step reads/writes above yield to the event loop, so a
+    // cancellation can land between the entry check and this point — and
+    // addEventListener never fires on an already-aborted signal. Without this
+    // re-check the record stays in `pendingRequests` forever: abortNodeTasks has
+    // already dropped its controller, so even the dialog's Cancel finds nothing
+    // left to abort and the invoke never settles.
+    if (signal?.aborted) {
+      abortPending(record, signal.reason || new Error('Operation cancelled'));
+      return;
+    }
     signal?.addEventListener?.('abort', record.abortListener, { once: true });
     sendRequest(record, 'initial');
   });

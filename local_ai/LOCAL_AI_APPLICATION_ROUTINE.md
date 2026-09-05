@@ -287,6 +287,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      noun phrase instead. A pronoun is allowed only when its antecedent is
      unambiguous inside the same bullet. Apply compound spelling across the
      whole résumé, including `in-house`.
+   - Keep every `.highlights li` at or under 180 visible characters, and any
+     `.tradeoff` clause's own text (excluding its label) at or under 100. This
+     is `STYLE.md §5.4`'s two-line budget, and Infinite Canvas now measures it
+     directly and rejects the result when a bullet exceeds it.
    - Give every résumé highlight one principal achievement or action chain.
      A trailing clause belongs only when it materially adds a supported
      mechanism, constraint, scope, or result to that same point. Delete
@@ -303,6 +307,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      `<span data-achievement-id="ID">figure</span>` for that figure only.
      Preserve the bare receipt id, never author `data-derivation`, and do not
      use a receipt attribute for a figure quoted directly from career data.
+
+     Figures in the letter are bound tighter than figures in the résumé. A
+     figure may appear in the letter only if it appears in the résumé bullet
+     named by `coverLetterArgument.primaryEvidence.evidence` or
+     `secondaryEvidence.evidence`; a figure carried by any other résumé bullet
+     does not license it. The letter carries at most three figures in total.
    - Every top-level résumé category is a peer `section.section` with a
      `.section-head` and an `h2`, regardless of its label. Use
      `.subsection-head` only for a genuine grouping within its enclosing parent
@@ -399,10 +409,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    singular when referring to it.
    Keep the letter in a plain, direct register. Write short declarative
    sentences, split long reasoning into short causal ones instead of nesting
-   purpose clauses, and let no sentence run much past 40 words. Do not use a
-   semicolon or a dash as a clause splice; Infinite Canvas rejects the whole
-   result for an em dash, for a spaced hyphen used as sentence punctuation,
-   and for an en dash outside a date or numeric range. Punctuate introductory
+   purpose clauses, and keep every sentence to 40 words or fewer. Infinite
+   Canvas rejects the whole result at 41. Use no semicolon anywhere in the
+   letter, and no dash as a clause splice. Infinite Canvas rejects the whole
+   result for any semicolon, for an em dash, for a double hyphen between
+   words, for a spaced hyphen used as sentence punctuation, and for an en dash
+   outside a date or numeric range. Punctuate introductory
    phrases so the transition into the main subject is immediately clear. When
    describing interface guidance, distinguish the ability to refer to
    something from the ability to indicate it visibly on screen, and state only
@@ -428,7 +440,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    single concrete anchor; otherwise describe it by category, as in `a Python
    back end` or `containerized deployment`. The résumé carries the stack, so a
    paragraph naming several tools the listing never mentions is a stack tour
-   whatever punctuation separates them. Do not assert a cross-domain
+   whatever punctuation separates them. The single-anchor allowance is
+   per-paragraph but the budget is letter-wide: across the whole letter at
+   most two tool names may be off-posting, even when each one is its own
+   paragraph's only anchor. A tour spread one name per paragraph is still a
+   tour. Do not assert a cross-domain
    equivalence with `maps onto`, `translates directly to`, or `mirrors`, and
    do not quote the employer's phrasing back as the second half of an analogy:
    argue the shared mechanism (constraints, data flow, failure modes) and let
@@ -445,7 +461,19 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    or discuss. Avoid conditional or deferential closing boilerplate: write `I
    welcome a conversation` rather than `I would welcome a conversation` or `I
    would welcome a discussion`. Apply this as a register rule, not as a
-   template for the closing sentence. The final paragraph may synthesize only
+   template for the closing sentence. Infinite Canvas checks two things in
+   that sentence, and a demonstrative pointing back at an earlier paragraph
+   satisfies neither: name the candidate's asset with a possessive, an
+   authorship clause, or a demonstrative that carries its own descriptor
+   (`my integration work`, `the connector I built`, `that MCP server
+   experience`), and say what that asset does for the target work
+   (`... could support ...`, `... supports ...`, `applying ... to ...`).
+   A bare demonstrative names nothing, and an employer-facing phrase is not a
+   candidate asset: `I welcome a conversation about applying that work` is
+   rejected; `I welcome a conversation about applying my MCP server
+   experience to the agent integrations this role owns` is accepted, and so is
+   `I welcome a conversation about where the connector work I built would fit
+   the systems this team already runs`. The final paragraph may synthesize only
    evidence and relationships already established in the letter. It must not
    introduce a new organizing frame, force nonparallel choices into one
    decision, or ask the employer to choose between products, prototypes, or
@@ -469,8 +497,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    `fast-paced environment`, `dynamic environment`, `passionate about`,
    `hit the ground running`, `align with your values`, `team player`,
    `wealth of experience`, `writing to express my interest`, and
-   `I believe I would be a great fit`. It also rejects the bare pair
-   `downsides and trade-offs`. Treat that as the narrow, literal edge of a
+   `I believe I would be a great fit`. The same rejection covers three
+   modifier-insertion variants of the same stock wording: `more than basic
+   presence` (including `more than just basic presence`), `the primary line of
+   defense`, and `this/that/the exact foundation`. It also rejects the bare
+   pair `downsides and trade-offs`. Treat that as the narrow, literal edge of a
    wider writing rule the host deliberately does not enforce: a balance claim
    that pairs a thing's downsides with its upsides is unfalsifiable filler in
    either direction, so state the specific judgment the evidence supports.
@@ -714,8 +745,13 @@ token when the final unit contains only one); generic action verbs such as
 each quote at or below 2,000 characters and cite the smallest complete passage
 that supplies the fact. Each candidate-career sentence in a cover-letter
 paragraph must link independently to that paragraph's bound quotes.
-High-risk factual qualifiers must be stated in those same unit-bound quotes or
-by a clear literal equivalent. This includes frequency (`daily`, `weekly`,
+High-risk factual qualifiers must be stated in those same unit-bound quotes.
+The match is on the literal word form and its ordinary inflections, not on
+meaning: a quote that says `optimizations` supports a bullet that says
+`optimization`, but a quote that describes the same achievement in different
+words does not. When a qualifier is rejected, the message names every word
+form that would have supported it, so either quote a passage that uses one of
+them or drop the qualifier. This includes frequency (`daily`, `weekly`,
 `regularly`, `always`), comparative superiority (`beat`, `outperformed`,
 `superior`), leadership or decision authority (`led`, `owned`, `managed`,
 `decided`, `approved`), production or organization-wide scope, and claimed

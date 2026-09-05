@@ -143,14 +143,14 @@ function useMediaEventLogger(mediaRef, nodeId, isActive) {
     el.addEventListener('pause', onPause);
     el.addEventListener('ended', onEnded);
     el.addEventListener('error', onError);
-    el.addEventListener('stall', onStall);
+    el.addEventListener('stalled', onStall);
     el.addEventListener('seeked', onSeeked);
     return () => {
       el.removeEventListener('play', onPlay);
       el.removeEventListener('pause', onPause);
       el.removeEventListener('ended', onEnded);
       el.removeEventListener('error', onError);
-      el.removeEventListener('stall', onStall);
+      el.removeEventListener('stalled', onStall);
       el.removeEventListener('seeked', onSeeked);
     };
     // Re-attach if the active flag or nodeId changes; mediaRef itself is stable.

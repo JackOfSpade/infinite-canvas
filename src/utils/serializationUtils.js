@@ -109,7 +109,12 @@ const JOBCARD_SCORED_FIELDS = [
   'reasoning', 'careerDirection', 'requirementAssessments', 'materialGaps',
   'strengths', 'experienceAssessment', 'confidence', 'fitAssessment', 'rawScore',
   'adjustedScore', 'adjustments', 'calibration', 'source', 'url', 'posted',
-  'language', 'resumeProfile',
+  'language', 'resumeProfile', 'googleCardUrl', 'applySource', 'originHubId',
+  // These arrived after the original on-canvas jobcard shape but can occur in
+  // an unversioned/exported legacy canvas. Preserve them during the broad
+  // card→hub migration instead of silently turning a preference-filtered or
+  // compensation-audited listing into a different downstream result.
+  'compensationAssessment', 'preferenceAssessment',
 ];
 
 /**

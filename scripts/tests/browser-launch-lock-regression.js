@@ -20,9 +20,40 @@ import { PLATFORM_AUTH_COOKIES, _resetLaunchCollisions, assert, clearAllSessionS
 
 const stealthBrowserSource = fs.readFileSync(path.resolve('electron/ipc/stealthBrowser.js'), 'utf8');
 const accountsSource = fs.readFileSync(path.resolve('electron/ipc/accounts.js'), 'utf8');
+const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
+const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
 
 export default [
-{
+  {
+    name: 'auth-gated work waits for its platform startup verification instead of reading a transient false cache',
+    run: () => {
+      const scheduleIndex = mainSource.indexOf('schedulePlatformVerification();');
+      const timerIndex = mainSource.indexOf('setTimeout(() => {', scheduleIndex);
+      assert(scheduleIndex >= 0 && timerIndex > scheduleIndex,
+        'main must mark platform verification pending before the renderer-mount delay, closing the pre-timer auth-cache race');
+
+      const jobHandlerStart = accountsSource.indexOf("handleSafe('check-job-platform-auth'");
+      const jobHandlerEnd = accountsSource.indexOf('\n  });', jobHandlerStart);
+      const jobHandler = accountsSource.slice(jobHandlerStart, jobHandlerEnd);
+      assert(jobHandler.indexOf('await waitForPendingPlatformVerification([platformId]);') >= 0
+        && jobHandler.indexOf('await waitForPendingPlatformVerification([platformId]);') < jobHandler.indexOf('const cache = await readStatusCache();'),
+      'the renderer-facing job auth check must await this platform before consulting its cache');
+
+      const sellHandlerStart = accountsSource.indexOf("handleSafe('check-sell-monitor-auth'");
+      const sellHandlerEnd = accountsSource.indexOf('\n  });', sellHandlerStart);
+      const sellHandler = accountsSource.slice(sellHandlerStart, sellHandlerEnd);
+      assert(sellHandler.indexOf('await waitForPendingPlatformVerification([platformId]);') >= 0
+        && sellHandler.indexOf('await waitForPendingPlatformVerification([platformId]);') < sellHandler.indexOf('const cache = await readStatusCache();'),
+      'sell-side auth checks share the same startup race and must wait before reading their cache too');
+
+      const backendWait = jobsSource.indexOf("preflight('await pending startup session verification'");
+      const backendCache = jobsSource.indexOf("preflight('read session status cache'", backendWait);
+      assert(backendWait >= 0 && backendCache > backendWait,
+        'the main-process job search gate must independently wait, so a stale renderer cannot bypass the fix');
+      return { scheduledBeforeDelay: true, rendererGateWaits: true, backendGateWaits: true };
+    },
+  },
+  {
     name: 'HEADLESS_SCRAPE_LAUNCH_CONTEXT: the singleton-yield guard and getStealthBrowser\'s own launch use the identical constant, not two literals that can drift',
     run: () => {
       // Exactly one definition. If a second `const HEADLESS_SCRAPE_LAUNCH_CONTEXT =`

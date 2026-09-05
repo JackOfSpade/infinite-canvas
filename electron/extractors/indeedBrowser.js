@@ -300,35 +300,61 @@ async function humanClick(page, selector, idx) {
 }
 
 // Click each job card on the current search results page and read the full
-// description from the right panel that updates in place. Matches descriptions
-// back to jobs via the vjk= URL param that Indeed sets on each card click.
+// description from the right panel that updates in place. Every card is matched
+// to its own job by the Indeed job key the card itself carries — the page also
+// renders cards for rows already collected on an earlier page, so a card's
+// position says nothing about which entry of `pageJobs` it belongs to.
 async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null, totalSoFar = 0) {
   await page.waitForSelector(CARD_SELECTOR, { timeout: 5000 }).catch(() => {});
-  const cardCount = await page.evaluate(
-    (sel) => document.querySelectorAll(sel).length, CARD_SELECTOR
-  ).catch(() => 0);
-  if (!cardCount) return { enriched: 0, cfBlankAt: null };
+  const cardKeys = await page.evaluate((sel) => Array.prototype.map.call(
+    document.querySelectorAll(sel),
+    (el) => {
+      let key = el.getAttribute('data-jk') || el.closest('[data-jk]')?.getAttribute('data-jk') || '';
+      if (!key) {
+        try { key = new URL(el.getAttribute('href') || '', location.href).searchParams.get('jk') || ''; }
+        catch { key = ''; }
+      }
+      return String(key || '').trim();
+    },
+  ), CARD_SELECTOR).catch(() => []);
+  if (!cardKeys.length) return { enriched: 0, cfBlankAt: null };
 
   const keyToJob = new Map();
   for (const job of pageJobs) { if (job.jobkey) keyToJob.set(job.jobkey, job); }
 
-  const limit = Math.min(cardCount, pageJobs.length);
+  // Click only the cards whose job is on this page's new-jobs list, once each —
+  // CARD_SELECTOR can match two anchors of the same card, and a repeat card is
+  // work with no data behind it.
+  const targets = [];
+  const claimedKeys = new Set();
+  for (let i = 0; i < cardKeys.length; i++) {
+    const key = cardKeys[i];
+    if (!key || claimedKeys.has(key)) continue;
+    const job = keyToJob.get(key);
+    if (!job) continue;
+    claimedKeys.add(key);
+    targets.push({ index: i, job });
+  }
+  if (!targets.length) return { enriched: 0, cfBlankAt: null };
+
+  const limit = targets.length;
   let enriched = 0;
 
-  for (let i = 0; i < limit; i++) {
+  for (let t = 0; t < limit; t++) {
     if (signal?.aborted) break;
+    const { index, job } = targets[t];
     if (overlayBase) {
       await updateOverlay(page, {
         ...overlayBase,
-        count: totalSoFar + i + 1,
+        count: totalSoFar + t + 1,
         status: `Enriching ${limit} jobs…`,
-        progressText: `${i + 1}/${limit}`,
+        progressText: `${t + 1}/${limit}`,
       }).catch(() => {});
     }
 
     const panelBefore = await page.$eval(PANEL_SELECTOR, el => el.textContent?.slice(0, 80) || '').catch(() => '');
 
-    if (!await humanClick(page, CARD_SELECTOR, i)) continue;
+    if (!await humanClick(page, CARD_SELECTOR, index)) continue;
 
     // Wait up to 4s for panel to update; detect full-page navigation as a glitch.
     let navigatedAway = false;
@@ -345,30 +371,24 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       const awayUrl = page.url();
       logger.warn(`[Indeed/Browser] Card click navigated away → ${awayUrl}`);
       // Already on the full job page — grab the description before going back.
-      const awayVjk = await page.evaluate(() => {
-        try { return new URL(location.href).searchParams.get('vjk') || ''; } catch { return ''; }
-      }).catch(() => '');
       const awayDesc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
       if (awayDesc) {
-        const job = keyToJob.get(awayVjk) || pageJobs[i];
-        if (job) {
-          job.description = awayDesc;
-          job.snippet = awayDesc;
-          recordIndeedEnrichmentAttempt(job, {
-            stage: 'card-panel',
-            outcome: awayDesc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
-            length: awayDesc.length,
-          });
-          enriched++;
-        }
+        job.description = awayDesc;
+        job.snippet = awayDesc;
+        recordIndeedEnrichmentAttempt(job, {
+          stage: 'card-panel',
+          outcome: awayDesc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+          length: awayDesc.length,
+        });
+        enriched++;
       } else {
         const sigs = await getChallengeSignals(page);
         if (sigs.isChallenge) {
-          recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
-          logger.warn(`[Indeed/Browser] CF signal on navigated-away page at card ${i + 1}/${limit} (${sigs.reason})`);
-          return { enriched, cfBlankAt: i };
+          recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
+          logger.warn(`[Indeed/Browser] CF signal on navigated-away page at card ${t + 1}/${limit} (${sigs.reason})`);
+          return { enriched, cfBlankAt: t };
         }
-        recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'blank', length: 0 });
+        recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'blank', length: 0 });
       }
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 400)));
@@ -377,35 +397,28 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
 
     await new Promise(r => setTimeout(r, 200 + Math.round(Math.random() * 200)));
 
-    const vjk = await page.evaluate(() => {
-      try { return new URL(location.href).searchParams.get('vjk') || ''; } catch { return ''; }
-    }).catch(() => '');
-
     const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
     if (description) {
-      const job = keyToJob.get(vjk) || pageJobs[i];
-      if (job) {
-        job.description = description;
-        job.snippet = description;
-        recordIndeedEnrichmentAttempt(job, {
-          stage: 'card-panel',
-          outcome: description.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
-          length: description.length,
-        });
-        enriched++;
-      }
+      job.description = description;
+      job.snippet = description;
+      recordIndeedEnrichmentAttempt(job, {
+        stage: 'card-panel',
+        outcome: description.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+        length: description.length,
+      });
+      enriched++;
     } else {
       // Blank panel — may be early CF interference before the full challenge page appears.
       const sigs = await getChallengeSignals(page);
       if (sigs.isChallenge) {
-        recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
-        logger.warn(`[Indeed/Browser] CF signal during enrichment at card ${i + 1}/${limit} (${sigs.reason})`);
-        return { enriched, cfBlankAt: i };
+        recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'challenge', reason: sigs.reason });
+        logger.warn(`[Indeed/Browser] CF signal during enrichment at card ${t + 1}/${limit} (${sigs.reason})`);
+        return { enriched, cfBlankAt: t };
       }
-      recordIndeedEnrichmentAttempt(pageJobs[i], { stage: 'card-panel', outcome: 'blank', length: 0 });
+      recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'blank', length: 0 });
     }
 
-    if (i < limit - 1) await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
+    if (t < limit - 1) await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
   }
 
   if (enriched > 0) logger.info(`[Indeed/Browser] Enriched ${enriched}/${limit} jobs with full descriptions`);
@@ -867,7 +880,6 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const workList = queryList.map((q, qi) => ({
       q, qi,
       startPage: qi === 0 ? startPage : 0,
-      retryCount: 0,
     }));
 
     // Data-driven per-page stop, one instance PER QUERY (indexed by qi, not per
@@ -893,7 +905,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       // ── Liveness check ────────────────────────────────────────────────────
       // Cloudflare challenge pages can detach the Puppeteer frame mid-navigation.
       // If the frame is dead, no further queries can succeed — stop cleanly.
-      if (wi > 0 || entry.retryCount > 0) {
+      if (wi > 0) {
         const alive = await page.evaluate(() => true).catch(() => false);
         if (!alive) {
           logger.warn('[Indeed/Browser] Page frame detached after challenge — skipping remaining queries');
@@ -901,7 +913,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      const { q, qi, retryCount } = entry;
+      const { q, qi } = entry;
 
       const overlayBase = {
         srcName:  'Indeed',
@@ -1009,7 +1021,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         ).catch(() => null);
 
         logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${pageJobs.length} platform-returned job(s) from ${rawPageJobs.length} candidate(s) (${htmlKB}KB${hasNextPage === false ? ', last page' : ''})`);
-        onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}${retryCount > 0 ? ` (retry ${retryCount})` : ''}`);
+        onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}`);
 
         if (rawPageJobs.length === 0) break;
 
@@ -1119,14 +1131,64 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      // Query delay only for fresh (non-retry) entries to avoid double-penalizing retries.
-      if (retryCount === 0 && !signal?.aborted) {
+      // Pace the gap between queries so consecutive searches don't look scripted.
+      if (!signal?.aborted) {
         const delay = QUERY_DELAY_MS[0] + Math.round(Math.random() * (QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]));
         await new Promise(r => setTimeout(r, delay));
       }
 
       wi++;
     }
+
+    // One navigate → classify → record body shared by both re-enrichment passes
+    // below; each pass supplies its own pacing and stage label. Returns the
+    // number of jobs that came back with enough text to score.
+    const runReEnrichPass = async ({ jobs, stage, label, waitUntil, timeout, settleMs, gapMs }) => {
+      let recovered = 0;
+      for (let ri = 0; ri < jobs.length; ri++) {
+        if (signal?.aborted) break;
+        const job = jobs[ri];
+        const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
+        if (!jobUrl) continue;
+        try {
+          await page.goto(jobUrl, { waitUntil, timeout });
+          await new Promise(r => setTimeout(r, settleMs[0] + Math.round(Math.random() * settleMs[1])));
+          const sigs = await getChallengeSignals(page);
+          if (sigs.isChallenge) {
+            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'challenge', reason: sigs.reason });
+            logger.warn(`[Indeed/Browser] ${label}: CF active (${sigs.reason}) — skipping remaining ${jobs.length - ri}, CF window still hot`);
+            break;
+          }
+          const unavailableReason = await getIndeedUnavailableReason(page);
+          if (unavailableReason) {
+            job.descriptionDeferredReason = `indeed-${unavailableReason}`;
+            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'unavailable', reason: unavailableReason });
+            logger.info(`[Indeed/Browser] ${label} retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
+            continue;
+          }
+          const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+          if (desc) {
+            job.description = desc;
+            job.snippet = desc;
+            recordIndeedEnrichmentAttempt(job, {
+              stage,
+              outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
+              length: desc.length,
+            });
+            if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) recovered++;
+          } else {
+            recordIndeedEnrichmentAttempt(job, { stage, outcome: 'blank', length: 0 });
+          }
+          if (ri < jobs.length - 1) {
+            await new Promise(r => setTimeout(r, gapMs[0] + Math.round(Math.random() * gapMs[1])));
+          }
+        } catch (e) {
+          recordIndeedEnrichmentAttempt(job, { stage, outcome: 'error', reason: e.message });
+          logger.warn(`[Indeed/Browser] ${label} failed (${job.jobkey || 'no-key'}): ${e.message}`);
+        }
+      }
+      return recovered;
+    };
 
     // ── Post-run re-enrichment pass ─────────────────────────────────────────────
     // Jobs with empty descriptions after the main pass may be silent CF blanks —
@@ -1149,48 +1211,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         await waitWithCountdown(cooldownMs, (s) => onProgress?.(`Re-enrich CF cooldown ${s}s…`));
       }
       logger.info(`[Indeed/Browser] Re-enriching ${missingDescJobs.length} jobs with missing descriptions`);
-      for (let ri = 0; ri < missingDescJobs.length; ri++) {
-        if (signal?.aborted) break;
-        const job = missingDescJobs[ri];
-        const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
-        if (!jobUrl) continue;
-        try {
-          await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-          await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 800)));
-          const sigs = await getChallengeSignals(page);
-          if (sigs.isChallenge) {
-            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'challenge', reason: sigs.reason });
-            logger.warn(`[Indeed/Browser] Re-enrich: CF active (${sigs.reason}) — skipping remaining ${missingDescJobs.length - ri}, CF window still hot`);
-            break;
-          }
-          const unavailableReason = await getIndeedUnavailableReason(page);
-          if (unavailableReason) {
-            job.descriptionDeferredReason = `indeed-${unavailableReason}`;
-            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'unavailable', reason: unavailableReason });
-            logger.info(`[Indeed/Browser] Re-enrich retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
-            continue;
-          }
-          const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-          if (desc) {
-            job.description = desc;
-            job.snippet = desc;
-            recordIndeedEnrichmentAttempt(job, {
-              stage: 're-enrich',
-              outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
-              length: desc.length,
-            });
-            if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) reEnriched++;
-          } else {
-            recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'blank', length: 0 });
-          }
-          if (ri < missingDescJobs.length - 1) {
-            await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
-          }
-        } catch (e) {
-          recordIndeedEnrichmentAttempt(job, { stage: 're-enrich', outcome: 'error', reason: e.message });
-          logger.warn(`[Indeed/Browser] Re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
-        }
-      }
+      reEnriched = await runReEnrichPass({
+        jobs: missingDescJobs,
+        stage: 're-enrich',
+        label: 'Re-enrich',
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+        settleMs: [1200, 800],
+        gapMs: [800, 600],
+      });
       logger.info(`[Indeed/Browser] Re-enrich complete: ${reEnriched}/${missingDescJobs.length} recovered`);
 
       // A second, deliberately slower pass gives transiently blank detail panes
@@ -1202,49 +1231,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       );
       if (residualDescJobs.length > 0 && !signal?.aborted) {
         logger.info(`[Indeed/Browser] Slow re-enriching ${residualDescJobs.length} residual job(s)`);
-        let slowRecovered = 0;
-        for (let ri = 0; ri < residualDescJobs.length; ri++) {
-          if (signal?.aborted) break;
-          const job = residualDescJobs[ri];
-          const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
-          if (!jobUrl) continue;
-          try {
-            await page.goto(jobUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-            await new Promise(r => setTimeout(r, 3000 + Math.round(Math.random() * 1000)));
-            const sigs = await getChallengeSignals(page);
-            if (sigs.isChallenge) {
-              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'challenge', reason: sigs.reason });
-              logger.warn(`[Indeed/Browser] Slow re-enrich: CF active (${sigs.reason}) — skipping remaining ${residualDescJobs.length - ri}, CF window still hot`);
-              break;
-            }
-            const unavailableReason = await getIndeedUnavailableReason(page);
-            if (unavailableReason) {
-              job.descriptionDeferredReason = `indeed-${unavailableReason}`;
-              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'unavailable', reason: unavailableReason });
-              logger.info(`[Indeed/Browser] Slow re-enrich retired unavailable listing (${unavailableReason}): ${job.jobkey || jobUrl}`);
-              continue;
-            }
-            const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-            if (desc) {
-              job.description = desc;
-              job.snippet = desc;
-              recordIndeedEnrichmentAttempt(job, {
-                stage: 'slow-re-enrich',
-                outcome: desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS ? 'recovered' : 'short',
-                length: desc.length,
-              });
-              if (desc.length >= DESCRIPTION_EVIDENCE_MIN_CHARS) slowRecovered++;
-            } else {
-              recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'blank', length: 0 });
-            }
-            if (ri < residualDescJobs.length - 1) {
-              await new Promise(r => setTimeout(r, 1500 + Math.round(Math.random() * 1000)));
-            }
-          } catch (e) {
-            recordIndeedEnrichmentAttempt(job, { stage: 'slow-re-enrich', outcome: 'error', reason: e.message });
-            logger.warn(`[Indeed/Browser] Slow re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
-          }
-        }
+        const slowRecovered = await runReEnrichPass({
+          jobs: residualDescJobs,
+          stage: 'slow-re-enrich',
+          label: 'Slow re-enrich',
+          waitUntil: 'networkidle2',
+          timeout: 30000,
+          settleMs: [3000, 1000],
+          gapMs: [1500, 1000],
+        });
         reEnriched += slowRecovered;
         logger.info(`[Indeed/Browser] Slow re-enrich complete: ${slowRecovered}/${residualDescJobs.length} recovered`);
       }

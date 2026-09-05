@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../../logger.js';
-import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath } from '../stealthBrowser.js';
+import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
 import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
@@ -576,6 +576,16 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
     // it must be closed before a second Chrome can open the same profile (mirrors
     // openLoginWindow). Pause the scrape pool so it can't relaunch mid-read. Both
     // are set up INSIDE the try so a throw still releases the pause + kills Chrome.
+    //
+    // The pool pause only gates the pool's OWN queue — job-side code calls
+    // getStealthBrowser() directly (LinkedIn description enrichment), and a
+    // JobSearch run can overlap a Check All because neither takes the other's
+    // lease. Reserve the shared profile like every other visible spawn
+    // (openLoginWindow / captcha-resolve / indeed) so a concurrent headless launch
+    // fails fast with a named reason instead of stealing the userDataDir this read
+    // is about to take. A reservation already held by a job-side window throws
+    // here and surfaces through the fillAll() catch below.
+    const releaseProfileReservation = reserveSharedProfile(`native-read:${platformId || 'hub'}`);
     const releasePool = pauseBrowserPool(`native-read:${platformId || 'hub'}`);
     let child = null;
     let childExited = false;
@@ -693,6 +703,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
       // closeStealthBrowser's own post-close wait.
       await waitForChildExit(child);
       releasePool();
+      releaseProfileReservation();
     }
   }, signal).catch((err) => {
     // The lock rejects with AbortError if we were cancelled while queued behind

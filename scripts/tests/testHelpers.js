@@ -8,7 +8,9 @@ export function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export function runExtractorFixtureTest({ name, file, extractor, minCount = 1, sampleAssert = null }) {
+// Shared body of the fixture helpers. `assertResult` runs while the JSDOM
+// window is still open, so a caller's sample assertions can still reach it.
+function evalFixtureExtractor({ name, file, extractor }, assertResult) {
   const html = fs.readFileSync(path.resolve(file), 'utf8');
   const dom = new JSDOM(html, {
     url: 'https://example.com',
@@ -20,27 +22,23 @@ export function runExtractorFixtureTest({ name, file, extractor, minCount = 1, s
     const raw = dom.window.eval(extractor);
     const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
     assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
-    assert(result.length >= minCount, `${name}: expected at least ${minCount} result(s), got ${result.length}`);
-    if (sampleAssert) sampleAssert(result[0], result);
+    assertResult(result);
     return { count: result.length, sample: result[0] };
   } finally {
     dom.window.close();
   }
 }
 
-export function runZeroResultFixtureTest({ name, file, extractor }) {
-  const html = fs.readFileSync(path.resolve(file), 'utf8');
-  const dom = new JSDOM(html, {
-    url: 'https://example.com',
-    runScripts: 'outside-only',
+export function runExtractorFixtureTest({ name, file, extractor, minCount = 1, sampleAssert = null }) {
+  return evalFixtureExtractor({ name, file, extractor }, result => {
+    assert(result.length >= minCount, `${name}: expected at least ${minCount} result(s), got ${result.length}`);
+    if (sampleAssert) sampleAssert(result[0], result);
   });
-  try {
-    const raw = dom.window.eval(extractor);
-    const result = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : raw);
-    assert(Array.isArray(result), `${name}: extractor did not return an array (or { items })`);
+}
+
+export function runZeroResultFixtureTest({ name, file, extractor }) {
+  const { count } = evalFixtureExtractor({ name, file, extractor }, result => {
     assert(result.length === 0, `${name}: expected 0 results, got ${result.length}`);
-    return { count: result.length };
-  } finally {
-    dom.window.close();
-  }
+  });
+  return { count };
 }

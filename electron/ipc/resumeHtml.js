@@ -404,24 +404,32 @@ function enDashIsRange(text, index) {
     && new RegExp(`^\\s*(?:\\d|present\\b|${month}\\.?\\s+\\d{4}\\b)`, 'i').test(after);
 }
 
-function assertDashPunctuation(text, surface) {
+// Collected, not thrown one at a time. Each dash problem is independent of the
+// others, and the Local AI path turns every throw into a full authoring round —
+// so a document with an em dash in the résumé and one in the letter used to
+// cost two rounds to learn about two defects already visible in one file.
+function dashPunctuationProblems(text, surface) {
+  const problems = [];
   if (text.includes('—')) {
-    throw new Error(`${surface} contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.`);
+    problems.push(`${surface} contains an em dash. Use a comma, conjunction, colon, semicolon, parentheses, or separate sentences instead.`);
   }
   if (/\s-\s/.test(text)) {
-    throw new Error(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
+    problems.push(`${surface} contains a spaced hyphen acting as sentence punctuation.`);
   }
   for (let index = text.indexOf('–'); index !== -1; index = text.indexOf('–', index + 1)) {
     if (!enDashIsRange(text, index)) {
-      throw new Error(`${surface} contains an en dash outside a date or numeric range.`);
+      problems.push(`${surface} contains an en dash outside a date or numeric range.`);
+      break;
     }
   }
+  return problems;
 }
 
 /** Enforce the design system's candidate-copy dash gate before document build. */
 export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLetter = null } = {}) {
+  const problems = [];
   const resume = candidateText(resumeMainHtml);
-  if (resume) assertDashPunctuation(resume, 'Résumé copy');
+  if (resume) problems.push(...dashPunctuationProblems(resume, 'Résumé copy'));
   if (coverLetter && typeof coverLetter === 'object') {
     const cover = candidateText([
       coverLetter.name,
@@ -432,8 +440,16 @@ export function assertCandidateDashPunctuation({ resumeMainHtml = '', coverLette
       coverLetter.closing,
       coverLetter.signatureTitle,
     ].filter(Boolean).join('\n'));
-    if (cover) assertDashPunctuation(cover, 'Cover-letter copy');
+    if (cover) problems.push(...dashPunctuationProblems(cover, 'Cover-letter copy'));
   }
+  if (!problems.length) return;
+  // A single problem keeps its exact original message; several are carried on
+  // `failures` so the caller's aggregate reads as one flat numbered list
+  // rather than a nested one. localAiApplication.js's validationFailureParts()
+  // reads that property.
+  const error = new Error(problems.length === 1 ? problems[0] : problems.join(' '));
+  if (problems.length > 1) error.failures = problems;
+  throw error;
 }
 
 /**
@@ -472,10 +488,23 @@ export function webFontFacesReadyExpression({ details = false } = {}) {
         .filter(Boolean);
       var requiredByKey = {};
       var surfaces = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel], main.page'));
+      // The pagination guides are screen-only chrome: @media print hides the
+      // whole overlay, so nothing inside it reaches the PDF. They must also be
+      // invisible to this predicate. renderGuides() rewrites the overlay's
+      // innerHTML from a rAF scheduled by document.fonts.ready, loadingdone, a
+      // ResizeObserver and a data-density MutationObserver — every one of which
+      // can land AFTER the isolated render has inline-substituted the ATS-safe
+      // families on the elements that existed at that moment. The regenerated
+      // folio then carries its own font stack, which this walk would score as
+      // an "unexpected" face and report as a failed font load — withholding a
+      // perfectly good PDF over a decoration that is never printed.
+      var guideOverlays = Array.prototype.slice.call(document.querySelectorAll('[data-ic-page-guides]'));
       var isDocumentText = function (node) {
         if (!String(node.nodeValue || '').trim()) return false;
         var parent = node.parentElement;
-        return !!parent && surfaces.some(function (surface) { return surface.contains(parent); });
+        if (!parent) return false;
+        if (guideOverlays.some(function (overlay) { return overlay.contains(parent); })) return false;
+        return surfaces.some(function (surface) { return surface.contains(parent); });
       };
       var walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
       var node;
@@ -515,7 +544,6 @@ export function webFontFacesReadyExpression({ details = false } = {}) {
 // buildCoverLetterDocument below). Filename list migrated verbatim from
 // resumePdf.js:70.
 const CSS_FILES = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
-const RESUME_CSS_FILES = CSS_FILES.slice(0, 2);
 
 /**
  * Resolve `Job Application Design System/`. In dev this is the repo root; in a packaged
@@ -874,7 +902,11 @@ const INJECTED_CHROME_CSS = `
 .ic-page-seam-fade-bot { bottom: 0; background: linear-gradient(to top, rgba(26,24,21,.10), transparent); }
 .ic-page-seam-line { position: absolute; left: 0; right: 0; height: 1px; background: rgba(26,24,21,.18); }
 .ic-page-seam-line-dashed { position: static; height: 0; border-top: 1px dashed rgba(26,24,21,.30); }
-.ic-page-folio { position: absolute; right: 6px; font: 8.5px/1.3 "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace; letter-spacing: -0.005em; color: #8C857A; white-space: nowrap; }
+/* var(--ff-mono), not a literal stack: the isolated PDF render substitutes the
+   ATS-safe families on the root, and buildShadowClone() measures the seam with
+   those same metrics. A hardcoded family made the folio the one element in the
+   preview whose typeface ignored both. */
+.ic-page-folio { position: absolute; right: 6px; font: 8.5px/1.3 var(--ff-mono); letter-spacing: -0.005em; color: #8C857A; white-space: nowrap; }
 .ic-document-tabs { display: flex; gap: 8px; max-width: 794px; margin: 0 auto 16px; }
 .ic-document-tabs .ic-btn { padding: 7px 14px; border: 1px solid #a89f92; border-radius: 4px; background: #f7f4ed; color: #3b352f; font: 600 12px/1.3 -apple-system, "Helvetica Neue", Arial, sans-serif; cursor: pointer; }
 .ic-document-tabs [aria-selected="true"] { background: #7A1F2B; border-color: #7A1F2B; color: #fff; }
@@ -2031,7 +2063,13 @@ ${editableRuntimeSanitizerSource()}
         }
         if (conflicts.length) {
           var conflictMessage = conflicts.map(function (item) {
-            return (item.document === 'cover' ? 'Cover letter' : 'Résumé') + ' PDF and HTML both changed; automatic import was paused to protect both revisions.';
+            var label = item.document === 'cover' ? 'Cover letter' : 'Résumé';
+            // The server reports why each import was held (missing sibling PDF,
+            // both sides edited, an extractor error, an ambiguous remap). Report
+            // what it observed instead of asserting one cause for all of them.
+            var reason = typeof item.reason === 'string' ? item.reason.trim() : '';
+            if (reason) return label + ': ' + reason;
+            return label + ' PDF and HTML both changed; automatic import was paused to protect both revisions.';
           }).join(' ');
           syncMessage = [syncMessage, conflictMessage].filter(Boolean).join(' ');
         }

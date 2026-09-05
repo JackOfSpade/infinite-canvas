@@ -7,8 +7,10 @@ import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
 import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
+import { strokePoints } from '../utils/geometry';
 
 const CLIPBOARD_KEY = 'infinite-canvas-clipboard';
+const PASTE_REPEAT_OFFSET = 40;
 let applicationClipboardFallback = null;
 
 export function useCanvasActions({
@@ -95,7 +97,7 @@ export function useCanvasActions({
     if (drawings && drawings.length > 0) {
       const { minX, maxX, minY, maxY } = getNodesBounds(nodesToCopy);
       drawingsToCopy = drawings.filter(d =>
-        d.points.some(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY)
+        strokePoints(d).some(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY)
       );
     }
 
@@ -103,7 +105,8 @@ export function useCanvasActions({
     const clipboardData = {
       nodes: structuredClone(nodesToCopy),
       edges: structuredClone(edgesToCopy),
-      drawings: structuredClone(drawingsToCopy)
+      drawings: structuredClone(drawingsToCopy),
+      pasteCount: 0
     };
 
     try {
@@ -141,9 +144,13 @@ export function useCanvasActions({
     const flowWidth  = containerW / zoom;
     const flowHeight = containerH / zoom;
     
-    // Compute center of current viewport in flow coordinates
-    const centerX = -vpx / zoom + flowWidth / 2;
-    const centerY = -vpy / zoom + flowHeight / 2;
+    // Compute center of current viewport in flow coordinates. Repeat pastes of
+    // the same clipboard step down-right instead of stacking invisibly: the
+    // re-saved cluster below is already centred, so without this the next
+    // paste's offsets would all be zero.
+    const pasteRepeat = Number.isFinite(clipboardData.pasteCount) ? clipboardData.pasteCount : 0;
+    const centerX = -vpx / zoom + flowWidth / 2 + pasteRepeat * PASTE_REPEAT_OFFSET;
+    const centerY = -vpy / zoom + flowHeight / 2 + pasteRepeat * PASTE_REPEAT_OFFSET;
 
     // Compute bounding box of copied cluster to find its local center
     const { minX, maxX, minY, maxY } = getNodesBounds(clipboardData.nodes);
@@ -175,10 +182,12 @@ export function useCanvasActions({
       }));
 
     const newDrawings = (clipboardData.drawings || []).map(originalDrawing => {
+      // Legacy strokes can be a bare points array; spreading one would turn its
+      // indices into numeric keys on the pasted stroke.
       return {
-        ...originalDrawing,
+        ...(Array.isArray(originalDrawing) ? {} : originalDrawing),
         id: generateId(),
-        points: originalDrawing.points.map(p => ({
+        points: strokePoints(originalDrawing).map(p => ({
           x: centerX + (p.x - clusterCenterX),
           y: centerY + (p.y - clusterCenterY)
         }))
@@ -205,7 +214,8 @@ export function useCanvasActions({
     const nextClipboard = {
       nodes: newNodes.map(n => ({...n, selected: false})),
       edges: newEdges.map(e => ({...e, selected: false})),
-      drawings: newDrawings
+      drawings: newDrawings,
+      pasteCount: pasteRepeat + 1
     };
     try {
       applicationClipboardFallback = nextClipboard;

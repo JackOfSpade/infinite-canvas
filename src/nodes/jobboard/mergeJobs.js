@@ -18,7 +18,7 @@ import { jobTitleCompanyLocationKey, jobTitleCompanyUrlKey } from '../../utils/j
  *
  * Pass an optional `stats` object to collect merge telemetry (mutated in place):
  * `{ totalIncoming, unique, duplicatesRemoved, collisions, collisionUpgrades,
- *    collisionAssessmentUpgrades }`.
+ *    collisionAssessmentUpgrades, preferenceFilteredSkipped }`.
  * The Job Board stores this so a "merged the wrong count / kept the wrong copy"
  * bug is diagnosable from the report — the merge is otherwise invisible (it runs
  * in the renderer, before the bucketJobs IPC that main stamps a funnel for).
@@ -35,11 +35,20 @@ export function unionScoredJobs(jobArrays, stats) {
   let collisions = 0;      // duplicate keys encountered (any resolution)
   let collisionUpgrades = 0; // collisions where a higher matchScore replaced the kept copy
   let collisionAssessmentUpgrades = 0;
+  let preferenceFilteredSkipped = 0;
 
   for (const arr of Array.isArray(jobArrays) ? jobArrays : []) {
     if (!Array.isArray(arr)) continue;
     for (const job of arr) {
       if (!job || typeof job !== 'object') continue;
+      // Search modules normally publish only preference-accepted jobs in
+      // `scoredJobs`. This boundary also has to defend saved/legacy canvases:
+      // a stale or manually-edited filtered row must never be displayed by a
+      // Job Board (and consequently never reach its seen-history writer).
+      if (job.preferenceAssessment?.status === 'filtered') {
+        preferenceFilteredSkipped++;
+        continue;
+      }
       totalIncoming++;
       const key = boardListingKey(job);
       const existing = byKey.get(key);
@@ -72,6 +81,7 @@ export function unionScoredJobs(jobArrays, stats) {
     stats.collisions = collisions;
     stats.collisionUpgrades = collisionUpgrades;
     stats.collisionAssessmentUpgrades = collisionAssessmentUpgrades;
+    stats.preferenceFilteredSkipped = preferenceFilteredSkipped;
   }
 
   return order.map(k => byKey.get(k));
@@ -160,26 +170,39 @@ function canSafelyPreferCompensationAssessment(candidate, existing) {
     && assessmentQuality(candidate?.compensationAssessment) > assessmentQuality(existing?.compensationAssessment);
 }
 
+// Keyed by the scoredJobs array identity. Correct only because every writer of
+// node.data.scoredJobs replaces the array with a fresh one — nothing mutates a
+// stored array or its job objects in place. If that ever changes, this cache
+// must go, not gain an invalidation hook.
+const FINGERPRINT_CACHE = new WeakMap();
+
 /**
  * Cheap content fingerprint of one module's scored jobs. Changes when the set
  * changes size (re-scrape), any score changes (re-score), the order changes,
  * or any card-visible/origin-sensitive job field changes,
  * so it tells whether a connection carries the SAME card-visible data it did at
- * the last Combine. Deliberately O(n) + allocation-free so it can run inside the
- * reactive store selector on every frame; not a cryptographic hash, but unlike
- * the old count+score-sum format it can't be fooled by a re-run whose score
- * deltas cancel out ([80,90] → [85,85]).
+ * the last Combine. It runs inside a reactive store selector, which zustand
+ * re-runs on every ReactFlow setState (pan/drag frames included), so repeat
+ * calls for an unchanged array are served from FINGERPRINT_CACHE — the O(n)
+ * fold over every job's text now costs kilobytes of characters per job. Not a
+ * cryptographic hash, but unlike the old count+score-sum format it can't be
+ * fooled by a re-run whose score deltas cancel out ([80,90] → [85,85]).
  *
- * The "5:" prefix versions the format: combineSignatures saved by older
+ * The "6:" prefix versions the format: combineSignatures saved by older
  * fingerprint can't be recomputed, so the board treats a signature without the
  * marker as a legacy baseline to adopt rather than a staleness mismatch (see
  * isLegacyCombineSignature).
  *
  * @param {object[]} scoredJobs
- * @returns {string} e.g. "5:191:123456789" (version:length:fold)
+ * @returns {string} e.g. "6:191:123456789" (version:length:fold)
  */
 export function moduleFingerprint(scoredJobs) {
-  const arr = Array.isArray(scoredJobs) ? scoredJobs : [];
+  const isArray = Array.isArray(scoredJobs);
+  if (isArray) {
+    const cached = FINGERPRINT_CACHE.get(scoredJobs);
+    if (cached !== undefined) return cached;
+  }
+  const arr = isArray ? scoredJobs : [];
   // FNV-1a is cheap enough to run in the ReactFlow store selector while making
   // every field that can alter a spawned card (or its origin-hub lookup) part
   // of staleness. The old fold used score + title length + title initial only,
@@ -253,6 +276,29 @@ export function moduleFingerprint(scoredJobs) {
     foldRows(value?.requirementRows);
     foldRows(value?.rejectedRequirementRows, true);
   };
+  const foldPreferenceAssessment = (assessment) => {
+    const value = assessment && typeof assessment === 'object' ? assessment : null;
+    fold(value?.status);
+    fold(value?.summary);
+    const preferenceScore = Number(value?.preferenceScore);
+    fold(Number.isFinite(preferenceScore) ? preferenceScore : null);
+    const matches = Array.isArray(value?.matches) ? value.matches : [];
+    fold(matches.length);
+    for (const match of matches) {
+      fold(match?.preferenceId);
+      fold(match?.criterion);
+      fold(match?.category);
+      fold(match?.strict === true);
+      fold(match?.outcome);
+      fold(match?.evidence);
+      fold(match?.source);
+      fold(match?.sourceDate);
+      fold(match?.verifiedAt);
+      const sourceUrls = Array.isArray(match?.sourceUrls) ? match.sourceUrls : [];
+      fold(sourceUrls.length);
+      for (const url of sourceUrls) fold(url);
+    }
+  };
   for (const j of arr) {
     if (!j || typeof j !== 'object') {
       fold('__non-job__');
@@ -271,6 +317,10 @@ export function moduleFingerprint(scoredJobs) {
     fold(j.posted);
     fold(j.language);
     fold(j.originHubId);
+    // Preference status, evidence and its secondary ordering score are all
+    // user-visible card input. Any change must offer Re-combine rather than
+    // leaving a board showing the previous ordering/explanation.
+    foldPreferenceAssessment(j.preferenceAssessment);
     // The card's expandable hiring-fit audit is derived from fitAssessment,
     // not from the short top-level reasoning above. It must participate in
     // staleness, or refreshed evidence/gaps can leave an old card disclosure
@@ -316,7 +366,9 @@ export function moduleFingerprint(scoredJobs) {
       fold(range?.period ?? range?.payPeriod ?? range?.unit);
     }
   }
-  return `5:${arr.length}:${h >>> 0}`;
+  const signature = `6:${arr.length}:${h >>> 0}`;
+  if (isArray) FINGERPRINT_CACHE.set(scoredJobs, signature);
+  return signature;
 }
 
 /**
@@ -327,12 +379,12 @@ export function moduleFingerprint(scoredJobs) {
  */
 export function isLegacyCombineSignature(signature) {
   const s = String(signature || '');
-  // v3 introduced visible-data folding and v4 added compensation. Those
-  // signatures must still be compared (and therefore go stale) when v5 adds
-  // fit-audit fields; silently adopting them would leave an old card audit
-  // visible after its source module refreshed. Only the pre-v3 formats lack a
+  // v3 introduced visible-data folding, v4 added compensation, v5 added the
+  // fit audit, and v6 adds Job Preferences. Those signatures must still be
+  // compared (and therefore go stale) after an upgrade; silently adopting one
+  // could leave old card ordering/evidence visible. Only pre-v3 formats lack a
   // safe enough baseline to compare and are adopted on load.
-  return !!s && !/(?:^|\|)[^=]+=[345]:/.test(s);
+  return !!s && !/(?:^|\|)[^=]+=[3456]:/.test(s);
 }
 
 /**

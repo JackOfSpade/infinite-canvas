@@ -6,6 +6,16 @@ function escapeCell(value) {
   return String(value ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
+// Bounded prose with an explicit truncation marker, and always applied BEFORE
+// escapeCell: a cut landing between an inserted `\` and its `|` would leave a
+// dangling backslash that escapes the cell's closing delimiter. Duplicated from
+// the report helpers because this module is also loaded by the renderer, which
+// must not import main-process code.
+function clipCellText(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
+}
+
 function productLabel(data = {}) {
   const product = data.product || {};
   return product.generated_title || product.title || product.model || product.brand || '(untitled)';
@@ -18,14 +28,19 @@ function summarizeSourceProgress(progress = {}) {
     const status = v?.status;
     return status === 'searching' || status === 'error' || v?.warning || status === 'done';
   });
-  return important
-    .slice(0, 9)
+  const shown = important.slice(0, 9);
+  const summary = shown
     .map(([sourceId, v]) => {
       const count = v?.count ?? '?';
       const warning = v?.warning?.code ? `[${v.warning.code}]` : '';
       return `${sourceId}=${v?.status || '?'}/${count}${warning}`;
     })
-    .join(', ') || '-';
+    .join(', ');
+  if (!summary) return '-';
+  // Name the cut rather than ending the list silently — an unmarked cap reads
+  // as "these are all the sources".
+  const omitted = important.length - shown.length;
+  return omitted > 0 ? `${summary}, +${omitted} more` : summary;
 }
 
 export function buildSellHubResolveSnapshot(nodes = [], nodeStates = []) {
@@ -66,7 +81,7 @@ export function buildSellHubResolveRollup(resolveStates = []) {
       : '-';
     const active = row.activeSources?.length ? row.activeSources.join(',') : '-';
     const queued = row.queuedSources?.length ? row.queuedSources.join(',') : '-';
-    return `| \`${shortId(row.id)}\` | ${escapeCell(row.title).slice(0, 70)} | ${escapeCell(row.hubState)} | ${phase} * ${row.workCount} | ${escapeCell(wait)} | ${escapeCell(active)} | ${escapeCell(queued)} | ${escapeCell(row.progressSummary).slice(0, 180)} |`;
+    return `| \`${shortId(row.id)}\` | ${escapeCell(clipCellText(row.title, 70))} | ${escapeCell(row.hubState)} | ${phase} * ${row.workCount} | ${escapeCell(wait)} | ${escapeCell(active)} | ${escapeCell(queued)} | ${escapeCell(clipCellText(row.progressSummary, 180))} |`;
   }).join('\n');
 
   return `

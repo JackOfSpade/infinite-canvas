@@ -177,8 +177,11 @@ export function useCanvasDragAndDrop({
       } else if (trimmedText.length > 0) {
         takeSnapshot();
         // Insert as a TextNode if it doesn't match a URL format.
-        // createTextNode only accepts position, so we patch the text field manually.
-        const newNode = { ...NODE_FACTORIES.text(position), data: { text: trimmedText, isNew: false } };
+        // createTextNode only accepts position, so we patch the text field
+        // manually — merging into the factory's data so the remembered text
+        // style (font, colors) survives.
+        const base = NODE_FACTORIES.text(position);
+        const newNode = { ...base, data: { ...base.data, text: trimmedText, isNew: false } };
         insertNodes([newNode]);
       }
     }

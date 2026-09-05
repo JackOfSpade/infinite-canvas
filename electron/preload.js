@@ -71,6 +71,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
   generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),
+  interpretJobPreferences: (args) => ipcRenderer.invoke('interpret-job-preferences', args),
+  evaluateJobPreferences: (args) => ipcRenderer.invoke('evaluate-job-preferences', args),
   resolveJobSearchLocation: (args) => ipcRenderer.invoke('resolve-job-search-location', args),
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
   searchJobsSingleSource: (args) => ipcRenderer.invoke('search-jobs-single-source', args),
