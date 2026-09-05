@@ -51,7 +51,8 @@ End-to-end, given candidate data + job description:
 1. **Parse candidate data.** Extract: name, contact (email and
    phone; optionally a supplied location and at most one canonical
    URL, site OR github, never both), 3–6 role entries
-   with titles + companies + dates + 3–6 bullets each, optional
+   with titles + companies + dates + each role's stated work
+   location + 3–6 bullets each, optional
    "Selected Systems" / "Projects", a skills block, and the highest
    **completed** degree + institution (they go in the header
    subtitle — there is no Education section; `STYLE.md §5.8`).
@@ -67,8 +68,17 @@ End-to-end, given candidate data + job description:
    other context. If it was not given, omit the
    `addressLocality` span entirely — a contact line of email · one
    URL is complete and correct. The same rule applies to the cover
-   letter's letterhead. Per-role `.role-location` values are
-   employment facts and may be used when supplied with the role.
+   letter's letterhead.
+
+   **Per-role `.role-location` is the opposite case and must not be
+   confused with it.** It is an employment fact, and it is **required
+   whenever the source data states a location for that role** — reading
+   it off that role's own entry is not an inference, so this rule never
+   licenses the candidate-contact location above. Extract it alongside
+   the title, company and dates in step 1. Render it in the role's
+   `.role-meta` row, or fold it into `.role-dates` when the role has no
+   summary to share that row with (`STYLE.md §5.2b`); a location is
+   never dropped to buy a line.
 
 2. **Read the job description.** Identify:
    - Company name and the *kind* of company (see decision table below)
@@ -710,7 +720,9 @@ free space recovery available, and it costs zero searchable terms.
 - No skills block over 3 rows / 20 terms, and no concepts or
   commodity tooling inside it
 - No candidate location that wasn't explicitly supplied as contact
-  data — never inferred from the job, employer, or school
+  data — never inferred from the job, employer, or school. (This is
+  the contact line only. A role's own stated work location is a
+  required employment fact — see step 1 and `STYLE.md §5.2`.)
 - No `Selected Systems` entry whose metrics already appear in a bullet
 - No coloured ranges, no gradients, no rounded cards
 - No emoji

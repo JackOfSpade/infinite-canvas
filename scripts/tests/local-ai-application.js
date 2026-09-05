@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, boundedRejectionError } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
@@ -1108,6 +1108,9 @@ export default [
         ['abrupt prior-employer opener', 'At Acme, I evaluated third-party products before adoption.', 'prior-employer-opening'],
         ['broad industry label', 'My aviation work extends this evidence with software design.', 'vague-domain-work-label'],
         ['noun-to-gerund cover-letter range', 'I evaluated products from the quote request through presenting findings.', 'parallel-structure'],
+        ['stewardship process range', 'I ran the evaluations, carrying each one from the quote request through the final analysis for management.', 'parallel-structure'],
+        ['prose span ending in through', 'I owned that work from the first scoping call through the final handoff.', 'parallel-structure'],
+        ['entailed setup premise', 'Before those products were adopted, the district had to choose them, and I ran the evaluations.', 'entailed-premise'],
         ['ambiguous data consumer', 'The platforms produced data they used and data they returned.', 'reference-clarity'],
         ['missing workplace-introduction comma', 'At the district I delivered software through traditional and AI-assisted workflows.', 'introductory-workplace-comma'],
         ['metaphorically ambiguous UI pointing', 'An agent walking someone through an on-screen task cannot point at the control it means.', 'visual-reference-precision'],
@@ -2144,6 +2147,349 @@ export default [
       const midToken = extractResumeEvidence(role('<li>Cut <b data-achievement-id="a1">p99</b>-latency on the district ingest path.</li>'));
       assert(midToken.roles[0].bullets[0].budgetText.includes('p99-latency'),
         'the budget measurement must not insert a space at a mid-token tag boundary');
+      return { enforced: true };
+    },
+  },
+  {
+    // The shipped MGT/AI Solutions Architect résumé rendered three roles with a
+    // `.role-header` and nothing else, dropping "Loveland, Colorado",
+    // "Getzville, New York" and "Oshawa, Ontario" — all three stated in the
+    // career data. Nothing asked for them and nothing measured their absence,
+    // so the result imported clean. These are the two halves of that fix.
+    name: 'Local AI résumé: a work location the career data states must reach the role, in either legal cell',
+    async run() {
+      const CAREER = [
+        '### Software Engineer',
+        '',
+        '**Thomson School District — Loveland, Colorado**',
+        '*May, 2023 – June, 2026*',
+        '',
+        '### Data Engineer',
+        '**Horizon Health Alliance — Getzville, New York**',
+        '',
+        '### Software Engineer',
+        '**FliteX (Plan de Vol International) — Oshawa, Ontario**',
+        '',
+        '### Analyst',
+        '**Unlocated Systems — Consumer Robotics, Hardware**',
+      ].join('\n');
+
+      // The career-data side reads the employer's own heading line and is sure
+      // or silent: a tail that is not a `City, Region` yields no requirement.
+      const stated = careerDataRoleLocation(CAREER, 'Thomson School District');
+      assert(stated && stated.city === 'Loveland' && stated.region === 'Colorado' && stated.code === 'CO',
+        `the employer heading must yield its stated city and region, got ${JSON.stringify(stated)}`);
+      assert(careerDataRoleLocation(CAREER, 'FliteX (Plan de Vol International)')?.code === 'ON',
+        'a parenthesised employer name and a Canadian province must both resolve');
+      assert(careerDataRoleLocation(CAREER, 'Unlocated Systems') === null,
+        'a tail that is not a recognised region must state no location rather than invent one');
+      assert(careerDataRoleLocation(CAREER, 'Nowhere Inc') === null,
+        'an employer the corpus never names must state no location');
+
+      const role = (company, meta, dates = '<p class="role-dates">May 2023 – Jun 2026</p>') =>
+        `<article class="role"><div class="role-header meta-row"><p class="role-title-line">`
+        + `<span class="title">Software Engineer</span><span class="company">${company}</span></p>${dates}</div>`
+        + `${meta}<ul class="highlights"><li>Built the nightly district extract.</li></ul></article>`;
+      const page = (...roles) => `<main class="page">${roles.join('')}</main>`;
+
+      // 1. The defect: a header-only role drops a stated location silently.
+      const dropped = extractResumeEvidence(page(role('Thomson School District', '')));
+      assert(dropped.roles[0].location === '', 'the reproduction must render no location');
+      const failures = resumeRoleLocationFailures(dropped.roles, CAREER);
+      assert(failures.length === 1 && failures[0].includes('Thomson School District')
+        && failures[0].includes('Loveland, Colorado') && failures[0].includes('role-location'),
+        `the gate must name the role, the stated location, and where it belongs, got ${JSON.stringify(failures)}`);
+
+      // 2. The design system's own cell satisfies it.
+      const metaRow = page(role('Thomson School District',
+        '<div class="role-meta meta-row"><p class="role-location">Loveland, CO</p></div>'));
+      const viaMeta = extractResumeEvidence(metaRow);
+      assert(viaMeta.roles[0].location === 'Loveland, CO', 'a .role-location cell must be read as the location');
+      assert(resumeRoleLocationFailures(viaMeta.roles, CAREER).length === 0,
+        'an abbreviated region must satisfy the stated location — shortening is formatting, not a new fact');
+
+      // 3. So does the STYLE.md §5.2b fold, which is what a tight page uses.
+      // The dates cell must still read back as the date range alone.
+      const folded = extractResumeEvidence(page(role('Thomson School District', '',
+        '<p class="role-dates"><time datetime="2023-05">May 2023</time> – <time datetime="2026-06">Jun 2026</time><span class="sep" aria-hidden="true">·</span>Loveland, CO</p>')));
+      assert(folded.roles[0].location === 'Loveland, CO' && folded.roles[0].dates === 'May 2023 – Jun 2026',
+        `a folded location must split back into dates + location, got ${JSON.stringify(folded.roles[0])}`);
+      assert(resumeRoleLocationFailures(folded.roles, CAREER).length === 0,
+        'the fold is a legal home for the location, not a missing one');
+
+      // A plain date range must never be mistaken for a fold, and a role the
+      // corpus never located must not be required to show anything.
+      const plain = extractResumeEvidence(page(role('Unlocated Systems', '')));
+      assert(plain.roles[0].dates === 'May 2023 – Jun 2026' && plain.roles[0].location === '',
+        'an unfolded dates cell must stay entirely in dates');
+      assert(resumeRoleLocationFailures(plain.roles, CAREER).length === 0,
+        'a role with no stated location must raise no requirement');
+
+      // 4. A location that contradicts the career data is its own defect.
+      const wrong = extractResumeEvidence(page(role('Thomson School District',
+        '<div class="role-meta meta-row"><p class="role-location">Denver, CO</p></div>')));
+      const wrongFailures = resumeRoleLocationFailures(wrong.roles, CAREER);
+      assert(wrongFailures.length === 1 && wrongFailures[0].includes('Denver, CO') && wrongFailures[0].includes('Loveland'),
+        `a contradicted location must be reported distinctly from a missing one, got ${JSON.stringify(wrongFailures)}`);
+
+      // 5. The bug report can finally see the role block. This sample renderer
+      // has existed in jobsSnapshot.js with no producer, so the section that
+      // shows "where the location ended up" was absent from every report.
+      const sample = resumeRoleBlockSample(metaRow);
+      assert(sample.found && sample.roleCount === 1 && sample.sample.includes('role-location') && !sample.truncated,
+        `the role-block sample must carry the meta row, got ${JSON.stringify(sample).slice(0, 300)}`);
+      assert(resumeRoleBlockSample('<main class="page"></main>').found === false,
+        'a résumé with no role article must report the sample as not found, not fabricate one');
+      assert(resumeRoleBlockSample(metaRow, 40).truncated === true,
+        'an oversized role block must report itself truncated');
+      const twoRoles = resumeRoleBlockSample(metaRow.replace('</main>', metaRow.slice(metaRow.indexOf('<article'), metaRow.indexOf('</main>')) + '</main>'));
+      assert(twoRoles.roleCount === 2 && twoRoles.sample.split('<article').length === 2,
+        `the sample must count every role but carry only the first, got roleCount ${twoRoles.roleCount}`);
+
+      // 6. Production sanitizes the model's markup BEFORE any of this parses
+      // it, so the fold has to survive that pass — the <time> elements and the
+      // prescribed .sep span included. Testing only raw markup would not show it.
+      const sanitized = sanitizeDocumentMainHtml(page(role('Thomson School District', '',
+        '<p class="role-dates"><time datetime="2023-05">May 2023</time> – <time datetime="2026-06">Jun 2026</time><span class="sep" aria-hidden="true">·</span>Loveland, CO</p>')),
+        { documentKind: 'resume' });
+      const throughSanitizer = extractResumeEvidence(sanitized).roles[0];
+      assert(throughSanitizer.location === 'Loveland, CO' && throughSanitizer.dates === 'May 2023 – Jun 2026',
+        `the fold must survive the production sanitizer, got ${JSON.stringify(throughSanitizer)}`);
+      assert(resumeRoleLocationFailures([throughSanitizer], CAREER).length === 0,
+        'a sanitized folded location must clear the gate');
+
+      // A place name may legitimately carry a number. The fold's guard exists to
+      // reject a second DATE, so it tests for a year, not for any digit.
+      const numbered = extractResumeEvidence(page(role('Thomson School District', '',
+        '<p class="role-dates">May 2023 – Jun 2026<span class="sep" aria-hidden="true">·</span>Route 66, MO</p>')));
+      assert(numbered.roles[0].location === 'Route 66, MO',
+        `a digit in a place name must not discard the location, got ${JSON.stringify(numbered.roles[0])}`);
+      const twoRanges = extractResumeEvidence(page(role('Thomson School District', '',
+        '<p class="role-dates">May 2023 – Jun 2026<span class="sep" aria-hidden="true">·</span>Jan 2020 – Mar 2021</p>')));
+      assert(twoRanges.roles[0].location === '', 'a second date range must not be read as a location');
+
+      // 7. The fold split must be LINEAR. The obvious regex for it
+      // (/^(.*\d.*?)\s*·\s*([^·]+)$/) backtracks quadratically on a
+      // digit-bearing cell with no separator — 2.4s at 24k chars, per role,
+      // inside a synchronous main-process import.
+      const huge = page(role('Thomson School District', '',
+        `<p class="role-dates">${'1 '.repeat(60000)}</p>`));
+      const started = Date.now();
+      assert(extractResumeEvidence(huge).roles[0].location === '',
+        'a separator-less dates cell yields no location');
+      const elapsed = Date.now() - started;
+      assert(elapsed < 2000, `the fold split must not backtrack: 120k chars took ${elapsed}ms`);
+      return { enforced: true };
+    },
+  },
+  {
+    // Three defects an adversarial pass reproduced against the real corpus
+    // before this test existed. The first is the dangerous one: matching the
+    // employer as a bare substring made a CORRECT résumé fail, with an
+    // instruction to render the fabricated string "Alliance — Getzville".
+    name: 'Local AI résumé: the work-location matcher survives short, long, colliding and ambiguous employer names',
+    async run() {
+      const CAREER = [
+        '**Thomson School District — Loveland, Colorado**',
+        '**Horizon Health Alliance — Getzville, New York**',
+        '**FliteX (Plan de Vol International) — Oshawa, Ontario**',
+      ].join('\n');
+      const at = (company) => careerDataRoleLocation(CAREER, company);
+
+      // The résumé may shorten or extend the corpus's own name for an employer.
+      assert(at('Horizon Health Alliance')?.text === 'Getzville, NY', 'the exact name must resolve');
+      assert(at('Horizon Health')?.text === 'Getzville, NY',
+        `a shortened employer must resolve to its real city, got ${JSON.stringify(at('Horizon Health'))}`);
+      assert(at('FliteX')?.text === 'Oshawa, ON',
+        'dropping a parenthetical must not disable the requirement — fail-open here is the evasion path');
+      assert(at('Thomson School District (K-12)')?.text === 'Loveland, CO',
+        'a résumé name longer than the corpus name must still resolve');
+
+      // ...but only on a whole-word boundary, and never past a real ambiguity.
+      assert(at('Health') === null, 'a mid-name fragment must not match an employer');
+      assert(careerDataRoleLocation('**Acmetrics — Buffalo, New York**', 'Acme') === null,
+        'a prefix that is not a whole word must not match');
+      assert(careerDataRoleLocation('**Acme Health — Buffalo, New York**\n**Acme Systems — Denver, Colorado**', 'Acme') === null,
+        'two employers extending one name is a genuine ambiguity — guessing invents a requirement');
+      assert(careerDataRoleLocation('**Acme Health — Buffalo, New York**\n**Acme — Denver, Colorado**', 'Acme')?.text === 'Denver, CO',
+        'an exact heading must win over a longer neighbour that also matches');
+      assert(careerDataRoleLocation('**Acme — Denver, Colorado**\n- Partnered with Globex - Austin, Texas', 'Globex') === null,
+        'a company named inside a bullet is not an employer heading');
+      assert(careerDataRoleLocation('**Acme, Denver, Colorado**', 'Acme') === null,
+        'a heading with no employer/location separator states no location');
+      assert(careerDataRoleLocation('**Foo-Bar Inc — Denver, Colorado**', 'Foo-Bar Inc')?.text === 'Denver, CO',
+        'a hyphen inside the employer name must not be read as the heading separator');
+      assert(careerDataRoleLocation('**Acme — Remote (US)**', 'Acme') === null,
+        'a location the region set does not recognise states nothing rather than inventing a requirement');
+      // The heading split is greedy because the LOCATION is the tail. A
+      // non-greedy split cut at the first spaced dash, so an employer whose own
+      // name contains one reported the city `Whitfield Consulting — Denver`
+      // and rejected a correct résumé.
+      assert(careerDataRoleLocation('**Baker - Whitfield Consulting — Denver, Colorado**', 'Baker - Whitfield Consulting')?.text === 'Denver, CO',
+        'an employer name containing a spaced dash must keep all of its name');
+      assert(resumeRoleLocationFailures(
+        [{ title: 'SE', company: 'Baker - Whitfield Consulting', location: 'Denver, CO' }],
+        '**Baker - Whitfield Consulting — Denver, Colorado**').length === 0,
+        'a correct résumé for a two-part employer name must not be rejected');
+      assert(careerDataRoleLocation('**Acme — Denver, Colorado**\n**Acme — Austin, Texas**', 'Acme') === null,
+        'two stints at one employer in two cities is an ambiguity, not a first-wins guess');
+      // A division suffix hit the same first-dash split, and because the left
+      // half was still the bare company it matched EXACTLY — so the ambiguity
+      // guard never ran and a correct résumé was rejected outright.
+      assert(careerDataRoleLocation('**Thomson School District - IT Department — Loveland, Colorado**', 'Thomson School District')?.text === 'Loveland, CO',
+        'a division suffix in the heading must not become part of the city');
+      assert(resumeRoleLocationFailures(
+        [{ title: 'SWE', company: 'Thomson School District', location: 'Loveland, CO' }],
+        '**Thomson School District - IT Department — Loveland, Colorado**').length === 0,
+        'a correct résumé must not be rejected because the heading names a division');
+
+      // The city is matched by the same prefix relation as the employer, which
+      // tolerates one name extending the other on purpose — see the comment in
+      // resumeRoleLocationFailures. Pinned so the trade-off stays a decision.
+      assert(resumeRoleLocationFailures([{ title: 'SE', company: 'Acme', location: 'New York' }],
+        '**Acme — New York City, New York**').length === 0,
+        'a résumé may write the shorter form of a longer stated city');
+
+      // The region is compared when the résumé shows one, and never demanded
+      // when it does not — supplying the missing half is the fabrication this
+      // whole rule exists to prevent.
+      const shownVerdict = (location) => resumeRoleLocationFailures(
+        [{ title: 'SE', company: 'Thomson School District', location }], CAREER).length === 0;
+      assert(shownVerdict('Loveland, CO'), 'an abbreviated region must pass');
+      assert(shownVerdict('Loveland, Colorado'), 'the written-out region must pass');
+      assert(shownVerdict('Loveland'), 'a city with no region must pass — the region is never demanded');
+      assert(!shownVerdict('Loveland, TX'), 'a region that contradicts the career data must be rejected');
+      assert(!shownVerdict('Denver, CO'), 'a different city must be rejected');
+      assert(!shownVerdict('New Loveland, CO'), 'a city that merely contains the stated one must be rejected');
+      return { enforced: true };
+    },
+  },
+  {
+    // resumeRoleBlockSample, resumeSkillsDlSample and resumeHtmlSample were all
+    // RENDERED by the bug report and PRODUCED by nothing, so the section that
+    // shows "where the location ended up" was permanently absent — which is why
+    // a résumé that dropped every work location looked identical to a correct
+    // one in every diagnostic. Pinning the producer/consumer pair is the only
+    // thing that keeps this from silently reverting to a dead field.
+    name: 'Local AI telemetry: the bug report\u2019s role-block sample has a producer on every terminal record',
+    async run() {
+      const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      const snapshotSource = await fs.promises.readFile(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+
+      const produced = [...localSource.matchAll(/resumeRoleBlockSample: resumeRoleBlockSample\(result\.resumeMainHtml\)/g)];
+      const telemetryCalls = [...localSource.matchAll(/recordApplicationTelemetry\(\{/g)];
+      assert(telemetryCalls.length === 3 && produced.length === 3,
+        `every Local AI telemetry record must carry the role-block sample, got ${produced.length} of ${telemetryCalls.length}`);
+      assert(localSource.includes('resumeHtmlLen: result.resumeMainHtml.length'),
+        'the report\u2019s "Résumé markup: N chars" line needs its producer too');
+
+      // The consumer reads exactly the shape the producer emits.
+      for (const field of ['found', 'roleCount', 'sample', 'truncated']) {
+        assert(snapshotSource.includes(`a.resumeRoleBlockSample.${field}`),
+          `the bug report reads resumeRoleBlockSample.${field}, so the producer must emit it`);
+      }
+      const emitted = resumeRoleBlockSample('<main class="page"><article class="role"><ul class="highlights"><li>x</li></ul></article></main>');
+      assert(['found', 'roleCount', 'sample', 'truncated'].every(key => key in emitted),
+        `the producer must emit every field the renderer reads, got ${Object.keys(emitted).join(', ')}`);
+      return { enforced: true };
+    },
+  },
+  {
+    name: 'Local AI validation: a dropped work location is rejected only when the career data actually states one',
+    async run() {
+      const CAREER = 'Jack Wu\n\n**Thomson School District — Loveland, Colorado**\n- Built the nightly district extract.\n';
+      const resumeMainHtml = (meta) => `<main class="page"><article class="role">`
+        + `<div class="role-header meta-row"><p class="role-title-line"><span class="title">Software Engineer</span>`
+        + `<span class="company">Thomson School District</span></p><p class="role-dates">May 2023 – Jun 2026</p></div>`
+        + `${meta}<ul class="highlights"><li>Built the nightly district extract.</li></ul></article></main>`;
+      // The cover-letter envelope must be well-formed: it is validated before
+      // the collected-failures block, so a malformed one would throw first and
+      // the location gate would never run. Its own checks may still fail here —
+      // every assertion below is scoped to the work-location wording alone.
+      const result = (meta) => ({
+        version: LOCAL_AI_APPLICATION_VERSION,
+        jobId: 'job-1',
+        status: 'completed',
+        outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: resumeMainHtml(meta),
+        coverLetter: { ...normalizedCoverLetter(), paragraphs: ['I would welcome the chance to talk about that work.'] },
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: draftedQualityReview(),
+      });
+
+      // Without trusted career data there is no stated location, so the gate
+      // must stay silent rather than demand one it cannot source.
+      let untrustedError = null;
+      try { validateLocalApplicationResult(result(''), 'job-1', process.cwd(), {}); } catch (error) { untrustedError = error; }
+      assert(!untrustedError || !/work location/.test(String(untrustedError.message)),
+        `a caller supplying no career data must never be told a location is missing, got ${untrustedError && untrustedError.message}`);
+
+      let droppedError = null;
+      try {
+        validateLocalApplicationResult(result(''), 'job-1', process.cwd(), {}, { careerData: CAREER });
+      } catch (error) { droppedError = error; }
+      assert(droppedError && /work location/.test(String(droppedError.message))
+        && /Thomson School District/.test(String(droppedError.message)),
+        `a dropped stated location must reject the import by name, got ${droppedError && droppedError.message}`);
+
+      let keptError = null;
+      try {
+        validateLocalApplicationResult(
+          result('<div class="role-meta meta-row"><p class="role-location">Loveland, CO</p></div>'),
+          'job-1', process.cwd(), {}, { careerData: CAREER },
+        );
+      } catch (error) { keptError = error; }
+      assert(!keptError || !/work location/.test(String(keptError.message)),
+        `a rendered location must clear the gate, got ${keptError && keptError.message}`);
+      return { enforced: true };
+    },
+  },
+  {
+    name: 'Local AI contract: the writer is told a stated work location is required, and told it is not the privacy-gated one',
+    async run() {
+      const routineSource = await fs.promises.readFile(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
+      const skillSource = await fs.promises.readFile(path.resolve('Job Application Design System/SKILL.md'), 'utf8');
+      const styleSource = await fs.promises.readFile(path.resolve('Job Application Design System/STYLE.md'), 'utf8');
+
+      // The routine declares itself the complete writer-facing contract, and it
+      // never mentioned the role's location at all — while its only "location"
+      // passages were prohibitions that read as covering employers.
+      assert(routineSource.includes('the résumé must show')
+        && routineSource.includes('role-location')
+        && routineSource.includes('role-meta meta-row')
+        && routineSource.includes('.role-dates'),
+        'the routine states where a role location is rendered');
+      assert(routineSource.includes('Three structural contracts'),
+        'the routine counts the location contract among the ones that reject a result');
+      assert(routineSource.includes('Never infer that contact location from an employer')
+        && routineSource.includes('It does not reach the per-role employment locations'),
+        'the routine scopes the contact-location privacy rule so it cannot be read as banning employment locations');
+      assert(routineSource.includes("This bars them from the letter's prose only"),
+        'the letter-scoped logistics ban says it is letter-scoped');
+      // The privacy rule itself must survive intact.
+      assert(routineSource.includes('candidate location/contact'),
+        'the do-not-invent list still names candidate contact details');
+
+      const flat = (text) => String(text).replace(/\s+/g, ' ');
+      assert(/required\b[^.]{0,80}whenever the source data states a location for that role/.test(flat(skillSource)),
+        'SKILL.md requires a stated per-role location');
+      assert(skillSource.includes("A role's own stated work location is a") && skillSource.includes('required employment fact'),
+        'SKILL.md negative-space list carves the employment fact out of the contact-location ban');
+      assert(flat(styleSource).includes('**The location is required whenever the source data states one for that role**'),
+        'STYLE.md §5.2 no longer grades the location optional');
+      // The old wording is the regression that matters: a restored "optional
+      // but recommended" would otherwise pass every additive assertion here.
+      assert(!/The summary line and location are optional but recommended/.test(flat(styleSource)),
+        'STYLE.md must not restore the wording that graded the location optional');
+      assert(!/Per-role `\.role-location` values are\s+employment facts and may be used when supplied/.test(skillSource),
+        'SKILL.md must not restore the permissive "may be used" wording');
+      // The design system is shared and its fixtures are fictional; the real
+      // candidate's employer city must not be pasted into it as an example.
+      assert(!/Loveland/.test(styleSource) && !/Loveland/.test(skillSource),
+        'design-system docs must not carry the real candidate\'s employment location');
+      assert(styleSource.includes('### 5.2b Folding the location into the dates cell')
+        && styleSource.includes('Fold only a lone location'),
+        'STYLE.md documents the fold and its one precondition');
       return { enforced: true };
     },
   },

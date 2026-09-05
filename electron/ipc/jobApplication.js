@@ -35,38 +35,14 @@ import {
 
 const { shell } = electronPkg;
 
-// The ATS submission, filename, and salutation already establish that this is
-// an application. Keep this authoring instruction aligned with the
-// deterministic `BANNED_OPENERS` gate in coverLetterChecks.js so the writer
-// leads with the argument instead of spending a revision on administrative
-// context the recruiter already has.
-const COVER_LETTER_OPENING_RULE = `The first sentence must immediately advance the candidate's argument with a job-specific thesis, a concrete evidence-to-employer-need connection, or a supported observation about the company's work. Never announce that the candidate is applying or that this is a cover letter. Reject “I am writing to apply…”, “I'm writing to apply…”, “I’m writing to apply…”, “I am applying for…”, “I'm applying for…”, “I’m applying for…”, “I am writing to express my interest…”, “Please accept my application…”, and equivalent administrative throat-clearing. The company or exact role title may appear only when it is load-bearing in the argument, not merely to identify the application. Every opening sentence must contain information the application context did not already provide.`;
-
-// Generated prose commonly loses grammatical parallelism while expanding a
-// terse source note (for example, a noun endpoint becomes a gerund endpoint).
-// Keep one shared rule across résumé and cover-letter authoring so both the
-// initial writer and every revision receive the same copy-editing contract.
-const PARALLEL_STRUCTURE_RULE = `PARALLEL STRUCTURE: Keep coordinated elements in the same grammatical form across endpoint ranges, paired conjunctions, and lists. Pair noun phrases with noun phrases or actions with actions. Reject any span that changes grammatical form between its endpoints, and rewrite it with parallel nouns or parallel actions. Do not compress a multi-step workflow into an opaque range; name its supported actions directly. Prefer the simplest parallel wording, and do not hide a mismatch with bureaucratic padding.`;
-
-// Letter register. Every clause here has a deterministic counterpart in
-// coverLetterChecks.js (punctuation-style, posting-reference, additive-seam,
-// anchor-relevance, plain-register, compound-hyphenation), so the prompt states
-// the principle only and the checks carry enforcement. Instance-level bans teach
-// evasion — the model routed a banned colon-unload through a semicolon — so each
-// clause names the register target rather than one forbidden glyph or phrase.
-const LETTER_REGISTER_RULE = `LETTER REGISTER: Write short declarative sentences, and avoid semicolons and dashes as clause splices. Punctuate introductory phrases so the transition into the main subject is immediately clear. When describing interface guidance, distinguish the ability to refer to something from the ability to indicate it visibly on screen; state the literal limitation rather than denying a broader metaphorical ability. Name the employer’s need directly instead of referring to the posting or advertisement as an object. Never join two pieces of evidence with a bare additive connective; state the relation that makes the second piece advance the argument. On first mention, introduce every unfamiliar candidate project, product, system, or prior employer with the candidate’s role or relationship and a concise descriptor before relying on its name; never make a reader infer what a named artifact is from a résumé they may not have read. Use a specific tool or product only when the posting or research names it, or when it is the paragraph’s single concrete anchor; otherwise use an accurate technology category. Exclude all application logistics from the letter: availability, start date, schedule, work location, relocation, commute, travel willingness, citizenship, work authorization, residency, visa, and sponsorship belong in application fields, even when career data or the listing mentions them. Hyphenate compound modifiers and keep one spelling throughout. When a closing invites further conversation, use direct present-tense language and name the specific work or contribution to discuss; avoid conditional or deferential boilerplate.`;
-
-// Paragraph-to-paragraph cohesion. The rules cover incomplete changes,
-// unanchored backward references, unearned causal links, nested comparisons,
-// and organizing frames that distort the target role. The
-// opening-demonstrative and legal-status clauses have deterministic
-// counterparts in coverLetterChecks.js; the rest are prompt-plus-audit only,
-// because they require reading the argument rather than matching a pattern.
-const LETTER_COHESION_RULE = `LETTER COHESION: A sentence that announces a change, movement, or migration must name both its origin and destination. A paragraph may open with a demonstrative noun phrase only when the immediately preceding paragraph establishes one clear referent; otherwise restate the referent or open with the new paragraph’s own subject. Use a causal connective only when the premise already stated on the page makes the conclusion follow; if the reader must supply a missing link, write the link as its own sentence or drop the connective. Make one comparison per sentence with both terms named, and never nest a comparison inside a condition. A coined frame may organize evidence, but it must not recast one posted role as multiple positions; name the target role literally and in the singular when referring to it.`;
-
-// Natural prose still has to remain strictly grounded. These rules authorize
-// connective paraphrase and narrow entailment, not new candidate facts.
-const LETTER_FLOW_AND_DICTION_RULE = `NATURAL FLOW AND DICTION: Use the résumé and career notes as evidence, not as wording to echo. Preserve every fact and its scope while varying distinctive source constructions across the résumé and letter. Before entering a new employer, project, or time period, state the argumentative connection first. Never follow a thesis with a standalone background fact whose relevance is explained only later. A transition must name the shared responsibility or mechanism and explain why the next proof deepens it. Use temporal contrast words only when the contrasted state or dated sequence is already clear. Prefer ordinary contemporary diction over coined or bureaucratic phrasing. On a first mention, name a prior employer with the candidate’s role or relationship, and name a candidate project, product, or system as an artifact the candidate built, led, or maintained with a concise descriptor; only then use a shorter unambiguous reference. Do not mention application logistics at all. You may add factual connective and causal language narrowly entailed by the supplied evidence to improve cohesion, but never invent a candidate fact, outcome, scope, tool, sequence, or motivation.`;
+// Cover-letter authoring rules deliberately do not live here. This module
+// validates and saves an application; the retired API authoring path that
+// once consumed opening, parallel-structure, register, cohesion, and diction
+// rule constants is gone, and five of them survived it unreferenced, so a
+// letter defect could be “fixed” in a string no prompt ever read. The writer
+// contract is local_ai/LOCAL_AI_APPLICATION_ROUTINE.md plus
+// APPLICATION_QUALITY_CRITERIA and the revision rules in
+// localAiApplication.js; enforcement is coverLetterChecks.js.
 
 // Per-card notes are user-authored context for ONE application, not a second
 // résumé source or a prompt-control channel. Keep the same cap as the renderer
@@ -649,6 +625,221 @@ export function assertRetainedResumeRoleBullets(mainHtml) {
   throw new Error(`Every retained résumé role must include at least one factual bullet; missing evidence for ${labels}.`);
 }
 
+// A role's employment location has two legal homes (STYLE.md §5.2b): its own
+// `.role-location` cell, or — when the role carries no `.role-summary` to share
+// that row with — folded into the `.role-dates` cell after the standard `·`
+// separator, `May 2023 – Jun 2026 · Loveland, CO`. Read both so every consumer
+// sees the same fact regardless of which shape the writer chose, and so the
+// fold does not read as a missing location to the gate below.
+function resumeRoleDatesAndLocation(roleHtml) {
+  const dates = firstResumeClassText(roleHtml, 'role-dates');
+  const explicit = firstResumeClassText(roleHtml, 'role-location');
+  if (explicit) return { dates, location: explicit };
+  // Split on the LAST separator by hand rather than with a regex. The obvious
+  // pattern for this — /^(.*\d.*?)\s*·\s*([^·]+)$/ — backtracks quadratically
+  // when the cell holds digits and no separator at all: a 24k-char role-dates
+  // cell cost 2.4s per pass here, and this runs per role inside the synchronous
+  // Local AI import on the main process. indexOf/slice is linear and does the
+  // same job.
+  const at = dates.lastIndexOf('·');
+  if (at < 0) return { dates, location: '' };
+  const head = dates.slice(0, at).trim();
+  const tail = dates.slice(at + 1).trim();
+  // The date range is the year-bearing half, and it has to be there — otherwise
+  // this is some other use of the separator, not a fold. A trailing cell
+  // carrying its own year is more of the range, not a city; a house number or a
+  // route number in a place name is fine, so test for a year, not any digit.
+  if (!head || !tail || !/\d/.test(head) || /\b\d{4}\b/.test(tail)) return { dates, location: '' };
+  return { dates: head, location: tail };
+}
+
+// US states, DC and the inhabited territories, plus Canadian provinces —
+// full names and postal codes. A closed, stable set, not a heuristic: its only
+// job is to let `careerDataRoleLocation` be CERTAIN that an employer line ends
+// in a place. An employer line that does not end in a recognized region simply
+// yields nothing and the location gate stays silent for that role, because a
+// requirement the career data did not actually state is worse than a miss.
+const CAREER_DATA_REGIONS = new Map(Object.entries({
+  alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA',
+  colorado: 'CO', connecticut: 'CT', delaware: 'DE', florida: 'FL', georgia: 'GA',
+  hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA',
+  kansas: 'KS', kentucky: 'KY', louisiana: 'LA', maine: 'ME', maryland: 'MD',
+  massachusetts: 'MA', michigan: 'MI', minnesota: 'MN', mississippi: 'MS',
+  missouri: 'MO', montana: 'MT', nebraska: 'NE', nevada: 'NV',
+  'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+  'north carolina': 'NC', 'north dakota': 'ND', ohio: 'OH', oklahoma: 'OK',
+  oregon: 'OR', pennsylvania: 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+  'south dakota': 'SD', tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT',
+  virginia: 'VA', washington: 'WA', 'west virginia': 'WV', wisconsin: 'WI',
+  wyoming: 'WY', 'district of columbia': 'DC', 'washington dc': 'DC',
+  'puerto rico': 'PR', guam: 'GU', 'american samoa': 'AS',
+  'us virgin islands': 'VI', 'northern mariana islands': 'MP',
+  alberta: 'AB', 'british columbia': 'BC', manitoba: 'MB', 'new brunswick': 'NB',
+  'newfoundland and labrador': 'NL', 'nova scotia': 'NS', ontario: 'ON',
+  'prince edward island': 'PE', quebec: 'QC', 'québec': 'QC',
+  saskatchewan: 'SK', 'northwest territories': 'NT', nunavut: 'NU', yukon: 'YT',
+}));
+const CAREER_DATA_REGION_CODES = new Set(CAREER_DATA_REGIONS.values());
+
+function normalizeCareerDataText(value) {
+  // Career data reaches us as the transcribed corpus, so headings keep their
+  // markdown emphasis. Strip only the decoration; never the words.
+  return String(value || '')
+    .replace(/[*_`#]+/g, ' ')
+    .replace(/[\s\u00a0]+/g, ' ')
+    .trim();
+}
+
+function careerDataRegionCode(region) {
+  const key = normalizeCareerDataText(region).toLowerCase().replace(/\./g, '').trim();
+  if (CAREER_DATA_REGIONS.has(key)) return CAREER_DATA_REGIONS.get(key);
+  const upper = key.toUpperCase();
+  return CAREER_DATA_REGION_CODES.has(upper) ? upper : '';
+}
+
+/**
+ * Do two written forms of an employer name refer to the same employer? The
+ * résumé legitimately shortens or extends what the corpus wrote — `FliteX` for
+ * `FliteX (Plan de Vol International)`, `Thomson School District (K-12)` for
+ * `Thomson School District` — so one name must be a WHOLE-WORD prefix of the
+ * other. A bare substring test is what made `Horizon Health` read its city out
+ * of `Alliance — Getzville`, rejecting a correct résumé and telling the writer
+ * to render that string. `Health` matches neither name.
+ */
+function careerDataNamesMatch(a, b) {
+  const left = String(a || '').toLowerCase();
+  const right = String(b || '').toLowerCase();
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const [shorter, longer] = left.length <= right.length ? [left, right] : [right, left];
+  if (!longer.startsWith(shorter)) return false;
+  // The prefix must end on a word boundary, so `Acme` never matches `Acmetrics`.
+  return /[\s(,.:;\u2014\u2013-]/.test(longer.charAt(shorter.length));
+}
+
+// One `Employer — City, Region` heading from the corpus. The separator must be
+// whitespace-delimited so a hyphenated name (`K-12`, `Foo-Bar Inc`) is not read
+// as one, and the split is GREEDY: the location is the tail, so an employer
+// whose own name contains a spaced dash (`Baker - Whitfield Consulting`) keeps
+// all of it. A non-greedy split cut at the first dash and produced the city
+// `Whitfield Consulting — Denver`.
+const CAREER_DATA_HEADING_RE = /^(.*)\s+[\u2014\u2013-]\s+([^\u2014\u2013]+)$/;
+
+function careerDataLocationHeadings(careerData) {
+  const headings = [];
+  for (const rawLine of String(careerData || '').split(/\r?\n/)) {
+    const split = CAREER_DATA_HEADING_RE.exec(normalizeCareerDataText(rawLine));
+    if (!split) continue;
+    const employer = split[1].trim();
+    const parts = split[2].split(',');
+    if (!employer || parts.length !== 2) continue;
+    const city = parts[0].trim();
+    const code = careerDataRegionCode(parts[1]);
+    // A city is words, not a date, a metric, or a sentence.
+    if (!code || !city || city.length > 40 || /[\d;:()]/.test(city)) continue;
+    headings.push({ employer, city, region: parts[1].trim(), code, text: `${city}, ${code}` });
+  }
+  return headings;
+}
+
+/**
+ * Find the employment location the career data states for one employer, by
+ * reading the employer's own heading line — `Thomson School District —
+ * Loveland, Colorado`. Returns `null` unless the corpus names this employer
+ * UNAMBIGUOUSLY AND gives it a `City, Region` whose region is recognized, so a
+ * role the corpus never located produces no requirement.
+ */
+export function careerDataRoleLocation(careerData, company) {
+  const employer = normalizeCareerDataText(company);
+  if (employer.length < 3) return null;
+  const headings = careerDataLocationHeadings(careerData);
+  // An exact heading wins outright: a corpus listing both `Acme` and
+  // `Acme Health` must give `Acme` its own city, not its longer neighbour's.
+  const exact = headings.filter(entry => entry.employer.toLowerCase() === employer.toLowerCase());
+  // One employer, two stints, two cities: which one THIS role is cannot be told
+  // from the name, so require agreement here exactly as below.
+  const unambiguous = (matches) => {
+    if (!matches.length) return null;
+    return new Set(matches.map(entry => entry.text)).size === 1 ? matches[0] : null;
+  };
+  if (exact.length) return unambiguous(exact);
+  // Two different employers could both extend this name. Which one the role
+  // means is genuinely unknown, and a guess here is a fabricated requirement.
+  return unambiguous(headings.filter(entry => careerDataNamesMatch(entry.employer, employer)));
+}
+
+/**
+ * The résumé must show the employment location the career data supplied with a
+ * role (STYLE.md §5.2, routine step 4). This is the deterministic half of that
+ * rule: the contract tells the writer to render it, and this catches the writer
+ * that did not. It only ever asserts what the corpus actually states — a role
+ * with no located employer line is not required to show anything, and nothing
+ * here invents, infers, or backfills a location.
+ */
+export function resumeRoleLocationFailures(roles, careerData) {
+  const missing = [];
+  const wrong = [];
+  for (const role of Array.isArray(roles) ? roles : []) {
+    const stated = careerDataRoleLocation(careerData, role?.company);
+    if (!stated) continue;
+    const shown = normalizeCareerDataText(role?.location);
+    const label = `${role?.title || 'role'} at ${role.company}`;
+    if (!shown) {
+      missing.push(`${label} (career data states ${stated.city}, ${stated.region})`);
+      continue;
+    }
+    const comma = shown.lastIndexOf(',');
+    const shownCity = comma < 0 ? shown : shown.slice(0, comma).trim();
+    // The region may legitimately be abbreviated, or left off entirely — but a
+    // region that is present and names a DIFFERENT place is a contradiction,
+    // not a formatting choice. Never require a region the résumé omitted:
+    // supplying the missing half is the fabrication this rule exists to stop.
+    // The city is matched by the same whole-word prefix relation as the
+    // employer, which DELIBERATELY tolerates one name extending the other
+    // ("New York" for a stated "New York City"). That also lets a fabricated
+    // neighbour through ("Loveland Heights" for "Loveland"), and that trade is
+    // intended: the alternative rejects a correct résumé and tells the writer
+    // its own city is wrong, which is the worse failure for this gate to have.
+    const shownRegion = comma < 0 ? '' : careerDataRegionCode(shown.slice(comma + 1));
+    if (!careerDataNamesMatch(shownCity, stated.city) || (shownRegion && shownRegion !== stated.code)) {
+      wrong.push(`${label} shows "${shown}" but the career data states ${stated.city}, ${stated.region}`);
+    }
+  }
+  const problems = [];
+  if (missing.length) {
+    problems.push(`Every role must show the work location its career-data entry states, in a <p class="role-location"> inside <div class="role-meta meta-row"> or folded into the .role-dates cell after a <span class="sep" aria-hidden="true">·</span>. Missing for: ${missing.join('; ')}.`);
+  }
+  if (wrong.length) {
+    problems.push(`A role's work location must be the one the career data states: ${wrong.join('; ')}.`);
+  }
+  return problems;
+}
+
+// The bug report's résumé head-slice runs out inside the FIRST role's header,
+// so the repeating Experience block — bullet count, whether a `.role-meta` row
+// survived, and where the location ended up — had no representation in a
+// report at all. jobsSnapshot.js has rendered this sample for a while; nothing
+// produced it, so the section was permanently absent rather than empty. That
+// blindness is why a résumé that silently dropped every work location looked
+// identical to a correct one in every diagnostic the app collects.
+const ROLE_BLOCK_SAMPLE_MAX_CHARS = 1_800;
+
+export function resumeRoleBlockSample(mainHtml, maxChars = ROLE_BLOCK_SAMPLE_MAX_CHARS) {
+  const html = String(mainHtml || '');
+  let roleCount = 0;
+  let first = '';
+  let match;
+  ROLE_ARTICLE_RE.lastIndex = 0;
+  while ((match = ROLE_ARTICLE_RE.exec(html))) {
+    roleCount += 1;
+    if (!first) first = match[0];
+  }
+  ROLE_ARTICLE_RE.lastIndex = 0;
+  if (!first) return { found: false, roleCount: 0, sample: '', truncated: false };
+  const truncated = first.length > maxChars;
+  return { found: true, roleCount, sample: truncated ? first.slice(0, maxChars) : first, truncated };
+}
+
 /**
  * Extract the final model-authored résumé markup into the letter's small,
  * inspectable evidence base. Annotation spans intentionally remain in each
@@ -698,11 +889,12 @@ export function extractResumeEvidence(mainHtml) {
       }
       for (const id of ids) if (!achievementIds.includes(id)) achievementIds.push(id);
     }
+    const { dates, location } = resumeRoleDatesAndLocation(roleHtml);
     roles.push({
       title: firstResumeClassText(roleHtml, 'title'),
       company: firstResumeClassText(roleHtml, 'company'),
-      dates: firstResumeClassText(roleHtml, 'role-dates'),
-      location: firstResumeClassText(roleHtml, 'role-location'),
+      dates,
+      location,
       summary: firstResumeClassText(roleHtml, 'role-summary'),
       bullets,
     });

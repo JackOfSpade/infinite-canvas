@@ -8,7 +8,7 @@
    back PIXELS. Nothing bridged the two, so a revision round after an
    overflow was guess-and-render.
 
-   The bridge is the LINE-YIELD model (STYLE.md §6.2): page capacity and
+   The bridge is the LINE-YIELD model (STYLE.md §6): page capacity and
    every block's cost are expressed in BASELINES — multiples of
    `--fs-body × --lh-body` — so the whole model is one arithmetic step
    away from both a character count and a pixel measurement:
@@ -114,7 +114,8 @@ var COST = {
     sectionGap: 2.00,         // section <-> section: --vr-2, exactly 2 baselines by construction
     roleHeader: 2.02,         // 1-line "Title · Company" row
     titleExtraLine: 1.07,
-    roleMeta: 2.00,           // 1-line summary + location row
+    roleMeta: 2.00,           // 1-line summary + location row; a location-only
+                              // row costs the same, which is why §5.2b folds it
     summaryExtraLine: 0.93,
     bulletLine: 1.00,         // exactly one baseline: li line-height IS --lh-body
     bulletGap: 0.40,
@@ -147,6 +148,15 @@ var BAND = {
   bulletOneLine:  { min:  87, max:  95 },
   bulletTwoLine:  { min: 176, max: 200 },
   roleTitle:      { min:  60, max:  70 },
+  /* §5.2b's fold moves the location into the `auto` dates cell, narrowing the
+     `1fr` title track by ~104px for a `City, ST` string (518.33 -> 414.24px at
+     Letter/default). Measured 2026-09-04 by the same method as the row above —
+     8 shuffles of TITLEWORDS grown a word at a time in a real render of
+     resume.html with a folded `May 2023 - Jun 2026 - Brooklyn, NY` cell:
+     47/55/56 at Letter/default, A4/default and Letter/compact, 50/55/60 at
+     A4/compact. A LONGER location narrows the track further and this floor
+     with it; re-measure before folding an unusually long city or region. */
+  roleTitleFolded: { min:  47, max:  56 },
   roleSummary:    { min:  75, max:  84 },
   tagline:        { min:  84, max:  93 },
   skillsRow:      { min:  70, max:  80 }
@@ -155,11 +165,21 @@ var BAND = {
 /* The published authoring budgets — margin below the measured floors. */
 var BUDGET = {
   roleTitle:   56,   // STYLE.md §5.2a
+  roleTitleFolded: 44,   // STYLE.md §5.2a, same margin below its floor as roleTitle
   roleSummary: 70,   // STYLE.md §5.2a
   tagline:     78,   // STYLE.md §5.8
   skillsRow:   64,   // STYLE.md §5.6
   skillsRows:   3    // STYLE.md §5.6 — rows, the unit that matters
 };
+
+/* A `.role-dates` cell that carries more than its date range is a §5.2b fold:
+   the location was moved up into it and the `.role-meta` row dropped. Detected
+   on the separator the fold is specified to use, not on "contains letters" —
+   the range itself is "May 2023 - Jun 2026". */
+function foldedDatesCell(roleHtml) {
+  var cell = /<p[^>]*class="[^"]*\brole-dates\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i.exec(roleHtml);
+  return Boolean(cell) && /\u00b7/.test(stripTags(cell[1]));
+}
 
 /* ---- markup reading (regex, like every other gate here) ------------ */
 
@@ -256,7 +276,11 @@ function estimate(main, cost, pick) {
   roles.forEach(function (role, ri) {
     t += cost.roleHeader;
     var title = textOf(role, 'role-title-line');
-    if (title) t += (rowLines(title.length, edge('roleTitle')) - 1) * cost.titleExtraLine;
+    /* A folded location shares the dates cell, so the title has materially less
+       room than the unfolded budget assumes. Charging the wide edge here
+       reported green on a document whose titles wrap. */
+    var titleEdge = edge(foldedDatesCell(role) ? 'roleTitleFolded' : 'roleTitle');
+    if (title) t += (rowLines(title.length, titleEdge) - 1) * cost.titleExtraLine;
 
     if (/class="[^"]*\brole-meta\b/.test(role)) {
       t += cost.roleMeta;
@@ -380,8 +404,9 @@ targets.forEach(function (rel) {
     '). Compact density buys about ' +
     (caps['Letter / compact'].lines - CAP).toFixed(1) +
     ' lines of capacity; a 2-line bullet trimmed under ' + BAND.bulletOneLine.min +
-    ' chars gives back 1.00, deleting a non-final bullet 1.40–2.40, dropping a role-meta row 2.00, ' +
-    'dropping a Skills row 1.33. See STYLE.md §6.2.');
+    ' chars gives back 1.00, deleting a non-final bullet 1.40–2.40, folding a lone location ' +
+    'into .role-dates and dropping its role-meta row 2.00 (STYLE.md §5.2b — a stated location is ' +
+    'never deleted to buy the line), dropping a Skills row 1.33. See STYLE.md §6.');
 
   if (lo.lines <= CAP && hi.lines > CAP) {
     ok('NOTE: the band straddles capacity — word mix decides. Render at default ' +
@@ -444,7 +469,7 @@ var FIXTURES = [
     fits: false
   },
   {
-    name: 'dropping the role-meta row is what makes 4 roles x 3 one-line bullets fit',
+    name: 'a role with no meta row at all (no summary, no stated location) is what makes 4 roles x 3 one-line bullets fit',
     html: doc(HEADER + '<section class="section"><div class="section-head"><h2>Experience</h2></div>' +
       [0,1,2,3].map(function () {
         return role('Staff Engineer · Company', null, [chars(80), chars(80), chars(80)]);

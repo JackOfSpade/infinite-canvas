@@ -848,23 +848,58 @@ export function checkCompoundHyphenation(paragraphs = []) {
     `${list.length} paragraph(s) hyphenate the covered compound modifiers`);
 }
 
+const MAX_ENTAILED_PREMISE_OBSERVATIONS = 4;
+
+// “Before <thing> was adopted, <subject> had to choose <it>”: the subordinate
+// clause supplies the acquisition and the main clause claims only the choice
+// that acquisition already implies. The pronoun object is required, so “before
+// the district adopted a vendor, I had to evaluate the market” — a different,
+// informative claim — does not match.
+const ENTAILED_ACQUISITION_PREMISE = /\b(?:before|prior to)\b[^,.;:!?]{0,90}?\b(?:adopted|adoption|purchased|bought|deployed|implemented|rolled out|brought in|selected|chosen)\b[^,.;:!?]{0,40},\s*[^,.;:!?]{0,60}?\b(?:had|needed)\s+to\s+(?:choose|select|pick|approve|evaluate|assess|decide\s+on)\s+(?:them|it|those|these|one)\b/iu;
+
+// An endpoint that names a date, a month, a weekday, or any number belongs to
+// an enumerable series, which is the one span where `through` is the precise
+// preposition rather than a second reading waiting to happen.
+const ENUMERABLE_SPAN_ENDPOINT = /\d|\b(?:january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/iu;
+
 /**
  * A process range promises grammatically parallel endpoints. This deliberately
- * checks the high-confidence generated-prose failure only: a noun-like left
- * endpoint followed by a gerund right endpoint. Wider coordination needs a
- * prose audit; this narrow form is safe enough to reject before publication.
+ * checks the high-confidence generated-prose failures only: a noun-like left
+ * endpoint followed by a gerund right endpoint, a contentless stewardship verb
+ * that spans the range instead of naming the work, and `through` standing in
+ * for the terminus preposition `to`. Wider coordination needs a prose audit;
+ * these narrow forms are safe enough to reject before publication.
  */
 export function checkParallelStructure(passages = []) {
   const list = Array.isArray(passages) ? passages : [];
   const observations = [];
   const processRange = /\bfrom\s+([^,.;:!?]{1,80}?)\s+(to|through)\s+([\p{L}][\p{L}'’-]*ing)\b/giu;
-  const opaqueRunRange = /\b(?:ran|run|running)\s+(?:each|every)(?:\s+one)?\s+from\s+([^,.;:!?]{1,60}?)\s+(?:to|through)\s+([^,.;:!?]{1,60})/giu;
+  // A stewardship verb plus a quantified or pronoun object lets the endpoints
+  // stand in for the work itself: “running each from X through Y” and “carrying
+  // each one from X to Y” are one defect with two verbs, and anchoring the
+  // pattern on `ran` alone let the second wording ship. The verb list is closed
+  // and the object is required. Verbs that name a real transfer (moved,
+  // migrated, ported) stay out on purpose: “moved each record from the student
+  // system to the warehouse” states an action between two real endpoints.
+  const stewardedRange = new RegExp(String.raw`\b(?:ran|run|runs|running|carried|carry|carries|carrying|took|take|takes|taking|owned|own|owns|owning|drove|drive|drives|driving|guided|guide|guides|guiding|handled|handle|handles|handling|managed|manage|manages|managing|shepherded|shepherd|shepherds|shepherding|ushered|usher|ushers|ushering|walked|walk|walks|walking|steered|steer|steers|steering)\b\s+(?:(?:each|every|all)(?:\s+[\p{L}'’-]+){0,2}|it|them|one)\s+from\s+([^,.;:!?]{1,60}?)\s+(?:to|through)\s+([^,.;:!?]{1,60})`, 'giu');
+  // `through` is the inclusive-range preposition of an enumerable series
+  // (“2019 through 2023”, “Monday through Friday”), where no other reading is
+  // available. Between prose endpoints it keeps a live path reading, because a
+  // quote request can literally pass through a final analysis, so a span
+  // between abstract endpoints reads unambiguously only with `to`.
+  const spanTerminus = /\bfrom\s+([^,.;:!?]{1,60}?)\s+through\s+([^,.;:!?]{1,60}?)(?=\s*(?:[,.;:!?]|$))/giu;
   for (let index = 0; index < list.length; index++) {
     const passage = text(list[index]);
-    const opaque = opaqueRunRange.exec(passage);
+    const opaque = stewardedRange.exec(passage);
     if (opaque) {
       observations.push(`passage ${index + 1} uses “${boundedDetailValue(opaque[0])}”; name the process steps with explicit action verbs instead of “run each from X through Y”`);
-      opaqueRunRange.lastIndex = 0;
+      stewardedRange.lastIndex = 0;
+    }
+    let span;
+    while ((span = spanTerminus.exec(passage))) {
+      if (ENUMERABLE_SPAN_ENDPOINT.test(span[1]) || ENUMERABLE_SPAN_ENDPOINT.test(span[2])) continue;
+      observations.push(`passage ${index + 1} spans “${boundedDetailValue(span[0])}”; end a span with “to” (“from X to Y”) and keep “through” for inclusive numeric or calendar ranges`);
+      if (observations.length >= MAX_PARALLEL_STRUCTURE_OBSERVATIONS) break;
     }
     let match;
     while ((match = processRange.exec(passage))) {
@@ -877,6 +912,29 @@ export function checkParallelStructure(passages = []) {
   }
   return observationResult('parallel-structure', observations, MAX_PARALLEL_STRUCTURE_OBSERVATIONS,
     `${list.length} passage(s) keep process-range endpoints grammatically parallel`);
+}
+
+/**
+ * A setup clause that only restates what its own subordinate clause already
+ * entails spends a line to reach the next claim: “before those products were
+ * adopted, the district had to choose them” tells a reader nothing, because
+ * adoption entails selection. The pattern stays closed to that entailment — a
+ * completed acquisition event followed by an obligation to select the same
+ * thing, referred to by a pronoun — because the general form (a premise the
+ * page already supports) needs a reading of the argument, not a match. That
+ * general form is stated in the letter prompt instead.
+ */
+export function checkEntailedPremise(passages = []) {
+  const list = Array.isArray(passages) ? passages : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    const match = ENTAILED_ACQUISITION_PREMISE.exec(text(list[index]));
+    if (!match) continue;
+    observations.push(`passage ${index + 1} sets up with “${boundedDetailValue(match[0])}”; the acquisition already entails the choice, so open with the claim that adds information and drop the restated precondition`);
+    if (observations.length >= MAX_ENTAILED_PREMISE_OBSERVATIONS) break;
+  }
+  return observationResult('entailed-premise', observations, MAX_ENTAILED_PREMISE_OBSERVATIONS,
+    `${list.length} passage(s) open their setup clauses with information the sentence does not already entail`);
 }
 
 /**
@@ -1865,6 +1923,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkDirectWelcomeClosing(paragraphs),
     checkLegalStatus(paragraphs),
     checkOpeningDemonstrative(paragraphs),
+    checkEntailedPremise(paragraphs),
   ];
 }
 

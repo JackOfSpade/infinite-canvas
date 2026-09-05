@@ -32,6 +32,7 @@ import {
   checkNeedGrounding,
   checkNeedsPortfolio,
   checkOpeningDemonstrative,
+  checkEntailedPremise,
   checkParallelStructure,
   checkPlainRegister,
   checkPlanGate,
@@ -613,15 +614,34 @@ export default [
       const faulty = checkParallelStructure(['I evaluated each product from the quote request through presenting findings to management.']);
       const opaque = checkParallelStructure(['I evaluated third-party products, running each from the quote request through a findings presentation to management.']);
       const parallel = checkParallelStructure([
-        'I evaluated each product from requesting quotes through presenting findings to management.',
-        'I evaluated each product from the initial request for quotes through the presentation of findings.',
+        'I evaluated each product from requesting quotes to presenting findings for management.',
+        'I evaluated each product from the initial request for quotes to the presentation of findings.',
         'I requested quotes, assessed each product, and presented findings to management.',
+        'I held that role from January 2019 through March 2023.',
       ]);
+      const steward = checkParallelStructure(['I ran the evaluations, carrying each one from the quote request through the final analysis for management.']);
+      const transfer = checkParallelStructure(['I wrote the Python ETL that moved each record from the student information system to the vendor warehouse.']);
+      const span = checkParallelStructure(['I owned that work from the first scoping call through the final handoff.']);
       assert(!faulty.passed && faulty.id === 'parallel-structure'
         && faulty.detail.includes('from the quote request through presenting')
         && !opaque.passed && opaque.detail.includes('run each from X through Y')
         && parallel.passed,
       'the runtime check rejects noun-to-gerund and opaque run-range defects while accepting parallel or explicit actions');
+      assert(!steward.passed && steward.detail.includes('run each from X through Y') && transfer.passed,
+        'the opaque-range anchor covers every stewardship verb, so a paraphrase from ran to carrying cannot route around it, while a concrete transfer between two real systems stays acceptable');
+      assert(!span.passed && span.detail.includes('inclusive numeric or calendar ranges')
+        && parallel.passed,
+        'a span between prose endpoints ends with to, and through survives only for an enumerable series');
+
+      const entailed = checkEntailedPremise(['Before those products were adopted, the district had to choose them, and I ran the evaluations.']);
+      const informative = checkEntailedPremise([
+        'Before the district adopted a vendor, I had to evaluate the market.',
+        'Before the migration shipped, I had to map every field by hand.',
+      ]);
+      assert(!entailed.passed && entailed.id === 'entailed-premise'
+        && entailed.detail.includes('already entails the choice')
+        && informative.passed,
+      'a setup clause is rejected only when the acquisition it names already entails the obligation it claims');
 
       const abrupt = checkPriorEmployerOpening(
         ['At Thomson School District, I evaluated third-party products before district-wide adoption.'],
@@ -1445,9 +1465,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 32, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 33, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative,entailed-premise',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

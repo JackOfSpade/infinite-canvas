@@ -68,8 +68,15 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    skills, credentials, metrics, company facts, or candidate location/contact
    details. A location in the header or cover-letter contact block is optional:
    include it only when it is explicitly supplied as the candidate's contact
-   information. Never infer it from an employer, school, job location, IP,
-   job-board profile, or any other contextual clue. If live research is
+   information. Never infer that contact location from an employer, school, job
+   location, IP, job-board profile, or any other contextual clue. This rule is
+   about where the candidate lives, and it governs the header and the letter's
+   letterhead only. It does not reach the per-role employment locations the
+   career data states for each job: those are stated facts about the work, they
+   are required on the role, and step 4's markup rules say how to render them.
+   Never run the two together — a stated employer location is not evidence of
+   where the candidate lives, and must never be promoted into the contact line.
+   If live research is
    available, use it only to improve company/role context and do not present an
    uncertain claim as fact.
    Treat an employer, team, product, or operational assertion that comes only
@@ -135,7 +142,14 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    sentences that compress several résumé bullets, repeated organizing
    metaphors, detached synthesis that broadens one example into a role-wide or
    career-wide claim, faulty parallelism in coordinated forms such as `from X
-   to/through Y`, unsolicited admissions of missing experience, transitions
+   to/through Y`, a span between prose endpoints that ends with `through`
+   where `to` marks the terminus, keeping `through` only for an enumerable
+   series such as dates or numbered items, a stewardship verb that spans a
+   range instead of naming the work, such as `carrying each one from the
+   quote request through the final analysis`, a setup clause that restates
+   only what its own sentence already entails, such as `before those
+   products were adopted, the district had to choose them`,
+   unsolicited admissions of missing experience, transitions
    that announce a migration or change but name only the origin or only the
    destination, causal connectives whose premise the preceding sentences never
    state, within-paragraph shifts between distinct responsibilities that rely
@@ -257,7 +271,26 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    - Every documented work-experience role must appear in the résumé and must
      contain at least one non-empty `<li>` inside `<ul class="highlights">`.
      Never remove, merge, or leave a summary-only/header-only role during a
-     fit revision. Career data is source material, not résumé copy: never paste
+     fit revision.
+   - When the career data states where a role was worked, the résumé must show
+     that employment location on the role. This is a required fact, not the
+     optional-but-recommended row the design references describe, and it is not
+     the candidate-contact location the privacy rule in step 3 governs — it is
+     an employment fact the career data supplied with the role, so reading it
+     off that role's own entry is not an inference. Render it either as
+     `<p class="role-location">` inside a `<div class="role-meta meta-row">`
+     (the design system's own role block), or, when the role carries no
+     `<p class="role-summary">` to share that row with, folded into the
+     `.role-dates` cell after a `<span class="sep" aria-hidden="true">·</span>`
+     — the cell then reads `<date range> · <City, ST>`. Prefer the fold when the page is
+     tight: a `.role-meta` row holding one right-aligned city spends a whole
+     line on it, and those lines belong to bullets. Abbreviate the region the
+     way the design references' own samples do (`Brooklyn, NY`, not
+     `Brooklyn, New York`); shortening a stated region is formatting, not a new
+     fact. Take the city and region from the career data's own entry for that
+     role and nowhere else — never from the job listing, the employer's
+     headquarters, or research. Infinite Canvas rejects a result whose role omits a location the
+     career data supplied. Career data is source material, not résumé copy: never paste
      a raw note or role summary verbatim. Rewrite supported facts as concise,
      polished employer-facing prose, correcting spelling and grammar without
      changing the factual meaning.
@@ -363,11 +396,16 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    is likewise intentionally allowed. What the boundary does not do is warn
    you: a class outside the design-system set and a tag outside its safe set
    are both dropped in silence, and an unwrapped tag runs its text together.
-   Two structural contracts instead reject the whole result, so confirm them
-   yourself before writing: exactly one `<main class="page">`, and every role
+   Three structural contracts instead reject the whole result, so confirm them
+   yourself before writing: exactly one `<main class="page">`; every role
    as `<article class="role">` carrying at least one non-empty `<li>` in its
-   `<ul class="highlights">`. A `<div class="role">` passes sanitizing and
-   then fails the import.
+   `<ul class="highlights">`; and every role whose career-data entry states
+   where it was worked showing that location, in its `.role-location` cell or
+   folded into its `.role-dates` cell. A `<div class="role">` passes sanitizing
+   and then fails the import, and so does a role that silently drops a stated
+   location — the sanitizer allows `role-meta`, `role-location`, and
+   `role-summary`, so an absent location is always an omission by the writer,
+   never something the boundary removed.
 5. Produce an evidence-grounded cover letter. Choose paragraph boundaries for
    the clearest, most persuasive final letter; there is no prescribed paragraph
    count or word count. One page is a ceiling, not a space target: a complete,
@@ -449,9 +487,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    do not quote the employer's phrasing back as the second half of an analogy:
    argue the shared mechanism (constraints, data flow, failure modes) and let
    the transfer stay implicit. Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter: legal work status belongs on the application form. Do not state application
-   logistics either: availability, start date, schedule, work location,
-   relocation, commute, travel willingness, and sponsorship belong in
+   logistics either: availability, start date, schedule, the work location
+   of the job being applied for, relocation, commute, travel willingness, and
+   sponsorship belong in
    application fields, even when career data or the listing mentions them.
+   This bars them from the letter's prose only, and says nothing about the
+   résumé's per-role employment locations, which step 4 requires.
    Infinite Canvas rejects a result that includes
    them (for example `willing to work anywhere`, `available to start`,
    `authorized to work`, or `visa sponsorship`).
@@ -779,4 +820,6 @@ field. `logistics` is a compatibility object only: omit it, or leave its
 `statement` empty. Never use it to place availability, relocation, commute,
 schedule, work location, travel, start date, or legal-work-status facts in a
 letter; those belong in application fields and must not be inferred from the
-job location, employer, school, profile, or context.
+job location, employer, school, profile, or context. This governs the letter.
+The résumé's per-role employment locations are a separate, required fact
+covered by step 4.

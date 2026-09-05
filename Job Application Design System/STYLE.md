@@ -355,8 +355,20 @@ when the resume is parsed back into the database.
 └─────────────────────────────────────────────────────────┘
 ```
 
-Every role must include: title, company, dates. The summary line and
-location are optional but recommended.
+Every role must include: title, company, dates. The summary line is
+optional but recommended. **The location is required whenever the source
+data states one for that role** — it is a fact about the employment, and
+dropping it silently changes what the résumé says about where the
+candidate has worked. It is optional only in the sense that a role whose
+source data never stated a location has none to render; it is not a fit
+lever. When the page is tight and the role has no summary to share the
+row with, fold the location into the `.role-dates` cell rather than
+spending a whole line on it — see §5.2b.
+
+(This is a stricter rule than the location's privacy-gated counterpart in
+§9.1. The two are different fields: `work[].location` is an employment
+fact supplied with the role, `basics.location` is where the candidate
+lives. Requiring the first says nothing about the second.)
 
 ### 5.2a Role-row length budgets
 
@@ -368,6 +380,7 @@ role*, silently.
 | Row | Budget | Measured floor [M] |
 |-----|--------|--------------------|
 | `.role-title-line` (Title · Company) | **56 chars** | 60 |
+| `.role-title-line`, folded dates cell (§5.2b) | **44 chars** | 47 |
 | `.role-summary` | **70 chars** | 75 |
 
 [M] Letter/default, the tightest of the four configs. Measured in
@@ -375,6 +388,18 @@ role*, silently.
 orders of a low-breakpoint compound vocabulary and taking the tightest
 result; the published budget sits below that floor with margin.
 Enforced statically by `build/fit-estimate-test.js`.
+
+**The folded row is a different budget, not the same one.** §5.2b moves the
+location into the `auto` dates cell, which takes ~106px out of the `1fr`
+title track — 518.33 → 414.24px at Letter/default for a `City, ST` string.
+Measured 2026-09-04 by the method above, against a folded
+`May 2023 – Jun 2026 · Brooklyn, NY` cell: **47** / 55 / 56 at
+Letter/default, A4/default and Letter/compact; 50 / 55 / 60 at A4/compact. Unlike the
+unfolded row, this floor moves with the location's own width — a longer city
+or region narrows the track further, so re-measure before folding one.
+`build/fit-estimate-test.js` charges the narrower edge automatically when it
+sees a folded cell; before it did, a document whose titles wrapped came back
+green.
 
 **`min-width: 0` is not the fix, and must not be added.** `.meta-row` is
 `grid-template-columns: 1fr auto` with `.role-dates`/`.role-location`
@@ -384,6 +409,41 @@ overflow trap. It is not: the `1fr` track measures ~518px against a
 floor never binds. A/B measured 2026-08-21 — the title budget is
 identical (60–70) with and without `min-width: 0`. The missing budget
 was the bug, not the grid.
+
+### 5.2b Folding the location into the dates cell
+
+The role block's second row exists to carry a scope summary and a
+location together. A role with no summary leaves that row holding one
+right-aligned city, and the row still costs a full line plus its
+`margin-bottom` — 2.00 baselines, the same as a full summary+location
+row (`build/fit-estimate-test.js`, `COST.roleMeta`). Across 3–5 roles
+that is 6–10 lines spent on whitespace.
+
+So a location-only second row may instead be folded up into the dates
+cell, separated by the standard inline separator:
+
+```html
+<p class="role-dates"><time datetime="2023-05">May 2023</time> – <time
+  datetime="2026-06">Jun 2026</time><span class="sep"
+  aria-hidden="true">·</span>Brooklyn, NY</p>
+```
+
+The `.role-meta` row is then omitted entirely. Both cells already share
+one rule (`--fs-small`, `--ink-meta`, right-aligned, `nowrap`), so the
+fold changes no typography — it only moves the string up one row, at
+zero line cost.
+
+**Fold only a lone location.** A row that still carries a
+`.role-summary` (or any second cell) is the grid doing its job; leave it
+alone.
+
+**And use the folded title budget, not the unfolded one.** Both cells are
+`nowrap`, so a folded cell lengthens the `auto` track and squeezes
+`.role-title-line`: the one-line ceiling drops from 56 chars to **44**
+(§5.2a). That is the whole cost of the fold, and it is a real one — a
+title over it wraps, spending the line the fold just saved. Check it
+before folding, and re-measure if the location is unusually long, because
+this budget moves with the location's own width.
 
 ### 5.3 Bullet conventions
 
@@ -1053,8 +1113,12 @@ value was not given, omit the `addressLocality` span and its adjacent
 the gap with no visual artefact.
 
 `work[].location` (`.role-location`) is different: it is an employment
-fact about that role and may be rendered when supplied with the role
-entry. It is still never a source for `basics.location`.
+fact about that role, and it is **required** whenever it is supplied with
+the role entry (§5.2) — either in the role's `.role-meta` row or folded
+into `.role-dates` (§5.2b). It is still never a source for
+`basics.location`: the two answer different questions, and a supplied
+`work[].location` is not permission to fill in a missing
+`basics.location`.
 
 ---
 
@@ -1615,6 +1679,28 @@ paired with a gerund phrase, an infinitive paired with a finite
 clause, an action paired with a thing. The most common offender is
 the process span *from [noun phrase] through [verb-ing phrase]*, which
 changes grammatical form between its endpoints without announcing it.
+
+Parallel endpoints are necessary but not sufficient, because the span
+signal itself carries two further defects.
+
+*The wrong span preposition.* Write a span as `from X to Y`. `to` can
+only mark a terminus, while `through` keeps a second reading as a path
+the first endpoint travels along — *from the quote request through the
+final analysis* can be read as the request passing through the
+analysis, and the fixed phrase *in the final analysis* pulls the same
+way. Reserve `through` for an enumerable series, where no second
+reading survives: `2019 through 2023`, `Monday through Friday`,
+`steps 2 through 5`.
+
+*A stewardship verb standing in for the work.* A span states where a
+process began and ended, so the verb governing it must still state
+what was done. *Carrying each one from the quote request to the final
+analysis* names two endpoints and no action; so do *running*,
+*taking*, *owning*, and *driving* something from one stage to another.
+Name the steps instead — requested the quotes, compared the products,
+wrote the analysis — or keep the span and give it a verb that reports
+real work. A verb naming a concrete transfer between two real systems
+is not this defect.
 
 Repair by putting every coordinated element in the same form — noun
 phrase with noun phrase, action with action — and prefer whichever
