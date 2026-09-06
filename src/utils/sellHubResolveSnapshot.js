@@ -88,7 +88,7 @@ export function buildSellHubResolveRollup(resolveStates = []) {
 ## SellHub Source Resolve Queue
 > Compact renderer-side state for captcha/Solve results that are being merged
 > back into SellHub comp data. This is intentionally outside the large Node
-> Diagnostics table so clipboard-capped reports still show whether a hub is
+> Diagnostics table so reports clearly show whether a hub is
 > actually applying resolved sources, queued behind another browser operation,
 > or displaying a stale busy message.
 

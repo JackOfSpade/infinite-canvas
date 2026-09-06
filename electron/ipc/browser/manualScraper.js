@@ -427,6 +427,55 @@ export function resolveManualSourceStopReason({
   return 'completed';
 }
 
+/**
+ * A cooldown re-probe proves the previous detail throttle has lifted only when
+ * it produced an actual terminal outcome: either an expanded description or a
+ * listing conclusively retired as unavailable. An ordinary zero-description
+ * probe is ambiguous and must keep the block armed.
+ */
+export function didDetailBlockReprobeRecover(result = {}) {
+  const expanded = Math.max(0, Number(result.expandedCount) || 0);
+  const unavailable = Math.max(0, Number(result.unavailableDetailDropped) || 0);
+  const reBlocked = ['description-rate-limited', 'description-panel-http-error']
+    .includes(result.descWarning?.code);
+  return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;
+}
+
+/**
+ * Preserve every safe aggregate while joining the small cooldown probe with
+ * the rest of its page. The unsuccessful branch intentionally leaves the
+ * untouched rows deferred, but never drops listings the probe conclusively
+ * retired as unavailable.
+ */
+export function composeDetailBlockReprobeResult(probeResult = {}, restResult = null, restJobs = [], reprobeOfCode = null) {
+  const probeJobs = Array.isArray(probeResult.jobs) ? probeResult.jobs : [];
+  const probeExpanded = Math.max(0, Number(probeResult.expandedCount) || 0);
+  const probeUnavailable = Math.max(0, Number(probeResult.unavailableDetailDropped) || 0);
+  if (didDetailBlockReprobeRecover(probeResult)) {
+    const rest = restResult || {};
+    return {
+      jobs: [...probeJobs, ...(Array.isArray(rest.jobs) ? rest.jobs : [])],
+      descError: rest.descError || null,
+      descWarning: rest.descWarning || probeResult.descWarning || null,
+      expandedCount: probeExpanded + Math.max(0, Number(rest.expandedCount) || 0),
+      unavailableDetailDropped: probeUnavailable + Math.max(0, Number(rest.unavailableDetailDropped) || 0),
+    };
+  }
+  return {
+    jobs: [
+      ...probeJobs,
+      ...(Array.isArray(restJobs) ? restJobs : []).map(job => ({
+        ...job,
+        descriptionDeferredReason: reprobeOfCode,
+      })),
+    ],
+    descError: null,
+    descWarning: probeResult.descWarning || probeResult.descError || null,
+    expandedCount: probeExpanded,
+    unavailableDetailDropped: probeUnavailable,
+  };
+}
+
 export function getManualScraperTelemetry() {
   return {
     active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
@@ -2420,13 +2469,23 @@ async function dismissGlassdoorOpportunityModal(page) {
 // Clicks each job card and captures the full description from the side panel.
 // Only runs when DESC_CONFIGS[sourceId] is defined.
 //
-// Returns { jobs, descError, descWarning } where descError is non-null when card or panel
+// Returns { jobs, descError, descWarning, unavailableDetailDropped } where descError is non-null when card or panel
 // selectors appear stale (≥ DESC_STALE_THRESHOLD consecutive failures of the same
 // type). A non-null descError is an abort signal — the caller must set earlyExit
 // and surface the error just like a SITE_CHANGED extraction failure.
 async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null, walkPlan = null) {
   const cfg = DESC_CONFIGS[sourceId];
-  if (!cfg || jobs.length === 0) return { jobs, descError: null, descWarning: null, expandedCount: 0 };
+  if (!cfg || jobs.length === 0) {
+    return {
+      jobs,
+      descError: null,
+      descWarning: null,
+      expandedCount: 0,
+      // This is deliberately distinct from a description miss: a confirmed
+      // closed/not-found posting is removed from the returned usable rows.
+      unavailableDetailDropped: 0,
+    };
+  }
 
   const enhanced  = [...jobs];
   const cardTargets = buildDescriptionCardTargets(enhanced, sourceId);
@@ -2438,6 +2497,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   // one-by-one (baseCount + i + 1) rather than jumping to totalSoFar immediately.
   const baseCount = totalSoFar - jobs.length;
   let descWarning = null;
+  // The caller retains upstream candidate identities separately. Keep the
+  // subset retired after a confirmed unavailable detail page here, so reporting
+  // can say what was traversed versus what remained usable.
+  let unavailableDetailDropped = 0;
 
   // Navigation-based expansion: navigate to each job's individual page and extract
   // the description there. Used for ZipRecruiter where the extractor
@@ -3032,6 +3095,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               reason, status: navigationStatus,
               expectedUrl: viewUrl.slice(0, 240), finalUrl: fetchPage.url().slice(0, 240),
             }, { updateActive: false });
+            if (enhanced[i] != null) unavailableDetailDropped += 1;
             enhanced[i] = null;
             continue;
           }
@@ -3464,7 +3528,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     try { await injectOverlay(page); } catch {
       // Overlay reinjection is best-effort after detail navigation.
     }
-    return { jobs: enhanced.filter(Boolean), descError: null, descWarning, expandedCount };
+    return {
+      jobs: enhanced.filter(Boolean),
+      descError: null,
+      descWarning,
+      expandedCount,
+      unavailableDetailDropped,
+    };
   }
 
   // Start from empty so the first card's already-visible description is captured
@@ -4296,6 +4366,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     panelRateLimitCount,
     panelHttpFailureCount,
     selectionMismatchCount,
+    unavailableDetailDropped,
   };
   } finally {
     if (sourceId === 'glassdoor') page.off('response', glassdoorPanelResponseListener);
@@ -5638,7 +5709,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       const srcName  = SOURCE_LABELS[sourceId] || sourceId;
       const allJobs  = [];
       const seen     = new Set();
+      // Distinct listing identities observed in source search rows. This count
+      // intentionally precedes confirmed unavailable-detail retirement; it is
+      // not synonymous with usable rows returned in `data`.
       const providerSeen = new Set();
+      let sourceUnavailableDetailDropped = 0;
       // Every task for a source is built from the same persisted hub limits.
       // Keep the aggregate job limit at source scope so several role queries
       // cannot each consume a separate allowance.
@@ -5691,6 +5766,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let sourceDetailUnenriched   = 0;    // rows that ended the walk with no description
       let sourceDetailReprobeTotal = 0;    // re-probes attempted (NOT reset on recovery)
       let sourceDetailFirstBlockPg = null; // first page ever blocked (NOT cleared on recovery)
+      let sourceDetailFirstBlockQuery = null; // query that first armed detail recovery
+      let sourceDetailFirstBlockQueryIndex = null;
       // The funnel's "Found (raw)" is computed from what this scraper RETURNS, so
       // it is already net of this per-source sourceJobKey dedup. A 30-page walk
       // over ~900 physical cards that returned 782 rows reported "after dedup:
@@ -6370,36 +6447,28 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + probeJobs.length, signal,
                 buildPhysicalCardWalkPlan(extracted, probeJobs),
               );
-              const probeReBlocked = ['description-rate-limited', 'description-panel-http-error']
-                .includes(probeResult.descWarning?.code);
-              if (probeResult.expandedCount > 0 && !probeResult.descError && !probeReBlocked) {
-                // Throttle lifted — finish the page normally. A descError on
-                // THIS pass is genuine (enrichment demonstrably works now), so
-                // it is left intact to stop the walk as it always would.
+              if (didDetailBlockReprobeRecover(probeResult)) {
+                // The throttle lifted — finish the page normally. A confirmed
+                // unavailable listing is terminal evidence too: it proves the
+                // request reached the detail endpoint without mistaking an
+                // ordinary zero-description miss for recovery.
                 const restResult = restJobs.length > 0
                   ? await expandDescriptions(
                     page, restJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + jobsToExpand.length, signal,
                     buildPhysicalCardWalkPlan(extracted, restJobs),
                   )
-                  : { jobs: [], descError: null, descWarning: null, expandedCount: 0 };
-                detailResult = {
-                  jobs: [...probeResult.jobs, ...restResult.jobs],
-                  descError: restResult.descError,
-                  descWarning: restResult.descWarning || probeResult.descWarning || null,
-                  expandedCount: probeResult.expandedCount + restResult.expandedCount,
-                };
+                  : {
+                    jobs: [],
+                    descError: null,
+                    descWarning: null,
+                    expandedCount: 0,
+                    unavailableDetailDropped: 0,
+                  };
+                detailResult = composeDetailBlockReprobeResult(probeResult, restResult);
               } else {
                 // Still blocked. Leave the untouched remainder deferred rather
                 // than walking it — that is what the block means.
-                detailResult = {
-                  jobs: [
-                    ...probeResult.jobs,
-                    ...restJobs.map(job => ({ ...job, descriptionDeferredReason: reprobeOfCode })),
-                  ],
-                  descError: null,
-                  descWarning: probeResult.descWarning || probeResult.descError || null,
-                  expandedCount: probeResult.expandedCount,
-                };
+                detailResult = composeDetailBlockReprobeResult(probeResult, null, restJobs, reprobeOfCode);
                 sourceDetailSkippedCards += restJobs.length;
               }
             } else {
@@ -6412,9 +6481,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               // back AND nothing re-blocked on the same page. Counting a
               // partially-expanded page that immediately re-blocked would make
               // the report claim a recovery that did not happen.
-              const reBlocked = ['description-rate-limited', 'description-panel-http-error']
-                .includes(detailResult.descWarning?.code);
-              if (detailResult.expandedCount > 0 && !detailResult.descError && !reBlocked) {
+              if (didDetailBlockReprobeRecover(detailResult)) {
                 sourceDetailRecovered += 1;
                 // Give a LATER block its own full budget. Leaving the counter
                 // at its high-water mark meant one successful recovery early in
@@ -6423,12 +6490,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 // Stop asserting a block that has provably lapsed — the skip log
                 // and the report both quote this page number.
                 sourceDetailBlockPage = null;
-                logger.info(`[BrowserScraper] ${srcName}: detail enrichment recovered on page ${pageNum} — ${detailResult.expandedCount}/${jobsToExpand.length} expanded after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode}`);
+                const retiredUnavailable = Math.max(0, Number(detailResult.unavailableDetailDropped) || 0);
+                logger.info(`[BrowserScraper] ${srcName}: detail enrichment recovered on page ${pageNum} — ${detailResult.expandedCount}/${jobsToExpand.length} expanded${retiredUnavailable > 0 ? `; ${retiredUnavailable} confirmed unavailable` : ''} after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode}`);
                 recordManualScraperTelemetry({
                   phase: 'detail-block-cleared', sourceId, srcName,
                   queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
                   reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
-                  expanded: detailResult.expandedCount, attempted: jobsToExpand.length,
+                  expanded: detailResult.expandedCount,
+                  unavailableDetailDropped: retiredUnavailable,
+                  attempted: jobsToExpand.length,
                 });
               } else {
                 reprobeFailedThisPage = true;
@@ -6460,7 +6530,14 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               }
             }
           }
-          const { jobs: enhanced, descError, descWarning, expandedCount } = detailResult;
+          const {
+            jobs: enhanced,
+            descError,
+            descWarning,
+            expandedCount,
+            unavailableDetailDropped = 0,
+          } = detailResult;
+          sourceUnavailableDetailDropped += Math.max(0, Number(unavailableDetailDropped) || 0);
           // Exactly the rows the scoring-evidence gate will drop — no inference
           // about which branch deferred them, and it stays correct on the
           // triggering page where only a suffix of the cards was deferred.
@@ -6522,6 +6599,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // subsequent page.
             if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
             if (sourceDetailFirstBlockPg == null) sourceDetailFirstBlockPg = pageNum;
+            if (sourceDetailFirstBlockQuery == null) sourceDetailFirstBlockQuery = task.query || null;
+            if (sourceDetailFirstBlockQueryIndex == null) sourceDetailFirstBlockQueryIndex = qi;
             sourceDetailBlockCode = descWarning.code;
             sourceDetailBlockAt = Date.now();
             sourceDetailBlockCount += 1;
@@ -6531,6 +6610,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // or the next page would attempt a full enrichment pass against a
             // source we just watched fail.
             if (sourceDetailBlockPage == null) sourceDetailBlockPage = pageNum;
+            if (sourceDetailFirstBlockQuery == null) sourceDetailFirstBlockQuery = task.query || null;
+            if (sourceDetailFirstBlockQueryIndex == null) sourceDetailFirstBlockQueryIndex = qi;
             sourceDetailBlockCode = descWarning?.code || 'description-rate-limited';
             sourceDetailBlockAt = Date.now();
             sourceDetailBlockCount += 1;
@@ -6872,6 +6953,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // Survives recovery — `firstPage`/`reprobes` above are reset when a
             // re-probe succeeds, which erased the episode from the report.
             everBlockedPage: sourceDetailFirstBlockPg,
+            firstQuery: sourceDetailFirstBlockQuery,
+            firstQueryIndex: sourceDetailFirstBlockQueryIndex,
             arms: sourceDetailBlockCount,
             reprobes: sourceDetailReprobes,
             reprobesTotal: sourceDetailReprobeTotal,
@@ -6881,12 +6964,20 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           }
           : null,
         executedQueries,
+        // Candidate identities are recorded before confirmed unavailable detail
+        // pages are removed from `data`; preserve both figures for an honest
+        // candidate-traversed → usable-row report.
         providerGathered: providerSeen.size,
+        unavailableDetailDropped: sourceUnavailableDetailDropped,
         providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),
         relevanceDropped: 0,
         preCapRelevanceDropped: 0,
         relevanceRejected: [],
         revealOutcomes: revealOutcomes.slice(0, 20),
+        // Glassdoor accepts a nation-tier locId while leaving rows scoped to
+        // browser egress. Keep this safe source-level fact independent from the
+        // warning slot, which must remain available for genuine scrape errors.
+        locationScopeUnenforced: nationTierCaveatRecorded,
       };
       results.push(result);
       onResult?.(result);

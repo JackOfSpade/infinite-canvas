@@ -395,7 +395,30 @@ export function materializeNonApiPrompt({
     settings.push('', 'Handoff configuration (non-secret):', JSON.stringify(safeHandoffSettings(handoffSettings), null, 2));
   }
   if (responseSchema) {
-    settings.push('', '--- REQUIRED RESPONSE FORMAT ---', '', 'Return only valid JSON matching this schema:', JSON.stringify(responseSchema, null, 2), '', 'Do not use Markdown code fences or include commentary outside the JSON.');
+    settings.push(
+      '', '--- REQUIRED RESPONSE FORMAT ---', '',
+      'Return only valid JSON matching this schema:',
+      JSON.stringify(responseSchema, null, 2),
+      '',
+      'Do not use Markdown code fences or include commentary outside the JSON.',
+      // Observed on a resume-parse handoff: the chat returned the required
+      // profile plus ~10 unrequested properties, including a verbatim re-
+      // transcription of every role's bullet points inside the profile JSON.
+      // Unknown properties are discarded on arrival (schemaValidation.js only
+      // enforces `required` + types), but they are still billed against the
+      // output cap named above, and this transport has no automatic cap-raise
+      // retry the way the API path does - a long corpus simply truncates
+      // mid-JSON and the user re-pastes by hand. Ask for the exact property
+      // set rather than rejecting extras: a hard `additionalProperties: false`
+      // would trap the user in a re-paste loop over output we already ignore.
+      'Emit exactly the properties named in the schema, at every nesting level, and nothing else. Do not add extra, explanatory, or provenance properties (for example a "source" key, "notes", or a calculation trace). They are discarded on arrival, and they spend the output budget above - which is what truncates a long reply mid-JSON.',
+      // Observed on the same handoff: the chat application rendered a bare file
+      // name inside the JSON as an attachment card. A card carries no text, so
+      // copying the reply turned "source": "Work Experience.md" into
+      // "source": "". The pasted text keeps no trace of what was removed, so no
+      // validator downstream can detect it - prevention is the only defence.
+      'Every character of this reply is transferred by copying it as plain text, so anything your chat application renders as a widget instead of as text is silently lost on the way back. Write all values as literal text only: no file attachments or file cards, no download chips, no citation or reference markers, no collapsible sections, no links. In particular, never write out an attached file\'s name - a file name is exactly what these applications turn into an attachment card, and it then copies back as an empty string.',
+    );
   }
   sections.push(settings.join('\n'));
   return sections.filter(Boolean).join('\n\n');

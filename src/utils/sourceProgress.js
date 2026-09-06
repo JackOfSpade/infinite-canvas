@@ -27,6 +27,11 @@ export function mergeSourceProgress(prev, payload) {
     detail:  payload.detail ?? null,
     warning: payload.warning !== undefined ? payload.warning : prev?.warning ?? null,
     url:     payload.url     !== undefined ? payload.url     : prev?.url     ?? null,
+    // A terminal source event can omit the run token emitted by its earlier
+    // progress beat. Keep it sticky so a later Solve stays bound to the exact
+    // run that produced this source card rather than falling back to a newer
+    // hub-wide token.
+    jobRunId: payload.jobRunId !== undefined ? payload.jobRunId : prev?.jobRunId ?? null,
     completed: payload.completed !== undefined ? payload.completed : prev?.completed ?? null,
     total:     payload.total     !== undefined ? payload.total     : prev?.total     ?? null,
   };
@@ -39,4 +44,36 @@ export const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
 export function isTerminalSourceStatus(status) {
   return TERMINAL_SOURCE_STATUSES.has(status);
+}
+
+/**
+ * Keep a source-progress consumer on one run generation. A late event from a
+ * retired run must not repaint a freshly reset card; untagged legacy events are
+ * accepted only before the first token has ever been observed.
+ */
+export function createSourceProgressRunGuard(initialRunId = null) {
+  let activeRunId = initialRunId || null;
+  const retiredRunIds = new Set();
+  const trimRetired = () => {
+    while (retiredRunIds.size > 24) retiredRunIds.delete(retiredRunIds.values().next().value);
+  };
+  return {
+    accepts(runId) {
+      if (!runId) return !activeRunId && retiredRunIds.size === 0;
+      if (retiredRunIds.has(runId)) return false;
+      if (activeRunId && activeRunId !== runId) return false;
+      activeRunId = runId;
+      return true;
+    },
+    retireActive() {
+      if (activeRunId) {
+        retiredRunIds.add(activeRunId);
+        trimRetired();
+      }
+      activeRunId = null;
+    },
+    active() {
+      return activeRunId;
+    },
+  };
 }

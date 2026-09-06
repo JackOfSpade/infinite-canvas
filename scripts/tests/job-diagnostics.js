@@ -1,7 +1,12 @@
-import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, collapseLogRepeats, filterJobsByAge, getJobSearchTransientKeysForSave, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { __canWriteJobResolveTelemetryForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
-import { __loadJobAnalysisSnapshotForTests } from '../test-dependencies.js';
+import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
+import { buildMainProcessLogsMarkdown, newestFirstLogLines, timestampedLogLines } from '../test-dependencies.js';
+import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/utils/EventLogger.js';
+import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
+import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
 import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
@@ -12,18 +17,68 @@ import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
-import { collapseEventBursts } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
+import { handoffElapsed, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
-import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification } from '../../electron/ipc/jobs.js';
+import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
 import { isTerminalSourceStatus } from '../test-dependencies.js';
 import { clipReportText } from '../test-dependencies.js';
+import { composeDetailBlockReprobeResult, didDetailBlockReprobeRecover } from '../test-dependencies.js';
+import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
 
 export default [
-{
+  {
+    name: 'manual scraper: cooldown re-probe treats confirmed unavailable rows as recovery and preserves their counters',
+    run: () => {
+      // Mock the exact shape `expandDescriptions` returns when every probe
+      // listing reaches a confirmed closed/not-found detail page. No full
+      // description was expanded, but this is positive terminal evidence that
+      // the throttle no longer owns the request.
+      const allUnavailableProbe = {
+        jobs: [],
+        descError: null,
+        descWarning: null,
+        expandedCount: 0,
+        unavailableDetailDropped: 2,
+      };
+      assert(didDetailBlockReprobeRecover(allUnavailableProbe),
+        'confirmed unavailable detail outcomes clear a cooldown block even when no description text expanded');
+      const allUnavailableComposite = composeDetailBlockReprobeResult(allUnavailableProbe, {
+        jobs: [], descError: null, descWarning: null, expandedCount: 0, unavailableDetailDropped: 0,
+      });
+      assert(allUnavailableComposite.unavailableDetailDropped === 2
+        && allUnavailableComposite.expandedCount === 0
+        && allUnavailableComposite.jobs.length === 0,
+      'an all-unavailable probe retains its terminal removal count through the successful composite branch');
+
+      const probe = { ...allUnavailableProbe, unavailableDetailDropped: 1 };
+      const rest = {
+        jobs: [{ id: 'usable-rest-row' }], descError: null, descWarning: null,
+        expandedCount: 1, unavailableDetailDropped: 2,
+      };
+      const composite = composeDetailBlockReprobeResult(probe, rest);
+      assert(composite.expandedCount === 1 && composite.unavailableDetailDropped === 3
+        && composite.jobs.length === 1,
+      'successful probe/rest composition sums unavailable removals instead of losing either branch');
+
+      const ordinaryMiss = {
+        jobs: [{ id: 'ambiguous-probe-row' }], descError: null,
+        descWarning: { code: 'description-detail-miss' }, expandedCount: 0,
+        unavailableDetailDropped: 0,
+      };
+      assert(!didDetailBlockReprobeRecover(ordinaryMiss),
+        'an ordinary zero-description miss is not mistaken for throttle recovery');
+      const blocked = composeDetailBlockReprobeResult(ordinaryMiss, null, [{ id: 'untouched-rest-row' }], 'description-rate-limited');
+      assert(blocked.unavailableDetailDropped === 0
+        && blocked.jobs[1]?.descriptionDeferredReason === 'description-rate-limited',
+      'an ambiguous probe retains the block and defers its untouched remainder without inventing unavailable removals');
+      return { unavailable: allUnavailableComposite.unavailableDetailDropped, compositeUnavailable: composite.unavailableDetailDropped };
+    },
+  },
+  {
     name: 'issue reports redact Job Preferences and retain only safe job counts',
     run: () => {
       const secret = 'private preference text must never appear';
@@ -115,7 +170,270 @@ export default [
   },
 },
 {
-    name: 'job completion assessment survives a FULL 50k clipboard cap and reconciles recovered scoring',
+    name: 'job recovery diagnostics list bounded metadata-only description-recovery checkpoints by hub and run',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-description-recovery-checkpoints-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubA = 'checkpoint-hub-a';
+      const hubB = 'checkpoint-hub-b';
+      const runA = 'checkpoint-run-a-123456789';
+      const runB = 'checkpoint-run-b-987654321';
+      const secret = 'PRIVATE CHECKPOINT JOB TEXT';
+      const hostileNodeId = `checkpoint-hostile\`\n${secret}`;
+      const hostileRunId = `checkpoint-hostile-run\`\n${secret}`;
+      const writeCheckpoint = (hubId, runId, createdAt, jobs, recoveryJobs) => {
+        const checkpointPath = getJobDescriptionRecoveryCheckpointPath(canvas, runId, path.join(dir, 'unsaved-analysis'));
+        fs.writeFileSync(checkpointPath, JSON.stringify({
+          version: 1, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId, runId, createdAt,
+          gatheredJobCount: jobs.length, sourceGatheredCount: jobs.length + 1,
+          jobs, descriptionRecoveryJobs: recoveryJobs,
+          profile: { name: secret }, prompt: secret,
+        }), 'utf8');
+      };
+      try {
+        writeCheckpoint(hubA, runA, '2026-09-05T16:00:00.000Z', [{ title: secret }, {}, {}], [{ title: secret }, {}]);
+        writeCheckpoint(hubB, runB, '2026-09-05T16:05:00.000Z', [{ title: secret }], [{ title: secret }, {}, {}, {}]);
+        const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'));
+        const prefix = `job-search-${analysisPaths.namespace}-description-recovery-`;
+        fs.writeFileSync(path.join(dir, `${prefix}malformed.json`), '{not json', 'utf8');
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, 'checkpoint-run-ownership', path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          sourceHubId: hubA, nodeId: hubB, runId: 'checkpoint-run-ownership', createdAt: '2026-09-05T16:06:00.000Z', jobs: [], descriptionRecoveryJobs: [],
+        }), 'utf8');
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, 'checkpoint-run-path-a', path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          sourceHubId: hubA, nodeId: hubA, runId: 'checkpoint-run-path-b', createdAt: '2026-09-05T16:07:00.000Z', jobs: [], descriptionRecoveryJobs: [],
+        }), 'utf8');
+        // The path hash can legitimately identify an opaque run token, and the
+        // sidecar's exact ownership can match it. It still must never inject
+        // new Markdown lines/backticks or private text into FULL/JOBRESOLVE.
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, hostileRunId, path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          sourceHubId: hostileNodeId, nodeId: hostileNodeId, runId: hostileRunId,
+          createdAt: '2026-09-05T16:08:00.000Z', jobs: [], descriptionRecoveryJobs: [],
+        }), 'utf8');
+
+        const listed = listDescriptionRecoveryCheckpointsSync(canvas);
+        assert(listed.checkpoints.length === 2 && listed.ignored.metadataInvalid === 1
+          && !JSON.stringify(listed).includes(secret)
+          && !JSON.stringify(listed).includes(hostileNodeId)
+          && !JSON.stringify(listed).includes(hostileRunId),
+        'the synchronous checkpoint metadata boundary rejects hostile ownership tokens before a report can render them');
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
+        assert(recovery.includes('Description-recovery checkpoints: 2 parseable, ownership-verified checkpoint(s)')
+          && recovery.includes('hub `…nt-hub-a` (present in this canvas)')
+          && recovery.includes('hub `…nt-hub-b` (present in this canvas)')
+          && recovery.includes('run `…23456789`')
+          && recovery.includes('run `…87654321`')
+          && recovery.includes('created ') && recovery.includes('updated ')
+          && recovery.includes('3 score-ready job(s) · 2 recovery-pool row(s)')
+          && recovery.includes('1 score-ready job(s) · 4 recovery-pool row(s)'),
+        'recovery diagnostics show separate, metadata-only hub/run checkpoints with created/updated ages and safe row counts');
+        assert(recovery.includes('Ignored checkpoint file(s): 1 malformed, 1 ownership-invalid, 1 path-invalid, 1 unsafe metadata')
+          && !recovery.includes(secret) && !recovery.includes(hostileNodeId) && !recovery.includes(hostileRunId)
+          && !recovery.includes('malformed.json'),
+        'malformed, stale, and hostile checkpoint metadata are counted without exposing their content, identifiers, filenames, or paths');
+
+        const base = {
+          description: 'Google Solve says recovery checkpoint is not ready.', nodes: [{ id: hubA, type: 'jobhub', data: {} }, { id: hubB, type: 'jobhub', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        };
+        const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+        const jobResolve = generateMarkdown({
+          ...base, filterCode: 'JOBRESOLVE', nodes: [],
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [hubA, hubB],
+            omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
+          },
+        }).markdown;
+        assert(full.includes('Description-recovery checkpoints: 2 parseable')
+          && jobResolve.includes('## Job Recovery Diagnostics')
+          && jobResolve.includes('Description-recovery checkpoints: 2 parseable')
+          && !full.includes(secret) && !jobResolve.includes(secret)
+          && !full.includes(hostileNodeId) && !jobResolve.includes(hostileRunId),
+        'FULL and JOBRESOLVE retain only safe checkpoint metadata even when JOBRESOLVE drops node payloads');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { checkpoints: 2, ignored: 3 };
+    },
+},
+{
+    name: 'durable terminal receipt proves saved output after restart without claiming live stages',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, search: telemetry.search, resolves: telemetry.resolves,
+        scoring: telemetry.scoring, bucketing: telemetry.bucketing, pipeline: telemetry.pipeline,
+        history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-durable-output-restart-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'durable-restart-hub';
+      const runId = 'durable-restart-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      const receiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: [{}, {}, {}],
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId, nodeId, startedAt: 1_700_000_000_000, completedAt: 1_700_000_239_600,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 3 },
+          cleanup: { attempted: true, cleared: true },
+          // A provider total is intentionally absent: the restart verdict must
+          // say output is durable without pretending this proves collection.
+          sources: {
+            dice: { count: 3, providerGathered: 3, pagesWalked: 5, relevanceDropped: 0, stopReason: 'job-limit', cap: { type: 'jobs-per-platform', limit: 50 } },
+            // A duplicate/repeated page is an incomplete walk, but is not a
+            // failed HTTP page. The receipt must preserve that distinction.
+            indeed: { count: 1, providerGathered: 1, relevanceDropped: 0, truncated: true, stopReason: 'no-new-rows' },
+          },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, search: null, resolves: {}, scoring: null, bucketing: null,
+          pipeline: null, history: null,
+        });
+
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(assessment.includes('✅ **DURABLE OUTPUT COMPLETE**')
+          && assessment.includes('Live search/scoring telemetry was not retained after restart')
+          && assessment.includes('Scoring: not retained in this process.')
+          && assessment.includes('Taxonomy: not retained in this process.')
+          && assessment.includes('`dice` reported no candidate corpus size — coverage unproven')
+          && !assessment.includes('✅ **VERIFIED COMPLETE**'),
+        'same-run receipt and owned saved snapshot establish durable output only, without upgrading absent live stages to VERIFIED');
+        assert(recovery.includes('Run manifest: absent — expected: a validated terminal receipt and same-run saved snapshot prove a clean prior-process finish')
+          && recovery.includes('Staging ledger: absent — expected: a validated terminal receipt and same-run saved snapshot prove a clean prior-process finish')
+          && recovery.includes('Jobs per platform cap 50')
+          && recovery.includes('5 successfully fetched API page(s) (fan-out total)')
+          && recovery.includes('walk stopped after a repeated/no-new-rows page; coverage is unproven')
+          && !recovery.includes('walk truncated by a failed page')
+          && recovery.includes('elapsed 4m')
+          && !recovery.includes('3m60s'),
+        'a validated prior-process receipt makes cleaned recovery sidecars expected and carries duration rounding into minutes');
+        assert(receiptElapsed(0, 239_600) === ' · elapsed 4m'
+          && receiptElapsed(null, null) === ''
+          && receiptElapsed(true, 239_600) === ''
+          && handoffElapsed(239_600) === '4m'
+          && !handoffElapsed(239_600).includes('60s'),
+        'receipt and manual-handoff duration helpers normalize rounded minute boundaries without fabricating absent receipt timing');
+
+        const receiptWithScoring = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        receiptWithScoring.scoring = { input: 3, selected: 3, scored: 3, placeholders: 0, unscored: 0, failedBatches: 0 };
+        fs.writeFileSync(receiptPath, JSON.stringify(receiptWithScoring), 'utf8');
+        const withDurableScoring = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(withDurableScoring.includes('DURABLE OUTPUT COMPLETE')
+          && withDurableScoring.includes('The receipt also retains matching final scoring counters.')
+          && withDurableScoring.includes('Scoring: durable terminal receipt — input 3 → scored 3'),
+        'new receipts can add run-scoped scoring evidence without making it mandatory for the legacy durable-output verdict');
+
+        const malformedBudget = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        malformedBudget.scoring = {
+          input: 4, selected: 3, scored: 3, placeholders: 0,
+          unscored: 0, failedBatches: 0, cappedForBudget: 0,
+        };
+        fs.writeFileSync(receiptPath, JSON.stringify(malformedBudget), 'utf8');
+        const budgetMismatch = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(budgetMismatch.includes('⚠️ **INDETERMINATE**')
+          && budgetMismatch.includes('durable receipt scoring is incomplete'),
+        'a retained budget cap must reconcile input = selected + capped before durable output can be green');
+
+        const malformedPartition = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        malformedPartition.scoring = {
+          input: 3, selected: 3, scored: 2, placeholders: 0,
+          unscored: 0, failedBatches: 0,
+        };
+        fs.writeFileSync(receiptPath, JSON.stringify(malformedPartition), 'utf8');
+        const partitionMismatch = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(partitionMismatch.includes('⚠️ **INDETERMINATE**')
+          && partitionMismatch.includes('durable receipt scoring is incomplete'),
+        'selected scoring input must reconcile as scored + unscored before durable output can be green');
+        fs.writeFileSync(receiptPath, JSON.stringify(receiptWithScoring), 'utf8');
+
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(), jobs: [{}, {}],
+        }), 'utf8');
+        const mismatch = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(mismatch.includes('⚠️ **INDETERMINATE**')
+          && mismatch.includes('terminal score-ready 3 ≠ saved score-ready 2'),
+        'a durable receipt/snapshot count mismatch remains indeterminate after restart');
+
+        // A count match alone cannot make an intentionally incomplete/unknown
+        // terminal result a successful score-ready output after restart.
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(), jobs: [{}, {}, {}],
+        }), 'utf8');
+        for (const outcome of ['incomplete', 'unknown']) {
+          const nonSuccessful = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+          nonSuccessful.terminal.outcome = outcome;
+          fs.writeFileSync(receiptPath, JSON.stringify(nonSuccessful), 'utf8');
+          const assessmentForOutcome = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+          assert(assessmentForOutcome.includes('⚠️ **INDETERMINATE**')
+            && !assessmentForOutcome.includes('DURABLE OUTPUT COMPLETE'),
+          `a completed ${outcome} receipt must not claim durable scored output`);
+        }
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { durableOutput: 3 };
+    },
+},
+{
+    name: 'failed terminal finalization retains the owned description-recovery checkpoint',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-terminal-checkpoint-retain-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'checkpoint-retain-hub';
+      const runId = 'checkpoint-retain-run';
+      try {
+        const created = await __createDescriptionRecoveryCheckpointForTests({
+          version: 1,
+          canvasFilePath: canvas,
+          sourceHubId: nodeId,
+          nodeId,
+          runId,
+          createdAt: new Date().toISOString(),
+          jobs: [{ title: 'recoverable row' }],
+          descriptionRecoveryJobs: [{ title: 'deferred row' }],
+        });
+        assert(created.saved, 'fixture creates a run-owned description-recovery checkpoint');
+
+        // No manifest exists, so the token-scoped completion transaction fails.
+        // Its checkpoint must remain loadable for the recovery path instead of
+        // being retired by an unconditional terminal cleanup.
+        registerJobsHandlers();
+        const complete = ipcMain.__getInvokeHandler('complete-job-run');
+        const sender = {
+          id: 991,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+        const result = await complete({ sender }, {
+          canvasFilePath: canvas,
+          nodeId,
+          runId,
+          terminalStatus: 'completed',
+          terminalOutcome: 'populated',
+          scoreReadyCount: 1,
+        });
+        const retained = await __loadDescriptionRecoveryCheckpointForTests(canvas, nodeId, runId);
+        assert(result.success === true && result.ok === false && result.tokenMismatch === true
+          && result.checkpointCleanup?.removed === false
+          && result.checkpointCleanup?.reason === 'terminal-not-finalized'
+          && retained?.snapshot?.runId === runId,
+        'a token/receipt failure leaves the current-run recovery checkpoint usable rather than retiring it');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { retained: true };
+    },
+},
+{
+    name: 'job completion assessment is retained in an uncapped FULL report and reconciles recovered scoring',
     run: () => {
       const telemetry = getJobsTelemetry();
       const saved = {
@@ -138,7 +456,7 @@ export default [
           terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 16 }, stagingStarted: true,
           cleanup: { attempted: true, cleared: true },
           funnel: { raw: 307, deduped: 307, kept: 8, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
-          sources: {},
+          sources: { dice: { count: 16, providerGathered: 16, stopReason: 'empty-page' } },
         }), 'utf8');
         Object.assign(telemetry, {
           nodeId, windowId: null,
@@ -146,9 +464,9 @@ export default [
           search: {
             ts: Date.now() - 9_000, queries: 1, raw: 307, deduped: 307, ageDropped: 0,
             roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 8, runId,
-            // Deliberately bigger than the clipboard cap. The assessment must
-            // remain usable even though this audit pushes Scoring out of the
-            // positional static prefix.
+            bySource: { dice: { count: 16, providerGathered: 16, stopReason: 'empty-page' } },
+            // Deliberately larger than the former clipboard cap. The full audit
+            // must remain available alongside the completion assessment.
             remoteRelevance: {
               indeed: Array.from({ length: 300 }, (_, index) => ({
                 title: `Cap fixture job ${index} ${'evidence '.repeat(24)}`,
@@ -163,26 +481,26 @@ export default [
           bucketing: { ts: Date.now() - 6_000, input: 16, roleCount: 1, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [] },
         });
 
-        const capped = generateMarkdown({
+        const report = generateMarkdown({
           description: 'Verify the whole run completed.', filterCode: 'FULL',
           filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
           nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
           frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
-        }, null, { maxChars: 50_000 });
+        });
 
-        assert(capped.hardTruncated && capped.markdown.length <= 50_000,
-          'completion assessment fixture must exercise the hard 50k clipboard cap');
-        assert(capped.markdown.includes('## Job Completion Assessment')
-          && capped.markdown.includes('✅ **VERIFIED COMPLETE**')
-          && capped.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
-          && capped.markdown.includes('input 16 → scored 16')
-          && capped.markdown.includes('terminal score-ready 16')
-          && capped.markdown.includes('Saved score-ready snapshot: 16 job(s)')
-          && capped.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree on `completion-run-16`'),
-        'early completion assessment reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot before the cap');
-        assert(capped.markdown.indexOf('## Job Completion Assessment') < capped.markdown.indexOf('## Job Search Pipeline')
-          && !capped.markdown.includes('### Scoring'),
-        'assessment is ordered before the long pipeline and survives when the detailed scoring subsection is clipped');
+        assert(report.markdown.length > 50_000 && !report.hardTruncated,
+          'completion assessment fixture exceeds the former 50k clipboard ceiling without truncation');
+        assert(report.markdown.includes('## Job Completion Assessment')
+          && report.markdown.includes('✅ **VERIFIED COMPLETE**')
+          && report.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
+          && report.markdown.includes('input 16 → scored 16')
+          && report.markdown.includes('terminal score-ready 16')
+          && report.markdown.includes('Saved score-ready snapshot: 16 job(s)')
+          && report.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree on `completion-run-16`'),
+        'completion assessment reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot in the full report');
+        assert(report.markdown.indexOf('## Job Completion Assessment') < report.markdown.indexOf('## Job Search Pipeline')
+          && report.markdown.includes('### Scoring'),
+        'assessment is ordered before the long pipeline without clipping detailed scoring evidence');
 
         // A current, non-stale board is part of the claimed completion only
         // when it names this source in its saved combine provenance and its
@@ -313,12 +631,13 @@ export default [
           terminal: { status: 'completed', outcome: 'zero' }, stagingStarted: true,
           cleanup: { attempted: true, cleared: true },
           funnel: { raw: 229, deduped: 1, kept: 0, relevanceDropped: 228, ageDropped: 0, roleDropped: 1, historyDropped: 0, descriptionEvidenceDropped: 0 },
-          sources: {},
+          sources: { dice: { count: 0, providerGathered: 0, stopReason: 'empty-page' } },
         }), 'utf8');
         telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId };
         telemetry.search = {
           ts: Date.now() - 4_000, queries: 1, raw: 229, deduped: 1, ageDropped: 0,
           roleDropped: 1, historyDropped: 0, relevanceDropped: 228, kept: 0, runId,
+          bySource: { dice: { count: 0, providerGathered: 0, stopReason: 'empty-page' } },
         };
         telemetry.resolves = {};
         telemetry.scoring = null;
@@ -454,10 +773,10 @@ export default [
           terminal: { status: 'completed', outcome: 'preference-filtered', scoreReadyCount: 0 }, stagingStarted: true,
           cleanup: { attempted: true, cleared: true },
           funnel: { raw: 2, deduped: 2, kept: 2, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
-          sources: {},
+          sources: { dice: { count: 2, providerGathered: 2, stopReason: 'empty-page' } },
         }), 'utf8');
         telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId: preferenceFilteredRunId };
-        telemetry.search = { ts: Date.now() - 4_000, queries: 1, raw: 2, deduped: 2, ageDropped: 0, roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 2, runId: preferenceFilteredRunId };
+        telemetry.search = { ts: Date.now() - 4_000, queries: 1, raw: 2, deduped: 2, ageDropped: 0, roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 2, runId: preferenceFilteredRunId, bySource: { dice: { count: 2, providerGathered: 2, stopReason: 'empty-page' } } };
         telemetry.resolves = {};
         const preferenceFilteredReport = generateMarkdown({
           description: 'Verify a completed preference-filtered run.', filterCode: 'FULL',
@@ -535,12 +854,13 @@ export default [
           terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 2 }, stagingStarted: true,
           cleanup: { attempted: true, cleared: true },
           funnel: { raw: 3, deduped: 3, kept: 3, relevanceDropped: 0, ageDropped: 0, roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0 },
-          sources: {},
+          sources: { dice: { count: 3, providerGathered: 3, stopReason: 'empty-page' } },
         }), 'utf8');
         telemetry.pipeline = { phase: 'completed', active: false, startedAt: Date.now() - 5_000, ts: Date.now(), runId: subtractiveRunId };
         telemetry.search = {
           ts: Date.now() - 4_000, queries: 1, raw: 3, deduped: 3, ageDropped: 0,
           roleDropped: 0, historyDropped: 0, relevanceDropped: 0, kept: 3, runId: subtractiveRunId,
+          bySource: { dice: { count: 3, providerGathered: 3, stopReason: 'empty-page' } },
         };
         telemetry.resolves = {
           indeed: {
@@ -627,7 +947,7 @@ export default [
         assert(recovery.includes('Last terminal run receipt: ✅ completed')
           && recovery.includes('previous-process receipt — live pipeline telemetry is unavailable in this process')
           && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 4 kept')
-          && recovery.includes('`google`: 11 returned')
+          && recovery.includes('`google`: 13 candidate identities traversed → 11 usable row(s) retained')
           && recovery.includes('warning rate-limit (block)')
           && recovery.includes('`google` scroll reveal: q1/1 191 card(s) after 29 reveal pass(es) — board end marker reached')
           && recovery.includes('✅ every query reached the board end marker'),
@@ -717,7 +1037,7 @@ export default [
     },
   },
 {
-    name: 'Bug report file export keeps every routine node diagnostic row',
+    name: 'Bug report exports keep every routine node diagnostic row',
     run: () => {
       const nodes = Array.from({ length: 20 }, (_, index) => ({
         id: `card${String(index).padStart(4, '0')}`, type: 'jobcard', data: {},
@@ -729,8 +1049,8 @@ export default [
       const payload = {
         description: 'Node export fidelity fixture.', nodes, edges: [], drawings: [],
         frontEndState: {}, nodeInternals,
-        // Expanded score disclosures are deliberate audit state, so clipboard
-        // sampling must retain them even after the routine-card cap.
+        // Expanded score disclosures are deliberate audit state and remain in
+        // the complete node inventory.
         nodeComponentStates: [
           { id: 'card0017', reasoningExpanded: true },
           { id: 'card0018', scoreAuditExpanded: true },
@@ -741,17 +1061,16 @@ export default [
       const fileReport = generateMarkdown(payload).markdown;
       assert(nodes.every(node => fileReport.includes(`| \`${node.id}\``))
         && !fileReport.includes('routine jobcard row(s) omitted'),
-      'Save to file must retain every routine jobcard row with no clipboard-budget footer');
+      'Save to file retains every routine jobcard row with no omission footer');
 
-      const clipboardReport = generateMarkdown(payload, null, { maxChars: 1_000_000 }).markdown;
-      assert(clipboardReport.includes('| `card0014`')
-        && !clipboardReport.includes('| `card0015`')
+      const clipboardReport = generateMarkdown(payload).markdown;
+      assert(nodes.every(node => clipboardReport.includes(`| \`${node.id}\``))
         && clipboardReport.includes('reasoningExpanded')
         && clipboardReport.includes('scoreAuditExpanded')
         && clipboardReport.includes('compensationExpanded')
-        && clipboardReport.includes('2 routine jobcard row(s) omitted to preserve the clipboard budget'),
-      'clipboard generation samples routine cards but retains every expanded hiring-fit disclosure as a flagged anomaly');
-      return { fileRows: nodes.length, clipboardRows: 18 };
+        && !clipboardReport.includes('routine jobcard row(s) omitted'),
+      'clipboard generation retains the same complete node inventory as file export');
+      return { fileRows: nodes.length, clipboardRows: nodes.length };
     },
   },
 {
@@ -1042,271 +1361,109 @@ export default [
     },
   },
 {
-    name: 'Bug report clipboard cap reserves the logs + event timeline',
+    name: 'Bug report markdown retains a report larger than the former clipboard cap',
     run: () => {
-      const events = Array.from({ length: 200 }, (_, i) => `EVT ${i} something happened on the canvas`);
-      const logs = Array.from({ length: 60 }, (_, i) => `[Marketplace] LOG ${i} scrape/resolve detail line`);
-      const fullFilterSummary = buildFilterSummaryMarkdown({
-        filterCode: 'FULL',
+      const events = Array.from({ length: 3_000 }, (_, i) => `EVT ${i} ${'evidence '.repeat(8)}`);
+      const result = generateMarkdown({
+        description: 'Uncapped clipboard regression fixture.', filterCode: 'FULL',
         filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: events,
       });
-
-      // Small base, tiny cap unreachable: nothing truncated, everything present.
-      const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
-      assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
-        'Clipboard cap: roomy budget keeps logs + full event history untouched');
-      assert(roomy.markdown.includes('Up to 200 lines from the main process') && !roomy.markdown.includes('Last ~60 lines'),
-        'Main-process log heading matches the current 200-line ring-buffer request');
-      assert(roomy.markdown.includes('**Timestamps:** UTC (`HH:MM:SS.mmm`).')
-        && roomy.markdown.includes('**Timestamps:** local time (renderer).'),
-      'Clipboard cap: timestamp bases are labeled for main-process and renderer evidence');
-      assert(roomy.markdown.includes('EVT 0 ') && roomy.markdown.includes('EVT 199 '),
-        'Clipboard cap: roomy budget keeps both oldest and newest events');
-
-      // The normal file/export path does not invoke the clipboard cap. Its
-      // independently assembled Event History heading must carry the same local
-      // time basis as the cap helper's shared tail.
-      const uncapped = generateMarkdown({
-        description: 'Timestamp-basis regression fixture.',
-        nodes: [], edges: [], drawings: [], frontEndState: {},
-        nodeInternals: [], nodeComponentStates: [], eventLogs: ['12:00:00 renderer event'],
-      }).markdown;
-      assert(uncapped.includes('## Event History\n> **Timestamps:** local time (renderer). See Runtime Identity'),
-        'Uncapped report labels renderer Event History timestamps as local time');
-      assert(uncapped.includes('## Runtime Identity') && uncapped.includes('timezone ') && uncapped.includes('UTC offset '),
-        'FULL report renders runtime versions and the date/timezone correlation anchor it already collects');
-
-      // Phase 1: base fits but full tail doesn't — oldest events trimmed first,
-      // newest events + the logs survive.
-      const cap = 8_000;
-      const smallBase = '# Bug Report\n' + fullFilterSummary + '\n' + 'x'.repeat(2_000) + '\n';
-      const phase1 = enforceClipboardMarkdownCap(smallBase, events, logs, cap);
-      assert(phase1.markdown.length <= cap, `Clipboard cap: phase-1 output must respect the cap (${phase1.markdown.length} <= ${cap})`);
-      assert(phase1.trimmedEventCount > 0 && !phase1.hardTruncated, 'Clipboard cap: phase-1 should trim oldest events, not hard-truncate');
-      assert(phase1.markdown.includes('EVT 199 ') && !phase1.markdown.includes('EVT 0 '),
-        'Clipboard cap: phase-1 keeps the NEWEST events and sheds the oldest');
-      assert(phase1.markdown.includes('## Recent Main-Process Logs') && phase1.markdown.includes('LOG 59'),
-        'Clipboard cap: phase-1 must not sacrifice the main-process logs');
-      assert(phase1.markdown.includes(`clipboard retained ${events.length - phase1.trimmedEventCount} of ${events.length} event line(s)`)
-        && !phase1.markdown.includes(`event log kept all ${events.length} line(s)`),
-      'Clipboard cap: phase-1 FULL summary reports final retained events, not the pre-cap selection');
-      assert(phase1.markdown.includes(`retained ${events.length - phase1.trimmedEventCount} of ${events.length} most-recent event line(s)`)
-        && phase1.markdown.includes(`${logs.length - phase1.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
-      'Clipboard cap: phase-1 banner quantifies retained event and log lines');
-
-      // Phase 2: the static base ALONE exceeds the cap (the bug from this report).
-      // The logs + most-recent events MUST survive; the base tail is what gets cut.
-      const giantBase = '# Bug Report\n' + fullFilterSummary + '\nNARRATIVE TOP\n' + 'Z'.repeat(40_000) + '\n## Node Diagnostics\nNODE TAIL\n';
-      const phase2 = enforceClipboardMarkdownCap(giantBase, events, logs, cap);
-      assert(phase2.markdown.length <= cap, `Clipboard cap: phase-2 output must respect the cap (${phase2.markdown.length} <= ${cap})`);
-      assert(phase2.hardTruncated, 'Clipboard cap: phase-2 should flag a hard truncation');
-      assert(phase2.markdown.includes('## Event History') && phase2.markdown.includes('EVT 199 '),
-        'Clipboard cap: phase-2 MUST preserve the recent event timeline (regression guard)');
-      assert(phase2.markdown.includes('**Timestamps:** UTC (`HH:MM:SS.mmm`).')
-        && phase2.markdown.includes('**Timestamps:** local time (renderer).'),
-      'Clipboard hard cap preserves both timestamp-basis notes with the retained diagnostics');
-      assert(phase2.markdown.includes('## Recent Main-Process Logs') && phase2.markdown.includes('LOG 59'),
-        'Clipboard cap: phase-2 MUST preserve the main-process logs (regression guard)');
-      assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
-        'Clipboard cap: phase-2 keeps the curated top of the base and sheds its low-value tail');
-      assert(phase2.markdown.includes(`clipboard retained ${events.length - phase2.trimmedEventCount} of ${events.length} event line(s)`)
-        && !phase2.markdown.includes(`event log kept all ${events.length} line(s)`),
-      'Clipboard cap: hard-capped FULL summary reports final retained events, not the pre-cap selection');
-      assert(phase2.markdown.includes(`retained ${events.length - phase2.trimmedEventCount} of ${events.length} most-recent event line(s)`)
-        && phase2.markdown.includes(`${logs.length - phase2.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
-      'Clipboard cap: hard-cap banner quantifies retained event and log lines');
-      assert(phase2.markdown.includes('static report content')
-        && phase2.markdown.includes('oldest event history line(s)')
-        && phase2.markdown.includes('oldest main-process log line(s)')
-        && phase2.markdown.includes('Report content after this point was omitted by the clipboard cap')
-        && !phase2.markdown.includes('older timeline entries')
-        && !phase2.markdown.includes('static node/session tail'),
-      'Clipboard cap: hard-cap copy names only the static/event/log content actually omitted');
-
-      // A hard cap can truncate the large static base while preserving EVERY
-      // event. Its banner must not claim that older event/timeline entries were
-      // lost merely because other content was cut (the real FULL-report case).
-      const shortEvents = Array.from({ length: 8 }, (_, i) => `SHORT EVT ${i}`);
-      const longLogs = Array.from({ length: 60 }, (_, i) => `[Main] LONG LOG ${i} ${'detail '.repeat(12)}`);
-      const staticAndLogsOnly = enforceClipboardMarkdownCap(giantBase, shortEvents, longLogs, cap);
-      assert(staticAndLogsOnly.hardTruncated && staticAndLogsOnly.trimmedEventCount === 0
-        && staticAndLogsOnly.trimmedLogCount > 0,
-      'Clipboard cap: fixture hard-truncates static/log content while retaining the full event history');
-      assert(staticAndLogsOnly.markdown.includes(`retained ${shortEvents.length} of ${shortEvents.length} most-recent event line(s)`)
-        && !staticAndLogsOnly.markdown.includes('oldest event history line(s)')
-        && !staticAndLogsOnly.markdown.includes('older timeline entries')
-        && staticAndLogsOnly.markdown.includes('oldest main-process log line(s)'),
-      'Clipboard cap: hard-cap banner does not claim event loss when every event was retained');
-
-      // Name both kinds of static loss. The exact cap assertion is especially
-      // important here because adding the names makes the banner longer and
-      // therefore leaves less room for the base than the initial generic pass.
-      const namedHardBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(5_000)
-        + '\n## Partial Audit\n' + 'B'.repeat(5_000)
-        + '\n## Dropped Diagnostics\nbody\n## Also Dropped\nbody\n';
-      const namedHard = enforceClipboardMarkdownCap(namedHardBase, events, logs, cap);
-      assert(namedHard.hardTruncated && namedHard.markdown.length <= cap,
-        `Clipboard cap: named hard-cap output respects the exact cap (${namedHard.markdown.length} <= ${cap})`);
-      assert(namedHard.markdown.includes('3 section(s) dropped: Partial Audit, Dropped Diagnostics, Also Dropped')
-        && namedHard.markdown.includes('"Kept Summary" cut mid-section'),
-      'Clipboard cap: hard-cap banner names whole dropped sections and the section cut in progress');
-
-      // This begins on the soft path (the base plus reserved tail fits), then
-      // the event/log notice tips it into its secondary static hard-cap path.
-      // It must use the same final-cut section diagnostics as the direct hard
-      // path rather than reporting the stale generic or first-pass omission.
-      const secondaryCap = 2_000;
-      const secondarySections = Array.from({ length: 12 }, (_, i) => `## S${i}\n${String(i).repeat(84)}\n`).join('');
-      const secondaryEvents = Array.from({ length: 100 }, (_, i) => `EVENT ${i} ${'x'.repeat(18)}`);
-      const secondaryLogs = Array.from({ length: 60 }, (_, i) => `LOG ${i} ${'x'.repeat(18)}`);
-      const secondaryHard = enforceClipboardMarkdownCap(secondarySections, secondaryEvents, secondaryLogs, secondaryCap);
-      assert(secondaryHard.hardTruncated && secondaryHard.markdown.length <= secondaryCap,
-        `Clipboard cap: secondary hard-cap output respects the exact cap (${secondaryHard.markdown.length} <= ${secondaryCap})`);
-      assert(secondaryHard.markdown.includes('2 section(s) dropped: S10, S11')
-        && secondaryHard.markdown.includes('"S9" cut mid-section'),
-      'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
-
-      // A `##` cut mid-body silently took its `###` children with it: the
-      // heading scan is /^## (.+)$/gm, so named diagnostics (the Non-API AI
-      // handoff receipt, the Glassdoor location cache) disappeared with the
-      // notice reporting only that the PARENT was "cut mid-section". The
-      // subsection tally is reported separately — folding it into the `##`
-      // count would misstate how many top-level sections were lost.
-      const subsectionBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(4_000)
-        + '\n## Big Section\n' + 'B'.repeat(4_000)
-        + '\n### Handoff Lifecycle\nbody\n### Location Cache\nbody\n'
-        + '\n## Dropped Whole\nbody\n';
-      const subsectionCut = enforceClipboardMarkdownCap(subsectionBase, events, logs, cap);
-      assert(subsectionCut.markdown.includes('subsection(s) lost with them: ')
-        && subsectionCut.markdown.includes('Handoff Lifecycle')
-        && !/\d+ section\(s\) dropped:[^;]*Handoff Lifecycle/.test(subsectionCut.markdown),
-      'Clipboard cap: dropped ### subsections are named in their own clause, never folded into the ## dropped-section tally');
-
-      // The base is being cut mid-document either way, so spending only the
-      // FLOOR on the tail wasted budget the static cut could not use. The tail
-      // grows toward the full logs+events, bounded at half the cap so the
-      // static prefix stays meaningful.
-      const grownEvents = Array.from({ length: 120 }, (_, i) => `EVENT ${i} ${'x'.repeat(40)}`);
-      const grownLogs = Array.from({ length: 125 }, (_, i) => `LOG ${i} ${'y'.repeat(60)}`);
-      const grownBase = '# Bug Report\n## Job Search Pipeline\n'
-        + Array.from({ length: 500 }, (_, i) => `- audit row ${i}: ${'P'.repeat(70)}`).join('\n')
-        + '\n\n## Dropped Diagnostics\nbody\n';
-      const grownCap = 50_000;
-      const grown = enforceClipboardMarkdownCap(grownBase, grownEvents, grownLogs, grownCap);
-      const retainedEvents = grownEvents.length - grown.trimmedEventCount;
-      const retainedLogs = grownLogs.length - grown.trimmedLogCount;
-      assert(grown.hardTruncated && grown.markdown.length <= grownCap,
-        `Clipboard cap: grown-tail hard-cap output still respects the exact cap (${grown.markdown.length} <= ${grownCap})`);
-      assert(retainedEvents === grownEvents.length && retainedLogs === grownLogs.length,
-        `Clipboard cap: a hard-truncated report spends leftover budget on the tail instead of the floor (kept ${retainedEvents}/${grownEvents.length} events, ${retainedLogs}/${grownLogs.length} logs)`);
-      assert(grown.markdown.includes(`retained ${retainedEvents} of ${grownEvents.length} most-recent event line(s)`)
-        && grown.markdown.includes(`${retainedLogs} of ${grownLogs.length} most-recent main-process log line(s)`),
-      'Clipboard cap: the banner reports the tail actually retained, not the floor it started from');
-      assert(grown.markdown.length >= grownCap * 0.9,
-        `Clipboard cap: the grown tail keeps overall utilisation high (${grown.markdown.length} of ${grownCap})`);
-
-      // A single board re-combine tears down hundreds of uniquely-id'd nodes in
-      // a couple of milliseconds. Capture-time collapsers cannot merge unique
-      // ids, so those bursts arrive whole and can eat most of the retained-event
-      // budget; the clipboard path folds them at render time only.
-      const teardownStamp = 'board-6f7c1a2e-3b9d-4c05-8e21-0d4a7b6c9e13-1755820000000';
-      const burstTs = (i) => `12:00:${String(Math.floor(i / 100)).padStart(2, '0')}.${String(i % 100).padStart(3, '0')}`;
-      const teardownBurst = Array.from({ length: 300 }, (_, i) => `[${burstTs(i)}] node removed id=${teardownStamp}-job-${i}`);
-      const distinctEvents = Array.from({ length: 50 }, (_, i) => `[12:01:${String(i % 60).padStart(2, '0')}.000] DISTINCT-${i} unique canvas activity`);
-      const FOLD_SIGNATURE = /×\d+ \(id prefix/;
-
-      // Save to file is the uncapped artifact and the primary evidence for
-      // "my card disappeared" reports: every raw id must survive it verbatim.
-      const savedToFile = generateMarkdown({
-        description: 'Burst-fold save-to-file fidelity fixture.',
-        nodes: [], edges: [], drawings: [], frontEndState: {},
-        nodeInternals: [], nodeComponentStates: [], eventLogs: teardownBurst,
-      }).markdown;
-      assert(teardownBurst.every((line) => savedToFile.includes(line)) && !FOLD_SIGNATURE.test(savedToFile),
-        'Save to file keeps every raw node-removed id: burst folding must never reach the uncapped export');
-
-      const roomyBurst = enforceClipboardMarkdownCap('# Bug Report\nbody\n', teardownBurst, logs, 1_000_000);
-      assert(!roomyBurst.truncated && teardownBurst.every((line) => roomyBurst.markdown.includes(line))
-        && !FOLD_SIGNATURE.test(roomyBurst.markdown),
-      'Clipboard cap: a report that fits keeps every id verbatim — folding is a last-resort transform');
-
-      const foldedEvents = [...teardownBurst, ...distinctEvents];
-      const folded = enforceClipboardMarkdownCap('# Bug Report\nbody\n', foldedEvents, [], cap);
-      assert(folded.markdown.length <= cap, `Clipboard cap: folded output must respect the cap (${folded.markdown.length} <= ${cap})`);
-      assert((folded.markdown.match(new RegExp(FOLD_SIGNATURE, 'g')) || []).length === 1
-        && folded.markdown.includes(`node removed ×${teardownBurst.length} (id prefix ${teardownStamp}-job-`),
-      'Clipboard cap: one structural teardown burst folds into exactly one run line');
-      assert(folded.markdown.includes(`first ${teardownStamp}-job-0`)
-        && folded.markdown.includes(`last ${teardownStamp}-job-${teardownBurst.length - 1}`),
-      'Clipboard cap: the fold line carries the full first/last ids that identify which tree was torn down');
-      assert(distinctEvents.every((line) => folded.markdown.includes(line)),
-        'Clipboard cap: folding repetitive churn buys room for every distinct event line');
-      assert(folded.markdown.includes(`${teardownBurst.length} repeated event line(s) from ${foldedEvents.length} captured line(s) were folded into 1 run line(s) before capping`),
-        'Clipboard cap: the banner states how many captured lines were folded into how many run lines');
-
-      const foldedFilterBase = '# Bug Report\n' + buildFilterSummaryMarkdown({
-        filterCode: 'FULL',
-        filterStats: { eventsShown: foldedEvents.length, eventsTotal: foldedEvents.length, omittedSections: [] },
-      }) + '\n';
-      const foldedFull = enforceClipboardMarkdownCap(foldedFilterBase, foldedEvents, [], cap);
-      assert(foldedFull.markdown.includes(`event log selected all ${foldedEvents.length} line(s) before clipboard capping`)
-        && foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${distinctEvents.length + 1} rendered event line(s)`)
-        && foldedFull.markdown.includes(`after folding ${teardownBurst.length} repeated line(s) from ${foldedEvents.length} captured line(s) into 1 run line(s)`)
-        && !foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${foldedEvents.length} event line(s)`),
-      'Clipboard cap: the rewritten FULL summary distinguishes raw captured events from fully retained post-fold lines');
-
-      const foldedHard = enforceClipboardMarkdownCap(giantBase, foldedEvents, logs, cap);
-      assert(foldedHard.hardTruncated && foldedHard.markdown.length <= cap,
-        `Clipboard cap: a folded hard-cap report still respects the exact cap (${foldedHard.markdown.length} <= ${cap})`);
-      assert(foldedHard.markdown.includes('were folded into 1 run line(s) before capping'),
-        'Clipboard cap: the hard-cap banner also accounts for folded churn');
-
-      // Direct folding contracts: short runs, unrelated ids, verb boundaries and
-      // the non-structural allowlist all keep their lines verbatim.
-      const shortRun = teardownBurst.slice(0, 7);
-      const shortFold = collapseEventBursts(shortRun);
-      assert(shortFold.collapsedRuns === 0 && shortFold.foldedLineCount === 0
-        && JSON.stringify(shortFold.lines) === JSON.stringify(shortRun),
-      'Burst folding leaves a small deletion verbatim: every id of a 7-node teardown survives');
-
-      const unrelatedRemovals = Array.from({ length: 20 }, (_, i) =>
-        `[12:02:${String(i).padStart(2, '0')}.000] node removed id=${String.fromCharCode(97 + i)}${i}-node`);
-      const unrelatedFold = collapseEventBursts(unrelatedRemovals);
-      assert(unrelatedFold.collapsedRuns === 0
-        && JSON.stringify(unrelatedFold.lines) === JSON.stringify(unrelatedRemovals),
-      'Burst folding is data-driven: ids without a shared prefix are never summarized as one run');
-
-      const rebuildBurst = Array.from({ length: 10 }, (_, i) => `[12:03:00.${String(i).padStart(3, '0')}] node added id=${teardownStamp}-job-${i}`);
-      const verbBoundary = collapseEventBursts([...teardownBurst.slice(0, 10), ...rebuildBurst]);
-      assert(verbBoundary.collapsedRuns === 2 && verbBoundary.lines.length === 2
-        && verbBoundary.lines[0].includes('node removed ×10 ') && verbBoundary.lines[1].includes('node added ×10 '),
-      'Burst folding never merges across verbs: a teardown and the rebuild that follows stay separate runs');
-
-      const noisyLines = [
-        ...Array.from({ length: 30 }, (_, i) => `[12:04:${String(i % 60).padStart(2, '0')}.000] CONSOLE-ERROR render failed id=${teardownStamp}-job-${i}`),
-        ...Array.from({ length: 30 }, (_, i) => `[12:05:${String(i % 60).padStart(2, '0')}.000] [LocalAI] import rejected id=${teardownStamp}-job-${i}`),
+      assert(result.markdown.length > 50_000 && !result.truncated && !result.hardTruncated,
+        'Report generation retains content larger than the former 50k clipboard ceiling');
+      assert(result.markdown.includes('EVT 0 ') && result.markdown.includes('EVT 2999 ')
+        && result.markdown.includes('Copy and Save to file export the same report.'),
+      'both the oldest and newest retained event lines remain present with accurate export guidance');
+      assert(result.markdown.indexOf('EVT 2999 ') < result.markdown.indexOf('EVT 0 ')
+        && result.markdown.includes('(timestamp assigned at report export) EVT 2999')
+        && result.markdown.includes('Order within this section:** newest first; last row is the oldest retained renderer event')
+        && result.markdown.includes('Legacy time-only rows retain their capture time but omit date and offset'),
+      'event history is reversed only at export, labels assigned legacy timestamps, and explains its section-local ordering caveat');
+      const chronological = ['[01:00:00.000] oldest', 'legacy row', '[01:00:02.000] newest'];
+      const stamped = timestampedLogLines(chronological, { basis: 'utc', now: Date.UTC(2026, 0, 1) });
+      assert(stamped[0] === chronological[0] && stamped[2] === chronological[2]
+        && stamped[1].includes('(timestamp assigned at report export) legacy row')
+        && JSON.stringify(newestFirstLogLines(stamped).map(line => line.endsWith('oldest') ? 'oldest' : line.endsWith('newest') ? 'newest' : 'legacy')) === JSON.stringify(['newest', 'legacy', 'oldest']),
+      'timestamp assignment preserves captured rows and reversal is newest-first only at the export boundary');
+      const mainLogs = buildMainProcessLogsMarkdown(['[01:00:00.000] oldest log', 'legacy main log', '[01:00:02.000] newest log']);
+      assert(mainLogs.indexOf('newest log') < mainLogs.indexOf('legacy main log')
+        && mainLogs.indexOf('legacy main log') < mainLogs.indexOf('oldest log')
+        && mainLogs.includes('(timestamp assigned at report export) legacy main log')
+        && mainLogs.includes('Order within this section:** newest first; last row is the oldest retained main-process entry')
+        && mainLogs.includes('Timestamps:** full ISO UTC'),
+      'main-process logs receive labelled legacy timestamps, newest-first export order, and a section-local ISO caveat');
+      const nonUtcLocalDate = {
+        getTimezoneOffset: () => 210,
+        getFullYear: () => 2026, getMonth: () => 0, getDate: () => 1,
+        getHours: () => 23, getMinutes: () => 59, getSeconds: () => 59, getMilliseconds: () => 7,
+      };
+      const fullLocalIso = '2026-01-01T23:59:59.007-03:30';
+      assert(localIsoTimestampWithOffset(nonUtcLocalDate) === fullLocalIso
+        && formatEventLogEntry('midnight-boundary event', nonUtcLocalDate) === `[${fullLocalIso}] midnight-boundary event`,
+      'new EventLogger rows use a full local ISO timestamp with a non-UTC offset, preserving a midnight crossing date');
+      const capturedTimestamps = [
+        '[2026-01-01T23:59:59.007-03:30] local ISO',
+        '[2026-01-02T03:29:59.007Z] UTC ISO',
+        '[23:59:59] legacy seconds',
+        '[23:59:59.007–00:00:01.008] legacy range',
       ];
-      const noisyFold = collapseEventBursts(noisyLines);
-      assert(noisyFold.collapsedRuns === 0 && JSON.stringify(noisyFold.lines) === JSON.stringify(noisyLines),
-        'Burst folding is verb-allowlisted: error and module lines are never folded, however repetitive');
-
-      const firstFoldPass = collapseEventBursts([...teardownBurst, ...distinctEvents, ...rebuildBurst]);
-      const secondFoldPass = collapseEventBursts(firstFoldPass.lines);
-      assert(secondFoldPass.collapsedRuns === 0
-        && JSON.stringify(secondFoldPass.lines) === JSON.stringify(firstFoldPass.lines),
-      'Burst folding is idempotent: an emitted run line can never be folded again');
-
-      const orderedFold = collapseEventBursts([
-        '[12:06:00.000] viewport changed zoom=1.2',
-        ...Array.from({ length: 10 }, (_, i) => `[12:06:01.${String(i).padStart(3, '0')}] node removed id=${teardownStamp}-job-${i}`),
-        '[12:06:02.000] [JobSearch] combine finished',
-      ]);
-      assert(orderedFold.lines.length === 3
-        && orderedFold.lines[0].startsWith('[12:06:00.000]')
-        && orderedFold.lines[1].startsWith('[12:06:01.000–12:06:01.009] node removed ×10 ')
-        && orderedFold.lines[2].startsWith('[12:06:02.000]'),
-      'Burst folding preserves ordering: the run line carries its first timestamp between its neighbours');
-      return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount, foldedRuns: firstFoldPass.collapsedRuns };
+      const recognized = timestampedLogLines(capturedTimestamps, { basis: 'utc', now: Date.UTC(2026, 0, 2) });
+      const assigned = timestampedLogLines(['unstamped legacy row'], { basis: 'utc', now: Date.UTC(2026, 0, 2) });
+      assert(JSON.stringify(recognized) === JSON.stringify(capturedTimestamps)
+        && assigned[0] === '[2026-01-02T00:00:00.000Z] (timestamp assigned at report export) unstamped legacy row',
+      'full ISO, second-only, and legacy range timestamps retain capture evidence without a second prefix; unstamped rows receive full ISO UTC');
+      return { length: result.markdown.length };
+    },
+  },
+{
+    name: 'registered clipboard report IPC returns the complete uncapped markdown contract',
+    run: async () => {
+      const events = Array.from({ length: 3_000 }, (_, i) => `[12:00:${String(i % 60).padStart(2, '0')}.000] IPC EVT ${i} ${'evidence '.repeat(8)}`);
+      const payload = {
+        description: 'IPC uncapped report regression fixture.', filterCode: 'FULL',
+        filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: events,
+      };
+      const direct = generateMarkdown(payload);
+      registerBugReportHandlers();
+      const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
+      const sender = {
+        id: 42_501,
+        isDestroyed: () => false,
+        once: () => {},
+        removeListener: () => {},
+      };
+      const viaIpc = await invoke({ sender }, payload);
+      const directHistory = direct.markdown.slice(direct.markdown.indexOf('## Event History'));
+      assert(viaIpc.success && viaIpc.markdown.length > 50_000
+        && !viaIpc.truncated && !viaIpc.hardTruncated
+        && viaIpc.markdown.includes('IPC EVT 0 ') && viaIpc.markdown.includes('IPC EVT 2999 ')
+        && viaIpc.markdown.endsWith(directHistory),
+      'registered generate-bug-report-markdown IPC returns the full direct-generator event history without a max-character cap');
+      return { length: viaIpc.markdown.length };
+    },
+  },
+{
+    name: 'LAST100 selection stays chronological until the report renders it newest first',
+    run: () => {
+      const raw = Array.from({ length: 150 }, (_, i) => `[12:01:${String(i % 60).padStart(2, '0')}.000] LAST100 EVT ${i}`);
+      const selected = applyBugReportCode(raw, {}, 'LAST100').filteredLogs;
+      assert(selected.length === 100 && selected[0] === raw[50] && selected.at(-1) === raw[149],
+        'LAST100 selects the newest hundred entries while preserving their chronological order for filtering');
+      const report = generateMarkdown({
+        description: 'LAST100 export ordering fixture.', filterCode: 'LAST100',
+        filterStats: { eventsShown: selected.length, eventsTotal: raw.length, omittedSections: [] },
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: selected,
+      }).markdown;
+      const history = report.slice(report.indexOf('## Event History'));
+      assert(history.includes('LAST100 EVT 50') && history.includes('LAST100 EVT 149')
+        && !history.includes('LAST100 EVT 49')
+        && history.indexOf('LAST100 EVT 149') < history.indexOf('LAST100 EVT 50'),
+      'the selected newest hundred are rendered newest-first, with the oldest retained row at the tail');
+      return { selected: selected.length };
     },
   },
 {
@@ -2988,7 +3145,7 @@ export default [
           && !report.includes('?htidocid=')
           && !report.includes(opaque)
           && report.length < 8_000,
-        'bounded job evidence preserves source-path provenance without letting long query strings consume the clipboard budget');
+        'bounded job evidence preserves source-path provenance without exposing long query strings');
       } finally {
         for (const key of Object.keys(telemetry)) delete telemetry[key];
         Object.assign(telemetry, saved);
@@ -3703,7 +3860,7 @@ export default [
     run: () => {
       const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       const policyStart = backend.indexOf('const sourceCountryPolicies = summarizeJobSourceCountryPolicies');
-      const runStart = backend.indexOf('const runStartedAt = Date.now()', policyStart);
+      const runStart = backend.indexOf('const runStartedAt = initialRunStartedAt;', policyStart);
       const preflight = backend.slice(policyStart, runStart);
       assert(policyStart >= 0 && runStart > policyStart
         && preflight.includes('countryApplicableSourceIds.size === 0')
@@ -4511,6 +4668,7 @@ export default [
         warning: { code: 'captcha', severity: 'block' },
         url: 'https://example.com/jobs',
         detail: 'page 1',
+        jobRunId: 'run-1',
         completed: 0,
         total: 10,
       });
@@ -4518,6 +4676,13 @@ export default [
       assert(terminal.warning?.code === 'captcha', 'Source progress merge: warning should stay sticky when omitted');
       assert(terminal.url === 'https://example.com/jobs', 'Source progress merge: url should stay sticky when omitted');
       assert(terminal.detail === null, 'Source progress merge: detail should not stay sticky');
+      assert(terminal.jobRunId === 'run-1', 'Source progress merge: job run token should stay sticky when terminal events omit it');
+      const runGuard = createSourceProgressRunGuard();
+      assert(runGuard.accepts('run-a') && !runGuard.accepts('run-b'),
+        'Source progress run guard binds a generation to its first run token');
+      runGuard.retireActive();
+      assert(!runGuard.accepts('run-a') && runGuard.accepts('run-b') && !runGuard.accepts('run-a'),
+        'Source progress run guard rejects late terminal events from a retired run after reset while accepting the next run');
       assert(terminal.completed === 0 && terminal.total === 10, 'Source progress merge: completed/total should stay sticky when omitted');
       const advanced = mergeSourceProgress(terminal, { status: 'searching', count: 12, completed: 4, total: 10 });
       assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
@@ -4563,6 +4728,19 @@ export default [
         && sourceCard.includes('resolveInFlightRef.current = false')
         && restoresNativeVerificationOutcome,
       'a derived blocking warning remains an error, rapid Continue clicks are single-flight, and a failed native verification keeps its returned outcome visible');
+      assert(sourceCard.includes('progress?.jobRunId || requestedHubData.jobRunId || null'),
+        'a source-card Solve carries its sticky per-source run token instead of relying on a potentially newer hub token');
+      const jobSearchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(sourceCard.includes('progressRunGuardRef.current.accepts(payload?.jobRunId)')
+        && sourceCard.includes('progressRunGuardRef.current.retireActive()')
+        && jobSearchRenderer.includes('jobRunId: jobRunIdRef.current || null'),
+      'source cards and warning-sync seeds reject late progress from retired runs and keep the current token on a resolved card');
+      const usaJobsStart = jobSearchRenderer.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
+      const usaJobsEnd = jobSearchRenderer.indexOf('const handleJobsSettingsChange = useCallback', usaJobsStart);
+      const usaJobsBackground = jobSearchRenderer.slice(usaJobsStart, usaJobsEnd);
+      assert(usaJobsBackground.includes('searchJobsSingleSource({')
+        && usaJobsBackground.includes('jobRunId: jobRunIdRef.current || data.jobRunId || null'),
+      'USAJobs background progress is attached to its completed search generation and is not dropped by the JobSearch run guard');
       return { terminal, advanced, cleared };
     },
   },
@@ -4580,6 +4758,24 @@ export default [
       assert(jobSourceWarningAction(zipBlocked) === 'skip', 'a gating source action remains Skip');
       assert(isJobSourceWarningGating(linkedinLimited), 'LinkedIn guest rate-limit remains the explicit throttle exception');
       assert(!isJobSourceWarningGating(ordinaryThrottle), 'ordinary source throttles must not delay scoring');
+      for (const code of [
+        'description-recovery-not-ready',
+        'description-recovery-snapshot-stale',
+        'description-recovery-snapshot-unavailable',
+      ]) {
+        assert(!canAttemptJobSourceResolve({ sourceId: 'google', code, severity: 'block' }),
+          `${code} is a checkpoint/ownership outcome, not an interactive retry action`);
+      }
+      const checkpointWriteFailure = descriptionRecoveryCheckpointWriteFailureWarning({
+        sourceId: 'google', code: 'http-403', severity: 'block', url: 'https://www.google.com/search',
+        action: 'solve', actionLabel: 'Solve', resumeState: { mode: 'retry' }, openSecondTab: true,
+      });
+      assert(checkpointWriteFailure.code === 'description-recovery-not-ready'
+        && checkpointWriteFailure.action === 'none'
+        && checkpointWriteFailure.url === null
+        && checkpointWriteFailure.resumeState === null
+        && !canAttemptJobSourceResolve(checkpointWriteFailure),
+      'a failed recovery-checkpoint write leaves an informative, skippable block but cannot render another Solve loop');
 
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
       const hub = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
@@ -4605,6 +4801,74 @@ export default [
       );
       assert(finalWarnings.length === 1 && finalWarnings[0].sourceId === 'indeed',
         'a source skipped during an in-flight search must not be re-blocked by the backend final warning list');
+
+      const latestPartial = { code: 'description-recovery', severity: 'block', shortLabel: 'Retry description recovery' };
+      const reconciled = reconcileJobSourceWarnings(
+        [zipBlocked, ordinaryThrottle],
+        new Map([
+          ['ziprecruiter', null],
+          ['google', latestPartial],
+        ]),
+      );
+      assert(reconciled.length === 2
+        && reconciled.some(warning => warning.sourceId === 'indeed')
+        && reconciled.some(warning => warning.sourceId === 'google' && warning.code === 'description-recovery'),
+      'an in-search Skip removes its stale final warning while a successful partial Solve preserves its newest warning');
+      const failedAttemptFinal = reconcileJobSourceWarnings([zipBlocked], new Map());
+      assert(failedAttemptFinal.length === 1 && failedAttemptFinal[0] === zipBlocked,
+        'a failed resolved:false attempt has no override and cannot suppress the backend final warning');
+      assert(['queued', 'parsing', 'querying', 'interpreting-preferences', 'searching', 'scoring', 'scoring-batch', 'evaluating-preferences']
+        .every(isJobSourceResolveBusyHubState)
+        && !isJobSourceResolveBusyHubState('sources-ready'),
+      'Solve stays disabled through every gathering/checkpointing state and re-enables only once the source checkpoint is ready');
+      assert(sourceCard.includes('const sourceActionDisabled = hubLocked || resolving;')
+        && !sourceCard.includes('const sourceActionDisabled = hubLocked || hubBusy;'),
+      'Skip remains available during an ordinary in-flight search but is disabled while this card resolver is queued/running');
+      assert(sourceCard.includes("kind: 'job-source-resolve'")
+        && sourceCard.includes('await moduleRunQueue.acquireModuleRun({')
+        && sourceCard.includes('(hubData.jobRunId || null) !== (jobRunId || null)')
+        && sourceCard.includes('onCancel: () => {')
+        && sourceCard.includes('Resolve queue cancelled before start')
+        && sourceCard.includes('lease?.release()')
+        && sourceCard.includes('Resolve did not start or complete'),
+      'Solve/Continue uses the app-wide run queue, legacy-null-normalizes ownership after its lease, and distinguishes an intentional queue cancellation from an IPC failure');
+      const queuedRunMatches = (hubRunId, cardRunId) => (hubRunId || null) === (cardRunId || null);
+      assert(queuedRunMatches(undefined, null)
+        && queuedRunMatches(null, undefined)
+        && queuedRunMatches('same-run', 'same-run')
+        && !queuedRunMatches('run-a', 'run-b')
+        && !queuedRunMatches('run-a', null),
+      'queued source Resolve treats absent legacy run tokens as one generation while fencing a real differing run token');
+      const focusedQueueFailure = applyBugReportCode([
+        '[JobSource][hub-a/google] Resolve did not start or complete: browser closed',
+      ], {}, 'JOBRESOLVE');
+      const focusedUnrelatedCardNoise = applyBugReportCode([
+        '[JobSource][hub-a/google] persisted terminal card status=done',
+      ], {}, 'JOBRESOLVE');
+      assert(focusedQueueFailure.filteredLogs.length === 1
+        && focusedUnrelatedCardNoise.filteredLogs.length === 0,
+      'JOBRESOLVE includes the renderer queue/IPC failure signature without admitting unrelated JobSource card logs');
+      const postSearchStart = hub.indexOf('const handlePostSearchResult = useCallback');
+      const postSearchEnd = hub.indexOf('const runPipeline = useCallback', postSearchStart);
+      const postSearch = hub.slice(postSearchStart, postSearchEnd);
+      assert(postSearch.includes('saved?.success === true')
+        && postSearch.includes('saved?.saved === true')
+        && postSearch.includes('saved?.recoveryCheckpointSaved === true')
+        && postSearch.includes('saved?.meta?.runId === jobRunId')
+        && postSearch.includes('saveDescriptionRecoveryCheckpoint: true')
+        && postSearch.includes('if (cancelled()) return { shouldScore: false, warnings };')
+        && postSearch.includes('reconcileJobSourceWarnings(')
+        && postSearch.includes('descriptionRecoveryCheckpointWriteFailureWarning(warning)')
+        && postSearch.includes('return { shouldScore: true, warnings: latestWarnings };')
+        && hub.includes('const finalWarnings = postSearchResult.warnings;')
+        && hub.includes('scrapeWarnings: finalWarnings'),
+      'post-search snapshot settlement rechecks cancellation and in-search Skip overrides, returns the reconciled warning list to scoring, and blocks only a strict source whose checkpoint receipt is unsafe');
+      const completionStart = hub.indexOf('const completeJobRun = useCallback');
+      const completionEnd = hub.indexOf('const [savedAnalysisMeta', completionStart);
+      const completion = hub.slice(completionStart, completionEnd);
+      assert(completion.includes('nodeId: id,')
+        && (hub.match(/discardJobRun\?\.\(\{ canvasFilePath[^}]*nodeId: id/g) || []).length >= 2,
+      'run completion and discard requests identify the owning hub so checkpoint cleanup cannot cross multi-hub boundaries');
 
       return { zipAction: jobSourceWarningAction(zipPartial), remaining: finalWarnings.map(w => w.sourceId) };
   },
@@ -7477,7 +7741,7 @@ export default [
       assert(bugReportSource.includes('staleReason:') && bugReportSource.includes('combineSignature:'),
         'FULL node diagnostics preserve board stale reason and signature evidence');
       const terminalZeroStart = jobSearchSource.indexOf('if (foundJobs.length === 0)');
-      const terminalZeroEnd = jobSearchSource.indexOf('return true;', terminalZeroStart);
+      const terminalZeroEnd = jobSearchSource.indexOf('return { shouldScore: true, warnings };', terminalZeroStart);
       assert(terminalZeroStart >= 0 && terminalZeroEnd > terminalZeroStart
         && /jobCount:\s*0/.test(jobSearchSource.slice(terminalZeroStart, terminalZeroEnd))
         && jobSearchSource.slice(terminalZeroStart, terminalZeroEnd).includes('gatheredCount: gatheredCount ?? 0')
@@ -8516,10 +8780,8 @@ export default [
     },
   },
 {
-    // Eight retained batches x ~6 confirming lines was ~7k chars of a 50k
-    // clipboard budget, spent restating what `selection-mismatches 0` already
-    // says — on the run that exposed this it helped push six whole sections out
-    // of the export.
+    // Eight retained batches x ~6 confirming lines restate what
+    // `selection-mismatches 0` already says, so only the useful summary remains.
     name: 'job pipeline report: an all-matching click-transition batch collapses, a mismatching batch stays itemised',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -8667,6 +8929,9 @@ export default [
       'the recovery-surviving block fields reach the per-source result');
       assert(scraperSource.includes('providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),'),
         'the shed-card count reaches the per-source result (its load-more semantics are pinned by its own test)');
+      assert(scraperSource.includes('if (enhanced[i] != null) unavailableDetailDropped += 1;')
+        && scraperSource.includes('unavailableDetailDropped: sourceUnavailableDetailDropped,'),
+      'a confirmed unavailable detail page is counted exactly when it is removed, separately from candidate identities');
 
       assert(jobsSource.includes('unenrichedRows: (prior.unenrichedRows || 0) + (result.detailBlock.unenrichedRows || 0),')
         && jobsSource.includes('reprobesTotal: (prior.reprobesTotal || 0) + (result.detailBlock.reprobesTotal || 0),')
@@ -8674,6 +8939,15 @@ export default [
       'merging a source\'s query variants keeps the block cost instead of dropping it');
       assert(jobsSource.includes('if (data.providerDuplicatesDropped) bySource[sid].providerDuplicatesDropped = data.providerDuplicatesDropped;'),
         'the duplicate-drop count reaches the telemetry the bug report reads');
+      assert(jobsSource.includes('sourceResults[sourceId].unavailableDetailDropped =')
+        && jobsSource.includes('if (data.unavailableDetailDropped) bySource[sid].unavailableDetailDropped = data.unavailableDetailDropped;')
+        && jobsSource.includes('unavailableDetailDropped: source?.unavailableDetailDropped,'),
+      'the unavailable-detail aggregate survives source merge, live telemetry, and terminal-receipt construction');
+      assert(scraperSource.includes('locationScopeUnenforced: nationTierCaveatRecorded,')
+        && jobsSource.includes('if (result.locationScopeUnenforced === true)')
+        && jobsSource.includes('if (data.locationScopeUnenforced === true) bySource[sid].locationScopeUnenforced = true;')
+        && jobsSource.includes('locationScopeUnenforced: source?.locationScopeUnenforced === true,'),
+      'the nation-tier scope caveat reaches both live telemetry and the durable receipt without occupying the source-warning slot');
       return { ok: true };
     },
   },
@@ -8845,74 +9119,6 @@ export default [
     },
   },
 {
-    name: 'Clipboard cap folds repeated log bursts and never leaves a fence open',
-    run: () => {
-      // A deep paginating walk emits one near-identical progress pair per page.
-      // Before folding, 54 of a real report's 93 retained log lines were these,
-      // crowding out whole diagnostic sections.
-      const walk = [];
-      for (let page = 1; page <= 15; page++) {
-        const ts = `23:${String(page).padStart(2, '0')}`;
-        walk.push(`[${ts}:08.719] INFO  [BrowserScraper] Glassdoor q1 descriptions: 30/30 expanded (sel: x)`);
-        walk.push(`[${ts}:08.733] INFO  [BrowserScraper] Glassdoor page ${page}: 30 new jobs (${page * 30} total)`);
-      }
-      const warn = '[23:18:16.782] WARN  [BrowserScraper] glassdoor: denied the list-panel request with HTTP 502';
-      const done = '[00:25:03.941] INFO  [BrowserScraper] Glassdoor done: 612 jobs (completed)';
-      const folded = collapseLogRepeats([...walk, warn, done]);
-      assert(folded.lines.length < walk.length,
-        'Clipboard log fold: a repeated progress shape must shrink the block');
-      assert(folded.lines.includes(warn),
-        'Clipboard log fold: WARN lines always pass through verbatim — a swallowed error is the most valuable line here');
-      assert(folded.lines.includes(done) && folded.lines.includes(walk[0]) && folded.lines.includes(walk.at(-1)),
-        'Clipboard log fold: the first and last occurrences of a folded shape survive so the walk stays readable');
-      assert(folded.lines.some(l => l.includes('repeat(s) elided') && l.includes('Glassdoor page #')),
-        'Clipboard log fold: the summary names the shape it stands for');
-      assert(collapseLogRepeats(folded.lines).foldedLineCount === 0,
-        'Clipboard log fold: a second pass over already-folded lines is a no-op');
-
-      // Distinct messages must never be merged just because they repeat nearby.
-      const distinct = Array.from({ length: 12 }, (_, i) => `[00:00:0${i % 10}.000] INFO  [A] step ${'x'.repeat(i + 1)} ran`);
-      assert(collapseLogRepeats(distinct).foldedLineCount === 0,
-        'Clipboard log fold: lines whose non-numeric shape differs are never folded together');
-
-      // Fenced blocks: the base carries ```json/```html samples. A cut inside
-      // one used to swallow the omission marker and render the whole tail as code.
-      const rows = (n, ch) => Array.from({ length: n }, (_, i) => `- row ${i} ${ch.repeat(40)}`).join('\n');
-      const fenced = '# R\n## Kept\n' + rows(60, 'A') + '\n\n## Samples\n```html\n' + rows(200, 'B') + '\n```\n\n## Tail\nbody\n';
-      const cut = enforceClipboardMarkdownCap(fenced, ['E1', 'E2'], ['L1', 'L2'], 6_000);
-      const fenceCount = (cut.markdown.match(/^ {0,3}```/gm) || []).length;
-      assert(cut.hardTruncated && cut.markdown.length <= 6_000,
-        `Clipboard fence balance: output still respects the cap (${cut.markdown.length} <= 6000)`);
-      assert(fenceCount % 2 === 0,
-        'Clipboard fence balance: a cut inside a fenced block must be closed, or the omission note renders as code');
-      assert(cut.markdown.includes('Report content after this point was omitted by the clipboard cap'),
-        'Clipboard fence balance: the omission marker survives the cut it describes');
-      return { foldedLineCount: folded.foldedLineCount, fenceCount };
-    },
-  },
-{
-    name: 'Clipboard hard cap grows its tail proportionally, not as a cliff',
-    run: () => {
-      // A base one char past the floor path used to forfeit (ceiling - floor)
-      // chars of static diagnostics immediately — that cliff is what cost a real
-      // report six whole sections plus a mid-section cut.
-      const cap = 50_000;
-      const events = Array.from({ length: 40 }, (_, i) => `EVENT ${i} ${'x'.repeat(40)}`);
-      const logs = Array.from({ length: 40 }, (_, i) => `LOG ${i} ${'y'.repeat(60)}`);
-      const tailish = 'Z'.repeat(200);
-      const sections = (n) => Array.from({ length: n }, (_, i) => `## S${i}\n${tailish}\n`).join('');
-      const marginal = '# Bug Report\n' + sections(160);
-      const out = enforceClipboardMarkdownCap(marginal, events, logs, cap);
-      assert(out.markdown.length <= cap, 'Clipboard proportional tail: output respects the cap');
-      // With a small overflow the static base must keep far more than half the cap.
-      const staticKept = out.markdown.length - (cap - Math.floor(cap * 0.5));
-      assert(staticKept > 0, 'Clipboard proportional tail: a marginal overflow keeps a majority static prefix');
-      assert(out.markdown.includes('## S0') && out.markdown.includes('## S100'),
-        'Clipboard proportional tail: a marginal overflow must not discard a third of the static sections');
-      return { length: out.markdown.length };
-    },
-  },
-{
     name: 'Job-run receipt and report carry API source corpus coverage',
     run: () => {
       // The extractors measure the provider's own corpus size precisely so that
@@ -8950,7 +9156,7 @@ export default [
       const snap = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       // Every other check in this reconciliation is downstream of search.kept, so
       // a source that returned a tenth of its corpus used to reconcile perfectly.
-      assert(snap.includes('const shortSources = coverageBySource.filter'),
+      assert(snap.includes('const shortSources = applicableCoverageSources.filter'),
         'the assessment reconciles per-source gather coverage, not only the stages after collection');
       assert(snap.includes('Gather completeness is unproven for'),
         'a green verdict states when gather completeness was NOT proven instead of implying it');
@@ -9045,7 +9251,7 @@ export default [
             bySource: {
               ziprecruiter: {
                 count: 442, unique: 442, providerGathered: 445, claimedTotal: 499,
-                pagesWalked: 24, stopReason: 'empty-page',
+                unavailableDetailDropped: 3, pagesWalked: 24, stopReason: 'empty-page',
               },
             },
           },
@@ -9062,8 +9268,8 @@ export default [
         }]);
 
         assert(assessment.includes('✅ **VERIFIED COMPLETE**'), `expected VERIFIED COMPLETE, got:\n${assessment}`);
-        assert(assessment.includes('gathered all 445 reachable row(s) (board advertised ~499; ended at empty-page)'),
-          'coverage reflects that the source exhausted reachable rows at empty-page');
+        assert(assessment.includes('traversed all 445 reachable candidate identities (board advertised ~499; ended at empty-page · 442 usable row(s) retained; 3 confirmed-unavailable detail listings dropped)'),
+          'coverage distinguishes candidate traversal, retained rows, and confirmed-unavailable detail drops');
         assert(!assessment.includes('no scroll-backed Google source'),
           'unqueried Google source note is omitted when other sources are present');
         assert(!assessment.includes('INDETERMINATE'),
@@ -9073,6 +9279,375 @@ export default [
         fs.rmSync(dir, { recursive: true, force: true });
       }
       return { ok: true };
+    },
+  },
+  {
+    name: 'completion assessment distinguishes revealed, country-inapplicable, and user-accepted source limits',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-completion-source-limits-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-source-limits-hub';
+      const runId = 'completion-source-limits-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, jobs: [{}, {}],
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 2 },
+          cleanup: { attempted: true, cleared: true },
+          sources: {
+            google: {
+              count: 2, providerGathered: 2, stopReason: 'completed',
+              revealOutcomes: [
+                { queryIndex: 1, queryTotal: 2, exit: 'end-of-list', count: 1, iterations: 1 },
+                { queryIndex: 2, queryTotal: 2, exit: 'end-of-list', count: 1, iterations: 1 },
+              ],
+            },
+            dice: { count: 0, providerGathered: 0, warning: { code: 'country-source-skipped', severity: 'info' } },
+            ziprecruiter: { count: 0, providerGathered: 0, stopReason: 'empty-page', warning: { code: 'description-detail-hard-block', severity: 'block' } },
+            glassdoor: { count: 2, providerGathered: 2, stopReason: 'empty-page', locationScopeUnenforced: true },
+          },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, runId },
+          search: {
+            runId, kept: 2,
+            bySource: {
+              google: {
+                count: 2, providerGathered: 2, stopReason: 'completed',
+                revealOutcomes: [
+                  { queryIndex: 1, queryTotal: 2, exit: 'end-of-list', count: 1, iterations: 1 },
+                  { queryIndex: 2, queryTotal: 2, exit: 'end-of-list', count: 1, iterations: 1 },
+                ],
+              },
+              dice: { count: 0, providerGathered: 0, warning: { code: 'country-source-skipped', severity: 'info' } },
+              ziprecruiter: { count: 0, providerGathered: 0, stopReason: 'empty-page', warning: { code: 'description-detail-hard-block', severity: 'block' } },
+              glassdoor: { count: 2, providerGathered: 2, stopReason: 'empty-page', locationScopeUnenforced: true },
+            },
+          },
+          resolves: {},
+          scoring: { selectedForScoring: 2, scored: 2, placeholders: 0, unscored: 0, failedBatches: 0 },
+          bucketing: { input: 2, missing: 0, duplicated: 0 },
+          history: null,
+        });
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(assessment.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && assessment.includes('`ziprecruiter` (description-detail-hard-block)')
+          && assessment.includes('`glassdoor` country scope is region-unverified; retained rows were not discarded')
+          && assessment.includes('`google` traversed all 2 reachable candidate identities (all scroll queries reached end-of-list)')
+          && assessment.includes('`dice` intentionally skipped — not applicable to the selected country scope')
+          && !assessment.includes('Gather completeness is unproven for 3 source(s)')
+          && !assessment.includes('`google` reported no candidate corpus size — coverage unproven')
+          && !assessment.includes('`dice` reported no candidate corpus size — coverage unproven')
+          && assessment.includes('terminal receipt is durable proof of the scoring output, while taxonomy and Job Board consumption are reconciled separately below'),
+        'end-of-list reveal is reachability proof, country-excluded sources are not coverage misses, and accepted hard blocks or nation-tier scope caveats qualify rather than erase a completed result');
+
+        // A clean post-search recovery supersedes the initial block warning. It
+        // must not leave an accepted-limitation badge in the completion headline
+        // merely because the durable receipt preserves the original warning.
+        telemetry.resolves = {
+          ziprecruiter: { ts: Date.now() + 1, resolved: true, kept: 0 },
+        };
+        const resolved = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(resolved.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && !resolved.includes('Completed with accepted source limitation')
+          && resolved.includes('`glassdoor` country scope is region-unverified'),
+        'a later clean source recovery clears the accepted-block qualifier while preserving the independent region-scope qualification');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { sources: 3 };
+    },
+  },
+  {
+    name: 'completion assessment qualifies an otherwise green run with no retained per-source coverage',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-completion-no-coverage-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-no-coverage-hub';
+      const runId = 'completion-no-coverage-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, jobs: [{}],
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 1 },
+          cleanup: { attempted: true, cleared: true }, sources: {},
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, runId },
+          search: { runId, kept: 1, bySource: {} }, resolves: {},
+          scoring: { selectedForScoring: 1, scored: 1, placeholders: 0, unscored: 0, failedBatches: 0 },
+          bucketing: { input: 1, missing: 0, duplicated: 0 }, history: null,
+        });
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(assessment.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && assessment.includes('No per-source gather coverage was retained, so this verdict covers the stages after collection.')
+          && !assessment.includes('✅ **VERIFIED COMPLETE**'),
+        `an otherwise green run without coverage must be qualified, got:\n${assessment}`);
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { qualified: true };
+    },
+  },
+  {
+    name: 'completion assessment qualifies an otherwise green run with a country-inapplicable enabled source',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-completion-country-skipped-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-country-skipped-hub';
+      const runId = 'completion-country-skipped-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      const sources = {
+        ziprecruiter: { count: 1, providerGathered: 1, stopReason: 'empty-page' },
+        dice: { count: 0, providerGathered: 0, warning: { code: 'country-source-skipped', severity: 'info' } },
+      };
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, jobs: [{}],
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 1 },
+          cleanup: { attempted: true, cleared: true }, sources,
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, runId },
+          search: { runId, kept: 1, bySource: sources }, resolves: {},
+          scoring: { selectedForScoring: 1, scored: 1, placeholders: 0, unscored: 0, failedBatches: 0 },
+          bucketing: { input: 1, missing: 0, duplicated: 0 }, history: null,
+        });
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(assessment.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && assessment.includes('`dice` was intentionally skipped as not applicable to the selected country scope')
+          && assessment.includes('Every applicable source traversed its full reachable candidate set.')
+          && !assessment.includes('✅ **VERIFIED COMPLETE**'),
+        `a country-skipped enabled source must qualify an otherwise green run, got:\n${assessment}`);
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { qualified: true };
+    },
+  },
+  {
+    name: 'completion assessment accepts only clean configured collection caps as bounded coverage',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves, scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-configured-cap-completion-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'configured-cap-hub';
+      const runId = 'configured-cap-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, jobs: [{}, {}, {}],
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId, terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 3 },
+          cleanup: { attempted: true, cleared: true }, sources: {},
+        }), 'utf8');
+        const cappedSource = {
+          count: 3, providerGathered: 3, providerTotal: 99,
+          stopReason: 'jobs-per-platform/provider-total', cap: { type: 'jobs-per-platform', limit: 3 },
+        };
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, runId },
+          search: { runId, kept: 3, bySource: { dice: cappedSource } },
+          resolves: {},
+          scoring: { selectedForScoring: 3, scored: 3, placeholders: 0, unscored: 0, failedBatches: 0 },
+          bucketing: { input: 3, missing: 0, duplicated: 0 }, history: null,
+        });
+        const bounded = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(bounded.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && bounded.includes('stopped at an explicit configured collection cap (`dice` jobs-per-platform=3)')
+          && bounded.includes('collection intentionally bounded'),
+        'a structured configured cap with its matching sole stop reason verifies collected output while qualifying full-corpus coverage');
+
+        // API fan-out can hit a per-query cap before the final aggregate source
+        // slice. Both stop tokens are expected evidence, not an API failure.
+        telemetry.search.bySource.dice = {
+          count: 3, providerGathered: 12, providerTotal: 99,
+          stopReason: 'jobs-per-platform', cap: { type: 'jobs-per-platform', limit: 3 },
+        };
+        const outerBounded = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(outerBounded.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && outerBounded.includes('stopped at an explicit configured collection cap (`dice` jobs-per-platform=3)')
+          && outerBounded.includes('collection intentionally bounded'),
+        'a final API aggregate slice must keep the same Jobs-per-platform cap and stop token even when each query itself stayed below that limit');
+
+        telemetry.search.bySource.dice = {
+          count: 3, providerGathered: 12, providerTotal: 99,
+          stopReason: 'jobs-per-platform/pages-per-platform',
+          cap: { type: 'jobs-per-platform', limit: 3 },
+          caps: [{ type: 'jobs-per-platform', limit: 3 }, { type: 'pages-per-platform', limit: 2 }],
+        };
+        const mixedExplicitCaps = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(mixedExplicitCaps.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && mixedExplicitCaps.includes('`dice` jobs-per-platform=3 + pages-per-platform=2')
+          && mixedExplicitCaps.includes('configured jobs-per-platform cap 3 + pages-per-platform cap 2'),
+        'distinct finite Dice Jobs and Pages caps across fan-out queries remain independently visible and qualify collected output');
+
+        telemetry.search.bySource.dice = {
+          count: 3, providerGathered: 12, providerTotal: 99, truncated: true,
+          stopReason: 'jobs-per-platform/page-ceiling',
+          cap: { type: 'jobs-per-platform', limit: 3 },
+          caps: [{ type: 'jobs-per-platform', limit: 3 }],
+        };
+        const mixedSafetyCeiling = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(mixedSafetyCeiling.includes('⚠️ **INDETERMINATE**')
+          && mixedSafetyCeiling.includes('`dice` traversed 12 of 99 candidate identities the provider advertised'),
+        'a default safety page ceiling alongside a Jobs cap is not reclassified as configured-cap completion');
+
+        telemetry.search.bySource.dice = { ...cappedSource, stopReason: 'jobs-per-platform/page-error' };
+        const mixed = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(mixed.includes('⚠️ **INDETERMINATE**')
+          && mixed.includes('`dice` traversed 3 of 99 candidate identities the provider advertised'),
+        'a configured cap mixed with an API page error remains an observed incomplete walk');
+
+        telemetry.search.bySource.dice = {
+          count: 3, providerGathered: 3, stopReason: 'provider-total/short-page',
+        };
+        const cleanUnknownTotal = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(cleanUnknownTotal.includes('✅ **VERIFIED COMPLETE**')
+          && cleanUnknownTotal.includes('Every source traversed its full reachable candidate set.')
+          && cleanUnknownTotal.includes('`dice` traversed all 3 reachable candidate identities (ended at provider-total/short-page)')
+          && !cleanUnknownTotal.includes('coverage unproven'),
+        'a total-less API fan-out with only clean provider endings proves reachable exhaustion without inventing a provider corpus size');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { bounded: 3 };
+    },
+  },
+  {
+    name: 'job diagnostics label summed API pagination and configured Dice caps accurately',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves, scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing, compensation: telemetry.compensation, history: telemetry.history,
+      };
+      try {
+        Object.assign(telemetry, {
+          nodeId: 'dice-api-pages', windowId: null, pipeline: null, resolves: {}, scoring: null,
+          bucketing: null, compensation: null, history: null,
+          search: {
+            ts: Date.now(), queries: 2, raw: 100, deduped: 100, kept: 100,
+            ageDropped: 0, roleDropped: 0, historyDropped: 0, relevanceDropped: 0,
+            bySource: {
+              dice: {
+                count: 100, unique: 100, providerGathered: 100, gathered: 100,
+                pagesWalked: 6, stopReason: 'jobs-per-platform',
+                cap: { type: 'jobs-per-platform', limit: 50 }, capOverflow: 0,
+              },
+            },
+          },
+        });
+        const report = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);
+        assert(report.includes('`dice`: successfully fetched 6 pages across API fan-out queries → stopped: jobs-per-platform')
+          && report.includes('stopped by the configured Jobs per platform limit (50); this is a user cap, not provider exhaustion'),
+        'API pagination reports summed fan-out request pages and explains the configured cap without calling it an exhausted provider');
+        telemetry.search.bySource.dice = {
+          ...telemetry.search.bySource.dice,
+          stopReason: 'pages-per-platform',
+          cap: { type: 'pages-per-platform', limit: 2 },
+          caps: [{ type: 'pages-per-platform', limit: 2 }],
+        };
+        const pageCapReport = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);
+        assert(pageCapReport.includes('`dice`: successfully fetched 6 pages across API fan-out queries → stopped: pages-per-platform')
+          && pageCapReport.includes('stopped by the configured Pages per platform limit (2); this is a user cap, not provider exhaustion'),
+        'an explicit API Pages cap is also counted as successfully fetched fan-out pages, not a browser walk');
+        telemetry.search.bySource.dice.stopReason = 'provider-total/page-error';
+        const mixedStopReport = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);
+        assert(mixedStopReport.includes('an API page request failed; later pages for that query were not collected')
+          && !mixedStopReport.includes('API pagination reached the provider-reported total; page count is summed across fan-out queries'),
+        'an API page error outranks a normal sibling provider-total stop in the rendered pagination verdict');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { apiPages: 6 };
+    },
+  },
+  {
+    name: 'competitive salary diagnostics reconcile role-band work separately from market cohorts',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        pipeline: telemetry.pipeline, resolves: telemetry.resolves, scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing, compensation: telemetry.compensation, history: telemetry.history,
+      };
+      try {
+        Object.assign(telemetry, {
+          nodeId: 'role-band-salary-funnel', windowId: null, search: null, pipeline: null,
+          resolves: {}, scoring: null, history: null,
+          bucketing: {
+            ts: Date.now(), input: 2, roleCount: 1, missing: 0, duplicated: 0,
+            bandSummary: [], salaryRangeLabels: [], roleSummary: [],
+            taxonomyAudit: [
+              { index: 0, title: 'Duplicate range A', source: 'dice', rawSalary: '$195k–$230k/yr', annualSalary: 195000, salaryRangeMetadata: { lowerAnnual: 195000, upperAnnual: 230000 } },
+              { index: 1, title: 'Duplicate range B', source: 'dice', rawSalary: '$195k–$230k/yr', annualSalary: 195000, salaryRangeMetadata: { lowerAnnual: 195000, upperAnnual: 230000 } },
+            ],
+          },
+          compensation: {
+            ts: Date.now(), scoredInput: 12, skippedBelowFit: 4, eligible: 8, minFitScore: 80,
+            skippedNoLocation: 1, skippedNoCurrency: 1, preResearchCandidates: 4,
+            skippedNoExperience: 2, skippedNoExperienceBand: 1,
+            roleBandLookups: 4, roleBandResearches: 2, roleBandCacheHits: 2, roleBandFailures: 1,
+            roleBandFailureJobs: 0, roleBandInterruptedJobs: 0, marketCandidates: 3,
+            missingOffer: 3, recommendedNoOffer: 1, cohorts: 2, researched: 1,
+            failedCohorts: 1, assessed: 3, cacheHits: 1, failures: [],
+          },
+        });
+        const report = buildJobsPipelineSnapshot(new Set(['role-band-salary-funnel']), null, null);
+        assert(report.includes('Fit-qualified partition: 8 job(s) = 1 no location + 1 no market currency + 2 no usable experience + 4 role-band candidate(s).')
+          && report.includes('Role-band gate (before market cohorts): 4 candidate(s) = 1 not placeable in a role band + 0 interrupted during role-band preparation + 0 affected by failed role-band lookup(s) + 3 passed to market cohorts.')
+          && report.includes('Role-band lookup work (separate from market cohorts): 4 role-family lookup(s) = 2 researched + 2 cache hit(s) · 1 of researched lookup(s) failed.')
+          && report.includes('Market cohorts (after role-band work): 3 job(s) → 2 cohort(s) → researched 1, failed 1.')
+          && report.includes('Jobs assessed: 3 · cache hit(s): 1')
+          && report.split('salary range disclosed: $195,000–$230,000/yr. Kept the lower endpoint for deterministic placement.').length === 2,
+        'salary diagnostics reconcile the new role-band counters without conflating lookup work with market cohorts or repeating identical audit-detail lines');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { roleBandLookups: 4, marketCohorts: 2 };
     },
   },
   {

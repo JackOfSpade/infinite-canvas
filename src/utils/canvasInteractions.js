@@ -42,3 +42,57 @@ export function cancelNodeTasksRecursively(nodes, skipIds) {
     if (n.data?.nodes) cancelNodeTasksRecursively(n.data.nodes, skipIds);
   });
 }
+
+/**
+ * Return the exact durable Job Search runs abandoned by a real canvas deletion.
+ * This deliberately consumes the deleted-node snapshot supplied by React Flow:
+ * component unmount is also used for canvas navigation and therefore is not
+ * evidence that the user deleted anything.
+ */
+export function collectDeletedJobRunDiscards(nodes, canvasFilePath) {
+  if (!Array.isArray(nodes)) return [];
+  const discards = [];
+  const seen = new Set();
+  const visit = (items) => {
+    for (const node of items || []) {
+      if (node?.type === 'jobhub') {
+        const nodeId = node.id || null;
+        // `pendingBatch.jobRunId` owns only the scoring-batch lifecycle. Outside
+        // that state it can be a stale persisted remnant, while `jobRunId` is the
+        // current search/checkpoint owner stamped before the pre-score await.
+        // Prefer the token whose state actually owns the hub so a malformed or
+        // interrupted prior batch cannot make deletion spare the current run.
+        const runId = node.data?.hubState === 'scoring-batch'
+          ? (node.data?.pendingBatch?.jobRunId || node.data?.jobRunId || null)
+          : (node.data?.jobRunId || node.data?.pendingBatch?.jobRunId || null);
+        const key = `${nodeId || ''}\u0000${runId || ''}`;
+        if (nodeId && runId && !seen.has(key)) {
+          seen.add(key);
+          discards.push({ canvasFilePath, nodeId, runId });
+        }
+      }
+      visit(node?.data?.canvasData?.nodes);
+      visit(node?.data?.nodes);
+    }
+  };
+  visit(nodes);
+  return discards;
+}
+
+/**
+ * Dispatch best-effort exact-run cleanup for every deleted Job Search hub.
+ * Kept beside the collector so interactive React Flow deletion and the
+ * programmatic Clear Canvas path cannot drift into different lifecycle rules.
+ */
+export function discardDeletedJobRuns(nodes, canvasFilePath, onError = null) {
+  const discards = collectDeletedJobRunDiscards(nodes, canvasFilePath);
+  for (const discard of discards) {
+    try {
+      const pending = window.electronAPI?.discardJobRun?.(discard);
+      pending?.catch?.((error) => onError?.(error, discard));
+    } catch (error) {
+      onError?.(error, discard);
+    }
+  }
+  return discards;
+}

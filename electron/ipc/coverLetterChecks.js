@@ -1216,14 +1216,36 @@ export function checkAdditiveSeam(paragraphs = []) {
 }
 
 // A responsibility pivot needs more than the fact that two tasks occurred in
-// one job. These two constructions have already produced letters that move
-// from one system to another without explaining their shared responsibility:
-// “That was a different problem. I solved it …” and “The same job included …”.
-// Keep the check deliberately lexical and narrow. It catches the opaque
-// hand-off, not every use of “problem”, “challenge”, or “same”.
+// one job. These constructions have already produced letters that move from
+// one system or lifecycle stage to another without explaining their shared
+// responsibility: “That was a different problem. I solved it …”, “The same
+// job included …”, and “Migration extended my systems work beyond
+// evaluation.” Keep the check deliberately lexical and narrow. It catches the
+// opaque hand-off, not every use of “problem”, “challenge”, “same”, or
+// “beyond”.
 const OPAQUE_RESPONSIBILITY_PIVOT = /\b(?:a|another|the)\s+(?:different|separate)\s+(?:problem|challenge)\b/iu;
 const ANAPHORIC_PIVOT_SOLUTION = /^(?:i|we)\s+(?:solved|addressed|handled|tackled|fixed)\s+(?:it|that|this)\b/iu;
 const SAME_JOB_SCOPE_OPENER = /^the\s+same\s+(?:job|role|position)\s+(?:also\s+)?(?:included|involved|covered)\b/iu;
+// This terminal grammar says only that one abstract work category is broader
+// than another. Requiring the whole sentence to fit the frame keeps concrete
+// uses legal: “the migration extended the catalog without an outage” states a
+// mechanism and result, while the generated scope sentence below states
+// neither.
+const CATEGORY_SCOPE_EXTENSION = /^(?:(?:operational|system|systems|platform|product|software|technology|technical|vendor|third[- ]party|data|service|application)\s+){0,3}(?:migration|implementation|integration|evaluation|assessment|selection|administration|deployment|operations?|planning)\s+(?:also\s+)?(?:extended|broadened|expanded)\s+my\s+(?:(?:third[- ]party|system|systems|platform|product|software|technology|technical|vendor|data|service|application)\s+){0,3}(?:work|experience|background|practice)\s+beyond\s+(?:(?:operational|system|systems|platform|product|software|technology|technical|vendor|third[- ]party|data|service|application)\s+){0,3}(?:migration|implementation|integration|evaluation|assessment|selection|administration|deployment|operations?|planning)[.!?]?$/iu;
+// “Beyond moving operations, I used …” has the same defect in introductory
+// form: a bare generic category marks addition but supplies no relationship.
+// A determiner, named object, constraint, or other material before the comma
+// takes the sentence out of scope, so “Beyond migrating the district catalog,
+// I …” and “Beyond migration during the cutover, I …” remain legal.
+const BARE_BEYOND_CATEGORY_OPENER = /^beyond\s+(?:(?:moving|migrating|evaluating|assessing|selecting|implementing|integrating|deploying|administering|operating|planning)\s+)?(?:(?:operational|system|platform|product|software|technology|technical|vendor|third[- ]party|data|service|application)\s+){0,2}(?:operations?|systems?|platforms?|products?|software|technology|tools?|data|services?|applications?|workflows?|migration|implementation|integration|evaluation|assessment|selection|administration|deployment|planning)\s*,\s*(?:i|we)\s+(?:\p{L}+ly\s+)?(?:used|built|created|developed|wrote|implemented|designed|managed|led|migrated|integrated|deployed|evaluated|assessed|selected|maintained)\b/iu;
+// Once an umbrella sentence has named the branches, repeating each abstract
+// label through the same low-information frame makes the paragraph read like
+// an outline: “I handled workflow change by ... I addressed data exchange by
+// ...”. The actions themselves should instantiate the branches. Keep this
+// deliberately narrow to adjacent, mirrored first-person frames over a small
+// set of abstract work categories; one useful “addressed X by” sentence is not
+// a defect, nor is a concrete problem such as an outage or backlog.
+const MIRRORED_CATEGORY_SCAFFOLD = /^(?:(?:separately|similarly|additionally|in\s+(?:separate|related|parallel|subsequent|additional)\s+[^,]{1,60}),\s*)?i\s+(?:handled|addressed|covered|managed|supported|demonstrated)\s+(?:the\s+)?(workflow changes?|data exchange|product evaluation|system migration|systems integration|implementation planning|vendor selection|platform administration|service deployment|operations?)\s+(?:by|through|such\s+as)\b/iu;
 
 /**
  * Requires a substantive bridge when prose changes responsibilities.
@@ -1242,11 +1264,24 @@ export function checkResponsibilityTransition(paragraphs = []) {
       observations.push(`paragraph ${index + 1} opens with “${leadingWordsSnippet(paragraph)}”; shared job scope is not a bridge between responsibilities — name the shared responsibility, constraint, or outcome before the new proof, or split or remove it`);
     }
     const paragraphSentences = sentences(paragraph);
-    for (let sentenceIndex = 0; sentenceIndex + 1 < paragraphSentences.length; sentenceIndex++) {
-      const pivot = paragraphSentences[sentenceIndex];
+    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length; sentenceIndex++) {
+      const sentence = paragraphSentences[sentenceIndex];
+      if (CATEGORY_SCOPE_EXTENSION.test(sentence)) {
+        observations.push(`paragraph ${index + 1} says “${boundedDetailValue(sentence)}”, which only renames one work category as broader than another; replace the scope comparison with a supported dependency, shared constraint, or outcome that explains why the next proof follows`);
+      }
+      if (BARE_BEYOND_CATEGORY_OPENER.test(sentence)) {
+        observations.push(`paragraph ${index + 1} opens evidence with a bare category transition (“${leadingWordsSnippet(sentence)}”); “beyond” marks addition but does not explain the relationship—name the dependency, shared constraint, or outcome that connects the proofs`);
+      }
       const solution = paragraphSentences[sentenceIndex + 1];
-      if (!OPAQUE_RESPONSIBILITY_PIVOT.test(pivot) || !ANAPHORIC_PIVOT_SOLUTION.test(solution)) continue;
-      observations.push(`paragraph ${index + 1} shifts from “${leadingWordsSnippet(pivot)}” to “${leadingWordsSnippet(solution)}” through an opaque problem label; name the shared responsibility, constraint, or outcome before the new proof, or split or remove it`);
+      if (!solution || !OPAQUE_RESPONSIBILITY_PIVOT.test(sentence) || !ANAPHORIC_PIVOT_SOLUTION.test(solution)) continue;
+      observations.push(`paragraph ${index + 1} shifts from “${leadingWordsSnippet(sentence)}” to “${leadingWordsSnippet(solution)}” through an opaque problem label; name the shared responsibility, constraint, or outcome before the new proof, or split or remove it`);
+    }
+    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length - 1; sentenceIndex++) {
+      const first = MIRRORED_CATEGORY_SCAFFOLD.exec(normalized(paragraphSentences[sentenceIndex]));
+      const second = MIRRORED_CATEGORY_SCAFFOLD.exec(normalized(paragraphSentences[sentenceIndex + 1]));
+      if (!first || !second || first[1].toLowerCase() === second[1].toLowerCase()) continue;
+      observations.push(`paragraph ${index + 1} repeats mirrored abstract labels (“${boundedDetailValue(first[1])}” then “${boundedDetailValue(second[1])}”); state the umbrella once, then let concrete action verbs demonstrate each branch, retaining only the separation cue needed to preserve factual scope`);
+      break;
     }
   }
   return observationResult('responsibility-transition', observations, MAX_RESPONSIBILITY_TRANSITION_OBSERVATIONS,

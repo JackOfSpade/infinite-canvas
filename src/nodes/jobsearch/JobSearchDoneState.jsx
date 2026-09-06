@@ -69,10 +69,17 @@ export function JobSearchDoneState({
   // A completed run with no eligible results replaces the old result set.
   rerunOutcome = null,
   resultDisposition = null,
+  lastCompletedRunAt = null,
 }) {
   const { addToast } = useToast();
   const targetRoleHelpId = useId();
   const preferencesHelpId = useId();
+  const lastCompletedRunAtText = Number.isFinite(Number(lastCompletedRunAt))
+    ? new Date(Number(lastCompletedRunAt)).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+    : null;
   // `testMode` is retained only for old persisted hubs. New runs record the
   // actual scoring behavior through `aiSkipped` / `collectionOnly`.
   const skippedAi = aiSkipped || collectionOnly || testMode;
@@ -119,6 +126,11 @@ export function JobSearchDoneState({
       <p className="text-white/40 text-xs">
         {resultLabel}
       </p>
+      {lastCompletedRunAtText && (
+        <p className="text-white/35 text-[9px] mt-0.5">
+          Last completed: {lastCompletedRunAtText}
+        </p>
+      )}
 
       {/* Keep the current run's found → score-ready funnel visible even when
           no jobs survive into the new result set. */}

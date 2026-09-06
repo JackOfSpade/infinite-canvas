@@ -784,12 +784,35 @@ export default [
         && opaqueResponsibilityPivot.detail.includes('paragraph 2 opens with “The same job also included assessing software the …”')
         && opaqueResponsibilityPivot.detail.includes('shared job scope is not a bridge between responsibilities'),
       'opaque problem-to-solution pivots and same-job paragraph openers require a substantive responsibility bridge');
+      const abstractCategoryPivot = checkResponsibilityTransition([
+        'Operational migration extended my third-party system work beyond product evaluation.',
+        'Beyond moving operations, I used Python ETL to connect the district information system with third-party solutions.',
+      ]);
+      assert(!abstractCategoryPivot.passed
+        && abstractCategoryPivot.detail.includes('paragraph 1 says “Operational migration extended my third-party system work beyond product evaluation.”')
+        && abstractCategoryPivot.detail.includes('only renames one work category as broader than another')
+        && abstractCategoryPivot.detail.includes('paragraph 2 opens evidence with a bare category transition (“Beyond moving operations, I used Python ETL to …”)')
+        && abstractCategoryPivot.detail.includes('“beyond” marks addition but does not explain the relationship'),
+      'abstract lifecycle categories and bare beyond-openers cannot stand in for the relationship between proofs');
+      const mirroredCategoryScaffold = checkResponsibilityTransition([
+        'My implementation experience covers workflow change and data exchange. I handled workflow change by transferring internal operations to third-party systems. In separate integration work, I addressed data exchange by connecting the district system to those solutions.',
+        'My implementation experience covers workflow change and data exchange. I handled workflow change such as transferring internal operations to third-party systems. I addressed the data exchange by connecting the district system to those solutions.',
+      ]);
+      assert(!mirroredCategoryScaffold.passed
+        && mirroredCategoryScaffold.detail.includes('paragraph 1 repeats mirrored abstract labels (“workflow change” then “data exchange”)')
+        && mirroredCategoryScaffold.detail.includes('paragraph 2 repeats mirrored abstract labels (“workflow change” then “data exchange”)')
+        && mirroredCategoryScaffold.detail.includes('state the umbrella once, then let concrete action verbs demonstrate each branch'),
+      'an explicit umbrella must not turn the following evidence into mirrored handled/addressed category labels, including the “such as” variant');
       const bridgedResponsibilityPivot = checkResponsibilityTransition([
         'The ticketing system I extended needed role-restricted access so staff saw only what their role allowed. Alongside that access-control work, I kept the district data consistent across its tools with Python integration jobs.',
         'That role also required me to assess software the district would adopt instead of build.',
+        'The migration extended the catalog system to support interlibrary loans without interrupting circulation.',
+        'Beyond migrating the district catalog, I used Python ETL to preserve borrower identifiers during cutover.',
+        'Moving operations exposed incompatible record identifiers, so I used Python ETL to reconcile them before cutover.',
+        'My implementation experience covered two distinct needs: adapting workflows and enabling data exchange. I transferred internal operations and their data to third-party systems. Separately, I used Python to connect the district information system with third-party solutions.',
       ]);
       assert(bridgedResponsibilityPivot.passed,
-        `a supported access-control bridge and a role-responsibility opener avoid the opaque-transition constructions: ${bridgedResponsibilityPivot.detail}`);
+        `supported bridges, concrete actions under one umbrella, and a minimal separation cue avoid opaque or mirrored category scaffolding: ${bridgedResponsibilityPivot.detail}`);
       const evaluatedResponsibilityPivot = evaluateCoverLetterChecks({
         plan: { mappings: [{}], companyHook: { detail: '' } },
         paragraphs: ['Keeping the district data consistent across its tools was a separate challenge. I addressed it with Python integration jobs.'],
@@ -797,6 +820,15 @@ export default [
       }).find(check => check.id === 'responsibility-transition');
       assert(evaluatedResponsibilityPivot && !evaluatedResponsibilityPivot.passed,
         'the complete cover-letter evaluator enforces opaque responsibility-transition repairs, not only the direct helper');
+      const evaluatedCategoryPivot = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: ['Operational migration extended my third-party system work beyond product evaluation. Beyond moving operations, I used Python ETL to connect the systems.'],
+        evidence, researchText: '',
+      }).find(check => check.id === 'responsibility-transition');
+      assert(evaluatedCategoryPivot && !evaluatedCategoryPivot.passed
+        && evaluatedCategoryPivot.detail.includes('only renames one work category as broader than another')
+        && evaluatedCategoryPivot.detail.includes('opens evidence with a bare category transition'),
+      'the complete evaluator routes both abstract category pivots into its single prose-revision attempt');
       const posting = checkPostingReference([
         'Owning the rollout end-to-end is what your posting wants sped up.',
         'The job ad asks for the same repair work, as advertised.',

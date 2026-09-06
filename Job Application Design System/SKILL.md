@@ -52,8 +52,9 @@ End-to-end, given candidate data + job description:
    phone; optionally a supplied location and at most one canonical
    URL, site OR github, never both), 3–6 role entries
    with titles + companies + dates + each role's stated work
-   location + 3–6 bullets each, optional
-   "Selected Systems" / "Projects", a skills block, and the highest
+   location + 3–6 bullets each, an optional source-accurate project
+   category (for example, "Personal Projects", "Open Source", or
+   "Selected Systems"), a skills block, and the highest
    **completed** degree + institution (they go in the header
    subtitle — there is no Education section; `STYLE.md §5.8`).
    Apply the content rules in `STYLE.md §5` aggressively — kill
@@ -168,6 +169,14 @@ End-to-end, given candidate data + job description:
    tools with distinct roles under one operation. Reject a bridge sentence that
    merely restates a category without adding a decision, mechanism, constraint,
    or result.
+
+   **Project-category provenance is binding too.** A heading that identifies
+   work as personal, open-source, academic, volunteer, or employer-owned is a
+   factual attribution, not disposable source wording. Preserve that category
+   for every retained project. In particular, source-labelled `Personal
+   Projects` must remain `Personal Projects`; choosing only some entries never
+   licenses `Selected Projects`, `Projects`, or `Selected Systems`, because
+   those labels erase the distinction from paid work.
    When the letter's opening first names an unfamiliar prior employer, identify
    the candidate's role or relationship in the same sentence rather than opening
    with a bare "At [employer]." Describe cross-domain evidence through the
@@ -694,10 +703,10 @@ only be claimed, not demonstrated — Terraform, TypeScript, a warehouse
 the candidate queried — the Skills block is the *only* place it exists,
 and cutting it loses the term outright.
 
-## Do not let "Selected Systems" restate the bullets
+## Do not let a project section restate the bullets
 
 The most common space waste in generated output is not the skills block
-— it is a `Selected Systems` section that re-lists metrics already in
+— it is a project section that re-lists metrics already in
 the Experience bullets. It is typically the largest block on the page
 after Experience itself. The shipped `resume.html` sample used to ship
 one; every metric it carried (1.4M QPS, p99 38 ms, 19 PB, 50K docs/sec)

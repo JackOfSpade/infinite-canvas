@@ -199,6 +199,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           resumePdfPath: result.resumePdfPath,
           coverLetterPdfPath: result.coverLetterPdfPath,
           jobListingPath: result.jobListingPath,
+          generationAuditPath: result.generationAuditPath,
           workDir: result.workDir,
           company: result.company,
           candidateName: result.candidateName,

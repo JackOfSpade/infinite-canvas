@@ -22,6 +22,7 @@ import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIde
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
+import { normalizeJobCollectionLimits, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -2787,7 +2788,8 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
  * @param {string} [location] — optional location filter
  * @param {number} [maxAgeDays] — keep only postings within this window (server-side
  *   when it matches a Dice bucket, else client-side — see dicePostedBucket)
- * @returns {Promise<Array>} — standardized job objects
+ * @returns {Promise<{items: Array, warning: object|null, providerTotal: number|null, truncated: boolean}>}
+ *   Standardized jobs plus corpus-coverage diagnostics.
  */
 // Dice exposes a SERVER-SIDE date filter (`filters.postedDate`) but only in coarse
 // 1/3/7-day buckets. Verified against the live API: the accepted enum is the
@@ -2811,29 +2813,183 @@ const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 // we do one unnecessary scan before confirming stability again).
 let _diceKeyIsStable = false;
 
-export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
+/**
+ * Dice's result count has appeared under a couple of different meta shapes over
+ * the lifetime of the public endpoint.  Only accept a non-negative finite
+ * number: a page's `count` is not a corpus total and must never be promoted to
+ * one in diagnostics.
+ */
+function diceProviderTotal(data) {
+  const candidates = [
+    data?.meta?.totalHits,
+    data?.meta?.total,
+    data?.meta?.totalResults,
+    data?.meta?.totalCount,
+    data?.total,
+    data?.totalResults,
+    data?.totalCount,
+  ];
+  for (const candidate of candidates) {
+    // Number(null), Number(''), and Number(false) are all 0, but none means
+    // the provider actually reported a zero-result corpus. Skip placeholders
+    // so a later compatible field can still supply the real total.
+    if (candidate == null || typeof candidate === 'boolean') continue;
+    if (typeof candidate === 'string' && !candidate.trim()) continue;
+    const total = Number(candidate);
+    if (Number.isFinite(total) && total >= 0) return total;
+  }
+  return null;
+}
+
+function mapDiceListing(job) {
+  // Dice's `salary` field is free text — often non-monetary prose like "Depends
+  // on Experience", "Competitive", or "Compensation information provided in the
+  // description". Keep only values that actually look like money (contain a
+  // digit) and aren't one of those known non-monetary phrases, so the renderer's
+  // salary parsing/buckets don't ingest garbage. Anything dropped renders as
+  // "Unspecified", which is correct.
+  const cleanDiceSalary = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s || !/\d/.test(s)) return '';
+    if (/compensation information|depends on|provided in the desc|commensurate|competitive/i.test(s)) return '';
+    return s;
+  };
+  // List API returns `summary` (short blurb) but rarely `description` (full HTML).
+  // Use summary as a placeholder — a second enrichment pass fetches full descriptions
+  // per-job via the detail endpoint after all queries are merged and deduped.
+  const descFromHtml = job?.description
+    ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
+  const descText = descFromHtml || (job?.summary || '').trim();
+  return {
+    title: job?.title || '',
+    company: job?.companyName || '',
+    location: job?.jobLocation?.displayName || '',
+    salary: cleanDiceSalary(job?.salary),
+    snippet: descText,
+    description: descText,
+    url: job?.detailsPageUrl || `https://www.dice.com/job-detail/${job?.guid || job?.id}`,
+    posted: job?.postedDate || '',
+    source: 'dice',
+    remote: job?.workFromHomeAvailability === 'TRUE',
+    employmentType: job?.employmentType || '',
+    easyApply: job?.easyApply || false,
+    // Internal field — used by enrichDiceDescriptions(), stripped before returning
+    _diceId: job?.guid || job?.id || '',
+  };
+}
+
+/**
+ * Fetch one Dice page with the established retry / 500-key-refresh policy.
+ * `requestPage` is an intentionally narrow test seam: production leaves it
+ * unset and uses safeApiFetch, while deterministic tests can return its usual
+ * { ok, status, json, warning } shape without patching global fetch.
+ */
+async function fetchDicePage(url, signal, requestPage = null) {
+  const request = requestPage || ((pageUrl) => safeApiFetch(pageUrl, {
+    headers: {
+      'User-Agent': getRandomUA(),
+      'x-api-key': getDiceApiKey(),
+      'Accept': 'application/json',
+    },
+    signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
+  }, 'dice'));
+
+  let r;
+  for (let attempt = 0; attempt <= DICE_MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error('Aborted');
+    if (attempt > 0) {
+      const delay = DICE_RETRY_DELAYS_MS[attempt - 1] ?? 4000;
+      logger.info(`[Dice API] Retry ${attempt}/${DICE_MAX_RETRIES} in ${delay}ms (last status: ${r?.status ?? '?'})`);
+      await new Promise(res => setTimeout(res, delay));
+      if (signal?.aborted) throw new Error('Aborted');
+    }
+    r = await request(url);
+    if (r.ok) return r;
+    // When the key is confirmed stable, 500s are transient server errors —
+    // retrying with the same key won't help. Break immediately and let the
+    // stable-backoff handler below wait 3s, saving 7s of pointless retry delay.
+    if (r.status >= 500 && _diceKeyIsStable) break;
+    if (r.status >= 500 && attempt < DICE_MAX_RETRIES) continue;
+    break;
+  }
+
+  if (r?.status < 500) return r;
+
+  let retryKey;
+  if (_diceKeyIsStable) {
+    logger.info('[Dice API] Key stable — skipping bundle scan, using 3s backoff for transient 500');
+    await new Promise(res => setTimeout(res, 3000));
+    retryKey = getDiceApiKey();
+  } else {
+    const oldKey = getDiceApiKey();
+    retryKey = await refreshDiceApiKey(signal);
+    if (retryKey) {
+      if (retryKey === oldKey) {
+        _diceKeyIsStable = true;
+        logger.info('[Dice API] Key unchanged after refresh — 500s are transient (not key rotation). Future 500s will skip bundle scan.');
+      } else {
+        logger.info('[Dice API] Key rotated — retrying with new key');
+      }
+    }
+  }
+  if (!retryKey) return r;
+
+  logger.info('[Dice API] Retrying with refreshed key');
+  const retryRequest = requestPage || ((pageUrl) => safeApiFetch(pageUrl, {
+    headers: {
+      'User-Agent': getRandomUA(),
+      'x-api-key': retryKey,
+      'Accept': 'application/json',
+    },
+    signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
+  }, 'dice'));
+  const refreshed = await retryRequest(url);
+  return refreshed.ok ? refreshed : r;
+}
+
+/**
+ * Fetch job listings from Dice via their public API (Tier 1).
+ *
+ * @param {object} [collectionLimits] Optional { jobsPerPlatform, pagesPerPlatform }.
+ *   A finite jobs value constrains the request page size and stops the pager as
+ *   soon as that many in-window rows have been collected.
+ * @param {object} [options] Test-only dependency seam:
+ *   { requestPage(url), interPageDelayMs }.
+ */
+export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null, collectionLimits = null, options = null) {
   // When the window matches a Dice date bucket, filter SERVER-SIDE and pull a
   // smaller page; otherwise keep the wide over-pull and filter client-side.
   const bucket = dicePostedBucket(maxAgeDays);
-  const params = new URLSearchParams({
+  const limits = normalizeJobCollectionLimits(collectionLimits);
+  const rowBudget = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
+  const pageCeiling = resolvePageCeiling(limits);
+  const defaultPageSize = bucket ? 400 : 1000;
+  // With a finite allowance, do not ask the provider for a 400/1000-row page
+  // and then throw most of it away. Non-bucket walks can still need several
+  // pages because old rows are filtered locally, but never fetch the full
+  // corpus once the requested number of in-window rows has been reached.
+  const pageSize = Number.isFinite(rowBudget) ? Math.min(defaultPageSize, Math.max(1, rowBudget)) : defaultPageSize;
+  // Dice rate-limits request *rate*, not just concurrent queries. queryFanOut
+  // spaces different queries; this handles the equally important rapid page
+  // burst inside one query. Tests opt out with { interPageDelayMs: 0 }.
+  const requestedInterPageDelay = Number(options?.interPageDelayMs);
+  const interPageDelayMs = Number.isFinite(requestedInterPageDelay)
+    ? Math.max(0, Math.floor(requestedInterPageDelay))
+    : 350;
+  const baseParams = new URLSearchParams({
     q: query,
     countryCode2: 'US',
     radius: '30',
     radiusUnit: 'mi',
-    page: '1',
-    // Why the page size differs:
-    //  • No bucket → relevance sort interleaves stale postings and the in-window
-    //    fraction is small (probed: ~3-4% at 1 day, ~32% at 7 days), so we over-pull
-    //    a WIDE relevance-ranked page and keep only the in-window slice below —
-    //    volume is what guarantees a full cap of in-window matches.
-    //  • Bucket active → `filters.postedDate` (added below) makes the response
-    //    ~100% in-window, so the relevance ranking is already over in-window jobs.
-    //    400 all-in-window rows meet/exceed what the old 1000-row mixed page yielded
-    //    in-window (1000×0.32≈320 at the widest 7-day bucket) at ~2.5x less data —
-    //    no coverage regression in any mode (FAST caps to 10 downstream regardless;
-    //    FULL keeps everything, and 400 ≥ 320). pageSize is honored past this.
+    pageSize: String(pageSize),
+    // Default page sizing differs by date mode: a server bucket makes the
+    // relevance ranking almost entirely in-window, so its normal 400-row page
+    // is sufficient; without one, the relevance feed interleaves stale rows
+    // and uses 1000. A finite jobs-per-platform setting above intentionally
+    // overrides either default with a cap-sized request, avoiding a large page
+    // that the caller has already said it will not keep.
     sortBy: 'relevance', // explicit (= Dice's default) so an API default change can't silently flip us off relevance
-    pageSize: bucket ? '400' : '1000',
     ...(location ? { location } : {}),
     // Dice EXCLUDES remote postings by default (`meta.includeRemote` comes back
     // false, and flipping this took a live "Systems Architect" probe from 422 to
@@ -2847,145 +3003,136 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   // Coarse server-side date bound — only when the window exactly matches a bucket.
   // The client-side filterJobsByAge below still runs (a no-op when the bucket already
   // bounds, but it enforces the exact cutoff and stays correct for the non-bucket path).
-  if (bucket) params.append('filters.postedDate', bucket);
+  if (bucket) baseParams.append('filters.postedDate', bucket);
 
-  const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`;
-  let r;
-  for (let attempt = 0; attempt <= DICE_MAX_RETRIES; attempt++) {
+  const items = [];
+  const seen = new Set();
+  const stopReasons = [];
+  let providerRawTotal = null;
+  let warning = null;
+  let pagesFetched = 0;
+  let rawCorpusExhausted = false;
+  let truncated = false;
+  let stoppedByJobsLimit = false;
+  let stoppedByExplicitPageLimit = false;
+
+  for (let page = 1; page <= pageCeiling; page++) {
     if (signal?.aborted) throw new Error('Aborted');
-    if (attempt > 0) {
-      const delay = DICE_RETRY_DELAYS_MS[attempt - 1] ?? 4000;
-      logger.info(`[Dice API] Retry ${attempt}/${DICE_MAX_RETRIES} in ${delay}ms (last status: ${r?.status ?? '?'})`);
-      await new Promise(res => setTimeout(res, delay));
+    if (page > 1 && interPageDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, interPageDelayMs));
       if (signal?.aborted) throw new Error('Aborted');
     }
-    r = await safeApiFetch(url, {
-      headers: {
-        'User-Agent': getRandomUA(),
-        'x-api-key': getDiceApiKey(),
-        'Accept': 'application/json',
-      },
-      signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-    }, 'dice');
-    if (r.ok) break;
-    // When the key is confirmed stable, 500s are transient server errors —
-    // retrying with the same key won't help. Break immediately and let the
-    // stable-backoff handler below wait 3s, saving 7s of pointless retry delay.
-    if (r.status >= 500 && _diceKeyIsStable) break;
-    if (r.status >= 500 && attempt < DICE_MAX_RETRIES) continue; // retry on server errors
-    break; // non-5xx or retries exhausted — fall through to error handling
-  }
+    const params = new URLSearchParams(baseParams);
+    params.set('page', String(page));
+    const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`;
+    const r = await fetchDicePage(url, signal, options?.requestPage || null);
+    // safeApiFetch converts a user abort into a non-OK envelope. Preserve the
+    // caller's cancellation contract instead of laundering it into a source
+    // failure/truncation diagnostic.
+    if (signal?.aborted) throw new Error('Aborted');
+    if (!r?.ok) {
+      const status = Number.isFinite(Number(r?.status)) ? Number(r.status) : 0;
+      const evidence = status >= 500
+        ? `Dice API unavailable — returned HTTP ${r.status} on page ${page} after retry/recovery handling.`
+        : `Dice API returned ${status || 'an unknown transport error'} on page ${page} of the result walk.`;
+      warning ||= r?.warning || {
+        code: 'scrape-failed',
+        severity: pagesFetched ? 'warn' : 'block',
+        evidence,
+        suggestion: 'Retry this source — the Dice API may be temporarily unavailable.',
+      };
+      logger.warn(`[Dice API] ${warning.code}: ${warning.evidence || ''}`);
+      // A failed first page is also unproven coverage. Without this, fan-out
+      // could combine that failure with a clean sibling and misreport the
+      // source as exhausted.
+      truncated = true;
+      stopReasons.push({ page, stopReason: 'page-error' });
+      break;
+    }
+    pagesFetched++;
+    if (r.warning && !warning) warning = r.warning;
+    const data = r.json;
+    const jobs = Array.isArray(data?.data) ? data.data : [];
+    if (providerRawTotal == null) providerRawTotal = diceProviderTotal(data);
 
-  if (!r.ok) {
-    if (r.status >= 500) {
-      let retryKey;
-      if (_diceKeyIsStable) {
-        // Key has been confirmed unchanged this session — 500s are transient.
-        // Skip the bundle scan and just wait out the transient error.
-        logger.info('[Dice API] Key stable — skipping bundle scan, using 3s backoff for transient 500');
-        await new Promise(res => setTimeout(res, 3000));
-        retryKey = getDiceApiKey();
-      } else {
-        // First time (or key genuinely rotated): do the full bundle scan.
-        const oldKey = getDiceApiKey();
-        retryKey = await refreshDiceApiKey(signal);
-        if (retryKey) {
-          if (retryKey === oldKey) {
-            _diceKeyIsStable = true;
-            logger.info('[Dice API] Key unchanged after refresh — 500s are transient (not key rotation). Future 500s will skip bundle scan.');
-          } else {
-            logger.info('[Dice API] Key rotated — retrying with new key');
-          }
-        }
-      }
-      if (retryKey) {
-        logger.info('[Dice API] Retrying with refreshed key');
-        const retryR = await safeApiFetch(url, {
-          headers: {
-            'User-Agent': getRandomUA(),
-            'x-api-key': retryKey,
-            'Accept': 'application/json',
-          },
-          signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-        }, 'dice');
-        if (retryR.ok) {
-          r = retryR; // use the successful retry response going forward
-        } else {
-          const evidence = `Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempts + 1 key-refresh retry.`;
-          logger.warn(`[Dice API] ${evidence}`);
-          return { items: [], warning: { code: 'task-failed', severity: 'block', evidence } };
-        }
-      } else {
-        const evidence = `Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempt(s). Key refresh also failed — try again later.`;
-        logger.warn(`[Dice API] ${evidence}`);
-        return { items: [], warning: { code: 'task-failed', severity: 'block', evidence } };
-      }
-    } else {
-      if (r.warning) logger.warn(`[Dice API] ${r.warning.code}: ${r.warning.evidence}`);
-      else logger.warn(`[Dice API] Returned ${r.status}`);
-      return { items: [], warning: r.warning };
+    let pageNewRows = 0;
+    for (const raw of jobs) {
+      const mapped = mapDiceListing(raw);
+      const key = mapped._diceId || sourceJobKey(mapped);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pageNewRows++;
+      const inWindow = maxAgeDays ? filterJobsByAge([mapped], maxAgeDays).length > 0 : true;
+      if (inWindow && items.length < rowBudget) items.push(mapped);
+    }
+
+    // All of these prove the raw provider corpus is exhausted. For a
+    // client-side age filter that completion is carried by stopReasons, not by
+    // relabeling the app's filtered count as a provider-reported total.
+    if (jobs.length === 0) {
+      rawCorpusExhausted = true;
+      stopReasons.push({ page, stopReason: 'empty-page' });
+      break;
+    }
+    if (providerRawTotal != null && seen.size >= providerRawTotal) {
+      rawCorpusExhausted = true;
+      stopReasons.push({ page, stopReason: 'provider-total' });
+      break;
+    }
+    // A provider that repeats a page cannot establish corpus coverage. Stop
+    // rather than burn the page backstop, and label the output partial.
+    if (pageNewRows === 0) {
+      truncated = true;
+      stopReasons.push({ page, stopReason: 'no-new-rows' });
+      break;
+    }
+    if (jobs.length < pageSize) {
+      rawCorpusExhausted = true;
+      stopReasons.push({ page, stopReason: 'short-page' });
+      break;
+    }
+    if (items.length >= rowBudget) {
+      truncated = true;
+      stoppedByJobsLimit = true;
+      stopReasons.push({ page, stopReason: 'jobs-per-platform' });
+      break;
+    }
+    if (page === pageCeiling) {
+      truncated = true;
+      // The default 1,000-page ceiling is only a pathological-pager safety
+      // backstop. It must not masquerade as a user-configured page allowance.
+      stoppedByExplicitPageLimit = limits.pagesPerPlatform != null;
+      // Keep the two cases distinguishable after query fan-out. A source can
+      // have a finite Jobs cap as well as Pages; treating the default safety
+      // backstop as the same token as an explicit Pages setting would let the
+      // former be excused as a configured collection boundary.
+      stopReasons.push({ page, stopReason: stoppedByExplicitPageLimit ? 'pages-per-platform' : 'page-ceiling' });
     }
   }
 
-  const data = r.json;
-  const jobs = data?.data || [];
-
-  // Log the applied date bound so a bug report can confirm the server-side filter
-  // actually fired (HTTP-source request URLs aren't otherwise surfaced anywhere).
-  logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}" (${bucket ? `filters.postedDate=${bucket}, pageSize=400` : 'no date bucket → pageSize=1000 + client-side filter'})`);
-
-  // Dice's `salary` field is free text — often non-monetary prose like "Depends
-  // on Experience", "Competitive", or "Compensation information provided in the
-  // description". Keep only values that actually look like money (contain a
-  // digit) and aren't one of those known non-monetary phrases, so the renderer's
-  // salary parsing/buckets don't ingest garbage. Anything dropped renders as
-  // "Unspecified", which is correct.
-  const cleanDiceSalary = (raw) => {
-    const s = String(raw || '').trim();
-    if (!s || !/\d/.test(s)) return '';
-    if (/compensation information|depends on|provided in the desc|commensurate|competitive/i.test(s)) return '';
-    return s;
-  };
-  const mapped = jobs.map(job => {
-    // List API returns `summary` (short blurb) but rarely `description` (full HTML).
-    // Use summary as a placeholder — a second enrichment pass fetches full descriptions
-    // per-job via the detail endpoint after all queries are merged and deduped.
-    const descFromHtml = job.description
-      ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
-      : '';
-    const descText = descFromHtml || (job.summary || '').trim();
-    const snippetText = descText;
-    return {
-      title: job.title || '',
-      company: job.companyName || '',
-      location: job.jobLocation?.displayName || '',
-      salary: cleanDiceSalary(job.salary),
-      snippet: snippetText,
-      description: descText,
-      url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
-      posted: job.postedDate || '',
-      source: 'dice',
-      remote: job.workFromHomeAvailability === 'TRUE',
-      employmentType: job.employmentType || '',
-      easyApply: job.easyApply || false,
-      // Internal field — used by enrichDiceDescriptions(), stripped before returning
-      _diceId: job.guid || job.id || '',
-    };
-  });
-  const withDesc = mapped.filter(j => j.description).length;
-  logger.info(`[Dice API] ${mapped.length} jobs for "${query}", ${withDesc}/${mapped.length} have descriptions (pre-enrichment)`);
-  // Date-filter the wide relevance pull before central collection limiting so
-  // the returned rows are the most-relevant in-window jobs. The global pass is
-  // a no-op here, not a second policy; `gathered` remains the pre-limit count.
-  const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
-  // Dice has already searched and ranked these rows for `query`; preserve the
-  // complete in-window result set even when its title uses adjacent wording.
-  const items = inWindow;
+  const hasClientSideAgeFilter = Boolean(maxAgeDays) && !bucket;
+  // An unbucketed response total covers all ages. Even after a complete walk,
+  // the number of rows retained by our local date filter is application-
+  // measured, not provider-reported, so leave providerTotal null. Exhaustive
+  // stopReasons still preserve the proof that every raw page was reached.
+  const providerTotal = bucket || !hasClientSideAgeFilter ? providerRawTotal : null;
+  const withDesc = items.filter(job => job.description).length;
+  logger.info(`[Dice API] ${items.length} in-window jobs for "${query}" after ${pagesFetched}/${pageCeiling} page(s) (${bucket ? `filters.postedDate=${bucket}` : 'client-side date filter'}; ${rawCorpusExhausted ? 'exhausted' : 'truncated/unproven'})`);
+  logger.info(`[Dice API] ${withDesc}/${items.length} returned jobs have descriptions (pre-enrichment)`);
   return {
     items,
-    warning: r.warning,
-    gathered: inWindow.length,
-    providerGathered: inWindow.length,
+    warning,
+    gathered: items.length,
+    providerGathered: items.length,
+    providerTotal,
+    truncated,
+    stopReasons,
+    pagesFetched,
+    cap: stoppedByJobsLimit
+      ? { type: 'jobs-per-platform', limit: rowBudget }
+      : stoppedByExplicitPageLimit
+        ? { type: 'pages-per-platform', limit: limits.pagesPerPlatform }
+        : null,
     relevanceDropped: 0,
     relevanceRejected: [],
     relevanceTrace: [],

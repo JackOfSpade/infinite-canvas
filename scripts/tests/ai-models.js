@@ -1,4 +1,4 @@
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, inspectJobTaxonomyRoleIndexes, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, normalizeJobTaxonomyPlan, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, runBoundedJobTaxonomy, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, validateJobTaxonomyPlan, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, fetchDiceListings, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, inspectJobTaxonomyRoleIndexes, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, normalizeJobTaxonomyPlan, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, runBoundedJobTaxonomy, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, validateJobTaxonomyPlan, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
 import { isNonApiJobTask } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
@@ -17,6 +17,14 @@ export default [
         'per-cohort compensation assessment has the larger 12,288-token ceiling');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
         'a 15-job consolidated cohort no longer flattens at the former 8,192-token ceiling');
+      // The profile grows with the corpus the multi-file career drop merges, so
+      // its cap must too. The old flat 4096 truncated a large corpus mid-JSON,
+      // and the copy/paste transport has no cap-raise retry to recover it.
+      assert(taskMaxTokensFor('resume-parse', {}) === 4096
+        && taskMaxTokensFor('resume-parse', { promptLength: 6000 }) === 4608
+        && taskMaxTokensFor('resume-parse', { promptLength: 60000 }) === 11776
+        && taskMaxTokensFor('resume-parse', { promptLength: 5_000_000 }) === 12288,
+        'resume-parse scales its cap with the merged career corpus and stops at a bounded ceiling');
       return { scoringCap: taskMaxTokensFor('job-scoring', { itemCount: 100 }), compensationCap: taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) };
     },
   },
@@ -1530,6 +1538,207 @@ export default [
         assert(dicePostedBucket(bad) === null, `${String(bad)} → null`);
       }
       return { ok: true };
+    },
+  },
+{
+    name: 'Dice pager: walks all provider pages, dedupes overlaps, and reports a complete bucketed corpus',
+    run: async () => {
+      const requests = [];
+      const row = (id) => ({
+        id: `dice-${id}`,
+        title: `Engineer ${id}`,
+        companyName: 'Acme',
+        detailsPageUrl: `https://www.dice.com/job-detail/dice-${id}`,
+        postedDate: 'today',
+      });
+      // The production 7-day page size is 400. Page two deliberately repeats
+      // the final first-page listing: completion must use unique row coverage,
+      // not merely page-count arithmetic, and output must not contain it twice.
+      const first = Array.from({ length: 400 }, (_, index) => row(index + 1));
+      const pages = new Map([
+        [1, { data: first, meta: { totalHits: 401 } }],
+        [2, { data: [row(400), row(401)], meta: { totalHits: 401 } }],
+      ]);
+      const result = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async (url) => {
+          const parsed = new URL(url);
+          const page = Number(parsed.searchParams.get('page'));
+          requests.push({ page, pageSize: parsed.searchParams.get('pageSize'), bucket: parsed.searchParams.get('filters.postedDate') });
+          return { ok: true, status: 200, warning: null, json: pages.get(page) || { data: [], meta: { totalHits: 401 } } };
+        },
+      });
+      assert(requests.map(request => request.page).join(',') === '1,2', `pager should request pages 1 and 2 only, got ${JSON.stringify(requests)}`);
+      assert(requests.every(request => request.pageSize === '400' && request.bucket === 'SEVEN'), 'bucketed walk preserves the server date filter and its 400-row page size');
+      assert(result.items.length === 401 && new Set(result.items.map(job => job._diceId)).size === 401,
+        `overlapping pages must be deduped, got ${result.items.length} rows / ${new Set(result.items.map(job => job._diceId)).size} unique ids`);
+      assert(result.providerTotal === 401 && result.pagesFetched === 2 && !result.truncated && result.stopReasons.at(-1)?.stopReason === 'provider-total',
+        `a complete bucketed corpus must retain totalHits and say complete, got ${JSON.stringify({ providerTotal: result.providerTotal, pagesFetched: result.pagesFetched, truncated: result.truncated, stopReasons: result.stopReasons })}`);
+      return { requests: requests.length, items: result.items.length };
+    },
+  },
+{
+    name: 'Dice pager: provider-total fallbacks reject placeholder zero coercions',
+    run: async () => {
+      const row = (id) => ({
+        id: `dice-${id}`,
+        title: `Engineer ${id}`,
+        companyName: 'Acme',
+        detailsPageUrl: `https://www.dice.com/job-detail/dice-${id}`,
+        postedDate: 'today',
+      });
+      const fallback = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => ({
+          ok: true,
+          status: 200,
+          warning: null,
+          json: { data: [row(1), row(2)], meta: { totalHits: null, total: 2 } },
+        }),
+      });
+      assert(fallback.providerTotal === 2 && fallback.stopReasons.at(-1)?.stopReason === 'provider-total',
+        `null totalHits must not coerce to 0 or hide a later valid total, got ${JSON.stringify({ providerTotal: fallback.providerTotal, stopReasons: fallback.stopReasons })}`);
+
+      const unknown = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => ({
+          ok: true,
+          status: 200,
+          warning: null,
+          json: { data: [row(1)], meta: { totalHits: null, total: '', totalResults: false } },
+        }),
+      });
+      assert(unknown.providerTotal === null && unknown.stopReasons.at(-1)?.stopReason === 'short-page',
+        `all placeholder totals must remain unknown, got ${JSON.stringify({ providerTotal: unknown.providerTotal, stopReasons: unknown.stopReasons })}`);
+      return { fallbackTotal: fallback.providerTotal, unknownTotal: unknown.providerTotal };
+    },
+  },
+{
+    name: 'Dice pager: finite jobs cap stops early and never compares an all-age provider total to filtered rows',
+    run: async () => {
+      const requests = [];
+      const row = (id) => ({
+        id: `dice-${id}`,
+        title: `Engineer ${id}`,
+        companyName: 'Acme',
+        detailsPageUrl: `https://www.dice.com/job-detail/dice-${id}`,
+        postedDate: 'today',
+      });
+      const result = await fetchDiceListings('engineer', '', null, 21, {
+        jobsPerPlatform: 3,
+        pagesPerPlatform: 99,
+      }, {
+        interPageDelayMs: 0,
+        requestPage: async (url) => {
+          const parsed = new URL(url);
+          requests.push({ page: Number(parsed.searchParams.get('page')), pageSize: parsed.searchParams.get('pageSize') });
+          return { ok: true, status: 200, warning: null, json: { data: [row(1), row(2), row(3)], meta: { totalHits: 9 } } };
+        },
+      });
+      assert(requests.length === 1 && requests[0].page === 1 && requests[0].pageSize === '3',
+        `finite cap must issue one cap-sized request instead of walking the corpus, got ${JSON.stringify(requests)}`);
+      assert(result.items.length === 3 && result.truncated && result.providerTotal === null,
+        `unbucketed capped rows are partial, so raw total 9 must stay unproven/null; got ${JSON.stringify({ items: result.items.length, truncated: result.truncated, providerTotal: result.providerTotal })}`);
+      assert(result.stopReasons.at(-1)?.stopReason === 'jobs-per-platform',
+        `finite cap must be explicit in diagnostics, got ${JSON.stringify(result.stopReasons)}`);
+      assert(result.pagesFetched === 1 && result.cap?.type === 'jobs-per-platform' && result.cap.limit === 3,
+        `cap diagnostics must name the finite configured limit, got ${JSON.stringify({ pagesFetched: result.pagesFetched, cap: result.cap })}`);
+      return { requests: requests.length, items: result.items.length };
+    },
+  },
+{
+    name: 'Dice pager: a fully exhausted client-side age filter keeps provider totals unproven',
+    run: async () => {
+      const row = (id, posted) => ({
+        id: `dice-${id}`,
+        title: `Engineer ${id}`,
+        companyName: 'Acme',
+        detailsPageUrl: `https://www.dice.com/job-detail/dice-${id}`,
+        postedDate: posted,
+      });
+      const filtered = await fetchDiceListings('engineer', '', null, 21, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => ({
+          ok: true,
+          status: 200,
+          warning: null,
+          json: { data: [row(1, 'today'), row(2, '90 days ago')], meta: { totalHits: 2 } },
+        }),
+      });
+      assert(filtered.items.length === 1 && !filtered.truncated && filtered.providerTotal === null
+        && filtered.stopReasons.at(-1)?.stopReason === 'provider-total',
+      `a raw-complete but locally filtered walk must expose completion without inventing a provider total, got ${JSON.stringify({ items: filtered.items.length, truncated: filtered.truncated, providerTotal: filtered.providerTotal, stopReasons: filtered.stopReasons })}`);
+
+      const unfiltered = await fetchDiceListings('engineer', '', null, null, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => ({
+          ok: true,
+          status: 200,
+          warning: null,
+          json: { data: [row(1, 'today'), row(2, '90 days ago')], meta: { totalHits: 2 } },
+        }),
+      });
+      assert(unfiltered.items.length === 2 && unfiltered.providerTotal === 2 && !unfiltered.truncated,
+        `without a local age filter, the provider's raw total remains comparable, got ${JSON.stringify({ items: unfiltered.items.length, providerTotal: unfiltered.providerTotal, truncated: unfiltered.truncated })}`);
+      return { filteredItems: filtered.items.length, unfilteredTotal: unfiltered.providerTotal };
+    },
+  },
+{
+    name: 'Dice pager: a first-page transport failure is explicitly truncated and warned',
+    run: async () => {
+      let requests = 0;
+      const result = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => {
+          requests++;
+          // A non-5xx response avoids retry/key-refresh timing while exercising
+          // the exact no-warning envelope safeApiFetch can produce on transport
+          // failures and unusual proxy responses.
+          return { ok: false, status: 418, warning: null, json: null };
+        },
+      });
+      assert(requests === 1 && result.items.length === 0 && result.truncated
+        && result.stopReasons.length === 1 && result.stopReasons[0].page === 1 && result.stopReasons[0].stopReason === 'page-error',
+      `first-page failure must be marked partial with page-error, got ${JSON.stringify({ requests, items: result.items.length, truncated: result.truncated, stopReasons: result.stopReasons })}`);
+      assert(result.warning?.code === 'scrape-failed' && result.warning?.severity === 'block' && result.warning.evidence.includes('418'),
+        `first-page no-warning failure must get a safe blocking warning, got ${JSON.stringify(result.warning)}`);
+      return { requests, warning: result.warning.code };
+    },
+  },
+{
+    name: 'Dice pager: only an explicit page ceiling is reported as a configured cap',
+    run: async () => {
+      const row = (id) => ({
+        id: `dice-${id}`,
+        title: `Engineer ${id}`,
+        companyName: 'Acme',
+        detailsPageUrl: `https://www.dice.com/job-detail/dice-${id}`,
+        postedDate: 'today',
+      });
+      const fullPage = (offset) => Array.from({ length: 400 }, (_, index) => row(offset + index));
+      const explicit = await fetchDiceListings('engineer', '', null, 7, { pagesPerPlatform: 2 }, {
+        interPageDelayMs: 0,
+        requestPage: async (url) => {
+          const page = Number(new URL(url).searchParams.get('page'));
+          return { ok: true, status: 200, warning: null, json: { data: fullPage((page - 1) * 400), meta: { totalHits: 1_000 } } };
+        },
+      });
+      assert(explicit.truncated && explicit.pagesFetched === 2 && explicit.stopReasons.at(-1)?.stopReason === 'pages-per-platform'
+        && explicit.cap?.type === 'pages-per-platform' && explicit.cap.limit === 2,
+      `explicit page ceiling must be named as a cap, got ${JSON.stringify({ truncated: explicit.truncated, pagesFetched: explicit.pagesFetched, stopReasons: explicit.stopReasons, cap: explicit.cap })}`);
+
+      const defaultBackstop = await fetchDiceListings('engineer', '', null, 7, { pagesPerPlatform: null }, {
+        interPageDelayMs: 0,
+        requestPage: async (url) => {
+          const page = Number(new URL(url).searchParams.get('page'));
+          return { ok: true, status: 200, warning: null, json: page === 1
+            ? { data: fullPage(0), meta: {} }
+            : { data: [], meta: {} } };
+        },
+      });
+      assert(!defaultBackstop.truncated && defaultBackstop.pagesFetched === 2 && defaultBackstop.stopReasons.at(-1)?.stopReason === 'empty-page' && defaultBackstop.cap === null,
+        `unlimited pages must not invent a configured cap, got ${JSON.stringify({ truncated: defaultBackstop.truncated, pagesFetched: defaultBackstop.pagesFetched, stopReasons: defaultBackstop.stopReasons, cap: defaultBackstop.cap })}`);
+      return { explicitPages: explicit.pagesFetched, defaultPages: defaultBackstop.pagesFetched };
     },
   },
 {

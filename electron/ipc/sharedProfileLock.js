@@ -25,7 +25,10 @@
 // see asyncMutex.js for the FIFO + reentrancy-guard mechanics.
 import { createFifoLock } from './asyncMutex.js';
 
-const lock = createFifoLock({ name: 'sharedProfileLock' });
+// Browser work may sit behind a long-running visible login or scrape. Make
+// acquisition abort-aware so Reset/delete can remove a queued card before it
+// ever opens Chrome, while preserving the legacy one-argument call sites.
+const lock = createFifoLock({ name: 'sharedProfileLock', supportsAbort: true });
 
 /**
  * Run `fn` exclusively with respect to all other withSharedProfileLock callers,
@@ -38,8 +41,9 @@ const lock = createFifoLock({ name: 'sharedProfileLock' });
  *
  * @template T
  * @param {() => Promise<T> | T} fn
+ * @param {AbortSignal|null} [signal] - optional cancellation while queued
  * @returns {Promise<T>}
  */
-export function withSharedProfileLock(fn) {
-  return lock.withLock(fn);
+export function withSharedProfileLock(fn, signal = null) {
+  return lock.withLock(fn, signal);
 }

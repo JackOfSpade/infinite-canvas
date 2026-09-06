@@ -22,7 +22,7 @@ import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
-import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
+import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
@@ -788,7 +788,6 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
-const CLIPBOARD_BUG_REPORT_MAX_CHARS = 50_000;
 
 function buildMissingPreviewRelinkMarkdown() {
   const snapshot = getMissingPreviewRelinkDiagnostics();
@@ -824,7 +823,7 @@ ${rows}
 `;
 }
 
-function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted) {
+function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, sectionOmitted) {
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
@@ -847,41 +846,9 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
     // "omitted by filter code", not "no nodes".
     nodeDiagMarkdown = '\n## Node Diagnostics\n*(omitted by filter code — per-node positions/sizes/component state)*\n';
   } else if (nodeInternals && nodeInternals.length > 0) {
-    // Cap the routine nodes a hub spawns into its results cascade (jobcard +
-    // jobgroup) so a large board doesn't blow the clipboard char budget — at
-    // ~150-200 chars/row, a 739-card cascade is >150KB and forces the far more
-    // valuable main-process logs + pipeline funnel + event history (which render
-    // AFTER this table) to be dropped entirely. Crucially, a cascade spawns
-    // COLLAPSED, so every card/group is `hidden` by default — that is the normal
-    // tree state, NOT an anomaly, so `hidden` must NOT exempt a node from the cap
-    // (the old predicate did, which is why all 739 rendered). The score/url and
-    // band/salary/role breakdown are summarized in the Job Search Pipeline /
-    // Taxonomy sections; only a genuine anomaly (selected/editing/resizing/
-    // edge-cursor/error or an expanded hiring-fit disclosure) forces a row to
-    // always show.
-    // Only clipboard output needs sampling; Save to file is the promised full
-    // artifact and must retain every routine row as well as every anomaly.
-    const ROUTINE_JOBCARD_CAP = options?.maxChars ? 15 : Infinity;
-    const ROUTINE_JOBGROUP_CAP = options?.maxChars ? 25 : Infinity; // keep enough to convey the taxonomy shape
-    const hasAnomaly = (n) => {
-      const cs = compStateById[n.id] || {};
-      return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor
-        || cs.reasoningExpanded || cs.scoreAuditExpanded || cs.compensationExpanded
-        || nodeDataById[n.id]?.errorMessage);
-    };
-    let cardShown = 0, cardOmitted = 0, groupShown = 0, groupOmitted = 0;
-    const nodesToRender = [];
-    for (const n of nodeInternals) {
-      if (n.type === 'jobcard' && !hasAnomaly(n)) {
-        if (cardShown >= ROUTINE_JOBCARD_CAP) { cardOmitted++; continue; }
-        cardShown++;
-      } else if (n.type === 'jobgroup' && !hasAnomaly(n)) {
-        if (groupShown >= ROUTINE_JOBGROUP_CAP) { groupOmitted++; continue; }
-        groupShown++;
-      }
-      nodesToRender.push(n);
-    }
-    const rows = nodesToRender.map(n => {
+    // Copy and Save both retain every node row. A collapsed cascade is normal
+    // state, but its complete inventory is still evidence for a report.
+    const rows = nodeInternals.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
         n.hidden ? 'hidden' : null,
@@ -1183,8 +1150,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
 
 | ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | height (prop) | style.width | style.height | measured.width | measured.height | currentSize | state flags | data preview |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-${rows}
-${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
+${rows}`;
   }
   return nodeDiagMarkdown;
 }
@@ -1727,20 +1693,26 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 
 function buildRecentMainProcessLogLines() {
   let mainProcessLogLines = [];
-    const logs = (getRecentLogs(200) || []).filter(l => l.ts >= PROCESS_START_MS);
+    // Keep source order chronological through all collection work; the shared
+    // Markdown renderer reverses it at the last possible boundary. Sorting by
+    // the logger's numeric capture timestamp also prevents asynchronous writes
+    // from becoming an accidental chronology claim in the report.
+    const logs = (getRecentLogs(200) || [])
+      .filter(l => Number(l?.ts) >= PROCESS_START_MS)
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
     if (logs.length > 0) {
       mainProcessLogLines = logs.map(l => {
-        const t = new Date(l.ts).toISOString().slice(11, 23); // HH:MM:SS.mmm
+        const t = new Date(l.ts).toISOString(); // full ISO UTC, including date
         const lvl = l.level.toUpperCase().padEnd(5, ' ');
-        // Trim each line to a reasonable max so a single fat error doesn't
-        // blow the section past the JSON payload's byte budget. SITE_CHANGED /
+        // Trim each line to a reasonable max so a single fat error does not
+        // dominate the captured-log section. SITE_CHANGED /
         // [diag …] lines get a wider cap: the generic 500 was cutting the
         // card0=[…] class skeleton off mid-token — the one payload that lets a
         // stale-selector fix be written without re-fetching the live page (which
         // may itself be behind anti-bot walls). These lines are rare (a handful
         // of ERROR entries, not the whole 60-line buffer), so raising just their
-        // cap can't blow the section's overall byte budget the way raising the
-        // default for every retained line would.
+        // cap cannot dominate the section the way raising the default for every
+        // retained line would.
         // Logger messages can contain redirect/challenge URLs with OAuth,
         // Cloudflare, or tracking tokens. The path is useful diagnostic
         // evidence; query and fragment values are not safe to export.
@@ -1844,7 +1816,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
   return aiConfigMarkdown;
 }
 
-export function generateMarkdown(payload, reportWindowId = null, options = {}) {
+export function generateMarkdown(payload, reportWindowId = null) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
 
   // A filter code (e.g. LEAN) may have dropped whole sections before the payload
@@ -1905,7 +1877,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // (the exact kind of state a bug report is filed about), so it must never take
   // down every other section if one node's shape throws (e.g. a non-numeric
   // position/size field hitting `.toFixed`).
-  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted); }
+  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, sectionOmitted); }
   catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
 
   // ── Media player state section ────────────────────────────────────────────
@@ -2216,10 +2188,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit); }
   catch { /* never break the report on diagnostic failure */ }
 
-  // Its own top-level section, deliberately ordered BEFORE the (unbounded) Job
-  // Search Pipeline block. It used to be appended to that section's tail, where
-  // the clipboard cap's positional prefix cut made it the first casualty — and
-  // it is the only witness to the ORDER manual handoffs were issued in.
+  // Its own top-level section, deliberately ordered before the Job Search
+  // Pipeline block so the manual-handoff issue order is easy to find.
   // Gated like every other job section rather than always-on. JOBS is included
   // because the receipt used to ride inside the Job Search Pipeline section,
   // and a JOBS report must not silently lose it in the move. TAXONOMY also
@@ -2241,17 +2211,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // RECOVERY therefore read only the compact sidecar/snapshot metadata here.
   // This remains useful even when the live pipeline section self-gates to ''.
   let jobRecoveryMarkdown = '';
-  if (isFullReport || reportCodes.has('RECOVERY')) {
+  if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE')) {
     try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds); }
     catch { jobRecoveryMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Diagnostics', new Error('could not inspect recovery sidecars')); }
   }
 
   // Keep the completion verdict ahead of the long Job Search Pipeline section.
-  // A clipboard-capped FULL report cuts that section positionally, so its
-  // detailed Scoring/Taxonomy subsections cannot be the only proof that a run
-  // completed. This compact reconciliation deliberately carries only counts
-  // and status facts; the full evidence remains in the pipeline below and in
-  // the uncapped saved report.
+  // This compact reconciliation carries the summary counts and status facts;
+  // detailed evidence remains in the pipeline immediately below.
   let jobCompletionAssessmentMarkdown = '';
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
     const jobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
@@ -2280,10 +2247,9 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
 
-  // The Marketplace Status MODULE's own hub-scan results (data.platformStatus) —
-  // renders EARLY (before the unbounded node table) so it survives clipboard
-  // truncation. Self-gates to '' when no marketplacestatus node has results, so
-  // call it unconditionally (a module can exist on a canvas with no sell-hub nodes).
+  // The Marketplace Status MODULE's own hub-scan results (data.platformStatus).
+  // Self-gates to '' when no marketplacestatus node has results, so call it
+  // unconditionally (a module can exist on a canvas with no sell-hub nodes).
   let marketplaceModuleRollupMarkdown = '';
   try { marketplaceModuleRollupMarkdown = buildMarketplaceModuleRollup(nodes); }
   catch { /* never break the report on diagnostic failure */ }
@@ -2354,15 +2320,15 @@ ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMark
 `;
 
   const events = payload.eventLogs || [];
-  const includedEventLines = events.map(String);
-  const eventsMarkdown = buildFencedTextBlock(includedEventLines, '*(No events recorded)*');
+  // Renderer filtering happens before this point while EventLogger's ring is
+  // chronological, preserving filter context and "last N" semantics. At the
+  // export boundary, legacy/mocked unmarked rows receive a labelled timestamp
+  // and the shared block stamps any legacy/mocked unmarked row then renders
+  // the same chronological array newest-first.
+  const chronologicalEventLines = Array.isArray(events) ? events.map(String) : [];
+  const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
 
-  // Logs and the Event History heading live outside baseMarkdown so the
-  // clipboard path (enforceClipboardMarkdownCap) can trim them independently.
   const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + eventsMarkdown;
-  if (options?.maxChars) {
-    return enforceClipboardMarkdownCap(baseMarkdown, includedEventLines, mainProcessLogLines, options.maxChars);
-  }
   return { markdown: fullMarkdown, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
 }
 
@@ -2388,6 +2354,6 @@ export function registerBugReportHandlers() {
   // Return the report as a string so the renderer can copy it to the clipboard.
   // No file dialog, no disk I/O — just generate and return the markdown.
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
-    return generateMarkdown(payload, event.sender?.id ?? null, { maxChars: CLIPBOARD_BUG_REPORT_MAX_CHARS });
+    return generateMarkdown(payload, event.sender?.id ?? null);
   });
 }

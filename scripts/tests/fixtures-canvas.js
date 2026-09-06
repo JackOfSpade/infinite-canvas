@@ -519,11 +519,11 @@ export default [
 
       // "Recovered" must mean the throttle actually lifted, and a recovery must
       // hand a later, unrelated block a fresh budget.
-      assert(source.includes("const reBlocked = ['description-rate-limited', 'description-panel-http-error']")
-        && source.includes('if (detailResult.expandedCount > 0 && !detailResult.descError && !reBlocked) {')
+      assert(source.includes('if (didDetailBlockReprobeRecover(detailResult)) {')
+        && source.includes('return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;')
         && source.includes('sourceDetailReprobes = 0;')
         && source.includes('sourceDetailBlockPage = null;'),
-      'only a genuinely cleared throttle counts as recovered, and it resets the re-probe budget and the reported block page');
+      'only a genuinely cleared throttle counts as recovered (including confirmed unavailable rows), and it resets the re-probe budget and the reported block page');
 
       assert(source.includes('} else if (reprobeFailedThisPage && !sourceDetailBlockCode) {'),
         'a re-probe that fails with an unrecognised code still re-arms the block, so the next page cannot hammer a source we just watched fail');
@@ -534,7 +534,8 @@ export default [
       // "stale selectors" error out of an external rate limit.
       assert(source.includes('const DETAIL_BLOCK_PROBE_CARDS = 2;')
         && source.includes('const probeJobs = jobsToExpand.slice(0, DETAIL_BLOCK_PROBE_CARDS);')
-        && source.includes('...restJobs.map(job => ({ ...job, descriptionDeferredReason: reprobeOfCode })),'),
+        && source.includes('composeDetailBlockReprobeResult(probeResult, null, restJobs, reprobeOfCode)')
+        && source.includes('descriptionDeferredReason: reprobeOfCode,'),
       'a cooldown re-probe touches only a couple of cards and leaves the remainder deferred, instead of walking a whole page against a throttled endpoint');
       assert(DETAIL_BLOCK_PROBE_CARDS_VALUE < DESC_STALE_THRESHOLD_VALUE,
         `the probe size (${DETAIL_BLOCK_PROBE_CARDS_VALUE}) must stay below the consecutive-timeout abort threshold (${DESC_STALE_THRESHOLD_VALUE})`);
@@ -2235,11 +2236,12 @@ export default [
       // offered without both.
       assert(source.includes('const resumeRunActionable = canResumeOffer')
         && source.includes('resumeOffer?.nodeId === id')
-        && source.includes('info?.found && info?.resumable && info?.nodeId === id ? info : null')
-        && source.includes('if (resumeOffer?.nodeId !== id) return;')
+        && source.includes('(info?.nodeId === id || !info?.nodeId)')
+        && source.includes('const legacyUnknownOwner = !resumeOffer?.nodeId;')
+        && source.includes('discardUnknownOwnerJobRun')
         && source.includes('hasReusableCareerProfile')
         && source.includes('((resumeOffer?.queries?.length ?? 0) > 0)'),
-      'only the matching hub exposes or can discard a recovery, and its Resume button still requires a career profile and staged queries');
+      'only the matching hub can resume/discard a modern recovery; an owner-unknown legacy offer exposes a separate Start fresh-only path, and Resume still requires a career profile and staged queries');
       assert(source.includes('resumeRunId: offer.runId || null'),
         'the crash-resume IPC request carries the offered run token for backend ownership validation');
       assert(source.includes('{resumeRunActionable && <button'),
@@ -2362,7 +2364,7 @@ export default [
         && reset.includes('...retainedCareerData')
         && reset.includes('initialDropAcceptedRef.current = hasReusableCareerProfile')
         && reset.includes('const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null')
-        && reset.includes('discardJobRun?.({ canvasFilePath, runId: resetRunId })'),
+        && reset.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: resetRunId })'),
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
       // The presence checks above hold for either arm of the ternary; pin the
       // DIRECTION separately.
@@ -3498,6 +3500,45 @@ export default [
         && recovery.filteredLogs.some(line => line.includes('Resuming from saved scrape'))
         && recovery.sectionExclusions.has('nodes') && recovery.sectionExclusions.has('mediaState'),
       'Bug report code filtering: RECOVERY retains interrupted-job handoff/recovery evidence while omitting heavy canvas payloads');
+      const jobResolve = applyBugReportCode([
+        ...logs,
+        '[SellHub][sell-hub] queued swappa-sold resolve for active resolve drain',
+        'unrelated renderer event 1',
+        'unrelated renderer event 2',
+        'unrelated renderer event 3',
+        'unrelated renderer event 4',
+        '[Jobs][job-hub] User requested source resolve for google',
+        '[Jobs][job-hub] Opening resolve window for google: https://www.google.com/search',
+        '[IPC] Registered task for sender 7 node job-hub',
+        '[Jobs][job-hub] description-recovery-snapshot-stale: current saved snapshot belongs to a different hub',
+        '[Jobs][job-hub] description-recovery-not-ready: current run checkpoint is still being written',
+        '[JobSearch][job-hub] Pre-score description recovery checkpoint was not saved for run job-run-1: EIO',
+        '[Jobs][job-hub] Saved AI prompt snapshot to /tmp/job-search-analysis.json',
+        '[JobSearch][job-hub] Resolved google: received 0 item(s); replaced 0, accepted 0 after dedup',
+        '[JobSearch][job-hub] job-source-retry-start source=google',
+        '[Jobs][job-hub] resume-job-source cancelled for indeed',
+      ], {}, 'JOBRESOLVE');
+      assert(jobResolve.matchedCodes.includes('JOBRESOLVE')
+        && jobResolve.filteredLogs.some(line => line.includes('User requested source resolve for google'))
+        && jobResolve.filteredLogs.some(line => line.includes('Opening resolve window for google'))
+        && jobResolve.filteredLogs.some(line => line.includes('Registered task'))
+        && jobResolve.filteredLogs.some(line => line.includes('description-recovery-snapshot-stale'))
+        && jobResolve.filteredLogs.some(line => line.includes('description-recovery-not-ready'))
+        && jobResolve.filteredLogs.some(line => line.includes('Pre-score description recovery checkpoint was not saved'))
+        && jobResolve.filteredLogs.some(line => line.includes('Saved AI prompt snapshot'))
+        && jobResolve.filteredLogs.some(line => line.includes('Resolved google'))
+        && jobResolve.filteredLogs.some(line => line.includes('job-source-retry-start'))
+        && jobResolve.filteredLogs.some(line => line.includes('resume-job-source cancelled'))
+        && !jobResolve.filteredLogs.some(line => line.includes('queued swappa-sold resolve')),
+      'Bug report code filtering: JOBRESOLVE retains Job Search Solve/Continue lifecycle and excludes SellHub resolve noise');
+      assert(jobResolve.sectionExclusions.has('nodes')
+        && jobResolve.sectionExclusions.has('mediaState')
+        && jobResolve.sectionExclusions.has('sessionTraces')
+        && jobResolve.sectionExclusions.has('jobAuditDetail'),
+      'Bug report code filtering: JOBRESOLVE drops heavy canvas, media, session-trace, and per-job audit detail');
+      const reportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(reportSource.includes("isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE')"),
+        'Bug report code filtering: JOBRESOLVE directly includes durable Job Recovery Diagnostics without requiring RECOVERY');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 

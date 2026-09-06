@@ -1,4 +1,4 @@
-import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, completeRunWithReceipt, evaluateJobPreferences, fs, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, completeRunWithReceipt, evaluateJobPreferences, fs, getJobsTelemetry, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 
 export default [
   {
@@ -588,6 +588,58 @@ export default [
     },
   },
   {
+    name: 'job run staging: another hub cannot atomically replace an unfinished canvas run',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-hub-conflict-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        const first = await startRun(canvasPath, { runId: 'hub-a-run', startedAt: 1, nodeId: 'hub-a', sourceIds: ['indeed'] });
+        const [b, c] = await Promise.all([
+          startRun(canvasPath, { runId: 'hub-b-run', startedAt: 2, nodeId: 'hub-b', sourceIds: ['dice'] }),
+          startRun(canvasPath, { runId: 'hub-c-run', startedAt: 3, nodeId: 'hub-c', sourceIds: ['remoteok'] }),
+        ]);
+        const state = await readRunState(canvasPath, 4);
+        assert(first?.runId === 'hub-a-run'
+          && b?.conflict === true && b.ownerNodeId === 'hub-a'
+          && c?.conflict === true && c.ownerNodeId === 'hub-a'
+          && state?.manifest?.runId === 'hub-a-run' && state.manifest.inputs?.nodeId === 'hub-a',
+        'concurrent fresh starts from other hubs return a named conflict and leave the original manifest/staging owner untouched');
+        return { owner: state.manifest.inputs.nodeId };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: an unknown-owner legacy manifest is preserved until deliberately discarded',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-unknown-owner-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await fs.promises.writeFile(path.join(root, 'workspace.jobs-run.json'), JSON.stringify({
+          version: 1, runId: 'legacy-run', startedAt: 1, lastUpdated: 2,
+          stage: 'searching', inputs: {}, sources: { indeed: { status: 'pending', queries: {} } },
+        }), 'utf8');
+        await fs.promises.writeFile(path.join(root, 'workspace.jobs-staging.jsonl'), `${JSON.stringify({ sourceId: 'indeed', job: { title: 'Recover me' } })}\n`, 'utf8');
+        const attempted = await startRun(canvasPath, { runId: 'new-hub-run', startedAt: 3, nodeId: 'new-hub', sourceIds: ['google'] });
+        const state = await readRunState(canvasPath, 4);
+        const rows = await readStagedJobs(canvasPath);
+        assert(attempted?.conflict === true && attempted.ownerUnknown === true && attempted.ownerNodeId === null
+          && state?.manifest?.runId === 'legacy-run' && rows.length === 1,
+        'a tokened hub cannot overwrite a parseable legacy manifest whose owner is unknown; its staged rows remain available for an explicit legacy Start fresh action');
+        const deliberateLegacyClear = await clearRun(canvasPath, {
+          expectedRunId: 'legacy-run', expectedOwnerUnknown: true,
+        });
+        const next = await startRun(canvasPath, { runId: 'new-hub-run', startedAt: 5, nodeId: 'new-hub', sourceIds: ['google'] });
+        assert(deliberateLegacyClear === true && next?.runId === 'new-hub-run',
+          'the explicit owner-unknown discard is token-bound and clears only a manifest that still has no hub owner, restoring a safe Start fresh path');
+        return { runId: state.manifest.runId, rows: rows.length, legacyCleared: deliberateLegacyClear };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job run staging: a failed fresh start preserves the prior recoverable JSONL',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-rollback-'));
@@ -618,7 +670,7 @@ export default [
       assert(
         jobsSource.includes('if (canvasFilePath && !startedRun)')
           && jobsSource.includes('No job sources were queried and existing results were left unchanged.')
-          && jobsSource.includes("retirePipeline('staging-start-failed', error)"),
+          && jobsSource.includes('restoreJobsTelemetryIfCurrentRun(nodeId, activeRunId, priorJobsTelemetry);'),
         'search-jobs must reject a failed saved-canvas staging start before source collection can proceed',
       );
       return { failClosed: true };
@@ -642,6 +694,8 @@ export default [
           sources: {
             remoteok: {
               count: 0, providerGathered: 39, relevanceDropped: 39, sponsoredDropped: 3,
+              pagesWalked: 7,
+              cap: { type: 'jobs-per-platform', limit: 39, url: 'https://MUST NOT PERSIST.example' },
               stopReason: 'feed-exhausted',
               warning: { code: 'safe-code', severity: 'info', evidence: 'MUST NOT PERSIST' },
               revealOutcomes: [
@@ -662,6 +716,9 @@ export default [
         assert(receipt?.terminal?.outcome === 'zero' && receipt?.funnel?.raw === 39
           && receipt?.sources?.remoteok?.relevanceDropped === 39
           && receipt?.sources?.remoteok?.sponsoredDropped === 3
+          && receipt?.sources?.remoteok?.cap?.type === 'jobs-per-platform'
+          && receipt.sources.remoteok.cap.limit === 39
+          && receipt.sources.remoteok.pagesWalked === 7
           && receipt?.sources?.remoteok?.revealOutcomes?.length === 1
           && receipt.sources.remoteok.revealOutcomes[0].exit === 'end-of-list'
           && receipt.sources.remoteok.revealOutcomes[0].count === 39,
@@ -726,6 +783,185 @@ export default [
       assert(preferenceFiltered.terminal.outcome === 'preference-filtered',
         'completion receipts must preserve the Job Preferences all-filtered outcome');
       return { failed: built.terminal.outcome, intentionalSkip: sanitized.terminal.outcome, preferenceFiltered: preferenceFiltered.terminal.outcome };
+    },
+  },
+  {
+    name: 'job run staging: durable scoring receipt is run-scoped and redacted',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, search: telemetry.search, pipeline: telemetry.pipeline, scoring: telemetry.scoring };
+      try {
+        telemetry.nodeId = 'receipt-hub';
+        telemetry.search = {
+          runId: 'receipt-run', ts: 100, raw: 4, relevanceDropped: 0, deduped: 4,
+          ageDropped: 0, roleDropped: 0, historyDropped: 0, kept: 4,
+          bySource: {
+            dice: {
+              count: 188,
+              providerGathered: 190,
+              unavailableDetailDropped: 2,
+              pagesWalked: 4,
+            },
+            glassdoor: {
+              count: 7,
+              providerGathered: 7,
+              locationScopeUnenforced: true,
+            },
+          },
+        };
+        telemetry.pipeline = { runId: 'receipt-run', startedAt: 100 };
+        telemetry.scoring = {
+          runId: 'other-run', input: 91, selectedForScoring: 90, scored: 89,
+          placeholders: 88, unscored: 1, failedBatches: 7, cappedForBudget: 1,
+          providerCalls: 99, failureReason: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }],
+        };
+        const mismatch = sanitizeLastRunReceipt(buildJobRunCompletionReceipt('receipt-run', 200));
+        assert(!Object.hasOwn(mismatch, 'scoring'),
+          `completion must not borrow scoring from another run, got ${JSON.stringify(mismatch.scoring)}`);
+
+        const hostile = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          scoring: {
+            input: 4, selected: 3, scored: 3, placeholders: 1, unscored: 0, failedBatches: 1,
+            cappedForBudget: 1, providerCalls: 2, prompt: 'MUST NOT PERSIST',
+            failureReason: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }], url: 'https://MUST-NOT-PERSIST.example',
+          },
+        });
+        assert(JSON.stringify(hostile).includes('MUST NOT PERSIST') === false
+          && Object.keys(hostile.scoring).every(key => ['input', 'selected', 'scored', 'placeholders', 'unscored', 'failedBatches', 'cappedForBudget', 'providerCalls'].includes(key)),
+        `scoring sanitizer must whitelist aggregates only, got ${JSON.stringify(hostile.scoring)}`);
+        const absentCoverage = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          scoring: {},
+          sources: {
+            dice: { providerTotal: null, cap: { type: 'jobs-per-platform', limit: null } },
+            'dice-zero-cap': { cap: { type: 'pages-per-platform', limit: 0 } },
+            'dice-fraction-cap': { cap: { type: 'pages-per-platform', limit: 0.5 } },
+            'dice-boolean-cap': { cap: { type: 'pages-per-platform', limit: true } },
+          },
+        });
+        assert(!Object.hasOwn(absentCoverage, 'scoring')
+          && !Object.hasOwn(absentCoverage.sources.dice, 'providerTotal')
+          && !Object.hasOwn(absentCoverage.sources.dice, 'cap')
+          && !Object.hasOwn(absentCoverage.sources['dice-zero-cap'], 'cap')
+          && !Object.hasOwn(absentCoverage.sources['dice-fraction-cap'], 'cap')
+          && !Object.hasOwn(absentCoverage.sources['dice-boolean-cap'], 'cap'),
+        `null coverage/scoring values must stay absent, got ${JSON.stringify(absentCoverage)}`);
+        const pageCap = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          sources: { dice: { cap: { type: 'pages-per-platform', limit: 2, detail: 'MUST NOT PERSIST' } } },
+        });
+        assert(pageCap.sources.dice.cap?.type === 'pages-per-platform' && pageCap.sources.dice.cap.limit === 2
+          && !JSON.stringify(pageCap).includes('MUST NOT PERSIST'),
+        `safe page caps must survive receipt sanitization without details, got ${JSON.stringify(pageCap)}`);
+        const mixedStops = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          sources: {
+            dice: {
+              stopReason: 'provider-total/short-page/empty-page/end-of-results/jobs-per-platform/pages-per-platform/page-ceiling/another-safe-stop/overflow-stop',
+              caps: [{ type: 'jobs-per-platform', limit: 3 }, { type: 'pages-per-platform', limit: 2 }],
+            },
+          },
+        });
+        assert(mixedStops.sources.dice.stopReason === 'provider-total/short-page/empty-page/end-of-results/jobs-per-platform/pages-per-platform/page-ceiling/another-safe-stop'
+          && mixedStops.sources.dice.caps?.length === 2,
+        `long fan-out stop evidence must retain complete bounded tokens and both safe caps, got ${JSON.stringify(mixedStops.sources.dice)}`);
+
+        telemetry.scoring = {
+          ...telemetry.scoring,
+          runId: 'receipt-run', input: 4, selectedForScoring: 3, scored: 3,
+          placeholders: 1, unscored: 0, failedBatches: 1, cappedForBudget: 1, providerCalls: 2,
+        };
+        const matched = sanitizeLastRunReceipt(buildJobRunCompletionReceipt('receipt-run', 200));
+        const serialized = JSON.stringify(matched);
+        assert(matched.version >= 2 && matched.scoring?.input === 4 && matched.scoring.selected === 3
+          && matched.scoring.scored === 3 && matched.scoring.placeholders === 1
+          && matched.scoring.unscored === 0 && matched.scoring.failedBatches === 1
+          && matched.scoring.cappedForBudget === 1 && matched.scoring.providerCalls === 2
+          && matched.sources?.dice?.pagesWalked === 4
+          && matched.sources?.dice?.providerGathered === 190
+          && matched.sources?.dice?.unavailableDetailDropped === 2
+          && matched.sources?.glassdoor?.locationScopeUnenforced === true,
+          `matching scoring aggregates must survive sanitization, got ${serialized}`);
+        assert(!serialized.includes('MUST NOT PERSIST') && !('failureReason' in matched.scoring) && !('jobs' in matched.scoring),
+          `receipt scoring must remain aggregate-only, got ${serialized}`);
+        return { mismatchRejected: true, selected: matched.scoring.selected };
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
+  {
+    name: 'job run staging: API fan-out preserves pagination and finite-cap diagnostics',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const fanOutStart = source.indexOf('async function queryFanOut(');
+      const fanOutEnd = source.indexOf('\nasync function fetchHttpSources(', fanOutStart);
+      const fanOut = source.slice(fanOutStart, fanOutEnd);
+      const httpStart = fanOutEnd;
+      const httpEnd = source.indexOf('\n/**\n * Resolve only the board location.', httpStart);
+      const http = source.slice(httpStart, httpEnd);
+      const apiMergeStart = source.indexOf('for (const res of apiResults)');
+      const apiMergeEnd = source.indexOf('// Each API fetcher now returns', apiMergeStart);
+      const apiMerge = source.slice(apiMergeStart, apiMergeEnd);
+      const bySourceStart = source.indexOf('const bySource = {};');
+      const bySourceEnd = source.indexOf('// Per-source date-bound truth.', bySourceStart);
+      const bySource = source.slice(bySourceStart, bySourceEnd);
+      assert(fanOutStart >= 0 && fanOutEnd > fanOutStart
+        && fanOut.includes('const pagesFetched = results.reduce(')
+        && fanOut.includes('r?.providerTotal != null')
+        && fanOut.includes('Number(r.providerTotal) >= 0')
+        && fanOut.includes("['jobs-per-platform', 'pages-per-platform'].includes(value?.type)")
+        && fanOut.includes('Number(value.limit) > 0')
+        && fanOut.includes(".map(reason => (typeof reason === 'string' ? reason : reason?.stopReason))")
+        && fanOut.includes("warning: { code: 'query-error', severity: 'warn' }")
+        && fanOut.includes("stopReason: 'query-error'")
+        && fanOut.includes('const caps = [...new Map(')
+        && fanOut.includes('stopReasons, pagesFetched, cap, caps }'),
+      'query fan-out must aggregate Dice page counts and retain every finite extractor cap');
+      const completeProviderTotals = [401, null].every(value => (
+        value != null && value !== '' && Number.isFinite(Number(value))
+      ));
+      assert(!completeProviderTotals,
+        'one coverage-unproven query must prevent a fan-out provider total from being fabricated as zero');
+      assert(httpEnd > httpStart
+        && http.includes('const pagesFetched = Array.isArray(result) ? 0')
+        && http.includes('sourceCap, sourceCaps, pagesFetched, relevanceDropped'),
+      'HTTP wrapper must return fan-out page counts to the source-results merge');
+      assert(apiMergeStart >= 0 && apiMergeEnd > apiMergeStart
+        && apiMerge.includes('if (res.pagesFetched != null)')
+        && apiMerge.includes('sourceResults[res.sourceId].pagesWalked = Math.max(')
+        && apiMerge.includes('if (res.sourceCap && !sourceResults[res.sourceId].cap)')
+        && apiMerge.includes('if (Array.isArray(res.sourceCaps) && res.sourceCaps.length > 0)'),
+      'HTTP result merging must publish page/cap diagnostics into the per-source funnel');
+      assert(bySourceStart >= 0 && bySourceEnd > bySourceStart
+        && bySource.includes("['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(data.cap.type)")
+        && bySource.includes('Number(data.cap.limit) > 0')
+        && bySource.includes("data.stopReasons.add('jobs-per-platform')")
+        && bySource.includes('if (Array.isArray(data.caps))')
+        && bySource.includes('bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };'),
+      'by-source serialization must retain finite API caps and matching outer-cap stop evidence');
+      assert(source.includes('const diceEffectivePageSize = normalizedCollectionLimits.jobsPerPlatform == null')
+        && source.includes("' (limited by Jobs per platform)'")
+        && source.includes('server-side; ${dicePageSizeFact}'),
+      'Dice date-bound diagnostics must describe the cap-sized API request rather than always claiming the 400/1000 default');
+      return { fanOutPages: true, sourceCap: true };
+    },
+  },
+  {
+    name: 'job run staging: interrupted role-band work is not a market-cohort failure',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const partitionStart = source.indexOf('for (const roleCandidates of candidatesByRole.values())');
+      const lookupStart = source.indexOf('let roleBands;', partitionStart);
+      const preLookup = source.slice(partitionStart, lookupStart);
+      assert(partitionStart >= 0 && lookupStart > partitionStart
+        && preLookup.includes('roleBandInterruptedJobs += roleCandidates.length;')
+        && !preLookup.includes('failedCohorts++'),
+      'an abort before role-band grouping must count interrupted rows without inventing a failed market cohort');
+      assert(source.includes('roleBandInterruptedJobs,'),
+        'compensation telemetry must expose interrupted role-band rows to diagnostics');
+      return { roleBandInterrupted: true };
     },
   },
   {

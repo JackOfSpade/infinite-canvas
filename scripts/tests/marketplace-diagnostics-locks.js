@@ -754,6 +754,30 @@ export default [
       const errMsg = await withSharedProfileLock(async () => { throw new Error('boom'); }).catch(e => e.message);
       const recovered = await withSharedProfileLock(async () => 'recovered');
       assert(errMsg === 'boom' && recovered === 'recovered', 'queue survives a rejected critical section');
+
+      // A Reset/delete can abort a source card while it is queued behind a
+      // different browser operation. Its callback must never start (opening a
+      // login/window after the card disappeared) and its abandoned queue slot
+      // must still let the next live operation acquire normally.
+      let releaseHead;
+      const headGate = new Promise(resolve => { releaseHead = resolve; });
+      const head = withSharedProfileLock(() => headGate);
+      await Promise.resolve();
+      const controller = new AbortController();
+      let ranAborted = false;
+      const queued = withSharedProfileLock(() => { ranAborted = true; }, controller.signal);
+      controller.abort();
+      let timeoutId;
+      const earlyAbort = await Promise.race([
+        queued.then(() => 'resolved', error => error?.name),
+        new Promise(resolve => { timeoutId = setTimeout(() => resolve('timed-out'), 100); }),
+      ]);
+      clearTimeout(timeoutId);
+      const follower = withSharedProfileLock(async () => 'live-follower');
+      releaseHead();
+      assert(earlyAbort === 'AbortError' && ranAborted === false
+        && await head === undefined && await follower === 'live-follower',
+      `an aborted queued profile operation never starts and does not wedge its follower — got ${earlyAbort}`);
       return { ok: true, order: order.join(',') };
     },
   },

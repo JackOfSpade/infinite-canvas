@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { mergeSourceProgress } from '../utils/sourceProgress';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { createSourceProgressRunGuard, mergeSourceProgress } from '../utils/sourceProgress';
 
 /**
  * useSourceProgress — subscribe to per-source progress events from the
@@ -30,15 +30,17 @@ import { mergeSourceProgress } from '../utils/sourceProgress';
  *   lastActive  — the sourceId most recently emitted with status='searching'
  *   reset       — clears the map (e.g. before a fresh re-run)
  */
-export function useSourceProgress(subscribe, hubId) {
+export function useSourceProgress(subscribe, hubId, { tokenAware = false } = {}) {
   const [progress, setProgress] = useState({});
   const [lastActive, setLastActive] = useState(null);
+  const runGuardRef = useRef(createSourceProgressRunGuard());
 
   useEffect(() => {
     if (!subscribe) return undefined;
     const cleanup = subscribe((payload) => {
       const { nodeId, sourceId, status } = payload;
       if (nodeId && nodeId !== hubId) return; // multi-hub safety
+      if (tokenAware && !runGuardRef.current.accepts(payload?.jobRunId)) return;
       setProgress(prev => ({
         ...prev,
         [sourceId]: mergeSourceProgress(prev?.[sourceId], payload),
@@ -46,12 +48,13 @@ export function useSourceProgress(subscribe, hubId) {
       if (status === 'searching') setLastActive(sourceId);
     });
     return () => cleanup?.();
-  }, [subscribe, hubId]);
+  }, [subscribe, hubId, tokenAware]);
 
   const reset = useCallback(() => {
+    if (tokenAware) runGuardRef.current.retireActive();
     setProgress({});
     setLastActive(null);
-  }, []);
+  }, [tokenAware]);
 
   return { progress, lastActive, reset };
 }

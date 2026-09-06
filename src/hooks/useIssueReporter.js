@@ -323,23 +323,14 @@ export function useIssueReporter({
         if (res.success) {
           try {
             await navigator.clipboard.writeText(res.markdown);
-            const hardCapOmissions = [
-              'some static report content',
-              res.trimmedEventCount > 0 ? `${res.trimmedEventCount} older event line(s)` : null,
-              res.trimmedLogCount > 0 ? `${res.trimmedLogCount} older main-process log line(s)` : null,
-            ].filter(Boolean).join(', ');
             addToast({
               title: 'Bug Report Copied',
-              description: res.hardTruncated
-                ? `Report copied with ${hardCapOmissions} omitted. Save to file for the full report.`
-                : res.truncated
-                  ? 'Report copied with repeated or oldest timeline entries condensed to fit the clipboard cap. Save to file for the full report.'
-                  : 'Report copied to clipboard.',
+              description: 'Report copied to clipboard.',
               type: "success",
             });
           } catch (clipErr) {
             EventLogger.error('Clipboard failed:', clipErr);
-            addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy to clipboard automatically.', type: "warning" });
+            addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy it automatically. Use Save to File to keep the report.', type: "warning" });
           }
         } else {
           addToast({ title: 'Bug Report Failed', description: res.error || 'Could not generate the report.', type: "error" });

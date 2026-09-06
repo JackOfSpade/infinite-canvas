@@ -231,7 +231,52 @@ export default [
         && handoff.includes('Return only valid JSON matching this schema:')
         && handoff.includes('Do not use Markdown code fences or include commentary outside the JSON.'),
       'attachment instructions stay outside the copyable prompt while the exact structured-output contract remains');
+      // Two silent-corruption defences, both from an observed resume-parse
+      // handoff. The chat returned ~10 unrequested properties (billed against
+      // the stated output cap, which is what truncates a long reply on a
+      // transport with no cap-raise retry), and it rendered a bare file name in
+      // the JSON as an attachment card - which copies back as an empty string,
+      // leaving no trace for any validator to catch.
+      assert(handoff.includes('Emit exactly the properties named in the schema, at every nesting level, and nothing else.')
+        && handoff.includes('they spend the output budget above')
+        && handoff.includes('transferred by copying it as plain text')
+        && handoff.includes('no file attachments or file cards')
+        && handoff.includes("never write out an attached file's name"),
+      'the structured contract forbids both unrequested properties and chat-UI widgets that do not survive a plain-text copy');
       return { chars: handoff.length };
+    },
+  },
+  {
+    name: 'non-API AI: JSON-only response rules appear only when the task actually has a response schema',
+    run: () => {
+      // A free-text handoff has no JSON contract to constrain, so none of the
+      // structured rules may leak into it. The plain-text-copy warning rides
+      // inside the REQUIRED RESPONSE FORMAT block for that reason: it is worded
+      // as a rule about JSON values, not about prose answers.
+      const freeText = materializeNonApiPrompt({
+        prompt: 'SUMMARIZE THIS',
+        task: 'job-compensation-research',
+        maxOutputTokens: 2048,
+        requestKind: 'text',
+      });
+      assert(freeText.includes('Expected response format: free text')
+        && !freeText.includes('--- REQUIRED RESPONSE FORMAT ---')
+        && !freeText.includes('Emit exactly the properties named in the schema')
+        && !freeText.includes('no file attachments or file cards'),
+      'a schema-less handoff carries no structured-output rules');
+
+      const structured = materializeNonApiPrompt({
+        prompt: 'EXTRACT THIS',
+        task: 'resume-parse',
+        maxOutputTokens: 4096,
+        requestKind: 'structured-text',
+        responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+      });
+      assert(structured.includes('Expected response format: JSON')
+        && structured.includes('Emit exactly the properties named in the schema')
+        && structured.includes('no file attachments or file cards'),
+      'a schema-bearing handoff carries both rules');
+      return { freeText: freeText.length, structured: structured.length };
     },
   },
   {

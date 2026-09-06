@@ -4,9 +4,8 @@
  * Records semantic user actions as timestamped strings.
  * Used by the Bug Report feature to reconstruct reproduction steps.
  *
- * Memory safety: enforces a 500 KB ring buffer (~6,000 lines). File export
- * preserves that captured ring in full; clipboard export applies its own
- * character budget (see electron/ipc/bugReport.js).
+ * Memory safety: enforces a 500 KB ring buffer (~6,000 lines). Report exports
+ * preserve that captured ring in full; earlier process history is not restored.
  *
  * Also auto-captures JS errors and unhandled promise rejections so they
  * appear in the event timeline alongside user actions.
@@ -18,12 +17,35 @@ const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/
 // even a 1-hour heavy session generates <3,000 lines. 15 MB was 200× too large.
 
 // String#length counts UTF-16 code units, not UTF-8 bytes. Bug reports are
-// exported as UTF-8, so use the same unit for the in-memory ceiling and the
-// downstream file budget. Keep one encoder for the session because logging can
-// happen on hot paths such as ResizeObserver updates.
+// exported as UTF-8, so use the same unit for the in-memory ceiling and for
+// judging which captured entries dominate a report. Keep one encoder for the
+// session because logging can happen on hot paths such as ResizeObserver updates.
 const textEncoder = new TextEncoder();
 function utf8ByteLength(value) {
   return textEncoder.encode(String(value)).byteLength;
+}
+
+function padTimestampPart(value, width = 2) {
+  return String(value).padStart(width, '0');
+}
+
+// `Date#toISOString` is always UTC. Event history is most useful in the
+// reporter's wall-clock context, but must also remain unambiguous across a
+// midnight boundary or daylight-saving offset. Keep the ISO date/time and the
+// numeric local UTC offset together on every newly captured row.
+export function localIsoTimestampWithOffset(date = new Date()) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absoluteOffset / 60);
+  const offsetRemainderMinutes = absoluteOffset % 60;
+  return `${padTimestampPart(date.getFullYear(), 4)}-${padTimestampPart(date.getMonth() + 1)}-${padTimestampPart(date.getDate())}`
+    + `T${padTimestampPart(date.getHours())}:${padTimestampPart(date.getMinutes())}:${padTimestampPart(date.getSeconds())}.${padTimestampPart(date.getMilliseconds(), 3)}`
+    + `${offsetSign}${padTimestampPart(offsetHours)}:${padTimestampPart(offsetRemainderMinutes)}`;
+}
+
+export function formatEventLogEntry(message, date = new Date()) {
+  return `[${localIsoTimestampWithOffset(date)}] ${message}`;
 }
 
 /**
@@ -85,9 +107,6 @@ class EventLoggerSingleton {
    */
   log(message) {
     const now = new Date();
-    const hms = now.toLocaleTimeString('en-US', { hour12: false });
-    const ms  = String(now.getMilliseconds()).padStart(3, '0');
-    const timestamp = `${hms}.${ms}`;
 
     // Any other event ends an in-progress resize run (see logNodeResize).
     this._resizeRun = null;
@@ -106,7 +125,7 @@ class EventLoggerSingleton {
     this._lastMsg   = message;
     this._lastCount = 1;
 
-    const entry = `[${timestamp}] ${message}`;
+    const entry = formatEventLogEntry(message, now);
 
     this.logs.push(entry);
     this.currentBytes += utf8ByteLength(entry);
@@ -138,9 +157,8 @@ class EventLoggerSingleton {
    * React Flow's ResizeObserver reports content-driven auto-height one frame at
    * a time, so a single hub node settling from 139px to 100px wrote ~40 lines,
    * each differing by a pixel or two. The generic (×N) dedup above can't touch
-   * those — every message is unique — so they filled over half of a bug report's
-   * retained event budget and pushed 104 genuinely useful older events out of
-   * the clipboard export. The diagnostic signal is the SPAN ("it shrank 139→100
+   * those — every message is unique — so they can obscure genuinely useful older
+   * events in the bounded capture ring. The diagnostic signal is the SPAN ("it shrank 139→100
    * over 22 frames"), never the intermediate pixels.
    *
    * The line keeps the run's FIRST timestamp so it stays ordered against its

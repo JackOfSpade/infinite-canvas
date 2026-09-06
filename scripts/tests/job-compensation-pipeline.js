@@ -1,5 +1,6 @@
 import { assert, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationResearchFingerprint } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
+import { researchCompensationAssessments } from '../../electron/ipc/jobs.js';
 import {
   classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
@@ -50,6 +51,79 @@ export default [{
     assert(classifyCompensationFitEligibility(50, { minScore: COMPENSATION_MIN_FIT_SCORE }) === 'below-threshold',
       'with no sentinel configured, 50 is an ordinary below-threshold score');
     return { threshold: COMPENSATION_MIN_FIT_SCORE };
+  },
+}, {
+  name: 'Compensation skips fit-qualified jobs with no established experience before any role-band lookup',
+  run: async () => {
+    const progress = [];
+    const jobs = [
+      {
+        title: 'Senior Platform Engineer',
+        location: 'Toronto, Ontario, Canada',
+        salary: 'C$130,000 per year',
+        matchScore: 88,
+        compensationContext: { roleFamily: 'Platform Engineering', seniority: 'senior', employmentType: 'full-time' },
+        experienceAssessment: { categorySpecificExperience: [{ category: 'Platform', requiredMinimumYears: '', reportedYears: '' }] },
+      },
+      {
+        title: 'Product Designer',
+        location: 'Austin, Texas, USA',
+        salary: '$120,000 per year',
+        matchScore: 91,
+        compensationContext: { roleFamily: 'Product Design', seniority: 'senior', employmentType: 'full-time' },
+        experienceAssessment: { categorySpecificExperience: [] },
+      },
+    ];
+    const event = { sender: { isDestroyed: () => false, send: (_channel, payload) => progress.push(payload) } };
+
+    await researchCompensationAssessments(jobs, { event, nodeId: 'no-years-regression' });
+
+    assert(jobs.every(job => job.compensationAssessment?.reasonCode === 'experience_band_unavailable'),
+      'fit-qualified jobs with no established years must receive the explicit experience-band fallback');
+    assert(progress.at(-1)?.processed === jobs.length && progress.at(-1)?.total === jobs.length,
+      'each early no-years fallback must advance compensation progress exactly once');
+
+    // getJobsTelemetry is intentionally imported through test-dependencies,
+    // which shares the same already-loaded jobs.js module instance as the
+    // exported pipeline function above.
+    const { getJobsTelemetry } = await import('../test-dependencies.js');
+    const telemetry = getJobsTelemetry().compensation;
+    assert(telemetry?.eligible === 2 && telemetry?.skippedNoExperience === 2
+      && telemetry?.preResearchCandidates === 0 && telemetry?.cohorts === 0,
+    'no-years jobs must leave no candidate or final market cohort behind');
+    assert(telemetry?.roleBandLookups === 0 && telemetry?.roleBandResearches === 0
+      && telemetry?.roleBandCacheHits === 0 && telemetry?.roleBandFailures === 0,
+    'no-years jobs must not consult either a cached or a newly researched role-family ladder');
+    assert(telemetry?.skippedNoExperienceBand === 0 && telemetry?.failedCohorts === 0
+      && telemetry?.assessed === 0,
+    'the early no-years branch is distinct from a resolved ladder that cannot place an established number');
+    return { skipped: telemetry.skippedNoExperience, roleBandLookups: telemetry.roleBandLookups };
+  },
+}, {
+  name: 'Compensation early abort keeps role-band interruption distinct from failed lookup and market cohorts',
+  run: async () => {
+    const jobs = [{
+      title: 'Senior Platform Engineer',
+      location: 'Toronto, Ontario, Canada',
+      salary: 'C$130,000 per year',
+      matchScore: 88,
+      compensationContext: { roleFamily: 'Platform Engineering', seniority: 'senior', employmentType: 'full-time' },
+      experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 5 }] },
+    }];
+    await researchCompensationAssessments(jobs, {
+      nodeId: 'role-band-early-abort',
+      signal: { aborted: true },
+    });
+    const { getJobsTelemetry } = await import('../test-dependencies.js');
+    const telemetry = getJobsTelemetry().compensation;
+    assert(jobs[0].compensationAssessment?.reasonCode === 'research_interrupted',
+      'an already-aborted role-band candidate must receive the explicit interruption fallback');
+    assert(telemetry?.preResearchCandidates === 1 && telemetry.roleBandInterruptedJobs === 1
+      && telemetry.roleBandFailures === 0 && telemetry.roleBandFailureJobs === 0
+      && telemetry.marketCandidates === 0 && telemetry.cohorts === 0
+      && telemetry.failedCohorts === 0 && telemetry.marketCohortFailures === 0,
+    `pre-group interruption must not fabricate lookup/market failures, got ${JSON.stringify(telemetry)}`);
+    return { interrupted: telemetry.roleBandInterruptedJobs };
   },
 }, {
   name: 'Role-family band extraction permits honest empty evidence and retains only grounded URLs',

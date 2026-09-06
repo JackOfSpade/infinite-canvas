@@ -5,7 +5,7 @@ import { EDGE_STYLE, getNodesBounds } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
-import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardDeletedJobRuns } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { strokePoints } from '../utils/geometry';
 
@@ -25,6 +25,7 @@ export function useCanvasActions({
   resetStack,
   depth,
   isAnimatingRef,
+  canvasFilePath = null,
 }) {
   const { getNodes, getEdges, setEdges: rfSetEdges, getViewport } = useReactFlow();
 
@@ -249,6 +250,17 @@ export function useCanvasActions({
     if (window.electronAPI?.cancelNodeTask) {
       cancelNodeTasksRecursively(allNodes, lockedIds);
     }
+    // Programmatic node-array replacement does not pass through React Flow's
+    // onNodesDelete callback. Retire paused/checkpointing Job Search runs here
+    // as the equivalent deletion boundary, using the file path captured before
+    // root Clear Canvas turns the workspace into an untitled canvas.
+    discardDeletedJobRuns(
+      allNodes.filter(node => !lockedIds.has(node.id)),
+      canvasFilePath,
+      (error, discard) => EventLogger.error(
+        `[JobSearch][${discard.nodeId}] Failed to discard cleared hub run ${discard.runId}:`, error,
+      ),
+    );
     // Local AI handoffs outlive their disposable result cards. Clearing the
     // canvas removes the display but does not erase a writer's in-progress
     // files; exact prior handoffs are cleaned only by successful regeneration.
@@ -258,7 +270,7 @@ export function useCanvasActions({
       (e) => lockedIds.has(e.source) && lockedIds.has(e.target)
     ));
     setDrawings([]);
-  }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
+  }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, canvasFilePath]);
 
   const clearCanvas = useCallback(() => {
     if (requestClearConfirm) {

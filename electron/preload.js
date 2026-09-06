@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   peekJobRun:     (args) => ipcRenderer.invoke('peek-job-run', args),
   completeJobRun: (args) => ipcRenderer.invoke('complete-job-run', args),
   discardJobRun:  (args) => ipcRenderer.invoke('discard-job-run', args),
+  discardUnknownOwnerJobRun: (args) => ipcRenderer.invoke('discard-unknown-owner-job-run', args),
   pollJobBatch:    (args) => ipcRenderer.invoke('poll-job-batch', args),
   discardJobBatch: (args) => ipcRenderer.invoke('discard-job-batch', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),

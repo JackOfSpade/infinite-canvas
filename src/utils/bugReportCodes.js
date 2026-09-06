@@ -247,19 +247,19 @@ export const CODE_DEFINITIONS = {
 
   XNODES: {
     label: 'Exclude Node Diagnostics',
-    description: 'Omit the per-node Node Diagnostics table (positions/sizes/component state). On a canvas with many nodes this table can dwarf the whole clipboard budget and crowd out the logs + event timeline; node COUNTS and every pipeline/session section are kept. Combine with FULL (e.g. "FULL+XNODES") to get everything except the heavy node table.',
+    description: 'Omit the per-node Node Diagnostics table (positions/sizes/component state). Node COUNTS and every pipeline/session section are kept. Combine with FULL (e.g. "FULL+XNODES") to get everything except the heavy node table.',
     excludeSections: ['nodeInternals', 'nodeComponentStates'],
   },
 
   XSESS: {
     label: 'Exclude Session Verify Traces',
-    description: 'Omit the verbose per-platform "Last verify trace" blocks (target/final URL + bodyHead HTML dumps) under Marketplace/Job Platform Sessions. The compact session summary tables (connected? / last reason) are kept. Use to fit a marketplace/job report under the clipboard cap without losing its logs.',
+    description: 'Omit the verbose per-platform "Last verify trace" blocks (target/final URL + bodyHead HTML dumps) under Marketplace/Job Platform Sessions. The compact session summary tables (connected? / last reason) are kept.',
     excludeSections: ['sessionTraces'],
   },
 
   XJOBAUDIT: {
     label: 'Exclude Job Pipeline Detail Audits',
-    description: 'Omit the heavy per-job audit prose inside the Job Search Pipeline section — the taxonomy salary-placement audit (one multi-line entry per job), the bounded scoring-evidence rows (long quoted reasons), the all-source role-relevance audit (one row per job), the Glassdoor location→locId cache dump, and the deferred-listing samples. The funnel numbers, stop reasons, warnings, and per-source outcomes in that same section are NOT affected — only the bulky per-job/per-location enumeration collapses to a one-line marker. Use this (not XNODES/XSESS) when a job-search report keeps hitting the clipboard cap on this content specifically; no other code can trim it.',
+    description: 'Omit the heavy per-job audit prose inside the Job Search Pipeline section — the taxonomy salary-placement audit (one multi-line entry per job), the bounded scoring-evidence rows (long quoted reasons), the all-source role-relevance audit (one row per job), the Glassdoor location→locId cache dump, and the deferred-listing samples. The funnel numbers, stop reasons, warnings, and per-source outcomes in that same section are NOT affected — only the bulky per-job/per-location enumeration collapses to a one-line marker. Use this (not XNODES/XSESS) when that detail is not relevant to the issue.',
     excludeSections: ['jobAuditDetail'],
   },
 
@@ -319,6 +319,14 @@ export const CODE_DEFINITIONS = {
     logFilter: line =>
       /\[JobSearch\]|\[Jobs\]|job.?run|jobs?.(?:staging|run)|saved (?:AI prompt|scrape)|resume(?:d|ing)? (?:job|saved|search)|manual ai|non-api-ai|copy\/?paste|cancel.?node.?task/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  JOBRESOLVE: {
+    label: 'Job Source Solve & Continue',
+    description: 'Job Search source-card Solve/Continue/retry audit — the visible resolver launch, current-run description-recovery snapshot ownership/readiness, per-source progress, returned-item merge, and relevant task lifecycle. Use when a Job Search source card says Solve/Continue did nothing, reopened repeatedly, or reports that its recovery snapshot belongs to another hub/run. Keeps the compact job pipeline/recovery evidence while dropping heavy canvas, media, session-trace, and per-job audit detail. This is separate from the SellHub-only RESOLVE code.',
+    logFilter: line =>
+      /\[JobSearch\].*(?:\bResolved\b|source[- ]?(?:retry|resolved|progress)|(?:pre[- ]score )?description[- ]recovery|recovery checkpoint|\b(?:Solve|Continue|retry|cancel(?:led)?)\b)|\[JobSource\].*(?:\bResolve\b|\bContinue\b|queue cancelled)|\[Jobs\].*(?:requested source resolve|opening resolve(?: window)?|resolve-job-source|resume-job-source|description[- ]recovery(?:-snapshot)?|recovery snapshot|Saved AI prompt snapshot|source[- ]?progress|\b(?:Solve|Continue|retry|cancel(?:led)?)\b)|\b(?:resolve-job-source|resume-job-source|job-source-(?:retry-start|resolved|progress)|description[- ]recovery-(?:snapshot-(?:stale|unavailable)|not-ready)|current[- ]run (?:recovery )?snapshot|User (?:requested source resolve|opening resolve)|Registered task|cancel[- ]node[- ]task)\b/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
   },
 
   MARKET: {

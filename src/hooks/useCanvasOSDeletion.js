@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardDeletedJobRuns } from '../utils/canvasInteractions';
 
 /**
  * Recursively collects OS file/folder paths from a node tree, for the "also move
@@ -48,20 +48,33 @@ function extractPaths(nodes, pathsToDelete) {
   });
 }
 
-export function useCanvasOSDeletion({ requestConfirm, undo }) {
+export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = null }) {
   const onNodesDelete = useCallback((deletedNodes) => {
-    // Cancel any active background tasks for these nodes (including nested nodes)
-    if (window.electronAPI?.cancelNodeTask) {
-      cancelNodeTasksRecursively(deletedNodes);
-    }
-    // Job cards are disposable result-display nodes. Deleting a card, clearing
-    // a Job Board, or replacing a board cascade must not cancel the independent
-    // Local AI writer session represented by that card. A later successful
-    // regeneration cleans only the exact terminal handoff it replaces.
-
     const pathsToDelete = new Set();
     extractPaths(deletedNodes, pathsToDelete);
     const osPaths = Array.from(pathsToDelete);
+
+    // Commit all background lifecycle cleanup at the same boundary as the
+    // canvas deletion. When the OS-file prompt is present its X/Escape/backdrop
+    // path calls undo(), so cancelling/retiring before that choice would restore
+    // a paused Job Search hub after already deleting its recovery data.
+    const finalizeNodeDeletion = () => {
+      if (window.electronAPI?.cancelNodeTask) {
+        cancelNodeTasksRecursively(deletedNodes);
+      }
+      // A paused Job Search has no active IPC for cancelNodeTask to unwind.
+      // Retire its exact durable run explicitly or its canvas-global manifest
+      // will keep every surviving hub locked behind an owner that no longer
+      // exists. Use the deleted node snapshot (not component unmount) so
+      // navigating between nested canvases never discards legitimate work.
+      discardDeletedJobRuns(deletedNodes, canvasFilePath, (error, discard) => {
+        EventLogger.error(`[JobSearch][${discard.nodeId}] Failed to discard deleted hub run ${discard.runId}:`, error);
+      });
+      // Job cards are disposable result-display nodes. Deleting a card, clearing
+      // a Job Board, or replacing a board cascade must not cancel the independent
+      // Local AI writer session represented by that card. A later successful
+      // regeneration cleans only the exact terminal handoff it replaces.
+    };
 
     if (osPaths.length > 0 && window.electronAPI) {
       requestConfirm({
@@ -71,6 +84,7 @@ export function useCanvasOSDeletion({ requestConfirm, undo }) {
         cancelLabel: 'Keep OS File',
         variant: 'warning',
         onConfirm: async () => {
+          finalizeNodeDeletion();
           for (const path of osPaths) {
             // Proceed with OS deletion even if unmounted because user confirmed
             try {
@@ -80,6 +94,9 @@ export function useCanvasOSDeletion({ requestConfirm, undo }) {
             }
           }
         },
+        // Declining disk deletion still commits the already-applied canvas
+        // deletion, so retire its tasks and exact recovery ownership too.
+        onCancel: finalizeNodeDeletion,
         // X-in-the-corner: roll the canvas back so the nodes that triggered
         // this dialog reappear. ReactFlow has already pushed the deletion
         // onto the undo stack by the time onNodesDelete fires, so one undo()
@@ -87,8 +104,10 @@ export function useCanvasOSDeletion({ requestConfirm, undo }) {
         // (we only trash on Confirm), so nothing to clean up on disk.
         onAbort: undo ? () => undo() : undefined,
       });
+    } else {
+      finalizeNodeDeletion();
     }
-  }, [requestConfirm, undo]);
+  }, [requestConfirm, undo, canvasFilePath]);
 
   return { onNodesDelete };
 }

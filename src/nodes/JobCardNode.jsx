@@ -503,6 +503,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         resumePdfPath: local.resumePdfPath,
         coverLetterPdfPath: local.coverLetterPdfPath,
         jobListingPath: local.jobListingPath,
+        generationAuditPath: local.generationAuditPath,
         workDir: local.workDir,
         company: local.company,
         candidateName: local.candidateName,

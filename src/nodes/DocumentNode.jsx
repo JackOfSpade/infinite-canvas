@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useReactFlow, NodeResizer } from '@xyflow/react';
 import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { renderMarkdown } from '../utils/markdownRenderer';
@@ -13,6 +13,18 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 /** Human-readable labels for HTMLMediaElement.error.code values. */
 const MEDIA_ERROR_LABELS = { 1: 'Aborted', 2: 'Network error', 3: 'Decode error', 4: 'Not supported' };
+
+const MARKDOWN_DEFAULT_WIDTH = 720;
+const MARKDOWN_DEFAULT_HEIGHT = 400;
+const MARKDOWN_MIN_WIDTH = 560;
+const MARKDOWN_MIN_HEIGHT = 180;
+
+const toPixelNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return NaN;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+};
 
 // ── Shared sub-components ──────────────────────────────────────────────────────
 
@@ -280,7 +292,7 @@ const STATUS_INDICATORS = {
   clean: { color: 'bg-white/25', pulse: false, label: 'Saved' },
 };
 
-const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirty }) {
+const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirty, className = 'absolute top-1.5 right-6 z-20 pointer-events-none' }) {
   let key = 'clean';
   if (saveStatus === 'saving') key = 'saving';
   else if (saveStatus === 'saved') key = 'saved';
@@ -289,7 +301,7 @@ const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirt
   const { color, pulse, label } = STATUS_INDICATORS[key];
   return (
     <div
-      className="absolute top-1.5 right-6 z-20 pointer-events-none"
+      className={className}
       title={label}
       aria-label={label}
     >
@@ -303,7 +315,7 @@ const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirt
 /**
  * Editable text/markdown preview.
  * .txt  -> always shows a textarea
- * .md   -> Preview / Edit tabs; double-click preview to enter edit mode
+ * .md   -> always shows the editor and live preview side by side
  * Auto-saves to disk via electronAPI.writeTextFile with debounce.
  */
 const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, onFileChanged, initialFontSize, onFontSizeChange }) {
@@ -332,7 +344,6 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
   // ── Edit state ─────────────────────────────────────────────────────
   // draftContent: what's currently in the textarea (may differ from diskContent)
   const [draftContent, setDraftContent] = useState(null);  // null until first disk load
-  const [isMdPreviewMode, setIsMdPreviewMode] = useState(true);  // .md starts in preview
   const [saveStatus, setSaveStatus] = useState('idle'); // 'idle'|'saving'|'saved'|'error'
   const [externalChange, setExternalChange] = useState(false); // disk changed while editing
   const [fontSize, setFontSizeLocal] = useState(initialFontSize || 12);
@@ -706,13 +717,19 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
   // The visual dot is rendered absolutely (see <StatusIndicator />) so it never
   // affects flow layout — only `isDirty` is computed here.
   const isDirty = draftContent !== null && draftContent !== diskState.content;
+  const deferredPreviewSource = useDeferredValue(draftContent);
+  const renderedMarkdown = React.useMemo(() => renderMarkdown(deferredPreviewSource), [deferredPreviewSource]);
 
   // ── Shared textarea props ────────────────────────────────────────────────
-  const textareaClass =
-    'nodrag nowheel flex-1 w-full h-full resize-none rounded-md bg-black/20 border border-white/5 ' +
-    'shadow-inner p-3 text-white/85 font-mono leading-relaxed outline-none ' +
-    'focus:border-sky-500/40 focus:bg-black/30 transition-colors ' +
+  const textareaBaseClass =
+    'nodrag nowheel min-h-0 flex-1 w-full resize-none p-3 text-white/85 font-mono leading-relaxed outline-none transition-colors ';
+  const textareaStateClass =
     (isLocked ? 'cursor-not-allowed opacity-60' : 'cursor-text');
+  const textareaClass =
+    `${textareaBaseClass}rounded-md bg-black/20 border border-white/5 shadow-inner ` +
+    `focus:border-sky-500/40 focus:bg-black/30 ${textareaStateClass}`;
+  const markdownTextareaClass =
+    `${textareaBaseClass}border border-white/10 bg-black/10 rounded-md focus:border-sky-500/40 focus:bg-black/20 ${textareaStateClass}`;
 
   const ZoomControls = (
     <div className="absolute bottom-3 right-5 flex items-center gap-1.5 bg-black/40 backdrop-blur-md rounded px-1.5 py-1 border border-white/10 z-20">
@@ -782,61 +799,56 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
     );
   }
 
-  // ── .md — Preview / Edit tabs ────────────────────────────────────────────
+  // ── .md — persistent editor + live preview ──────────────────────────────
   return (
     <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
       {ExternalChangeBanner}
 
-      {/* Tab row */}
-      <div className="flex items-center gap-0.5 px-1 pt-1 pb-0 shrink-0">
-        <button
-          onClick={() => setIsMdPreviewMode(true)}
-          onPointerDown={(e) => e.stopPropagation()}
-          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${isMdPreviewMode
-            ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
-            : 'text-white/40 hover:text-white/60'
-            }`}
+      <div className="flex flex-1 min-h-0 w-full gap-1.5 pt-1 overflow-hidden">
+        <section
+          className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner"
+          aria-label={`Markdown editor for ${filename}`}
         >
-          Preview
-        </button>
-        <button
-          onClick={() => setIsMdPreviewMode(false)}
-          onPointerDown={(e) => e.stopPropagation()}
-          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${!isMdPreviewMode
-            ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
-            : 'text-white/40 hover:text-white/60'
-            }`}
-        >
-          Edit
-        </button>
-      </div>
+          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">
+            Edit
+          </div>
+          <textarea
+            className={markdownTextareaClass}
+            style={{ fontSize: `${fontSize}px` }}
+            value={draftContent}
+            onChange={handleChange}
+            readOnly={isLocked}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onWheel={handleWheel}
+            spellCheck={false}
+            autoFocus={!isLocked}
+            aria-label={`Edit ${filename}`}
+          />
+          <StatusIndicator
+            saveStatus={saveStatus}
+            isDirty={isDirty}
+            className="absolute top-2 right-3 z-20 pointer-events-none"
+          />
+        </section>
 
-      {/* Content */}
-      {isMdPreviewMode ? (
-        <div
-          className="nodrag nowheel flex-1 w-full h-full overflow-auto rounded-md bg-black/20 border border-white/5 shadow-inner p-3 text-preview-md"
-          style={{ fontSize: `${fontSize}px` }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => { e.stopPropagation(); setIsMdPreviewMode(false); }}
-          onWheel={handleWheel}
-          title="Double-click to edit"
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(draftContent) }}
-        />
-      ) : (
-        <textarea
-          className={textareaClass}
-          style={{ fontSize: `${fontSize}px` }}
-          value={draftContent}
-          onChange={handleChange}
-          readOnly={isLocked}
-          onPointerDown={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-          onWheel={handleWheel}
-          spellCheck={false}
-          autoFocus
-        />
-      )}
-      <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} />
+        <section
+          className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner"
+          aria-label={`Markdown preview for ${filename}`}
+        >
+          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">
+            Preview
+          </div>
+          <div
+            className="nodrag nowheel min-h-0 flex-1 w-full overflow-auto p-3 text-preview-md"
+            style={{ fontSize: `${fontSize}px` }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onWheel={handleWheel}
+            dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
+          />
+        </section>
+      </div>
       {ZoomControls}
     </div>
   );
@@ -875,6 +887,7 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   const isVideo = category === 'video';
   const isAudio = category === 'audio';
   const isText = category === 'text';   // .md / .txt — expandable text preview
+  const isMarkdown = isText && String(data.filename || data.filePath || '').toLowerCase().endsWith('.md');
   const isMedia = isVideo || isAudio;    // has an HTMLMediaElement
   const isExpandable = isMedia || isText; // can enter the expanded-preview state
 
@@ -932,32 +945,49 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
     }
     setNodes((nds) => nds.map((n) => {
       if (n.id !== id) return n;
+      const measuredWidth = toPixelNumber(n.width) || toPixelNumber(n.style?.width);
+      const measuredHeight = toPixelNumber(n.height) || toPixelNumber(n.style?.height);
       return {
         ...n,
         width: undefined, height: undefined,
         style: { ...n?.style, width: undefined, height: undefined },
-        data: { ...n.data, isExpanded: false, expandedWidth: n.width, expandedHeight: n.height },
+        data: {
+          ...n.data,
+          isExpanded: false,
+          expandedWidth: isMarkdown
+            ? Math.max(measuredWidth || MARKDOWN_DEFAULT_WIDTH, MARKDOWN_MIN_WIDTH)
+            : n.width,
+          expandedHeight: isMarkdown
+            ? Math.max(measuredHeight || MARKDOWN_DEFAULT_HEIGHT, MARKDOWN_MIN_HEIGHT)
+            : n.height,
+        },
       };
     }));
-  }, [id, setNodes]);
+  }, [id, isMarkdown, setNodes]);
 
   const handleExpand = useCallback((e) => {
     e.stopPropagation();
     setNodes((nds) => nds.map((n) => {
       if (n.id !== id) return n;
+      const expandedWidth = isMarkdown
+        ? Math.max(toPixelNumber(n.data.expandedWidth) || MARKDOWN_DEFAULT_WIDTH, MARKDOWN_MIN_WIDTH)
+        : n.data.expandedWidth || n.width;
+      const expandedHeight = isMarkdown
+        ? Math.max(toPixelNumber(n.data.expandedHeight) || MARKDOWN_DEFAULT_HEIGHT, MARKDOWN_MIN_HEIGHT)
+        : n.data.expandedHeight || n.height;
       return {
         ...n,
-        width: n.data.expandedWidth || n.width,
-        height: n.data.expandedHeight || n.height,
+        width: expandedWidth,
+        height: expandedHeight,
         style: {
           ...n?.style,
-          width: n.data.expandedWidth || n.style?.width,
-          height: n.data.expandedHeight || n.style?.height,
+          width: expandedWidth,
+          height: expandedHeight,
         },
         data: { ...n.data, isExpanded: true },
       };
     }));
-  }, [id, setNodes]);
+  }, [id, isMarkdown, setNodes]);
 
   const handleVideoMetadata = useCallback((e) => {
     if (!width && !data.expandedWidth && e.target.videoWidth && e.target.videoHeight) {
@@ -983,8 +1013,8 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   const currentHeight = height || data.expandedHeight;
 
   // Default expanded sizes per type
-  const defaultExpandedW = isVideo ? 400 : isText ? 380 : 320;
-  const defaultExpandedH = isVideo ? 313 : isText ? 320 : 200;
+  const defaultExpandedW = isVideo ? 400 : isMarkdown ? MARKDOWN_DEFAULT_WIDTH : isText ? 380 : 320;
+  const defaultExpandedH = isVideo ? 313 : isMarkdown ? MARKDOWN_DEFAULT_HEIGHT : isText ? 320 : 200;
 
   const nodeWidth = isCollapsed ? 'auto' : (currentWidth || (isImage ? 250 : defaultExpandedW));
   const nodeHeight = isCollapsed ? 'auto' : (currentHeight || (isExpanded ? defaultExpandedH : 'auto'));
@@ -992,8 +1022,8 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   const containerStyle = {
     width: nodeWidth,
     height: nodeHeight,
-    minWidth: isImage ? 150 : isExpanded && isExpandable ? 280 : 'auto',
-    minHeight: isImage ? 150 : isExpanded && isExpandable ? 180 : 'auto',
+    minWidth: isImage ? 150 : isExpanded && isMarkdown ? MARKDOWN_MIN_WIDTH : isExpanded && isExpandable ? 280 : 'auto',
+    minHeight: isImage ? 150 : isExpanded && isExpandable ? MARKDOWN_MIN_HEIGHT : 'auto',
   };
 
   // ── Render branches ────────────────────────────────────────────────────────
@@ -1116,8 +1146,8 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
     >
       {showResizer && (
         <NodeResizer
-          minWidth={isImage ? 150 : 240}
-          minHeight={isImage ? 150 : 160}
+          minWidth={isImage ? 150 : isMarkdown ? MARKDOWN_MIN_WIDTH : 240}
+          minHeight={isImage ? 150 : isExpanded && isExpandable ? MARKDOWN_MIN_HEIGHT : 160}
           isVisible={selected && !data.locked}
           color="#3b82f6"
           handleStyle={{ width: 8, height: 8, borderRadius: 2 }}

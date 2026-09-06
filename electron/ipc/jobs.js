@@ -9,6 +9,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { callLLMDocument, callLLMText, callLLMRaw, checkPromptFits, modelForTask, providerForTask } from './llm.js';
 import { isNonApiAiStepBackError, isNonApiJobTask } from './nonApiAi.js';
+import { readPlainTextDocument } from './docUtils.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
 import { nonScoringJobConstraintKind, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
@@ -55,7 +56,7 @@ import {
 import { wrapUntrustedText } from './promptSafety.js';
 import { clearAllSessionStatusCache, getActiveLoginFlowInfo, invalidatePlatformSessionStatus, readStatusCache, runPlatformLoginFlow, waitForPendingPlatformVerification, writeStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
-import { getJobAnalysisPaths, snapshotOwnedByCanvas } from './jobAnalysisPaths.js';
+import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, snapshotOwnedByCanvas } from './jobAnalysisPaths.js';
 import { sourceJobKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, salaryRangeMetadata, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence, describeLocationTreatment } from '../../src/utils/jobLocation.js';
@@ -108,7 +109,7 @@ const compensationAssessmentCache = new Map();
 const CAREER_FILE_PARSE_CACHE = lazyStore('career-file-parse');
 const CAREER_FILE_PARSE_CACHE_VERSION = 4;
 const CAREER_FILE_PARSE_CACHE_MAX_ENTRIES = 120;
-const CAREER_FILE_EXTRACT_PROMPT = 'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content — roles, employers, dates, bullet points, projects, skills, education, certifications, contact info, AND (just as important) financial statements, metrics/dashboard exports, performance reviews, and project retrospectives. Preserve every figure, date, unit, and table structure exactly as given, even when the content is not obviously "résumé material" — a balance sheet line item or a KPI table row is career data too. Preserve every fact and the original structure using simple line breaks, "- " bullets, and plain-text tables (rows/columns kept intact) where the source has them. Do not summarize away detail and do not invent anything.';
+const CAREER_FILE_EXTRACT_PROMPT = 'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content — roles, employers, dates, bullet points, projects, skills, education, certifications, contact info, AND (just as important) financial statements, metrics/dashboard exports, performance reviews, and project retrospectives. Preserve every figure, date, unit, and table structure exactly as given, even when the content is not obviously "résumé material" — a balance sheet line item or a KPI table row is career data too. Preserve every fact and the original structure using simple line breaks, "- " bullets, and plain-text tables (rows/columns kept intact) where the source has them. Do not summarize away detail and do not invent anything. Return the transcription alone: no preamble, no closing commentary, and no heading that restates the name of the file - the app adds its own file header, and a bare file name is exactly what a chat application turns into an attachment card, which carries no text and is silently lost when the reply is copied back.';
 const CAREER_PROFILE_PARSE_PROMPT = 'Analyze this candidate\'s career data thoroughly and return the structured JSON profile. Include workHistory for every professional role with a stable unique id, title, employer, and source-supported startDate/endDate. Preserve dates as stated; normalize clear month/year dates to YYYY-MM when possible, use "present" only when the source says current/present, and use empty strings rather than inventing dates.';
 const CAREER_FILE_EXTRACT_PROMPT_HASH = crypto.createHash('sha256').update(CAREER_FILE_EXTRACT_PROMPT).digest('hex');
 const CAREER_PROFILE_PARSE_PROMPT_HASH = crypto.createHash('sha256').update(CAREER_PROFILE_PARSE_PROMPT).digest('hex');
@@ -322,6 +323,14 @@ function analysisPathsForCanvas(canvasFilePath) {
   return getJobAnalysisPaths(canvasFilePath, path.join(app.getPath('userData'), JOB_ANALYSIS_DIR));
 }
 
+function descriptionRecoveryCheckpointPath(canvasFilePath, runId) {
+  return getJobDescriptionRecoveryCheckpointPath(
+    canvasFilePath,
+    runId,
+    path.join(app.getPath('userData'), JOB_ANALYSIS_DIR),
+  );
+}
+
 // Writes the exact text sent to the AI: the cached prefix followed by each
 // batch payload. Uses previewBatches (all gathered jobs, ignoring score cap)
 // so the file is populated even when AI scoring is skipped in test mode.
@@ -371,10 +380,10 @@ async function verifiedPromptPathForSnapshot(promptPath, snapshot) {
   }
 }
 
-async function writeJobAnalysisFileAtomically(filePath, content) {
+async function writeJobAnalysisFileAtomically(filePath, content, { mode } = {}) {
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    await fs.promises.writeFile(tmpPath, content, 'utf8');
+    await fs.promises.writeFile(tmpPath, content, mode == null ? 'utf8' : { encoding: 'utf8', mode });
     await fs.promises.rename(tmpPath, filePath);
   } finally {
     await fs.promises.unlink(tmpPath).catch(() => {});
@@ -416,6 +425,317 @@ async function saveJobAnalysisSnapshot(snapshot) {
     await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
     return { jsonPath, lastSuccessJsonPath, promptPath };
   });
+}
+
+function hasExactDescriptionRecoveryOwnership(snapshot, nodeId, jobRunId) {
+  return !!nodeId && !!jobRunId
+    && snapshot?.sourceHubId === nodeId
+    && snapshot?.nodeId === nodeId
+    && snapshot?.runId === jobRunId;
+}
+
+// Deletion can arrive while the pre-score IPC is still writing the ordinary
+// canvas-global analysis bundle, before it has queued its checkpoint write. A
+// path lock alone cannot order an operation that has not reached the lock yet,
+// so retain an exact-tuple tombstone for the lifetime of this process. Run IDs
+// are unique, and evicting old entries by count would reopen the race for an
+// unusually delayed writer. The eventual create observes the tombstone under
+// the same checkpoint lock and cannot resurrect the deleted run.
+const _retiredDescriptionRecoveryCheckpoints = new Set();
+function descriptionRecoveryRetirementKey(checkpointPath, nodeId, jobRunId) {
+  return `${checkpointPath || ''}\u0000${String(nodeId || '')}\u0000${String(jobRunId || '')}`;
+}
+function retireDescriptionRecoveryCheckpoint(checkpointPath, nodeId, jobRunId) {
+  const key = descriptionRecoveryRetirementKey(checkpointPath, nodeId, jobRunId);
+  _retiredDescriptionRecoveryCheckpoints.add(key);
+}
+
+async function saveDescriptionRecoveryCheckpoint(snapshot, { create = false } = {}) {
+  const checkpointPath = descriptionRecoveryCheckpointPath(snapshot?.canvasFilePath, snapshot?.runId);
+  if (!checkpointPath || !hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) {
+    return { saved: false, reason: 'missing-ownership', checkpointPath: null };
+  }
+  return withJobAnalysisSnapshotLock(checkpointPath, async () => {
+    // A hash-keyed filename is not itself authority: retain the full ownership
+    // check so a malformed caller can never poison a different run's sidecar.
+    if (!hasExactDescriptionRecoveryOwnership(snapshot, snapshot.nodeId, snapshot.runId)) {
+      return { saved: false, reason: 'missing-ownership', checkpointPath };
+    }
+    if (create && _retiredDescriptionRecoveryCheckpoints.has(
+      descriptionRecoveryRetirementKey(checkpointPath, snapshot.nodeId, snapshot.runId),
+    )) {
+      return { saved: false, reason: 'checkpoint-retired', checkpointPath };
+    }
+    if (!create) {
+      let existing;
+      try {
+        existing = JSON.parse(await fs.promises.readFile(checkpointPath, 'utf8'));
+      } catch (error) {
+        return { saved: false, reason: error?.code === 'ENOENT' ? 'checkpoint-unavailable' : 'checkpoint-invalid', checkpointPath };
+      }
+      if (!hasExactDescriptionRecoveryOwnership(existing, snapshot.nodeId, snapshot.runId)) {
+        return { saved: false, reason: 'ownership-mismatch', checkpointPath };
+      }
+    }
+    await fs.promises.mkdir(path.dirname(checkpointPath), { recursive: true });
+    await writeJobAnalysisFileAtomically(checkpointPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+    return { saved: true, checkpointPath };
+  });
+}
+
+async function loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId) {
+  const checkpointPath = descriptionRecoveryCheckpointPath(canvasFilePath, jobRunId);
+  if (!checkpointPath) throw Object.assign(new Error('No run-keyed description recovery checkpoint.'), { code: 'ENOENT' });
+  let snapshot;
+  try {
+    snapshot = JSON.parse(await fs.promises.readFile(checkpointPath, 'utf8'));
+  } catch (error) {
+    throw Object.assign(error, { checkpointPath });
+  }
+  if (!hasExactDescriptionRecoveryOwnership(snapshot, nodeId, jobRunId)) {
+    throw Object.assign(new Error('Description recovery checkpoint ownership mismatch.'), {
+      code: 'EOWNERSHIP', checkpointPath,
+    });
+  }
+  return { snapshot, origin: 'current', checkpointPath };
+}
+
+async function removeDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId) {
+  const checkpointPath = descriptionRecoveryCheckpointPath(canvasFilePath, jobRunId);
+  // A run token is not sufficient authority for destructive cleanup. It is
+  // generated client-side and, while collisions are unlikely, a delayed or
+  // misrouted terminal IPC must never be able to erase another hub's
+  // checkpoint. Require the same hub+run tuple used for every read/update.
+  if (!checkpointPath || !nodeId || !jobRunId) {
+    return { removed: false, reason: 'missing-ownership' };
+  }
+  return withJobAnalysisSnapshotLock(checkpointPath, async () => {
+    // Mark retirement before checking whether the file exists. The matching
+    // pre-score create may still be awaiting the canvas-global snapshot write;
+    // when it eventually reaches this lock it must fail closed.
+    retireDescriptionRecoveryCheckpoint(checkpointPath, nodeId, jobRunId);
+    try {
+      const snapshot = JSON.parse(await fs.promises.readFile(checkpointPath, 'utf8'));
+      const ownsCheckpoint = hasExactDescriptionRecoveryOwnership(snapshot, nodeId, jobRunId);
+      if (!ownsCheckpoint) return { removed: false, reason: 'ownership-mismatch' };
+      await fs.promises.unlink(checkpointPath);
+      return { removed: true, checkpointPath };
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { removed: false };
+      throw error;
+    }
+  });
+}
+
+function descriptionRecoveryCheckpointMeta(snapshot, updatedAt = null) {
+  // Checkpoints sit beside a user-controlled canvas. Their ownership IDs are
+  // used operationally as exact opaque tokens, but the diagnostics reader must
+  // never return arbitrary token text for interpolation into a Markdown report.
+  // Keep this rule aligned with the terminal receipt/report token grammar.
+  const safeIdentifier = (value) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
+  };
+  const recoveryJobs = Array.isArray(snapshot?.descriptionRecoveryJobs)
+    ? snapshot.descriptionRecoveryJobs
+    : (Array.isArray(snapshot?.jobs) ? snapshot.jobs : []);
+  return {
+    version: snapshot?.version ?? null,
+    createdAt: snapshot?.createdAt ?? null,
+    updatedAt: updatedAt || snapshot?.updatedAt || snapshot?.createdAt || null,
+    sourceHubId: safeIdentifier(snapshot?.sourceHubId),
+    nodeId: safeIdentifier(snapshot?.nodeId),
+    runId: safeIdentifier(snapshot?.runId),
+    gatheredJobCount: Number(snapshot?.gatheredJobCount) || 0,
+    sourceGatheredCount: Number(snapshot?.sourceGatheredCount) || 0,
+    scoreReadyCount: Array.isArray(snapshot?.jobs) ? snapshot.jobs.length : 0,
+    descriptionRecoveryCount: recoveryJobs.length,
+  };
+}
+
+async function listDescriptionRecoveryCheckpoints(canvasFilePath) {
+  const paths = analysisPathsForCanvas(canvasFilePath);
+  const prefix = paths.namespace
+    ? `job-search-${paths.namespace}-description-recovery-`
+    : 'job-search-description-recovery-';
+  let names = [];
+  try {
+    names = await fs.promises.readdir(paths.dir);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  const results = await Promise.all(names
+    .filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+    .map(async (name) => {
+      try {
+        const snapshot = JSON.parse(await fs.promises.readFile(path.join(paths.dir, name), 'utf8'));
+        const expectedPath = descriptionRecoveryCheckpointPath(canvasFilePath, snapshot?.runId);
+        if (expectedPath !== path.join(paths.dir, name)
+          || !hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) return null;
+        return descriptionRecoveryCheckpointMeta(snapshot);
+      } catch {
+        return null;
+      }
+    }));
+  return results.filter(Boolean).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+
+// Report assembly is intentionally synchronous. This mirrors the async IPC
+// listing above but exposes metadata only, never checkpoint job content/paths.
+export function listDescriptionRecoveryCheckpointsSync(canvasFilePath) {
+  const paths = analysisPathsForCanvas(canvasFilePath);
+  const prefix = paths.namespace
+    ? `job-search-${paths.namespace}-description-recovery-`
+    : 'job-search-description-recovery-';
+  let names = [];
+  try {
+    names = fs.readdirSync(paths.dir);
+  } catch {
+    return { checkpoints: [], ignored: { malformed: 0, ownershipMismatch: 0, pathMismatch: 0, metadataInvalid: 0 } };
+  }
+  const ignored = { malformed: 0, ownershipMismatch: 0, pathMismatch: 0, metadataInvalid: 0 };
+  const checkpoints = [];
+  for (const name of names.filter(name => name.startsWith(prefix) && name.endsWith('.json'))) {
+    try {
+      const snapshot = JSON.parse(fs.readFileSync(path.join(paths.dir, name), 'utf8'));
+      if (!hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) {
+        ignored.ownershipMismatch++;
+      } else if (descriptionRecoveryCheckpointPath(canvasFilePath, snapshot.runId) !== path.join(paths.dir, name)) {
+        ignored.pathMismatch++;
+      } else {
+        const stat = fs.statSync(path.join(paths.dir, name));
+        const metadata = descriptionRecoveryCheckpointMeta(snapshot, stat.mtime.toISOString());
+        // Exact ownership can be true for opaque historic tokens containing
+        // Markdown control characters. They remain a valid sidecar on disk,
+        // but are not safe report metadata and must not cross this boundary.
+        if (!metadata.sourceHubId || !metadata.nodeId || !metadata.runId) {
+          ignored.metadataInvalid++;
+        } else {
+          checkpoints.push(metadata);
+        }
+      }
+    } catch {
+      ignored.malformed++;
+    }
+  }
+  checkpoints.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return { checkpoints, ignored };
+}
+
+// A long-running Solve can outlive Reset/re-run. Re-check the *current* record
+// while holding the same bundle lock immediately before writing, so an old
+// recovery transaction never resurrects its snapshot over the replacement run.
+async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobRunId } = {}) {
+  const checkpoint = await saveDescriptionRecoveryCheckpoint(snapshot);
+  if (!checkpoint.saved) return checkpoint;
+  const { dir, jsonPath, lastSuccessJsonPath, promptPath } = analysisPathsForCanvas(snapshot.canvasFilePath);
+  return withJobAnalysisSnapshotLock(jsonPath, async () => {
+    let current;
+    try {
+      current = JSON.parse(await fs.promises.readFile(jsonPath, 'utf8'));
+    } catch (error) {
+      return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'current-snapshot-unavailable', error };
+    }
+    if (!hasExactDescriptionRecoveryOwnership(current, nodeId, jobRunId)) {
+      return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'superseded' };
+    }
+    if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
+    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+    await writeJobAnalysisFileAtomically(jsonPath, serialized);
+    if ((Number(snapshot?.gatheredJobCount) || 0) > 0 && Array.isArray(snapshot?.jobs) && snapshot.jobs.length > 0) {
+      await writeJobAnalysisFileAtomically(lastSuccessJsonPath, serialized);
+    }
+    await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
+    return { saved: true, globalSaved: true, checkpointPath: checkpoint.checkpointPath, jsonPath, lastSuccessJsonPath, promptPath };
+  });
+}
+
+// The update-only checkpoint writer deliberately returns a value (rather than
+// throwing) when Reset/terminal cleanup won the race. Callers that enriched
+// rows must not mistake that for persistence: doing so would report success
+// while the next Solve reloads the old pool and repeats the same work.
+function requireDescriptionRecoveryCheckpointPersisted(result) {
+  if (result?.saved) return result;
+  const superseded = ['checkpoint-unavailable', 'checkpoint-retired', 'ownership-mismatch', 'missing-ownership'].includes(result?.reason);
+  throw Object.assign(
+    new Error(superseded
+      ? 'Description recovery checkpoint was removed or replaced by a newer run.'
+      : `Description recovery checkpoint was not saved (${result?.reason || 'unknown'}).`),
+    { code: superseded ? 'DESCRIPTION_RECOVERY_SUPERSEDED' : 'DESCRIPTION_RECOVERY_PERSIST_FAILED', persistence: result },
+  );
+}
+
+function descriptionRecoveryPersistenceWarning(sourceLabel, error, evidence) {
+  if (error?.code === 'DESCRIPTION_RECOVERY_SUPERSEDED') {
+    return descriptionRecoveryNotReadyWarning(sourceLabel, 'current-snapshot-unavailable');
+  }
+  return {
+    code: 'description-recovery-persist-failed', severity: 'block',
+    evidence,
+    suggestion: 'Click Solve again after verifying the canvas folder is writable. If this was Reset or a newer run, use that current source card instead.',
+  };
+}
+
+export async function __saveDescriptionRecoverySnapshotIfCurrentForTests(snapshot, ownership) {
+  return saveDescriptionRecoverySnapshotIfCurrent(snapshot, ownership);
+}
+
+export async function __createDescriptionRecoveryCheckpointForTests(snapshot) {
+  return saveDescriptionRecoveryCheckpoint(snapshot, { create: true });
+}
+
+export async function __removeDescriptionRecoveryCheckpointForTests(canvasFilePath, nodeId, jobRunId) {
+  return removeDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId);
+}
+
+export async function __loadDescriptionRecoveryCheckpointForTests(canvasFilePath, nodeId, jobRunId) {
+  return loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId);
+}
+
+export async function __listDescriptionRecoveryCheckpointsForTests(canvasFilePath) {
+  return listDescriptionRecoveryCheckpoints(canvasFilePath);
+}
+
+async function discardOwnedJobRun(canvasFilePath, nodeId, runId, { trashItem = null } = {}) {
+  if (!nodeId || !runId) {
+    return { ok: true, cleared: false, checkpointCleanup: { removed: false, reason: 'missing-ownership' } };
+  }
+  // Unsaved canvases intentionally have no crash-recovery manifest, but their
+  // pre-score checkpoints live in the private app-data fallback directory and
+  // still contain the full recovery/profile payload. Let manifest cleanup no-op
+  // while retiring that exact node+run checkpoint just like a saved canvas.
+  const cleared = canvasFilePath
+    ? await clearRun(canvasFilePath, {
+        trashItem,
+        expectedRunId: runId,
+        expectedNodeId: nodeId,
+      })
+    : false;
+  const checkpointCleanup = await removeDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, runId);
+  return { ok: true, cleared, checkpointCleanup };
+}
+
+export async function __discardOwnedJobRunForTests(canvasFilePath, nodeId, runId) {
+  return discardOwnedJobRun(canvasFilePath, nodeId, runId);
+}
+
+// Legacy manifests written before hub ownership existed cannot be safely
+// attributed to whichever current hub happens to see their banner. Give the
+// user an explicit Start fresh path, but bind it atomically to both the run
+// token and the manifest still having no owner; it cannot clear a modern hub.
+async function discardUnknownOwnerJobRun(canvasFilePath, runId, { trashItem = null } = {}) {
+  if (!canvasFilePath || !runId) return { ok: true, cleared: false, reason: 'missing-run-token' };
+  const cleared = await clearRun(canvasFilePath, {
+    trashItem,
+    expectedRunId: runId,
+    expectedOwnerUnknown: true,
+  });
+  return { ok: true, cleared, legacyOwnerUnknown: true };
+}
+
+export async function __discardUnknownOwnerJobRunForTests(canvasFilePath, runId) {
+  return discardUnknownOwnerJobRun(canvasFilePath, runId);
 }
 
 // ── Pending batch-scoring sidecar (next to the canvas; null if unsaved) ──────
@@ -583,6 +903,115 @@ async function loadJobAnalysisSnapshot(canvasFilePath) {
 // at the IPC caller.
 export async function __loadJobAnalysisSnapshotForTests(canvasFilePath) {
   return loadJobAnalysisSnapshot(canvasFilePath);
+}
+
+/**
+ * A description-recovery Solve is allowed to use only the active canvas
+ * snapshot for the exact Job Search run that produced the source card.  In
+ * particular, `loadJobAnalysisSnapshot` is intentionally allowed to fall back
+ * to a last-successful snapshot for ordinary recovery/read-only diagnostics;
+ * that fallback is unsafe for a live Solve because it can belong to another
+ * hub or a completed predecessor run.
+ */
+export function assessDescriptionRecoverySnapshotOwnership({ snapshot, origin, nodeId, jobRunId } = {}) {
+  if (!jobRunId) return { ok: false, reason: 'missing-run-id' };
+  if (origin !== 'current') return { ok: false, reason: 'current-snapshot-unavailable' };
+  const sourceHubId = typeof snapshot?.sourceHubId === 'string' ? snapshot.sourceHubId : '';
+  const snapshotNodeId = typeof snapshot?.nodeId === 'string' ? snapshot.nodeId : '';
+  const snapshotRunId = typeof snapshot?.runId === 'string' ? snapshot.runId : '';
+  if (!sourceHubId || !snapshotNodeId || !snapshotRunId) return { ok: false, reason: 'missing-ownership' };
+  if (sourceHubId !== nodeId || snapshotNodeId !== nodeId) return { ok: false, reason: 'hub-mismatch' };
+  if (snapshotRunId !== jobRunId) return { ok: false, reason: 'run-mismatch' };
+  return { ok: true, reason: null };
+}
+
+export function isLiveDescriptionRecoveryRun(manifest, nodeId, jobRunId) {
+  return ['searching', 'gathered'].includes(manifest?.stage)
+    && manifest?.runId === jobRunId
+    && manifest?.inputs?.nodeId === nodeId;
+}
+
+async function assessDescriptionRecoveryCheckpoint({ snapshot, origin, nodeId, jobRunId, canvasFilePath } = {}) {
+  const ownership = assessDescriptionRecoverySnapshotOwnership({ snapshot, origin, nodeId, jobRunId });
+  if (ownership.ok || !['hub-mismatch', 'run-mismatch'].includes(ownership.reason)) return ownership;
+  // The current analysis snapshot is written after gathering finishes. During a
+  // live run it can still legitimately describe a prior hub/run; use the
+  // manifest (the durable unfinished-run authority) to distinguish that
+  // expected checkpoint gap from an actual stale source-card request. `gathered`
+  // remains unfinished until the renderer writes its pre-score snapshot.
+  const state = await readRunState(canvasFilePath, Date.now());
+  if (state?.resumable === true && isLiveDescriptionRecoveryRun(state?.manifest, nodeId, jobRunId)) {
+    return { ok: false, reason: 'live-run-checkpoint-not-ready' };
+  }
+  return ownership;
+}
+
+// A Google/LinkedIn Solve rewrites the whole current-run recovery universe.
+// Serializing only the final file write is insufficient: two source cards can
+// both read the same pre-recovery universe, then the later write drops the
+// other source's freshly enriched rows. Keep the lock scoped to one canvas /
+// hub / run so independent searches never block each other.
+export function createDescriptionRecoveryMutex() {
+  const tails = new Map();
+  const throwIfAborted = (signal) => {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : Object.assign(new Error('Description recovery aborted'), { name: 'AbortError' });
+  };
+  return {
+    async run(key, signal, fn) {
+      throwIfAborted(signal);
+      const previous = tails.get(key) || Promise.resolve();
+      const result = previous.then(async () => {
+        throwIfAborted(signal);
+        return fn();
+      }, async () => {
+        throwIfAborted(signal);
+        return fn();
+      });
+      const tail = result.then(() => {}, () => {});
+      tails.set(key, tail);
+      return result.finally(() => {
+        if (tails.get(key) === tail) tails.delete(key);
+      });
+    },
+    size: () => tails.size,
+  };
+}
+
+const descriptionRecoveryMutex = createDescriptionRecoveryMutex();
+
+function descriptionRecoveryMutexKey(canvasFilePath, nodeId, jobRunId) {
+  const resolvedCanvasPath = canvasFilePath ? path.resolve(canvasFilePath) : '(unsaved-canvas)';
+  return `${resolvedCanvasPath}\u0000${String(nodeId || '')}\u0000${String(jobRunId || '')}`;
+}
+
+function withDescriptionRecoveryLock({ canvasFilePath, nodeId, jobRunId, signal }, fn) {
+  return descriptionRecoveryMutex.run(
+    descriptionRecoveryMutexKey(canvasFilePath, nodeId, jobRunId),
+    signal,
+    fn,
+  );
+}
+
+function descriptionRecoveryNotReadyWarning(sourceLabel, reason) {
+  const label = sourceLabel || 'This source';
+  const evidence = reason === 'missing-run-id'
+    ? `${label} Solve is not attached to an active search run, so it cannot safely use saved recovery data.`
+    : reason === 'current-snapshot-unavailable'
+      ? `The current-run ${label} recovery checkpoint is not ready. An earlier completed-run snapshot was found, but it was not used.`
+    : reason === 'missing-ownership'
+        ? `The current ${label} recovery snapshot is missing required hub/run ownership metadata, so it was not used.`
+        : reason === 'live-run-checkpoint-not-ready'
+          ? `This ${label} search is still running, and its current-run recovery checkpoint has not been written yet. An earlier snapshot was not used.`
+        : `${label} Solve needs the current run's recovery checkpoint before it can safely continue.`;
+  return {
+    code: 'description-recovery-not-ready',
+    severity: 'block',
+    evidence,
+    suggestion: 'Wait for this search to reach its recovery checkpoint, then retry Solve from the current source card. If the search has ended, run it again before retrying.',
+  };
 }
 
 /** Test seam for the deterministic prompt/snapshot binding contract. */
@@ -915,6 +1344,46 @@ function normalizeSourceGatheredCount(value, scoreReadyCount) {
     : fallback;
 }
 
+// Ordered manual-source URLs are recovery input, not report telemetry. Keep a
+// small, exact allow-list taken only from this run's configured task URLs; a
+// Solve may consume one entry after a restart without trusting renderer input.
+const DESCRIPTION_RECOVERY_BLOCKED_URL_CAP = 24;
+function boundedRecoveryBlockedUrls(urls) {
+  const seen = new Set();
+  const result = [];
+  for (const raw of Array.isArray(urls) ? urls : []) {
+    const url = typeof raw === 'string' ? raw : '';
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    result.push(url);
+    if (result.length >= DESCRIPTION_RECOVERY_BLOCKED_URL_CAP) break;
+  }
+  return result;
+}
+
+function recoveryBlockedUrlsForSource(state, sourceId) {
+  return boundedRecoveryBlockedUrls(state?.[sourceId]?.blockedUrls);
+}
+
+function consumeRecoveryBlockedUrl(state, sourceId, resolvedUrl) {
+  const remaining = recoveryBlockedUrlsForSource(state, sourceId)
+    .filter(url => url !== resolvedUrl);
+  return {
+    remaining,
+    state: {
+      ...(state || {}),
+      [sourceId]: {
+        ...(state?.[sourceId] || {}),
+        blockedUrls: remaining,
+      },
+    },
+  };
+}
+
+export function __consumeRecoveryBlockedUrlForTests(state, sourceId, resolvedUrl) {
+  return consumeRecoveryBlockedUrl(state, sourceId, resolvedUrl);
+}
+
 export function buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext }) {
   const role = (targetRole || '').trim();
   const gathered = Array.isArray(jobs) ? jobs : [];
@@ -1188,7 +1657,7 @@ const jobsTelemetry = {
   // latest one. Reset when a fresh search stamps, same as `resolves` above.
   // { [sourceId]: [{ t, mode, outcome, detail }] }
   resumeAttempts: {},
-  scoring:   null, // { ts, input, scored, placeholders, ungroundedScores, batches, failedBatches, unscored }
+  scoring:   null, // { ts, runId, input, selectedForScoring, scored, placeholders, ungroundedScores, batches, failedBatches, unscored }
   // Last career-file parse cache decision. The cache is an optimization, so a
   // failed local write must never discard an otherwise valid manual-AI parse.
   // Hashes are deliberately shortened before telemetry leaves this module.
@@ -1206,10 +1675,14 @@ const jobsTelemetry = {
   // hits), and why it failed. Reset at search start alongside `resolves` above;
   // populated at the end of researchCompensationAssessments.
   // { ts, scoredInput, eligible, preResearchCandidates, skippedBelowFit,
+  //   skippedNoExperience, skippedNoExperienceBand,
   //   missingOffer, recommendedNoOffer, skippedNoCurrency, skippedNoLocation,
-  //   cohorts, researched, failedCohorts,
+  //   roleBandLookups, roleBandResearches, roleBandCacheHits, roleBandFailures,
+  //   roleBandFailureJobs, roleBandInterruptedJobs, marketCandidates,
+  //   cohorts, researched, failedCohorts, marketCohortFailures,
   //   assessed, minFitScore, cacheHits,
-  //   failures: [{ cohort, reason }] }  // failures capped at 5
+  //   failures: [{ cohort, reason }],
+  //   roleBandFailureDetails: [{ role, reason }] }  // detail lists capped at 5
   compensation: null,
   bucketing: null, // { ts, input, categories, placed, missing, duplicated, model, strategy, blocked, capability, errorCode, error } — failure details distinguish an explicit capability denial from a provider error; neither produces a new board
   // Per-source job-source-progress event trail for the current search, captured
@@ -1377,19 +1850,28 @@ export function getJobsTelemetry() {
 export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), terminal = null) {
   const search = jobsTelemetry.search?.runId === runId ? jobsTelemetry.search : null;
   const pipeline = jobsTelemetry.pipeline?.runId === runId ? jobsTelemetry.pipeline : null;
+  const scoring = jobsTelemetry.scoring?.runId === runId ? jobsTelemetry.scoring : null;
   const sources = {};
   if (search?.bySource && typeof search.bySource === 'object') {
     for (const [sourceId, source] of Object.entries(search.bySource)) {
       sources[sourceId] = {
         count: source?.count,
+        // Distinct candidate identities traversed, retained for compatibility.
+        // It can exceed count when a detail page conclusively retires a closed
+        // posting; `unavailableDetailDropped` carries that explicit delta.
         providerGathered: source?.providerGathered ?? source?.gathered,
+        unavailableDetailDropped: source?.unavailableDetailDropped,
+        locationScopeUnenforced: source?.locationScopeUnenforced === true,
         // Corpus-coverage evidence. `providerGathered` alone cannot say whether
         // the walk saw the whole result set, so a receipt read after restart
         // could not tell a complete gather from a truncated one.
         providerTotal: source?.providerTotal ?? source?.claimedTotal,
         truncated: source?.truncated === true,
+        pagesWalked: source?.pagesWalked,
         relevanceDropped: source?.relevanceDropped,
         sponsoredDropped: source?.sponsoredDropped,
+        cap: source?.cap,
+        caps: source?.caps,
         stopReason: source?.stopReason,
         revealOutcomes: Array.isArray(source?.revealOutcomes)
           ? source.revealOutcomes.slice(0, 20)
@@ -1429,6 +1911,21 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         kept: search.kept,
       },
     } : {}),
+    // Scoring telemetry is also process-global. A direct re-score or a second
+    // canvas can finish between this run's gather and completion, so retain it
+    // only when the scoring snapshot carries this exact durable run token.
+    ...(scoring ? {
+      scoring: {
+        input: scoring.input,
+        selected: scoring.selectedForScoring,
+        scored: scoring.scored,
+        placeholders: scoring.placeholders,
+        unscored: scoring.unscored,
+        failedBatches: scoring.failedBatches,
+        cappedForBudget: scoring.cappedForBudget,
+        providerCalls: scoring.providerCalls,
+      },
+    } : {}),
     sources,
     stagingStarted: pipeline?.stagingStarted === true,
   };
@@ -1446,6 +1943,10 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
   const sid = payload.sourceId;
   if (!sid) return false;
   if (expectedNodeId && jobsTelemetry.nodeId && expectedNodeId !== jobsTelemetry.nodeId) return false;
+  // Source-card actions may finish after Reset starts a replacement pipeline.
+  // A run-tagged event is never allowed to mutate that replacement's report,
+  // including the brief preparing state before it has received a run token.
+  if (payload.jobRunId && payload.jobRunId !== jobsTelemetry.pipeline?.runId) return false;
 
   if (!jobsTelemetry.sourceEventsT0) jobsTelemetry.sourceEventsT0 = Date.now();
   const arr = jobsTelemetry.sourceEvents[sid] || (jobsTelemetry.sourceEvents[sid] = []);
@@ -1485,7 +1986,65 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
 }
 
 /** Write only the current LinkedIn Solve result; the pass trail owns history. */
-export function recordLinkedinResolveAttempt(sourceId, extra = {}) {
+function ownsCurrentJobTelemetry(nodeId, jobRunId) {
+  return !!jobRunId
+    && jobsTelemetry.nodeId === nodeId
+    && jobsTelemetry.pipeline?.runId === jobRunId;
+}
+
+// A source-card action can finish after its hub has Reset or another hub has
+// become the process-global telemetry owner. Token-bearing actions must match
+// that owner. Legacy untokened actions predate the run fence, so accept them
+// only when no tokened pipeline is active; otherwise they would be ambiguous
+// and could overwrite the current run's diagnostics.
+function canWriteJobResolveTelemetry(nodeId, jobRunId) {
+  return jobRunId
+    ? ownsCurrentJobTelemetry(nodeId, jobRunId)
+    : !jobsTelemetry.pipeline?.runId;
+}
+
+export function __canWriteJobResolveTelemetryForTests(nodeId, jobRunId) {
+  return canWriteJobResolveTelemetry(nodeId, jobRunId);
+}
+
+// A rejected fresh start temporarily owns global diagnostics while it performs
+// preflight. Restore the previous snapshot only if that same rejected token is
+// still current: an overlapping later search may have legitimately claimed it
+// before the failed start learns about its manifest conflict.
+function restoreJobsTelemetryIfCurrentRun(nodeId, jobRunId, snapshot) {
+  if (!ownsCurrentJobTelemetry(nodeId, jobRunId)) return false;
+  Object.assign(jobsTelemetry, snapshot);
+  return true;
+}
+
+export function __restoreJobsTelemetryIfCurrentRunForTests(nodeId, jobRunId, snapshot) {
+  return restoreJobsTelemetryIfCurrentRun(nodeId, jobRunId, snapshot);
+}
+
+// Durable recovery data, not this process's telemetry, authorizes a source
+// card after restart or after another canvas became the in-memory owner.
+async function canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId) {
+  if (!jobRunId) return !canvasFilePath && canWriteJobResolveTelemetry(nodeId, jobRunId);
+  // Unsaved cards cannot survive a restart and are fenced by their renderer
+  // run token. Do not make their action depend on unrelated process-global
+  // diagnostics: another hub may legitimately become that owner while this
+  // unsaved card is paused. Untagged legacy actions above remain fail-closed.
+  if (!canvasFilePath) return typeof nodeId === 'string' && nodeId.trim().length > 0;
+  const state = await readRunState(canvasFilePath, Date.now());
+  return !!state?.manifest
+    && state.manifest.runId === jobRunId
+    && state.manifest.inputs?.nodeId === nodeId
+    // Source cards are actionable only after the gather/checkpoint boundary.
+    // A stale/legacy renderer button must never join a still-live collection.
+    && state.manifest.stage === 'gathered';
+}
+
+export async function __canPerformJobSourceActionForTests(canvasFilePath, nodeId, jobRunId) {
+  return canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId);
+}
+
+export function recordLinkedinResolveAttempt(sourceId, extra = {}, ownership = null) {
+  if (!canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return null;
   const previous = jobsTelemetry.resolves[sourceId];
   const snapshot = {
     ts: Date.now(),
@@ -1503,7 +2062,8 @@ export function recordLinkedinResolveAttempt(sourceId, extra = {}) {
 }
 
 /** Attach the renderer's real queue delta without losing earlier Solve passes. */
-export function recordResolveMergeOutcome(sourceId, merge = {}) {
+export function recordResolveMergeOutcome(sourceId, merge = {}, ownership = null) {
+  if (!canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return null;
   const resolve = jobsTelemetry.resolves[sourceId];
   if (!sourceId || !resolve) return null;
   const normalized = {
@@ -1525,11 +2085,18 @@ export function recordResolveMergeOutcome(sourceId, merge = {}) {
 // clears it internally, so the report can tell a native-login click from a
 // plain retry-later click. Mirrors the linkedinEnrich cap (see
 // recordLinkedinEnrichPass) — newest last, capped at 12.
-function recordResumeAttempt(sourceId, mode, outcome, detail) {
-  if (!sourceId) return;
+function recordResumeAttemptTelemetry(sourceId, mode, outcome, detail, ownership = null) {
+  if (!sourceId || !canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return;
   const list = jobsTelemetry.resumeAttempts[sourceId] || (jobsTelemetry.resumeAttempts[sourceId] = []);
   list.push({ t: Date.now(), mode: mode || 'resume', outcome, detail: String(detail || '').slice(0, 200) });
   if (list.length > 12) list.shift();
+}
+
+// Narrow test seam for the ownership-sensitive resume trail. Handler-local
+// wrappers always bind their own node/run tuple; this proves the recorder
+// accepts the current tuple and rejects a late foreign one.
+export function __recordResumeAttemptForTests(sourceId, mode, outcome, detail, ownership) {
+  return recordResumeAttemptTelemetry(sourceId, mode, outcome, detail, ownership);
 }
 
 // The Indeed browser keeps a bounded per-row enrichment trail. Aggregate it at
@@ -1570,8 +2137,9 @@ const RECENT_INDEED_LOGIN_MS = 60_000;
 // fetchIndeedListingsBrowser's return value — pass it through as-is rather
 // than re-deriving any of it here, so this can never disagree with what the
 // extractor itself observed.
-function stampIndeedSessionTelemetry(sessionDiagnostics) {
-  if (!sessionDiagnostics) return;
+function stampIndeedSessionTelemetry(sessionDiagnostics, ownership = null) {
+  if (!sessionDiagnostics
+    || (ownership && !canWriteJobResolveTelemetry(ownership.nodeId, ownership.jobRunId))) return;
   jobsTelemetry.indeedSession = { ts: Date.now(), ...sessionDiagnostics };
 }
 
@@ -1617,8 +2185,11 @@ async function invalidateIndeedSessionIfNeedsLogin(warning) {
   await invalidatePlatformSessionStatus('indeed', warning.evidence || 'Indeed scrape returned needs-login.');
 }
 
-async function syncIndeedSessionStatusFromScrape(sessionDiagnostics, warning) {
-  stampIndeedSessionTelemetry(sessionDiagnostics);
+async function syncIndeedSessionStatusFromScrape(sessionDiagnostics, warning, { telemetryOwnership = null } = {}) {
+  // The account-status cache describes the real shared browser profile and is
+  // useful even for a durable recovery owned by another canvas. Only the
+  // process-global diagnostic stamp is ownership-fenced.
+  stampIndeedSessionTelemetry(sessionDiagnostics, telemetryOwnership);
   if (warning?.code === 'needs-login') {
     await invalidateIndeedSessionIfNeedsLogin(warning);
     return;
@@ -2127,6 +2698,7 @@ let lkEnrichedThisGen = 0;
 // browserGen ties the pass to a specific browser process; attempted and
 // remainingBefore make a shrinking work pool explicit in the diagnostic trail.
 function recordLinkedinEnrichPass(entry) {
+  if (entry?.jobRunId && !ownsCurrentJobTelemetry(entry.nodeId, entry.jobRunId)) return false;
   const gen = entry.browserGen ?? null;
   let before = lkEnrichedThisGen;
   if (gen != null) {
@@ -2169,10 +2741,13 @@ export function linkedInBrowserUnavailableWarning(result = {}) {
 // probeTotalEnriched, aborted }. saveMidProbe(pool) is optional — the resolve
 // path uses it to persist enriched descriptions mid-probe; the search path
 // relies on the final snapshot save at the end of the search.
-async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn, saveMidProbe) {
+async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn, saveMidProbe, { ownership = null, canWriteTelemetry = () => true } = {}) {
   const PROBE_BATCH = 15;
+  const setCooldownTelemetry = (value) => {
+    if (canWriteTelemetry()) jobsTelemetry.linkedinCooldown = value;
+  };
   logger.info(`[Jobs][${nodeId}] Cooldown probe armed: waits ${waitsMs.map(ms => Math.round(ms / 60000)).join('/')}m, batch ${PROBE_BATCH}`);
-  jobsTelemetry.linkedinCooldown = { running: true, attempts: 0, foundMs: null, waitsMs, ts: Date.now() };
+  setCooldownTelemetry({ running: true, attempts: 0, foundMs: null, waitsMs, ts: Date.now() });
   let pool = initialPool;
   let foundMs = null;
   let attempt = 0;     // total probe CALLS (initial + confirmations) — telemetry/return
@@ -2182,7 +2757,7 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
   // and browser process as the wall that armed it. The first entry is the
   // immediately preceding rate-limited pass (recorded by either search or
   // Solve); never silently promote a VPN/browser change into a cooldown clear.
-  const precedingWall = [...jobsTelemetry.linkedinEnrich].reverse().find(e =>
+  const precedingWall = (canWriteTelemetry() ? [...jobsTelemetry.linkedinEnrich] : []).reverse().find(e =>
     e.browserGen != null && e.ip && (e.walled || (e.noDescSoftBlock || 0) > 0),
   );
   const expectedIdentity = precedingWall
@@ -2212,19 +2787,19 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
     pool = pool.map(j => byUrl.get(j.url) || j);
     probeTotalEnriched += pr.successCount || 0;
     const stillEmptyAfter = filterJobsByDescriptionEvidence(pool).dropped.length;
-    recordLinkedinEnrichPass({ kind: 'probe', ip, ipOk: !!ip, walled: pr.loginWall, browserUnavailable: !!pr.browserUnavailable, attempted: pr.attempted ?? batch.length, remainingBefore: stillEmpty.length, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt });
+    recordLinkedinEnrichPass({ kind: 'probe', ...(ownership || {}), ip, ipOk: !!ip, walled: pr.loginWall, browserUnavailable: !!pr.browserUnavailable, attempted: pr.attempted ?? batch.length, remainingBefore: stillEmpty.length, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt });
     if (pr.browserUnavailable) {
-      jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs: null, waitsMs, ts: Date.now(), browserUnavailable: true };
+      setCooldownTelemetry({ running: false, attempts: attempt, foundMs: null, waitsMs, ts: Date.now(), browserUnavailable: true });
       logger.info(`[Jobs][${nodeId}] ${pausedLabel}: shared browser unavailable (${pr.browserError || 'unknown error'})`);
       return { kind: 'bail', result: { pool, foundMs: null, attempt, probeTotalEnriched, aborted: false, browserUnavailable: true, profileReserved: !!pr.profileReserved, browserError: pr.browserError || null } };
     }
     const issue = identityIssue(ip, pr.browserGen);
     if (issue) {
-      jobsTelemetry.linkedinCooldown = {
+      setCooldownTelemetry({
         running: false, attempts: attempt, foundMs: null, waitsMs, ts: Date.now(),
         identityChanged: issue === 'changed', identityUnverified: issue === 'unverified',
         expectedIdentity, observedIdentity: { ip: ip || null, browserGen: pr.browserGen ?? null },
-      };
+      });
       logger.info(`[Jobs][${nodeId}] ${invalidLabel}: IP/browser ${issue} (expected ${expectedIdentity?.ip || '?'}/#${expectedIdentity?.browserGen ?? '?'}, got ${ip || '?'}/#${pr.browserGen ?? '?'})`);
       return { kind: 'bail', result: { pool, foundMs: null, attempt, probeTotalEnriched, aborted: false, cooldownIdentityChanged: issue === 'changed', cooldownIdentityUnverified: issue === 'unverified' } };
     }
@@ -2244,7 +2819,7 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
       });
       if (probe.kind === 'exhausted') { foundMs = waitMs; break; }
       if (probe.kind === 'bail') return probe.result;
-      jobsTelemetry.linkedinCooldown = { running: true, attempts: attempt, foundMs: null, waitsMs, ts: Date.now() };
+      setCooldownTelemetry({ running: true, attempts: attempt, foundMs: null, waitsMs, ts: Date.now() });
       if (probe.successCount > 0 && saveMidProbe) {
         try { await saveMidProbe(pool); } catch (e) { logger.warn(`[Jobs][${nodeId}] Cooldown probe: snapshot persist failed — ${e.message}`); }
       }
@@ -2276,11 +2851,11 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
       logger.info(`[Jobs][${nodeId}] Cooldown probe: ${mins}m interval not stable (confirmation walled) — advancing to next wait`);
     }
   } catch (e) {
-    jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now(), aborted: true };
+    setCooldownTelemetry({ running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now(), aborted: true });
     logger.info(`[Jobs][${nodeId}] Cooldown probe aborted: ${e.message}`);
     return { pool, foundMs, attempt, probeTotalEnriched, aborted: true };
   }
-  jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now() };
+  setCooldownTelemetry({ running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now() });
   return { pool, foundMs, attempt, probeTotalEnriched, aborted: false };
 }
 
@@ -2449,6 +3024,52 @@ export function refreshManualSourceUrlIndex(tasks, sourceId, sourceFirstUrl, tas
   const liveFirstUrl = liveSourceTasks[0]?.url || (resultId ? taskUrlById[resultId] : null) || sourceFirstUrl[sourceId] || null;
   if (liveFirstUrl) sourceFirstUrl[sourceId] = liveFirstUrl;
   return liveFirstUrl;
+}
+
+// A manual source can wall after q2/q3, while a detail-enrichment block can
+// first arm on q1 and remain latched as later queries execute. Start recovery
+// from the exact first blocked query when supplied (otherwise the last actual
+// navigation), and carry Glassdoor's resolved locId/locT scope forward.
+export function orderedBlockedManualSourceUrls(tasks, sourceId, executedQueries = [], firstBlockedQuery = null, firstBlockedQueryIndex = null) {
+  const sourceTasks = (Array.isArray(tasks) ? tasks : []).filter(task => task?.sourceId === sourceId);
+  const executed = Array.isArray(executedQueries) ? executedQueries : [];
+  const last = executed.at(-1);
+  const firstMatch = firstBlockedQuery && sourceTasks.findIndex(task => task?.query === firstBlockedQuery);
+  const index = Number.isInteger(firstBlockedQueryIndex) && firstBlockedQueryIndex >= 0 && firstBlockedQueryIndex < sourceTasks.length
+    ? firstBlockedQueryIndex
+    : Number.isInteger(firstMatch) && firstMatch >= 0 ? firstMatch : Math.max(0, sourceTasks.findIndex(task =>
+    (last?.query && task?.query === last.query) || (last?.url && task?.url === last.url),
+  ));
+  const indexedTask = sourceTasks[index];
+  // The explicit scraper index is authoritative even when generated query text
+  // is blank or duplicated. Resolve its ACTUAL navigated URL by task URL first,
+  // then query text; falling back to the last issued query is reserved for
+  // legacy/manual results that carry no first-block identity at all.
+  const indexedExecuted = Number.isInteger(firstBlockedQueryIndex)
+    ? executed.find(entry => (indexedTask?.url && entry?.url === indexedTask.url)
+      || (indexedTask?.query && entry?.query === indexedTask.query))
+    : null;
+  const firstExecuted = indexedExecuted || (firstBlockedQuery
+    ? executed.find(entry => entry?.query === firstBlockedQuery)
+    : last);
+  const currentUrl = typeof firstExecuted?.url === 'string' && firstExecuted.url ? firstExecuted.url : sourceTasks[index]?.url;
+  const queued = sourceTasks.slice(index + 1).map(task => task.url);
+  if (sourceId === 'glassdoor' && currentUrl) {
+    try {
+      const current = new URL(currentUrl);
+      const locId = current.searchParams.get('locId');
+      const locT = current.searchParams.get('locT');
+      if (locId || locT) {
+        for (let i = 0; i < queued.length; i++) {
+          const planned = new URL(queued[i]);
+          if (locId) planned.searchParams.set('locId', locId);
+          if (locT) planned.searchParams.set('locT', locT);
+          queued[i] = planned.toString();
+        }
+      }
+    } catch { /* malformed task URLs are ignored by the bounded queue */ }
+  }
+  return boundedRecoveryBlockedUrls([currentUrl, ...queued]);
 }
 
 // Location helpers (deriveLocationParam / summarizeLocationAdherence /
@@ -2786,12 +3407,21 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   // contract every extractor is expected to follow) would otherwise vanish
   // as an invisible 0-result source — no warning card, no log trace. Log it
   // here so a persistent failure in ANY fan-out source is at least visible
-  // in the app logs / bug report ring buffer, even though the pipeline still
-  // degrades gracefully to an empty result for that query.
+  // in the app logs / bug report ring buffer. Non-cancellation failures also
+  // surface a safe warning/truncation fact in the source diagnostics while the
+  // pipeline degrades gracefully to an empty result for that query.
   const onQueryError = (q, err) => {
-    if (err?.message === 'Aborted') return { items: [] };
+    if (signal?.aborted || err?.message === 'Aborted') return { items: [] };
     logger.warn(`[${label}] Query "${q}" threw and was dropped: ${err?.message || err}`);
-    return { items: [] };
+    // Keep the durable result terse and controlled: a query failure makes
+    // coverage incomplete, but neither the query nor provider error body may
+    // enter receipt/report data.
+    return {
+      items: [],
+      warning: { code: 'query-error', severity: 'warn' },
+      truncated: true,
+      stopReason: 'query-error',
+    };
   };
   let results;
   if (!isFinite(concurrency) || concurrency >= queries.length) {
@@ -2857,7 +3487,12 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   // extractor measured. Summed only when EVERY query reported a total — one
   // query that threw or that came from a source with no corpus count makes the
   // sum a fiction, and an unproven coverage claim must read as unproven.
-  const providerTotal = results.length > 0 && results.every(r => Number.isFinite(Number(r?.providerTotal)))
+  const providerTotal = results.length > 0 && results.every(r => (
+    r?.providerTotal != null
+    && r.providerTotal !== ''
+    && Number.isFinite(Number(r.providerTotal))
+    && Number(r.providerTotal) >= 0
+  ))
     ? results.reduce((sum, r) => sum + Number(r.providerTotal), 0)
     : null;
   const truncated = results.some(r => r?.truncated === true);
@@ -2868,7 +3503,39 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
     0,
     results.reduce((sum, r) => sum + (Array.isArray(r?.items) ? r.items.length : 0), 0) - items.length,
   );
-  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace };
+  // A query-level walker may stop for a meaningful reason (for example a
+  // provider page cap). Preserve every distinct reason through fan-out rather
+  // than losing it when the per-query envelopes are merged.
+  const stopReasons = [...new Set(results.flatMap(result => (Array.isArray(result?.stopReasons)
+    ? result.stopReasons
+    : result?.stopReason ? [result.stopReason] : []))
+    .map(reason => (typeof reason === 'string' ? reason : reason?.stopReason))
+    .filter(reason => typeof reason === 'string' && reason))];
+  // Unlike a browser source's deepest page number, API fan-out is a set of
+  // independent request walks. Sum the pages actually fetched so a Dice
+  // source's final receipt says how much API pagination it performed.
+  const pagesFetched = results.reduce((sum, result) => (
+    sum + Math.max(0, Number(result?.pagesFetched) || 0)
+  ), 0);
+  // A finite query-level ceiling is meaningful only when that query actually
+  // stopped because of it. Preserve the extractor's compact metadata so the
+  // HTTP wrapper can carry it into sourceResults/bySource diagnostics.
+  const caps = [...new Map(results.map(result => result?.cap)
+    .filter(value => (
+      ['jobs-per-platform', 'pages-per-platform'].includes(value?.type)
+      && value.limit != null
+      && value.limit !== ''
+      && Number.isFinite(Number(value.limit))
+      && Number(value.limit) > 0
+    ))
+    .map(value => [`${value.type}:${Math.floor(Number(value.limit))}`, {
+      type: value.type,
+      limit: Math.floor(Number(value.limit)),
+    }])).values()];
+  // `cap` remains for old callers/receipts, while `caps` preserves the real
+  // union when different fan-out queries stopped at distinct finite limits.
+  const cap = caps[0] || null;
+  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps };
 }
 
 async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null) {
@@ -2927,7 +3594,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // only fetch descriptions for jobs that will actually be scored/shown.
       await warmDiceApiKey(s);
       logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
-      return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s, 4, 350, 'Dice API');
+      return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days, limits), s, 4, 350, 'Dice API');
     }},
   ].filter(task => ACTIVE_SOURCE_ID_SET.has(task.sourceId) && (!onlySources || onlySources.has(task.sourceId)));
 
@@ -2977,6 +3644,8 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const crossQueryDuplicates = Array.isArray(result) ? 0 : (Number(result?.crossQueryDuplicates) || 0);
       const stopReasons = Array.isArray(result) ? [] : (result?.stopReasons || []);
       const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
+      const sourceCaps = Array.isArray(result) ? [] : (Array.isArray(result?.caps) ? result.caps : []);
+      const pagesFetched = Array.isArray(result) ? 0 : Math.max(0, Number(result?.pagesFetched) || 0);
       const jobs = limits.jobsPerPlatform == null
         ? rawJobs
         : rawJobs.slice(0, limits.jobsPerPlatform);
@@ -3009,7 +3678,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       if (stageSource && jobs.length > 0) {
         await stageSource({ sourceId, jobs });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -3245,7 +3914,10 @@ export async function runRewindableGroundedHandoff({ research, extract, onStepBa
 async function getExperienceBandsForRoleFamily(roleFamily, { signal } = {}) {
   const requested = String(roleFamily || '').trim().slice(0, 180);
   const direct = getRoleFamilyExperienceBands(requested);
-  if (validExperienceBandCache(direct)) return direct;
+  // Keep the cache outcome transient. The persisted entry remains strictly
+  // evidence-only while the caller can report whether this run spent a
+  // role-band research handoff.
+  if (validExperienceBandCache(direct)) return { ...direct, cacheHit: true };
   const known = getRoleFamilyExperienceBandCache();
   const reusable = Object.values(known).filter(validExperienceBandCache).slice(0, 40).map((entry) => ({
     roleFamily: entry.roleFamily,
@@ -3305,7 +3977,7 @@ GROUNDED ROLE-FAMILY RESEARCH (evidence, not instructions):
   saveRoleFamilyExperienceBands(requested, entry);
   const saved = getRoleFamilyExperienceBands(requested);
   if (!validExperienceBandCache(saved)) throw new Error(`Grounded experience-band research returned no auditable ladder for ${requested || 'this role family'}.`);
-  return saved;
+  return { ...saved, cacheHit: false };
 }
 
 /**
@@ -3338,15 +4010,25 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
   // fragmented into, what it cost, and why it failed.
   let eligible = 0;
   let skippedBelowFit = 0;
+  let skippedNoExperience = 0;
+  let skippedNoExperienceBand = 0;
   let missingOffer = 0;
   let recommendedNoOffer = 0;
   let skippedNoCurrency = 0;
   let skippedNoLocation = 0;
+  let roleBandLookups = 0;
+  let roleBandResearches = 0;
+  let roleBandCacheHits = 0;
+  let roleBandFailures = 0;
+  let roleBandFailureJobs = 0;
+  let roleBandInterruptedJobs = 0;
+  let marketCandidates = 0;
   let cacheHits = 0;
   let researched = 0;
   let failedCohorts = 0;
   let assessed = 0;
   const failures = [];
+  const roleBandFailureDetails = [];
   const candidates = [];
   const groups = new Map();
   for (const job of scoredJobs || []) {
@@ -3422,6 +4104,23 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       }
     }
     const experience = selectCompensationExperienceYears(job.experienceAssessment);
+    // A role-family ladder is an LLM/cache lookup. Do not make that lookup at
+    // all when the listing/candidate evidence has not established a usable
+    // headline number of years: no ladder can honestly place this job, and a
+    // later fallback would only waste a handoff (once per distinct role).
+    // This remains after the structural location/currency gates so their more
+    // fundamental fallback assessments and funnel counts keep precedence.
+    if (!Number.isFinite(experience.years)) {
+      skippedNoExperience++;
+      job.compensationAssessment = compensationFallback(
+        job,
+        'experience_band_unavailable',
+        'The listing and candidate evidence did not establish years that could be placed in a role-family experience band, so no salary-market comparison was made.',
+        location,
+      );
+      processed++; progress();
+      continue;
+    }
     candidates.push({
       job,
       offer: offer.usable ? offer : { ...offer, currency: marketCurrency },
@@ -3446,7 +4145,10 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
   for (const roleCandidates of candidatesByRole.values()) {
     const role = roleCandidates[0].role;
     if (signal?.aborted) {
-      failedCohorts++;
+      // No final market cohort exists yet: this is an interrupted role-band
+      // prerequisite, not a failed salary-market research cohort. Keep the
+      // affected rows explicit so the diagnostic equation can reconcile.
+      roleBandInterruptedJobs += roleCandidates.length;
       for (const candidate of roleCandidates) {
         candidate.job.compensationAssessment = compensationFallback(candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
         processed++;
@@ -3455,12 +4157,27 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       continue;
     }
     let roleBands;
+    roleBandLookups++;
     try {
       roleBands = await getExperienceBandsForRoleFamily(role, { signal });
+      if (roleBands.cacheHit) roleBandCacheHits++;
+      else roleBandResearches++;
     } catch (err) {
-      failedCohorts++;
-      if (failures.length < 5) failures.push({ cohort: `role-family:${role.toLowerCase()}`, reason: String(err?.message || err).slice(0, 300) });
-      logger.warn(`[Jobs][${nodeId}] Experience-band research failed for ${role}:`, err?.message || err);
+      // Role-band resolution is a prerequisite, not a final salary-market
+      // cohort. Keep its failure separate so a report does not imply the
+      // market-research stage ran and failed.
+      roleBandResearches++;
+      if (signal?.aborted) {
+        // The lookup was attempted but cancelled. It is not a provider failure
+        // and no final market cohort existed yet, so preserve it only in the
+        // dedicated interruption partition.
+        roleBandInterruptedJobs += roleCandidates.length;
+      } else {
+        roleBandFailures++;
+        roleBandFailureJobs += roleCandidates.length;
+        if (roleBandFailureDetails.length < 5) roleBandFailureDetails.push({ role, reason: String(err?.message || err).slice(0, 300) });
+        logger.warn(`[Jobs][${nodeId}] Experience-band research failed for ${role}:`, err?.message || err);
+      }
       for (const candidate of roleCandidates) {
         candidate.job.compensationAssessment = signal?.aborted
           ? compensationFallback(candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location)
@@ -3475,6 +4192,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       if (!experienceBand) {
         // A successful ladder cannot honestly place a job with no supported
         // headline years. Do not manufacture an "unbanded" salary cohort.
+        skippedNoExperienceBand++;
         candidate.job.compensationAssessment = compensationFallback(candidate.job, 'experience_band_unavailable', 'The listing and candidate evidence did not establish years that could be placed in the researched role-family experience bands, so no salary-market comparison was made.', candidate.location);
         processed++;
         continue;
@@ -3496,6 +4214,9 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
         jobs: [],
       });
       groups.get(key).jobs.push(candidate);
+      // Count rows, not cohort keys: several listings can share one final
+      // research group, and this is the truthful input to that market stage.
+      marketCandidates++;
     }
     progress();
   }
@@ -3669,10 +4390,19 @@ Search the internet for current, credible salary sources. Find at least two reas
     eligible,
     preResearchCandidates: candidates.length,
     skippedBelowFit,
+    skippedNoExperience,
+    skippedNoExperienceBand,
     missingOffer,
     recommendedNoOffer,
     skippedNoCurrency,
     skippedNoLocation,
+    roleBandLookups,
+    roleBandResearches,
+    roleBandCacheHits,
+    roleBandFailures,
+    roleBandFailureJobs,
+    roleBandInterruptedJobs,
+    marketCandidates,
     cohorts: groups.size,
     researched,
     // Includes both aborted/interrupted cohorts and cohorts whose research or
@@ -3680,10 +4410,14 @@ Search the internet for current, credible salary sources. Find at least two reas
     // assessment rather than a real one; this is an observation of outcome,
     // not an asserted single cause (an aborted run is not a "failure").
     failedCohorts,
+    // Explicit alias for newer diagnostic consumers; retain failedCohorts for
+    // compatibility with existing bug-report snapshots.
+    marketCohortFailures: failedCohorts,
     assessed,
     minFitScore: COMPENSATION_MIN_FIT_SCORE,
     cacheHits,
     failures,
+    roleBandFailureDetails,
     aiTransport: 'non-api-ai',
   };
   return scoredJobs;
@@ -3749,9 +4483,20 @@ export function registerJobsHandlers() {
 
     // Pass 1 — transcribe each file to faithful text.
     const sections = [];
+    let directTextFiles = 0;
+    let transcribedFiles = 0;
     for (const fp of paths) {
       if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       const name = path.basename(fp);
+      // A .md/.txt file is already the plain text this pass exists to produce, so
+      // read it verbatim instead of spending a transcription round on it. That
+      // matters most on the copy/paste transport, where the round trip is a whole
+      // manual handoff whose only possible outcome is a less faithful copy of a
+      // file sitting on disk. Returns null for anything not confidently clean
+      // UTF-8 (including a sensitive path, which the extractor below refuses by
+      // name), so an odd file still takes the original route.
+      const verbatim = await readPlainTextDocument(fp);
+      if (verbatim) directTextFiles += 1; else transcribedFiles += 1;
       // Broadened per docs/resume-achievement-mining-design.md §7: this corpus is not
       // just résumés — a dropped balance sheet, dashboard export, or performance review
       // is where a derived accomplishment's raw endpoints live (the CFO's debt figures
@@ -3761,15 +4506,30 @@ export function registerJobsHandlers() {
       // nothing left to derive from. So the content list below is deliberately not
       // résumé-shaped, and figures/units/table structure are called out explicitly
       // rather than folded into "every fact."
-      const extracted = await callLLMDocument(
+      const text = verbatim ?? String((await callLLMDocument(
         fp,
         CAREER_FILE_EXTRACT_PROMPT,
         { signal, task: 'career-file-extract', responseSchema: CAREER_FILE_EXTRACT_SCHEMA }
-      );
-      sections.push(`===== FILE: ${name} =====\n${String(extracted.text || '').trim()}`);
+      )).text || '').trim();
+      // Per FILE, not just per drop. An empty transcription used to contribute a
+      // bare "===== FILE: x =====" header and let the loop continue, so a single
+      // unreadable resume/brag doc/dashboard export went missing from the corpus
+      // that drives queries, scoring and the generated resume - and the
+      // all-files check below can never catch it, because the other files keep
+      // careerData non-empty. Name the file and stop.
+      if (!text) {
+        throw new Error(`No text could be read from ${name}, so it would be missing from your career data. Run that file's handoff again, or take it out of the drop.`);
+      }
+      sections.push(`===== FILE: ${name} =====\n${text}`);
     }
     const careerData = sections.join('\n\n').trim();
     if (!careerData) throw new Error('Could not extract any text from the dropped files.');
+    // Report which files skipped the transcription handoff. A report that says
+    // "3 files, 1 handoff" explains an otherwise surprising handoff count without
+    // asserting anything about the files themselves.
+    cacheTelemetry.readVerbatim = directTextFiles;
+    cacheTelemetry.transcribed = transcribedFiles;
+    cacheTelemetry.careerDataChars = careerData.length;
 
     // Pass 2 — derive the structured profile from the merged career data.
     const profile = await callLLMText(
@@ -3994,12 +4754,24 @@ Return a JSON object with four arrays of search query strings:
     }
   });
 
-  handleSafe('save-job-analysis-snapshot', async (event, { jobs, descriptionRecoveryJobs, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext } = {}) => {
-    const { snapshot } = buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext });
+  handleSafe('get-job-description-recovery-checkpoints', async (_event, { canvasFilePath } = {}) => ({
+    checkpoints: await listDescriptionRecoveryCheckpoints(canvasFilePath),
+  }));
+
+  handleSafe('save-job-analysis-snapshot', async (event, { jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext, saveDescriptionRecoveryCheckpoint: requestRecoveryCheckpoint = false, descriptionRecoveryCheckpoint = false } = {}) => {
+    const { snapshot } = buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext });
     const paths = await saveJobAnalysisSnapshot(snapshot);
+    const checkpointRequested = requestRecoveryCheckpoint || descriptionRecoveryCheckpoint;
+    const recoveryCheckpoint = checkpointRequested
+      ? await saveDescriptionRecoveryCheckpoint(snapshot, { create: true })
+      : null;
+    if (checkpointRequested && !recoveryCheckpoint?.saved) {
+      logger.warn(`[Jobs][${nodeId}] Did not save description recovery checkpoint: ${recoveryCheckpoint?.reason || 'unknown reason'}`);
+    }
     logger.info(`[Jobs][${nodeId}] Saved AI prompt snapshot to ${paths.jsonPath}`);
     return {
       saved: true,
+      recoveryCheckpointSaved: recoveryCheckpoint?.saved === true,
       meta: {
         version: snapshot.version,
         createdAt: snapshot.createdAt,
@@ -4010,6 +4782,9 @@ Return a JSON object with four arrays of search query strings:
         selectedJobCount: snapshot.selectedJobCount,
         promptPath: paths.promptPath,
         jsonPath: paths.jsonPath,
+        descriptionRecoveryCheckpoint: recoveryCheckpoint
+          ? { saved: recoveryCheckpoint.saved, reason: recoveryCheckpoint.reason || null }
+          : null,
       },
     };
   });
@@ -4035,6 +4810,28 @@ Return a JSON object with four arrays of search query strings:
       const error = 'No search queries were produced for this run. Set a target role, or re-run query generation, then search again.';
       return { success: false, noQueries: true, error };
     }
+    // Avoid repainting global diagnostics for an obviously foreign unfinished
+    // run. `startRun` below remains the authoritative, locked check; this is
+    // only a read-only fast path that preserves the current owner's telemetry
+    // while the user is directed to that owner's recovery controls.
+    if (!resume && canvasFilePath) {
+      const existing = await readRunState(canvasFilePath, Date.now());
+      if (existing?.incomplete && existing.manifest?.inputs?.nodeId !== nodeId) {
+        const ownerNodeId = existing.manifest?.inputs?.nodeId || null;
+        const ownerLabel = ownerNodeId
+          ? `Job Search hub ${ownerNodeId}`
+          : 'an older Job Search run with an unknown owner';
+        const error = `${ownerLabel} has unfinished recovery data. Resume or Start fresh that run from its recovery banner before starting a fresh search here.`;
+        logger.warn(`[Jobs][${nodeId}] ${error}`);
+        return {
+          success: false,
+          stagingConflict: true,
+          ownerNodeId,
+          ownerUnknown: !ownerNodeId,
+          error,
+        };
+      }
+    }
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     let activeJobPreferences = typeof jobPreferences === 'string' ? jobPreferences.slice(0, 4000) : '';
     let activeJobPreferencePlan = normalizeJobPreferencePlan(jobPreferencePlan || jobPreferencesInterpretation);
@@ -4053,12 +4850,11 @@ Return a JSON object with four arrays of search query strings:
     const selectedSourceIds = getEnabledJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS);
     let activeSourceIds = getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
     const location = String(preferredLocation || '').trim();
+    // A fresh request can still lose the durable-manifest ownership race below.
+    // Keep the incumbent telemetry intact until that claim succeeds: otherwise
+    // a rejected hub B would make a still-valid hub A's Solve look stale.
+    const priorJobsTelemetry = { ...jobsTelemetry };
     recordJobsSourceScope(nodeId, event.sender?.id ?? null);
-    // This may be an API-only run (for example LinkedIn alone), in which case
-    // runBrowserSourcesInOrder never executes. Reset the browser singleton at
-    // the job-search boundary rather than inside that browser-only branch so a
-    // prior Google/Glassdoor terminal event cannot masquerade as current work.
-    resetManualScraperTelemetry();
     // Reset per-run state at search START, not at search end — a paste or captcha
     // resolve can arrive mid-run (before the search result returns), and resetting
     // at the end would wipe those records before the bug report reads them.
@@ -4077,6 +4873,10 @@ Return a JSON object with four arrays of search query strings:
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
+    // Allocate a correlation token before any preflight can emit progress. A
+    // crash-resume replaces this with its durable manifest token below.
+    const initialRunStartedAt = Date.now();
+    let activeRunId = `${nodeId || 'job'}-${initialRunStartedAt}`;
     jobsTelemetry.pipeline = {
       phase: 'preparing-sources',
       startedAt: jobsTelemetry.sourceEventsT0,
@@ -4086,6 +4886,7 @@ Return a JSON object with four arrays of search query strings:
       lastSource: null,
       runOrigin: normalizedRunOrigin,
       profileInputMode: normalizedProfileInputMode,
+      runId: activeRunId,
     };
     jobsTelemetry.linkedinEnrich = []; // fresh egress-IP trail per run (see definition)
     jobsTelemetry.linkedinCooldown = null; // fresh cooldown-probe result per run
@@ -4121,8 +4922,11 @@ Return a JSON object with four arrays of search query strings:
     // the card) vs. only 'error', and how long after a failure the block warning
     // actually landed (the window the card spent failed-but-unflagged).
     const emitProgress = (payload) => {
-      recordJobSourceProgress(payload);
-      if (!event.sender.isDestroyed()) event.sender.send('job-source-progress', payload);
+      const correlatedPayload = activeRunId && payload?.nodeId === nodeId && !payload.jobRunId
+        ? { ...payload, jobRunId: activeRunId }
+        : payload;
+      recordJobSourceProgress(correlatedPayload);
+      if (!event.sender.isDestroyed()) event.sender.send('job-source-progress', correlatedPayload);
     };
 
     // ── Resume mode ─────────────────────────────────────────────────────────
@@ -4136,7 +4940,8 @@ Return a JSON object with four arrays of search query strings:
     let resumeStartPages = null;  // { [sourceId]: 1-based next page }
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
     let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
-    let activeRunId = null;       // compare-and-clear token returned to the renderer
+    // compare-and-clear token returned to the renderer (allocated above so
+    // preflight source progress remains correlated).
     let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
     // A crash after gathering but before/during renderer-driven manual scoring
     // has no remaining scrape work. Do not make already-staged jobs depend on
@@ -4196,6 +5001,7 @@ Return a JSON object with four arrays of search query strings:
         activeSourceIds = resumeSourceIds;
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
         activeRunId = priorRunId;
+        jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), runId: activeRunId, ts: Date.now() };
         priorRunStartedAt = prior.manifest.startedAt ?? null;
         resumeGatheredOnly = canRecoverGatheredRunDirectly(prior.manifest, queries);
         resumeScope = new Set();
@@ -4380,7 +5186,7 @@ Return a JSON object with four arrays of search query strings:
     // existing manifest/staging and appends the newly-scraped pages. All calls
     // no-op without a canvas path. stageOnPage flushes each page as it completes;
     // HTTP sources are flushed per-source after they finish (below).
-    const runStartedAt = Date.now();
+    const runStartedAt = initialRunStartedAt;
     let stagingStarted = false;
     if (resumeScope) {
       // Keep the recovered manifest/staging and its original run token intact.
@@ -4392,7 +5198,6 @@ Return a JSON object with four arrays of search query strings:
       // A resume reached this branch only after readRunState found its manifest.
       stagingStarted = !!canvasFilePath;
     } else {
-      activeRunId = `${nodeId || 'job'}-${runStartedAt}`;
       const startedRun = await startJobRun(canvasFilePath, {
         runId: activeRunId,
         startedAt: runStartedAt,
@@ -4416,9 +5221,27 @@ Return a JSON object with four arrays of search query strings:
       // Continuing after a failed start used to allow an un-recoverable search to
       // paint a terminal zero and replace prior board results with no forensic
       // record. Unsaved canvases intentionally retain the no-sidecar behavior.
+      if (startedRun?.conflict) {
+        const ownerLabel = startedRun.ownerNodeId
+          ? `Job Search hub ${startedRun.ownerNodeId}`
+          : 'an older Job Search run with an unknown owner';
+        const error = `${ownerLabel} has unfinished recovery data. Resume or Start fresh that run from its recovery banner before starting a fresh search here.`;
+        // `startRun` rejected this request under the manifest lock. Restore the
+        // previous process-global owner rather than publishing B's short-lived
+        // preparing token over A's valid Solve/recovery diagnostics.
+        restoreJobsTelemetryIfCurrentRun(nodeId, activeRunId, priorJobsTelemetry);
+        logger.warn(`[Jobs][${nodeId}] ${error}`);
+        return {
+          success: false,
+          stagingConflict: true,
+          ownerNodeId: startedRun.ownerNodeId || null,
+          ownerUnknown: startedRun.ownerUnknown === true,
+          error,
+        };
+      }
       if (canvasFilePath && !startedRun) {
         const error = 'Could not initialize durable job-run recovery for this saved canvas. No job sources were queried and existing results were left unchanged.';
-        retirePipeline('staging-start-failed', error);
+        restoreJobsTelemetryIfCurrentRun(nodeId, activeRunId, priorJobsTelemetry);
         logger.warn(`[Jobs][${nodeId}] ${error}`);
         return { success: false, stagingStartFailed: true, error };
       }
@@ -4433,6 +5256,11 @@ Return a JSON object with four arrays of search query strings:
       stagingStarted,
       ts: Date.now(),
     };
+    // This may be an API-only run (for example LinkedIn alone), in which case
+    // runBrowserSourcesInOrder never executes. Reset browser telemetry only
+    // after the durable run claim above succeeds, so a rejected hub cannot wipe
+    // an incumbent hub's active/manual-source diagnostics.
+    resetManualScraperTelemetry();
     const stageOnPage = ({ sourceId, query, page, jobs }) =>
       recordSourcePage(canvasFilePath, {
         sourceId, query, page, jobs, now: Date.now(), expectedRunId: activeRunId,
@@ -4461,6 +5289,7 @@ Return a JSON object with four arrays of search query strings:
         await clearRun(canvasFilePath, {
           trashItem: (p) => shell.trashItem(p),
           expectedRunId: activeRunId,
+          expectedNodeId: nodeId,
         });
       }
       jobsTelemetry.pipeline = {
@@ -4550,17 +5379,14 @@ Return a JSON object with four arrays of search query strings:
       // so a later Solve reopened the locKeyword-only (effectively nationwide)
       // URL rather than the exact page that was scraped. Refresh this small
       // telemetry/index from the live task objects before emitting the warning.
-      const liveFirstUrl = refreshManualSourceUrlIndex(tasks, sourceId, sourceFirstUrl, taskUrlById, res.id);
+      refreshManualSourceUrlIndex(tasks, sourceId, sourceFirstUrl, taskUrlById, res.id);
       if (blocked) {
-        // manualScraper reports one result per SOURCE (it walks every query task
-        // before emitting), so this records that source's single scrape URL. The
-        // list shape and the resolve handler's next-URL bookkeeping remain for
-        // the renderer's contract; with one entry per source it never advances.
-        const u = liveFirstUrl;
-        if (u) {
-          const list = sourceBlockedUrls[sourceId] || (sourceBlockedUrls[sourceId] = []);
-          if (!list.includes(u)) list.push(u);
-        }
+        const blockedUrls = orderedBlockedManualSourceUrls(
+          tasks, sourceId, res.executedQueries, res.detailBlock?.firstQuery, res.detailBlock?.firstQueryIndex,
+        );
+        // The source card must open the actual blocked q2/q3 route, not q1.
+        if (blockedUrls[0]) sourceFirstUrl[sourceId] = blockedUrls[0];
+        sourceBlockedUrls[sourceId] = blockedUrls;
       }
       emitProgress({
         nodeId, sourceId,
@@ -4647,7 +5473,7 @@ Return a JSON object with four arrays of search query strings:
       [browserOut, httpResults] = resumeGatheredOnly
         ? [{ manualResults: [], indeedResult: null }, []]
         : await Promise.all([
-          withSharedProfileLock(runBrowserSourcesInOrder),
+          withSharedProfileLock(runBrowserSourcesInOrder, combinedSignal),
           fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits),
         ]);
       await throwIfSearchAborted();
@@ -4714,6 +5540,21 @@ Return a JSON object with four arrays of search query strings:
       if (result.providerDuplicatesDropped != null) {
         sourceResults[sourceId].providerDuplicatesDropped =
           (sourceResults[sourceId].providerDuplicatesDropped || 0) + Number(result.providerDuplicatesDropped || 0);
+      }
+      // `providerGathered` is the number of distinct source-card identities
+      // traversed. A detail page can subsequently prove an identity unavailable
+      // and remove it from result.data, so preserve that bounded difference
+      // rather than relabelling the candidate count as returned usable rows.
+      if (result.unavailableDetailDropped != null) {
+        sourceResults[sourceId].unavailableDetailDropped =
+          (sourceResults[sourceId].unavailableDetailDropped || 0) + Math.max(0, Number(result.unavailableDetailDropped) || 0);
+      }
+      // A nation-tier Glassdoor location can be accepted and echoed without
+      // actually filtering rows. It is a source-level scope fact, not a source
+      // warning: warning severity drives card state and must not hide real
+      // scraper failures that occur later in the walk.
+      if (result.locationScopeUnenforced === true) {
+        sourceResults[sourceId].locationScopeUnenforced = true;
       }
       if (result.success && Array.isArray(result.data)) {
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
@@ -4813,13 +5654,37 @@ Return a JSON object with four arrays of search query strings:
       if (res.capDropped != null) sourceResults[res.sourceId].capDropped = res.capDropped;
       if (res.crossQueryDuplicates) sourceResults[res.sourceId].crossQueryDuplicates = res.crossQueryDuplicates;
       if (res.truncated) sourceResults[res.sourceId].truncated = true;
+      if (res.pagesFetched != null) {
+        const pagesFetched = Math.max(0, Number(res.pagesFetched) || 0);
+        if (pagesFetched > 0) {
+          sourceResults[res.sourceId].pagesWalked = Math.max(
+            Number(sourceResults[res.sourceId].pagesWalked) || 0,
+            pagesFetched,
+          );
+        }
+      }
       if (Array.isArray(res.stopReasons) && res.stopReasons.length > 0) {
-        sourceResults[res.sourceId].stopReasons = res.stopReasons;
+        // Manual walkers keep this as a Set; API fan-out returns an array.
+        // Merge rather than replace so a recovery/second API pass cannot erase
+        // an already observed stop condition.
+        if (!(sourceResults[res.sourceId].stopReasons instanceof Set)) {
+          sourceResults[res.sourceId].stopReasons = new Set(sourceResults[res.sourceId].stopReasons || []);
+        }
+        for (const stopReason of res.stopReasons) sourceResults[res.sourceId].stopReasons.add(stopReason);
       }
       // An internal per-source ceiling (LinkedIn's offset budget) is a real cap
       // and must not be reported as an exhausted source.
       if (res.sourceCap && !sourceResults[res.sourceId].cap) {
         sourceResults[res.sourceId].cap = res.sourceCap;
+      }
+      if (Array.isArray(res.sourceCaps) && res.sourceCaps.length > 0) {
+        if (!Array.isArray(sourceResults[res.sourceId].caps)) sourceResults[res.sourceId].caps = [];
+        for (const cap of res.sourceCaps) {
+          if (!['jobs-per-platform', 'pages-per-platform'].includes(cap?.type)
+              || !Number.isSafeInteger(cap.limit) || cap.limit <= 0
+              || sourceResults[res.sourceId].caps.some(existing => existing.type === cap.type && existing.limit === cap.limit)) continue;
+          sourceResults[res.sourceId].caps.push({ type: cap.type, limit: cap.limit });
+        }
       }
       if (res.enrichment) sourceResults[res.sourceId].enrichment = res.enrichment;
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
@@ -5196,7 +6061,10 @@ Return a JSON object with four arrays of search query strings:
             const waitsMs = JOB_SEARCH_TEST_MODE.probeCooldownWaitsMin.map(m => Math.round(m * 60_000));
             const lkPool = kept.filter(j => j.source === 'linkedin');
             const { pool: probedPool, foundMs, attempt, browserUnavailable, profileReserved, browserError } =
-              await runCooldownProbe(nodeId, waitsMs, lkPool, combinedSignal, emitProgress, null);
+              await runCooldownProbe(nodeId, waitsMs, lkPool, combinedSignal, emitProgress, null, {
+                ownership: { nodeId, jobRunId: activeRunId },
+                canWriteTelemetry: () => canWriteJobResolveTelemetry(nodeId, activeRunId),
+              });
             const probedByUrl = new Map(probedPool.map(j => [j.url, j]));
             kept = kept.map(j => j.source === 'linkedin' ? (probedByUrl.get(j.url) || j) : j);
             const probeStillEmpty = filterJobsByDescriptionEvidence(probedPool).dropped.length;
@@ -5376,16 +6244,37 @@ Return a JSON object with four arrays of search query strings:
       }
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
-        // Two shapes reach this field: the manual walker adds STRINGS to a Set
-        // (line 4412), while the API path assigns an ARRAY OF {query, stopReason}
-        // objects (line 4486). A bare join over the latter renders
-        // "[object Object]"; unreachable today only because API sources leave
-        // pagesWalked at 0 and never enter this guard.
-        bySource[sid].stopReason = [...(data.stopReasons || [])]
+      }
+      // API walkers can hit their finite request limit exactly, so their outer
+      // merge has no post-fetch cap overflow to expose. Preserve the walker's
+      // own compact cap fact before a restart loses in-memory sourceResults.
+      if (data.cap && typeof data.cap === 'object'
+          && ['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(data.cap.type)
+          && data.cap.limit != null && data.cap.limit !== ''
+          && Number.isFinite(Number(data.cap.limit)) && Number(data.cap.limit) > 0) {
+        bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };
+      }
+      if (Array.isArray(data.caps)) {
+        const caps = data.caps
+          .filter(cap => ['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(cap?.type)
+            && Number.isSafeInteger(cap.limit) && cap.limit > 0)
+          .filter((cap, index, values) => values.findIndex(other => other.type === cap.type && other.limit === cap.limit) === index)
+          .slice(0, 3)
+          .map(cap => ({ type: cap.type, limit: cap.limit }));
+        if (caps.length > 0) bySource[sid].caps = caps;
+      }
+      // Manual walkers use a Set while API fan-out now returns an array. The
+      // normalized Set lets either source surface its stop reason, including
+      // one-shot/API sources that have no pagesWalked counter.
+      const stopReasons = data.stopReasons instanceof Set
+        ? data.stopReasons
+        : new Set(data.stopReasons || []);
+      if (stopReasons.size > 0) {
+        bySource[sid].stopReason = [...stopReasons]
           .map(r => (typeof r === 'string' ? r : r?.stopReason))
           .filter(Boolean)
           .join('/') || null;
-        if ((data.stopReasons || new Set()).has('per-source-cap')) {
+        if (stopReasons.has('per-source-cap')) {
           // Browser sources cannot know how many additional matches exist without
           // issuing more pages. Preserve the actual enforced aggregate cap so the
           // report never calls this a clean/exhausted search.
@@ -5412,13 +6301,39 @@ Return a JSON object with four arrays of search query strings:
         );
         if (unattributed > 0) bySource[sid].unattributedShortfall = unattributed;
         if (capOverflow > 0) {
+          // HTTP fan-out applies the user-facing aggregate Jobs-per-platform
+          // limit only after individual query walks are merged. This outer
+          // slice is the fact that bounded the source result delivered to the
+          // board, so preserve the SAME public cap type and stop token. The
+          // diagnostic contract deliberately rejects a structured cap without
+          // evidence that its corresponding limit actually fired.
+          if (!(data.stopReasons instanceof Set)) {
+            data.stopReasons = new Set(data.stopReasons || []);
+          }
+          data.stopReasons.add('jobs-per-platform');
           bySource[sid].cap = normalizedCollectionLimits.jobsPerPlatform == null
             ? null
-            : { type: 'per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
+            : { type: 'jobs-per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
+          if (bySource[sid].cap) {
+            const caps = Array.isArray(bySource[sid].caps) ? bySource[sid].caps : [];
+            if (!caps.some(cap => cap.type === bySource[sid].cap.type && cap.limit === bySource[sid].cap.limit)) {
+              caps.unshift(bySource[sid].cap);
+            }
+            bySource[sid].caps = caps.slice(0, 3);
+          }
+          // `bySource.stopReason` was serialized above, before the aggregate
+          // overflow was measurable. Re-serialize it here so the durable
+          // receipt and live completion assessment see the same evidence.
+          bySource[sid].stopReason = [...data.stopReasons]
+            .map(r => (typeof r === 'string' ? r : r?.stopReason))
+            .filter(Boolean)
+            .join('/') || null;
         }
       }
       if (data.detailBlock) bySource[sid].detailBlock = data.detailBlock;
       if (data.providerDuplicatesDropped) bySource[sid].providerDuplicatesDropped = data.providerDuplicatesDropped;
+      if (data.unavailableDetailDropped) bySource[sid].unavailableDetailDropped = data.unavailableDetailDropped;
+      if (data.locationScopeUnenforced === true) bySource[sid].locationScopeUnenforced = true;
       if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
       // The API-side twin of `claimedTotal` above. Without it a source that
       // walked 44 of 973 and one whose whole corpus IS 44 render identically —
@@ -5441,11 +6356,20 @@ Return a JSON object with four arrays of search query strings:
     // say so explicitly. The merged client filter remains the final backstop.
     const diceBucket = dicePostedBucket(ageDays);
     const glassdoorBucket = glassdoorPostedBucket(ageDays);
+    // Dice sizes every API request to a finite Jobs-per-platform setting. The
+    // date-bound diagnostic must show that effective request size rather than
+    // its usual 400/1000 default, or a bounded run falsely looks like it
+    // over-pulled a full page.
+    const diceDefaultPageSize = diceBucket ? 400 : 1000;
+    const diceEffectivePageSize = normalizedCollectionLimits.jobsPerPlatform == null
+      ? diceDefaultPageSize
+      : Math.min(diceDefaultPageSize, normalizedCollectionLimits.jobsPerPlatform);
+    const dicePageSizeFact = `pageSize ${diceEffectivePageSize}${normalizedCollectionLimits.jobsPerPlatform != null ? ' (limited by Jobs per platform)' : ''}`;
     const dateBounds = Object.fromEntries(activeSourceIds.map((id) => {
       let detail = 'client-side only';
       if (id === 'dice') detail = diceBucket
-        ? `filters.postedDate=${diceBucket} (server-side; pageSize 400)`
-        : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; pageSize 1000)`;
+        ? `filters.postedDate=${diceBucket} (server-side; ${dicePageSizeFact})`
+        : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; ${dicePageSizeFact})`;
       else if (id === 'glassdoor') detail = glassdoorBucket
         ? `fromAge=${glassdoorBucket} (server bucket rounded up; client trims to ${ageDays}d)`
         : `client-side only (${ageDays}d exceeds Glassdoor's 30-day server bucket)`;
@@ -5670,7 +6594,12 @@ Return a JSON object with four arrays of search query strings:
     // whole-feed title admission. `gatheredCount` is the sum of the source-card
     // counts before cross-source dedup/age/history filtering, so the renderer's
     // visible "N scraped" total reconciles with the platform cards.
-    return { jobs: kept, descriptionRecoveryJobs, rawCount: relevanceFunnel.raw, gatheredCount: allJobs.length, sourceResults, scrapeWarnings, runId: activeRunId };
+    const descriptionRecoveryState = Object.fromEntries(
+      Object.entries(sourceBlockedUrls)
+        .map(([sourceId, urls]) => [sourceId, { blockedUrls: boundedRecoveryBlockedUrls(urls) }])
+        .filter(([, state]) => state.blockedUrls.length > 0),
+    );
+    return { jobs: kept, descriptionRecoveryJobs, descriptionRecoveryState, rawCount: relevanceFunnel.raw, gatheredCount: allJobs.length, sourceResults, scrapeWarnings, runId: activeRunId };
   });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
@@ -5712,6 +6641,7 @@ Return a JSON object with four arrays of search query strings:
 
   handleSafe('complete-job-run', async (event, {
     canvasFilePath,
+    nodeId = null,
     runId = null,
     terminalStatus = null,
     terminalOutcome = null,
@@ -5724,7 +6654,9 @@ Return a JSON object with four arrays of search query strings:
     // No token means there is no safely attributable sidecar to clear (unsaved
     // canvases and legacy/snapshot-only scoring land here). Never turn an
     // unscoped completion into an unconditional delete of another hub's run.
-    if (!runId) return { ok: true, cleared: false, receipt: null };
+    if (!runId || !nodeId) {
+      return { ok: true, cleared: false, receipt: null, reason: 'missing-ownership' };
+    }
     const receipt = buildJobRunCompletionReceipt(runId, Date.now(), {
       status: terminalStatus,
       outcome: terminalOutcome,
@@ -5732,26 +6664,45 @@ Return a JSON object with four arrays of search query strings:
     });
     const completion = await completeRunWithReceipt(canvasFilePath, receipt, {
       trashItem: (p) => shell.trashItem(p),
+      expectedNodeId: nodeId,
     });
-    return completion;
+    // The checkpoint is the exact recovery universe for a blocked description
+    // source. A failed receipt write, failed sidecar cleanup, or token mismatch
+    // leaves the run resumable, so retiring that checkpoint here would make the
+    // subsequent recovery banner unable to Solve its own deferred listings.
+    // Only a fully committed, cleanup-cleared terminal transaction may retire it.
+    const checkpointCleanup = completion?.ok === true && completion?.cleared === true
+      ? await removeDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, runId)
+      : { removed: false, reason: 'terminal-not-finalized' };
+    return { ...completion, checkpointCleanup };
   });
 
-  handleSafe('discard-job-run', async (event, { canvasFilePath, runId = null } = {}) => {
+  handleSafe('discard-job-run', async (event, { canvasFilePath, nodeId = null, runId = null } = {}) => {
     // "Start fresh" → recoverable: route the sidecars to the OS Trash instead of
     // unlinking them. clearRun falls back to a hard delete if the volume has no
     // Trash, so the run is always cleared either way. Just like clean
     // completion, this MUST be run-token scoped: an old recovery banner's
     // delayed click must never trash a scan that started immediately after it.
     if (!runId) return { ok: true, cleared: false };
-    const cleared = await clearRun(canvasFilePath, {
+    return discardOwnedJobRun(canvasFilePath, nodeId, runId, {
       trashItem: (p) => shell.trashItem(p),
-      expectedRunId: runId,
     });
-    return { ok: true, cleared };
   });
 
-  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation, collectionLimits, enabledSourceIds, targetRole = '' }, signal) => {
+  handleSafe('discard-unknown-owner-job-run', async (event, { canvasFilePath, runId = null } = {}) => {
+    return discardUnknownOwnerJobRun(canvasFilePath, runId, {
+      trashItem: (p) => shell.trashItem(p),
+    });
+  });
+
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, jobRunId = null, preferredLocation, collectionLimits, enabledSourceIds, targetRole = '' }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
+    const emitSingleSourceProgress = (payload) => {
+      if (!nodeId) return;
+      const correlatedPayload = jobRunId ? { ...payload, jobRunId } : payload;
+      recordJobSourceProgress(correlatedPayload, { updatePipeline: false, expectedNodeId: nodeId });
+      if (!event.sender.isDestroyed()) event.sender.send('job-source-progress', correlatedPayload);
+    };
     if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) {
       return {
         success: false,
@@ -5780,8 +6731,8 @@ Return a JSON object with four arrays of search query strings:
         evidence: sourceCountryPolicy.reason,
         suggestion: `This source is intentionally not queried for ${sourceCountryPolicy.location.boardReady || sourceCountryPolicy.location.country || 'this target'}. Run a separate United States hub to use U.S.-only sources.`,
       };
-      if (nodeId && !event.sender.isDestroyed()) {
-        event.sender.send('job-source-progress', {
+      if (nodeId) {
+        emitSingleSourceProgress({
           nodeId,
           sourceId,
           status: 'skipped',
@@ -5797,8 +6748,8 @@ Return a JSON object with four arrays of search query strings:
     let jobs = [];
     let warning = null;
 
-    if (nodeId && !event.sender.isDestroyed()) {
-      event.sender.send('job-source-progress', {
+    if (nodeId) {
+      emitSingleSourceProgress({
         nodeId,
         sourceId,
         status: 'searching',
@@ -5818,8 +6769,8 @@ Return a JSON object with four arrays of search query strings:
           evidence: 'USAJobs API key + email not set',
           suggestion: 'Get a free key at developer.usajobs.gov, then open Settings → Job Sources and paste the API key + your email to enable this source.',
         };
-        if (nodeId && !event.sender.isDestroyed()) {
-          event.sender.send('job-source-progress', {
+        if (nodeId) {
+          emitSingleSourceProgress({
             nodeId,
             sourceId,
             status: 'skipped',
@@ -5847,8 +6798,8 @@ Return a JSON object with four arrays of search query strings:
           evidence: String(err?.message || err),
           suggestion: 'API call failed. Check logs for the full response.',
         };
-        if (nodeId && !event.sender.isDestroyed()) {
-          event.sender.send('job-source-progress', {
+        if (nodeId) {
+          emitSingleSourceProgress({
             nodeId,
             sourceId,
             status: 'error',
@@ -5903,8 +6854,8 @@ Return a JSON object with four arrays of search query strings:
     if (warning && warning.severity === 'block') status = 'error';
     else if (warning && warning.severity === 'info') status = 'skipped';
 
-    if (nodeId && !event.sender.isDestroyed()) {
-      event.sender.send('job-source-progress', {
+    if (nodeId) {
+      emitSingleSourceProgress({
         nodeId,
         sourceId,
         status,
@@ -6310,6 +7261,10 @@ Return a JSON object with four arrays of search query strings:
     logger.info(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
     jobsTelemetry.scoring = {
       ts: Date.now(),
+      // A receipt can only use this aggregate when it belongs to the staged
+      // search completed later. Snapshot context is the renderer's durable
+      // provenance carrier; direct re-scores intentionally leave this null.
+      runId: snapshotContext?.runId || null,
       input: gathered.length,            // jobs the renderer handed us (post gather/dedup/age/history)
       selectedForScoring: toScore.length, // after the across-source budget cap
       cappedForBudget,                    // gathered − selected: by-design overflow, NOT a failure
@@ -6613,8 +7568,7 @@ Return a JSON object with four arrays of search query strings:
     // bandSummary above. Bands and roles both reported how many jobs landed in
     // each; salary ranges reported labels only, so the one level whose buckets
     // the model invents had no realized shape in the report — its counts could
-    // only be reconstructed from the taxonomy placement audit, which is bounded
-    // and is the first thing a filter code or the clipboard cap drops. Uses the
+    // only be reconstructed from the bounded taxonomy placement audit. Uses the
     // same placeRange the renderer uses, so it can never disagree with the canvas.
     const rangeCounts = new Map();
     for (const j of jobs) {
@@ -6634,9 +7588,8 @@ Return a JSON object with four arrays of search query strings:
     for (const role of result.roles) for (const index of role.jobIndices) {
       if (!roleByIndex.has(index)) roleByIndex.set(index, role.name);
     }
-    // Keep this trace compact enough that a FULL clipboard report still reaches
-    // the sections after taxonomy. Reserve space for anomalous salary rows even
-    // when they occur late, then fill the remaining slots in original order.
+    // Keep this bounded trace focused. Reserve space for anomalous salary rows
+    // even when they occur late, then fill the remaining slots in original order.
     const taxonomyAuditLimit = 20;
     const anomalyIndices = jobs
       .map((job, index) => salaryRangeAnomaly(job.salary) ? index : -1)
@@ -6746,7 +7699,22 @@ Return a JSON object with four arrays of search query strings:
     if (!getRunnableJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
       return { resolved: false, disabled: true, items: [] };
     }
-    logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
+    logger.info(`[Jobs][${nodeId}] User requested source resolve for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
+
+    // Google and LinkedIn recovery target an already-collected universe rather
+    // than whatever first slice happens to be mounted in the visible window.
+    // Never let a source card without the active run token borrow a prior
+    // canvas-global snapshot to construct that universe.
+    const requiresStrictDescriptionRecoverySnapshot = sourceId === 'google' || sourceId === 'linkedin';
+    if (requiresStrictDescriptionRecoverySnapshot && !jobRunId) {
+      const warning = descriptionRecoveryNotReadyWarning(resolveSourceLabel(sourceId), 'missing-run-id');
+      logger.info(`[Jobs][${nodeId}] ${sourceId} Solve deferred: ${warning.code} (missing jobRunId)`);
+      return { resolved: false, items: [], warning, nextBlockedUrl: null };
+    }
+    if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId))) {
+      logger.info(`[Jobs][${nodeId}] ${sourceId} Solve ignored: its durable run is no longer current`);
+      return { resolved: false, staleRun: true, items: [], nextBlockedUrl: null };
+    }
 
     // LinkedIn "Solve" = re-fetch descriptions, NOT log in. Descriptions come
     // from ANONYMOUS guest pages (the cookieless JSON-LD; the logged-in SPA has
@@ -6760,6 +7728,10 @@ Return a JSON object with four arrays of search query strings:
     // fills another batch as LinkedIn's guest quota cools down.
     const isLinkedInReEnrich = sourceId === 'linkedin';
     if (isLinkedInReEnrich) {
+      // A durable Solve from another canvas must not inherit or overwrite the
+      // process-local cooldown diagnostics owned by the current canvas.
+      const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);
+      return withDescriptionRecoveryLock({ canvasFilePath, nodeId, jobRunId, signal }, () => withSharedProfileLock(async () => {
       // Pass-start ≈ when the user clicked Solve. Stamped on the enrichment trail
       // so the idle gap before this pass (the cooldown wait) excludes the pass's
       // own multi-minute duration on a clean finish.
@@ -6767,31 +7739,40 @@ Return a JSON object with four arrays of search query strings:
       // Resolve-attempt telemetry — the LinkedIn branch returns directly and
       // never reaches the generic resolves[] recorder below, so without this the
       // bug report's "Captcha-resolve / Solve" section is blank for LinkedIn.
-      const recordResolve = (extra) => recordLinkedinResolveAttempt(sourceId, extra);
+      const recordResolve = (extra) => recordLinkedinResolveAttempt(
+        sourceId, extra, { nodeId, jobRunId },
+      );
       // A Resolve happens after the gather stage, so it must update the source
       // trail without changing the already-completed search pipeline back to
       // active. The renderer delivery remains best-effort, as before.
       const sendProgress = (payload) => {
-        recordJobSourceProgress(payload, { updatePipeline: false, expectedNodeId: nodeId });
-        if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', payload);
+        const correlatedPayload = jobRunId && !payload.jobRunId
+          ? { ...payload, jobRunId }
+          : payload;
+        recordJobSourceProgress(correlatedPayload, { updatePipeline: false, expectedNodeId: nodeId });
+        if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', correlatedPayload);
       };
 
       let items = [];
       try {
-        const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
-        // Guard against a snapshot from a different hub (e.g. user ran hub B
-        // after hub A's rate-limit card was left open).
-        const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
-        const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
-        if (!snapshotIsThisHub || !snapshotIsThisRun) {
+        const { snapshot, origin } = await loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId);
+        const ownership = await assessDescriptionRecoveryCheckpoint({ snapshot, origin, nodeId, jobRunId, canvasFilePath });
+        if (!ownership.ok) {
+          const warning = ownership.reason === 'current-snapshot-unavailable'
+            || ownership.reason === 'missing-run-id'
+            || ownership.reason === 'missing-ownership'
+            || ownership.reason === 'live-run-checkpoint-not-ready'
+            ? descriptionRecoveryNotReadyWarning('LinkedIn', ownership.reason)
+            : {
+                code: 'description-recovery-snapshot-stale', severity: 'block',
+                evidence: `The current LinkedIn recovery snapshot belongs to a different ${ownership.reason === 'hub-mismatch' ? 'hub' : 'search run'}, so it was not merged into this search.`,
+                suggestion: 'Run the search again, then retry Solve from its current source card.',
+              };
+          logger.info(`[Jobs][${nodeId}] LinkedIn Solve rejected recovery snapshot: ${ownership.reason}`);
           return {
             resolved: false,
             items: [],
-            warning: {
-              code: 'description-recovery-snapshot-stale', severity: 'block',
-              evidence: `The saved LinkedIn recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
-              suggestion: 'Run the search again, then retry Solve from its current source card.',
-            },
+            warning,
             nextBlockedUrl: null,
           };
         }
@@ -6842,7 +7823,9 @@ Return a JSON object with four arrays of search query strings:
                 ?? scoringJobs.length,
             },
           });
-          await saveJobAnalysisSnapshot(nextSnapshot);
+          return requireDescriptionRecoveryCheckpointPersisted(
+            await saveDescriptionRecoverySnapshotIfCurrent(nextSnapshot, { nodeId, jobRunId }),
+          );
         };
 
         if (needEnrich.length > 0) {
@@ -6861,7 +7844,10 @@ Return a JSON object with four arrays of search query strings:
               await persistRecoveryPool(pool);
             };
             const { pool: merged, foundMs, attempt, probeTotalEnriched, aborted, browserUnavailable, profileReserved, browserError } =
-              await runCooldownProbe(nodeId, waitsMs, allLinkedIn, signal, sendProgress, saveMidProbe);
+              await runCooldownProbe(nodeId, waitsMs, allLinkedIn, signal, sendProgress, saveMidProbe, {
+                ownership: { nodeId, jobRunId },
+                canWriteTelemetry,
+              });
             if (probeTotalEnriched > 0) await persistRecoveryPool(merged);
             if (aborted) return { resolved: true, items: admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
             const stillEmpty = filterJobsByDescriptionEvidence(merged).dropped.length;
@@ -6873,7 +7859,7 @@ Return a JSON object with four arrays of search query strings:
             }
             recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: foundMs == null, stillEmpty, cooldownProbe: true, cooldownFoundMs: foundMs });
             if (foundMs != null) {
-              clearLinkedInCeiling();
+              if (canWriteTelemetry()) clearLinkedInCeiling();
               logger.info(`[Jobs][${nodeId}] Cooldown probe FOUND: guest wall clears after ~${Math.round(foundMs / 60000)}m idle on the same IP/browser.`);
               sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'done' });
               return { resolved: true, items: admitForScoring(merged), replaceSourceItems: true, nextBlockedUrl: null };
@@ -6899,7 +7885,9 @@ Return a JSON object with four arrays of search query strings:
           // back safely if the session cannot render the description.
           const resolveSessionCache = await readStatusCache();
           const preferAuthenticated = resolveSessionCache.linkedin?.connected === true;
-          const sameIp = linkedInSameIpRetryDecision(linkedinLastCeilingIp, linkedinLastCeilingAt, currentIp);
+          const sameIp = canWriteTelemetry()
+            ? linkedInSameIpRetryDecision(linkedinLastCeilingIp, linkedinLastCeilingAt, currentIp)
+            : { skip: false, retryAfterMs: 0 };
           if (sameIp.skip && !preferAuthenticated) {
             const waitSeconds = Math.ceil(sameIp.retryAfterMs / 1000);
             const switchWarning = {
@@ -6911,7 +7899,7 @@ Return a JSON object with four arrays of search query strings:
             // walled: true — this observed-IP guard skipped an immediate retry;
             // it mirrors recordResolve above (was false, which
             // made the enrichment trail contradict itself for this event).
-            recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled: true, skippedSameIp: true, attempted: 0, remainingBefore: needEnrich.length, enriched: 0, startedAt: passStartedAt });
+            recordLinkedinEnrichPass({ kind: 'solve', nodeId, jobRunId, ip: currentIp, ipOk: !!currentIp, walled: true, skippedSameIp: true, attempted: 0, remainingBefore: needEnrich.length, enriched: 0, startedAt: passStartedAt });
             logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — egress IP unchanged (${currentIp}); ${waitSeconds}s cooldown remains before same-IP retry`);
             sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: switchWarning });
             return { resolved: true, items: admitForScoring(allLinkedIn), warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
@@ -6930,7 +7918,7 @@ Return a JSON object with four arrays of search query strings:
           // re-walled outcome from a clean finish; comparing `ip` to the prior
           // pass records whether the observed VPN egress changed, not why the
           // guest limit did or did not clear.
-          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, noInternet, browserUnavailable, attempted, remainingBefore: needEnrich.length, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, usedAuthenticated, authenticatedFallback, startedAt: passStartedAt });
+          recordLinkedinEnrichPass({ kind: 'solve', nodeId, jobRunId, ip: currentIp, ipOk: !!currentIp, walled, noInternet, browserUnavailable, attempted, remainingBefore: needEnrich.length, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, usedAuthenticated, authenticatedFallback, startedAt: passStartedAt });
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: +${successCount} description(s), ${stillEmpty} still empty (${contextRotations} ctx-rotation(s)${walled ? ', guest wall' : ''})`);
 
           // Persist this pass's descriptions back to the snapshot. Without this,
@@ -6942,8 +7930,22 @@ Return a JSON object with four arrays of search query strings:
           if (successCount > 0) {
             try {
               await persistRecoveryPool(items);
-            } catch (e) {
-              logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: could not persist descriptions to snapshot — ${e.message}`);
+            } catch (error) {
+              logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: could not persist descriptions to snapshot — ${error.message}`);
+              const persistenceWarning = descriptionRecoveryPersistenceWarning(
+                'LinkedIn',
+                error,
+                'Recovered LinkedIn descriptions could not be checkpointed, so this source was not marked complete.',
+              );
+              sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: persistenceWarning });
+              return {
+                resolved: false,
+                staleRun: error?.code === 'DESCRIPTION_RECOVERY_SUPERSEDED',
+                items: [],
+                warning: persistenceWarning,
+                replaceSourceItems: false,
+                nextBlockedUrl: null,
+              };
             }
           }
 
@@ -6983,7 +7985,7 @@ Return a JSON object with four arrays of search query strings:
             // IP so the next immediate retry can be deferred briefly. severity
             // 'throttle' (not 'warn') keeps the action button visible (the card
             // hides it for 'warn'/'info') and renders amber rather than block-red.
-            rememberLinkedInCeiling(currentIp || linkedinLastCeilingIp);
+            if (canWriteTelemetry()) rememberLinkedInCeiling(currentIp || linkedinLastCeilingIp);
             const ipNote = currentIp ? ` (IP ${currentIp})` : '';
             const reason = walled
               ? "LinkedIn temporarily limited description enrichment"
@@ -6996,7 +7998,7 @@ Return a JSON object with four arrays of search query strings:
             sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: rateWarning });
             return { resolved: true, items: scoringItems, warning: rateWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
-          clearLinkedInCeiling(); // finished without hitting the ceiling — reset
+          if (canWriteTelemetry()) clearLinkedInCeiling(); // finished without hitting the ceiling — reset
           sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'done' });
           return { resolved: true, items: scoringItems, replaceSourceItems: true, nextBlockedUrl: null };
         } else if (allLinkedIn.length > 0) {
@@ -7004,7 +8006,7 @@ Return a JSON object with four arrays of search query strings:
           // still replaces the pending set (clears the warning cleanly).
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: all ${allLinkedIn.length} jobs already have descriptions`);
           items = admitForScoring(allLinkedIn);
-          clearLinkedInCeiling();
+          if (canWriteTelemetry()) clearLinkedInCeiling();
           sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'done' });
           return { resolved: true, items, replaceSourceItems: true, nextBlockedUrl: null };
         } else {
@@ -7025,12 +8027,14 @@ Return a JSON object with four arrays of search query strings:
       }
 
       return { resolved: false, items: [], nextBlockedUrl: null };
+      }, signal));
     }
 
     // Use the source's ordinary list extractor in the visible window.  In
     // particular, Google must not take authWindows' no-extractor body-text
     // shortcut: a clean Google Jobs result page has enough text to satisfy that
     // shortcut, so the old omission closed Solve immediately with zero rows.
+    const runGenericResolve = async () => {
     const resolveConfig = getJobSourceResolveConfig(sourceId);
     const inlineExtractorJS = resolveConfig?.extractorJS || null;
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
@@ -7060,6 +8064,7 @@ Return a JSON object with four arrays of search query strings:
     // wedge a source that simply had nothing to recover.
     const recoveryBlocksResolve = sourceId === 'google';
     const recoveryLabel = resolveSourceLabel(sourceId);
+    let sourceRecoveryCheckpointOwned = false;
     const unusableRecoverySnapshot = (code, evidence, suggestion) => {
       sourceRecoverySnapshot = null;
       sourceRecoveryJobs = [];
@@ -7069,43 +8074,65 @@ Return a JSON object with four arrays of search query strings:
     };
     if (resolveConfig?.requiresDescriptionEnrichment) {
       let blocked = null;
-      if (!canvasFilePath) {
-        blocked = unusableRecoverySnapshot(
-          'description-recovery-snapshot-unavailable',
-          `${recoveryLabel} description recovery needs the current saved search snapshot, but this canvas has no saved path.`,
-          'Save the canvas, run the search again, then retry Solve.',
-        );
-      } else {
+      try {
+        // Every description-enrichment source first tries its exact run sidecar.
+        // Google requires it; Glassdoor/Zip retain their visible-window fallback
+        // only when no attributable current-run checkpoint exists. Unsaved
+        // canvases use the same exact-run contract in the private app-data
+        // fallback directory, so a missing canvas path is not itself a failure.
+        let checkpointError = null;
+        let loaded;
         try {
-          const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
-          const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
-          const snapshotIsThisRun = !jobRunId || snapshot.runId === jobRunId;
-          if (!snapshotIsThisHub || !snapshotIsThisRun) {
-            blocked = unusableRecoverySnapshot(
-              'description-recovery-snapshot-stale',
-              `The saved ${recoveryLabel} recovery snapshot belongs to a different ${!snapshotIsThisHub ? 'hub' : 'search run'}, so it was not merged into this search.`,
+          loaded = await loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId);
+          sourceRecoveryCheckpointOwned = true;
+        } catch (error) {
+          checkpointError = error;
+          if (!recoveryBlocksResolve) loaded = await loadJobAnalysisSnapshot(canvasFilePath);
+        }
+        if (!loaded) throw checkpointError || new Error('Description recovery checkpoint unavailable.');
+        const { snapshot, origin } = loaded;
+        const ownership = await assessDescriptionRecoveryCheckpoint({ snapshot, origin, nodeId, jobRunId, canvasFilePath });
+        if (ownership.ok) {
+          sourceRecoverySnapshot = snapshot;
+          sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot)
+            .filter(job => job?.source === sourceId);
+          // A challenge can happen before this source yielded any rows. The
+          // exact checkpoint still owns an ordered blocked-URL queue, so let
+          // the visible resolver run normally and persist that queue update.
+        } else if (recoveryBlocksResolve) {
+          const warning = ownership.reason === 'current-snapshot-unavailable'
+            || ownership.reason === 'missing-run-id'
+            || ownership.reason === 'missing-ownership'
+            || ownership.reason === 'live-run-checkpoint-not-ready'
+            ? descriptionRecoveryNotReadyWarning(recoveryLabel, ownership.reason)
+            : {
+                code: 'description-recovery-snapshot-stale',
+                severity: 'block',
+                evidence: `The current ${recoveryLabel} recovery snapshot belongs to a different ${ownership.reason === 'hub-mismatch' ? 'hub' : 'search run'}, so it was not merged into this search.`,
+                suggestion: 'Run the search again, then retry Solve from its current source card.',
+              };
+          logger.info(`[Jobs][${nodeId}] ${recoveryLabel} Solve rejected recovery snapshot: ${ownership.reason}`);
+          blocked = { resolved: false, items: [], warning, nextBlockedUrl: null };
+        } else {
+          // Snapshot-assisted matching is an optimisation for the other
+          // enrichment sources. Do not use an ambiguous/old snapshot, but do
+          // retain their established ordinary visible-window resolve path.
+          logger.info(`[Jobs][${nodeId}] ${recoveryLabel} Solve skipped unusable recovery snapshot: ${ownership.reason}`);
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] ${recoveryLabel} resolve could not read the description recovery pool: ${error?.message || error}`);
+        blocked = recoveryBlocksResolve
+          ? {
+              resolved: false,
+              items: [],
+              warning: descriptionRecoveryNotReadyWarning(recoveryLabel, 'current-snapshot-unavailable'),
+              nextBlockedUrl: null,
+            }
+          : unusableRecoverySnapshot(
+              'description-recovery-snapshot-unavailable',
+              `${recoveryLabel}’s current-run description recovery snapshot could not be read, so no stale rows were merged.`,
               'Run the search again, then retry Solve from its current source card.',
             );
-          } else {
-            sourceRecoverySnapshot = snapshot;
-            sourceRecoveryJobs = snapshotDescriptionRecoveryJobs(snapshot)
-              .filter(job => job?.source === sourceId);
-            if (sourceRecoveryJobs.length === 0) {
-              blocked = unusableRecoverySnapshot(
-                'description-recovery-snapshot-unavailable',
-                `The current ${recoveryLabel} recovery snapshot has no source rows, so the resolver did not clear this source.`,
-                'Run the search again, then retry Solve from its current source card.',
-              );
-            }
-          }
-        } catch (error) {
-          logger.warn(`[Jobs][${nodeId}] ${recoveryLabel} resolve could not read the description recovery pool: ${error?.message || error}`);
-          blocked = unusableRecoverySnapshot(
-            'description-recovery-snapshot-unavailable',
-            `${recoveryLabel}’s current-run description recovery snapshot could not be read, so no stale rows were merged.`,
-            'Run the search again, then retry Solve from its current source card.',
-          );
-        }
       }
       if (blocked) return blocked;
     }
@@ -7113,7 +8140,7 @@ Return a JSON object with four arrays of search query strings:
       recoveryJobs,
       descriptionRecoveryState = sourceRecoverySnapshot?.descriptionRecoveryState,
     ) => {
-      if (!sourceRecoverySnapshot || sourceId !== 'google') return;
+      if (!sourceRecoverySnapshot || !sourceRecoveryCheckpointOwned) return;
       const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
         snapshotDescriptionRecoveryJobs(sourceRecoverySnapshot), sourceId, recoveryJobs,
       );
@@ -7139,9 +8166,12 @@ Return a JSON object with four arrays of search query strings:
             ?? scoringJobs.length,
         },
       });
-      await saveJobAnalysisSnapshot(nextSnapshot);
+      const persisted = requireDescriptionRecoveryCheckpointPersisted(
+        await saveDescriptionRecoverySnapshotIfCurrent(nextSnapshot, { nodeId, jobRunId }),
+      );
       sourceRecoverySnapshot = nextSnapshot;
       sourceRecoveryJobs = descriptionRecoveryJobs.filter(job => job?.source === sourceId);
+      return persisted;
     };
     // The normal manual-scrape path expands Glassdoor list rows into full detail
     // descriptions before returning them. A captcha/review-gate resolve used to
@@ -7213,19 +8243,19 @@ Return a JSON object with four arrays of search query strings:
               },
             );
             let persistenceWarning = null;
-            if (sourceId === 'google' && unavailableRecoveryRows.length > 0) {
+            if (sourceRecoveryCheckpointOwned && unavailableRecoveryRows.length > 0) {
               try {
                 await persistSourceRecoveryJobs(recovery.recoveryJobs, {
                   ...(sourceRecoverySnapshot?.descriptionRecoveryState || {}),
-                  [sourceId]: guidanceOutcome.state,
+                  [sourceId]: { ...(sourceRecoverySnapshot?.descriptionRecoveryState?.[sourceId] || {}), ...guidanceOutcome.state },
                 });
               } catch (error) {
                 logger.warn(`[Jobs][${nodeId}] ${resolveSourceLabel(sourceId)} resolve could not persist its retry recommendation: ${error?.message || error}`);
-                persistenceWarning = {
-                  code: 'description-recovery-persist-failed', severity: 'block',
-                  evidence: `${resolveSourceLabel(sourceId)}’s latest no-progress check could not be checkpointed, so the retry/skip recommendation was not advanced.`,
-                  suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
-                };
+                persistenceWarning = descriptionRecoveryPersistenceWarning(
+                  resolveSourceLabel(sourceId),
+                  error,
+                  `${resolveSourceLabel(sourceId)}’s latest no-progress check could not be checkpointed, so the retry/skip recommendation was not advanced.`,
+                );
               }
             }
             const unavailableWarning = unavailableRecoveryRows.length > 0 && providerRows.length > 0
@@ -7299,15 +8329,15 @@ Return a JSON object with four arrays of search query strings:
             try {
               await persistSourceRecoveryJobs(recovery.recoveryJobs, {
                 ...(sourceRecoverySnapshot?.descriptionRecoveryState || {}),
-                [sourceId]: guidanceOutcome.state,
+                [sourceId]: { ...(sourceRecoverySnapshot?.descriptionRecoveryState?.[sourceId] || {}), ...guidanceOutcome.state },
               });
             } catch (error) {
               logger.warn(`[Jobs][${nodeId}] ${resolveSourceLabel(sourceId)} resolve could not persist the description recovery pool: ${error?.message || error}`);
-              persistenceWarning = {
-                code: 'description-recovery-persist-failed', severity: 'block',
-                evidence: `Recovered ${resolveSourceLabel(sourceId)} descriptions could not be checkpointed, so this source was not marked complete.`,
-                suggestion: 'Click Solve again. If this repeats, verify the canvas folder is writable before continuing.',
-              };
+              persistenceWarning = descriptionRecoveryPersistenceWarning(
+                resolveSourceLabel(sourceId),
+                error,
+                `Recovered ${resolveSourceLabel(sourceId)} descriptions could not be checkpointed, so this source was not marked complete.`,
+              );
             }
           }
 
@@ -7356,14 +8386,15 @@ Return a JSON object with four arrays of search query strings:
         }
       : null;
 
-    const result = await openCaptchaResolveWindow(
+    logger.info(`[Jobs][${nodeId}] Opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
+    const result = await withSharedProfileLock(() => openCaptchaResolveWindow(
       url,
       event.sender,
       signal,
       inlineExtractorJS,
       secondTabUrl || null,
       inlineItemsPostprocessor,
-    );
+    ), signal);
     const resolverNeedsDescriptions = !!resolveConfig?.requiresDescriptionEnrichment;
     const postprocessOutcome = result?.diag?.postprocessOutcome || null;
     const rawResolvedItems = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
@@ -7433,8 +8464,10 @@ Return a JSON object with four arrays of search query strings:
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
     // re-resolving the same source replaces its entry (latest wins).
-    const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
-    jobsTelemetry.resolves[sourceId] = {
+    const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);
+    if (canWriteTelemetry()) {
+      const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
+      jobsTelemetry.resolves[sourceId] = {
       ts: Date.now(),
       resolved: !!result.resolved,
       cumulativeMergeNet: priorResolveMergeNet,
@@ -7460,14 +8493,15 @@ Return a JSON object with four arrays of search query strings:
       diag: result.diag || null,
       enrichment: enrichmentMeta,
       warning: resolveWarning ? { code: resolveWarning.code, severity: resolveWarning.severity } : null,
-    };
+      };
+    }
     // Preserve the original search funnel. A Solve reopens a page that the
     // initial scrape already counted; adding its raw/retained rows here made a
     // 119-row Google result look like 129 provider rows even when the renderer
     // accepted zero new jobs. The resolve funnel below records the recovery
     // attempt; only the renderer has the cross-source dedup evidence needed to
     // describe a real queue contribution.
-    if (jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
+    if (canWriteTelemetry() && jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
       const bySource = jobsTelemetry.search.bySource || (jobsTelemetry.search.bySource = {});
       const prior = bySource[sourceId] || {};
       bySource[sourceId] = {
@@ -7500,6 +8534,7 @@ Return a JSON object with four arrays of search query strings:
     const resolveProgress = {
       nodeId,
       sourceId,
+      jobRunId,
       status: resolveStatus,
       count: items.length,
       url,
@@ -7510,10 +8545,43 @@ Return a JSON object with four arrays of search query strings:
     recordJobSourceProgress(resolveProgress, { updatePipeline: false, expectedNodeId: nodeId });
     if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', resolveProgress);
     // Multi-query sequential solve: if this source had more than one blocked query,
-    // pop the just-resolved URL and return the next one so the frontend can re-raise
-    // a Solve card for it without requiring a full re-run.
-    const remaining = (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url);
-    if (jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
+    // consume the exact checkpoint-owned queue first. That queue survives a
+    // restart or another canvas claiming process-global diagnostics; telemetry
+    // remains only a backward-compatible same-process fallback.
+    let checkpointRemainingUrls = null;
+    if (sourceRecoveryCheckpointOwned) {
+      const queuedUrls = recoveryBlockedUrlsForSource(sourceRecoverySnapshot?.descriptionRecoveryState, sourceId);
+      if (queuedUrls.length > 0) {
+        const consumedQueue = consumeRecoveryBlockedUrl(
+          sourceRecoverySnapshot?.descriptionRecoveryState,
+          sourceId,
+          url,
+        );
+        checkpointRemainingUrls = consumedQueue.remaining;
+        try {
+          await persistSourceRecoveryJobs(sourceRecoveryJobs, {
+            ...consumedQueue.state,
+          });
+        } catch (error) {
+          const warning = descriptionRecoveryPersistenceWarning(
+            recoveryLabel,
+            error,
+            `${recoveryLabel} cleared a blocked query but could not checkpoint the remaining query order.`,
+          );
+          return {
+            resolved: false,
+            staleRun: error?.code === 'DESCRIPTION_RECOVERY_SUPERSEDED',
+            items: [],
+            warning,
+            nextBlockedUrl: null,
+          };
+        }
+      }
+    }
+    const remaining = checkpointRemainingUrls ?? (canWriteTelemetry()
+      ? (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url)
+      : []);
+    if (canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
     const nextBlockedUrl = remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
     // JobSourceCardNode's onResolved handler already reads `warning` off this
@@ -7534,14 +8602,27 @@ Return a JSON object with four arrays of search query strings:
       replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,
       removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
     };
+    };
+    // Every generic Solve may now consume an exact checkpoint-owned URL queue,
+    // not only Google. Serialize its full read/visible-browser/write lifetime
+    // per hub/run so two clicks cannot both consume the same queued query.
+    return withDescriptionRecoveryLock({ canvasFilePath, nodeId, jobRunId, signal }, runGenericResolve);
   });
 
   // Resume an Indeed scrape that was interrupted by a login-wall mid-pagination.
   // The user re-authenticates via Settings, then clicks Continue on the source
   // card. Runs only the remaining queries starting from the challenged page so
   // we don't repeat work already captured in pendingJobs.
-  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds, targetRole = '' } = {}, signal) => {
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds, targetRole = '' } = {}, signal) => {
     if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
+    if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId))) {
+      logger.info(`[Jobs][${nodeId}] Indeed Continue ignored: its durable run is no longer current`);
+      return { resolved: false, staleRun: true, items: [] };
+    }
+    const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);
+    const recordResumeAttempt = (attemptSourceId, mode, outcome, detail) => {
+      recordResumeAttemptTelemetry(attemptSourceId, mode, outcome, detail, { nodeId, jobRunId });
+    };
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     // The mode a "Continue"/"Log in"/"Solve" click was showing when the user
     // acted, kept for the resumeAttempts trail below even once a branch clears
@@ -7562,15 +8643,16 @@ Return a JSON object with four arrays of search query strings:
         return { resolved: false, items: [] };
       }
       logger.info(`[Jobs][${nodeId}] Retrying ${retryRows.length} exact Indeed description(s)`);
-      const retried = await withSharedProfileLock(() => retryIndeedJobDescriptions(retryRows, signal));
+      const retried = await withSharedProfileLock(() => retryIndeedJobDescriptions(retryRows, signal), signal);
       const retriedItems = Array.isArray(retried.jobs) ? retried.jobs : retryRows;
       repairJobsMojibake(retriedItems);
       normalizeJobsMarkup(retriedItems);
       const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
       const items = descriptionEvidence.jobs;
       tagJobLanguages(items);
-      const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
-      jobsTelemetry.resolves.indeed = {
+      if (canWriteTelemetry()) {
+        const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
+        jobsTelemetry.resolves.indeed = {
         ts: Date.now(),
         kind: 'description-retry',
         cumulativeMergeNet: priorResolveMergeNet,
@@ -7583,12 +8665,14 @@ Return a JSON object with four arrays of search query strings:
         remainingDescriptions: retried.remaining || 0,
         unavailableDescriptions: Array.isArray(retried.unavailable) ? retried.unavailable : [],
         challengeReason: retried.challengeReason || null,
-      };
+        };
+      }
       const retryDetail = `${items.length} description(s) recovered of ${retried.attempted || 0} attempted; descriptionEvidenceDropped=${descriptionEvidence.dropped.length}`;
       recordResumeAttempt(sourceId, attemptMode, 'resolved', retryDetail);
       const retryProgress = {
         nodeId,
         sourceId,
+        jobRunId,
         status: 'done',
         count: items.length,
         warning: null,
@@ -7628,7 +8712,7 @@ Return a JSON object with four arrays of search query strings:
       // instead of on the disk cache, which is exactly the thing that can be
       // stale (a stale connected:true is what produced this bug in the first
       // place, so it must never be allowed to skip the window on its own).
-      if (Date.now() - lastIndeedLoginConfirmedAt < RECENT_INDEED_LOGIN_MS) {
+      if (canWriteTelemetry() && Date.now() - lastIndeedLoginConfirmedAt < RECENT_INDEED_LOGIN_MS) {
         logger.info(`[Jobs][${nodeId}] Indeed login already completed ${Math.round((Date.now() - lastIndeedLoginConfirmedAt) / 1000)}s ago — resuming without opening a second window`);
         recordResumeAttempt(sourceId, attemptMode, 'logged-in', 'reused the login completed moments earlier');
         effectiveResumeState = { ...effectiveResumeState, mode: null };
@@ -7641,7 +8725,7 @@ Return a JSON object with four arrays of search query strings:
         // Same shared-profile lock as every other native/browser hop here —
         // the login window and the scrape browser must never touch the
         // profile at the same time.
-        loginResult = await withSharedProfileLock(() => runPlatformLoginFlow('indeed', event.sender));
+        loginResult = await withSharedProfileLock(() => runPlatformLoginFlow('indeed', event.sender), signal);
       } catch (error) {
         recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error));
         return {
@@ -7684,7 +8768,7 @@ Return a JSON object with four arrays of search query strings:
       // that reports success and STILL leaves the scrape logged out is
       // exactly the failure this whole change exists to make visible.
       recordResumeAttempt(sourceId, attemptMode, 'logged-in', loginResult?.reason || 'native login confirmed connected');
-      lastIndeedLoginConfirmedAt = Date.now();
+      if (canWriteTelemetry()) lastIndeedLoginConfirmedAt = Date.now();
       effectiveResumeState = { ...effectiveResumeState, mode: null };
     }
     if (effectiveResumeState.mode === 'native-challenge') {
@@ -7698,7 +8782,7 @@ Return a JSON object with four arrays of search query strings:
       try {
         // Keep the job-side browser queue exclusive while real Chrome owns the
         // shared profile; the helper itself transfers/resolves the reservation.
-        nativeResult = await withSharedProfileLock(() => openNativeIndeedChallengeWindow(challengeUrl, event.sender, { challengeObserved: true, signal }));
+        nativeResult = await withSharedProfileLock(() => openNativeIndeedChallengeWindow(challengeUrl, event.sender, { challengeObserved: true, signal }), signal);
       } catch (error) {
         recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error));
         return {
@@ -7743,11 +8827,13 @@ Return a JSON object with four arrays of search query strings:
     logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1} (location=${location || 'none'})`);
     // Same shared-profile lock — a "Continue" click could land while a full
     // search is still scraping; serialize this Indeed browser against them.
-    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location, normalizedCollectionLimits));
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location, normalizedCollectionLimits), signal);
     // Observation of the session this resumed scrape actually ran with (see
     // BUG 3/4), plus BUG 5's cache truth check — a warning proving the
     // session is dead must downgrade the cached "connected" status.
-    await syncIndeedSessionStatusFromScrape(result?.sessionDiagnostics, result?.warning);
+    await syncIndeedSessionStatusFromScrape(result?.sessionDiagnostics, result?.warning, {
+      telemetryOwnership: { nodeId, jobRunId },
+    });
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
     // Raw source-returned rows stay distinct from the subset that clears the
     // role/history/description gates below. This value is also returned to the
@@ -7794,7 +8880,7 @@ Return a JSON object with four arrays of search query strings:
     // summary. Advance that summary with the rows actually gathered now (and
     // clear/replace the original warning) so the bug report cannot call a
     // successful post-challenge pass a zero-result source.
-    if (jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
+    if (canWriteTelemetry() && jobsTelemetry.search && (!jobsTelemetry.nodeId || jobsTelemetry.nodeId === nodeId)) {
       const bySource = jobsTelemetry.search.bySource || (jobsTelemetry.search.bySource = {});
       const prior = bySource[sourceId] || {};
       // Keep the source funnel in a single dimension: `count` is the number of
@@ -7838,6 +8924,7 @@ Return a JSON object with four arrays of search query strings:
     const resumeProgress = {
       nodeId,
       sourceId,
+      jobRunId,
       status: resumeStatus,
       // This mirrors the initial source-card count: raw rows collected before
       // the downstream role/evidence gates, not only the score-ready subset.
@@ -7850,8 +8937,9 @@ Return a JSON object with four arrays of search query strings:
     recordJobSourceProgress(resumeProgress, { updatePipeline: false, expectedNodeId: nodeId });
     if (!event.sender?.isDestroyed?.()) event.sender?.send?.('job-source-progress', resumeProgress);
 
-    const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
-    jobsTelemetry.resolves[sourceId] = {
+    if (canWriteTelemetry()) {
+      const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
+      jobsTelemetry.resolves[sourceId] = {
       ts: Date.now(),
       kind: 'source-resume',
       resolved,
@@ -7874,7 +8962,8 @@ Return a JSON object with four arrays of search query strings:
       },
       enrichment,
       warning: warning ? { code: warning.code, severity: warning.severity } : null,
-    };
+      };
+    }
     recordResumeAttempt(sourceId, attemptMode, resolved ? 'resolved' : 'blocked', warning?.code ? `warning: ${warning.code}; ${funnelDetail}` : funnelDetail);
     return {
       resolved,
@@ -7896,8 +8985,12 @@ Return a JSON object with four arrays of search query strings:
   // bug report shows "new: N" from the IPC side, which can overstate the actual
   // contribution when the resolver re-opened the same page as the initial scrape
   // (kept=11 from IPC but pendingJobs 28→28 because 11 replaced 11).
-  ipcMain.handle('record-resolve-merge', (_event, { sourceId, replacedExisting, fresh, pendingBefore, pendingAfter } = {}) => {
-    recordResolveMergeOutcome(sourceId, { replacedExisting, fresh, pendingBefore, pendingAfter });
+  ipcMain.handle('record-resolve-merge', (_event, { sourceId, nodeId = null, jobRunId = null, replacedExisting, fresh, pendingBefore, pendingAfter } = {}) => {
+    return recordResolveMergeOutcome(
+      sourceId,
+      { replacedExisting, fresh, pendingBefore, pendingAfter },
+      { nodeId, jobRunId },
+    );
   });
 
   const resetBlocker = async () => {

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, boundedRejectionError } from '../../electron/ipc/localAiApplication.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, boundedRejectionError, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -71,6 +71,55 @@ const coverLetterArgumentForResumeEvidence = (evidence, evidenceRole = 'Engineer
 const normalizedCoverLetter = () => ({
   name: '', contact: [], salutation: '', recipient: '',
   paragraphs: ['A concise factual letter.'], closing: '', signatureTitle: '',
+});
+
+const auditSentences = (paragraph) => {
+  const normalized = String(paragraph || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return [];
+  return typeof Intl?.Segmenter === 'function'
+    ? [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(normalized)]
+      .map(part => part.segment.replace(/\s+/g, ' ').trim()).filter(Boolean)
+    : (normalized.match(/[^.!?]+(?:[.!?]+|$)/gu) || [normalized]).map(value => value.trim()).filter(Boolean);
+};
+
+const generationAuditFor = ({
+  paragraphs = normalizedCoverLetter().paragraphs,
+  controllingThesis = validCoverLetterArgument().roleThesis,
+} = {}) => ({
+  version: LOCAL_AI_GENERATION_AUDIT_VERSION,
+  jobPriorities: [{
+    requirement: 'Reliable delivery of supported systems',
+    priority: 'highest',
+    disposition: 'addressed-both',
+    justification: 'The selected systems evidence is the strongest direct support for the emphasized delivery need.',
+  }],
+  resumePlan: {
+    strategy: 'Lead with the strongest direct evidence and retain distinct support needed for credible breadth.',
+    selectionRationale: 'The retained highlights prioritize interview value while preserving documented roles and source boundaries.',
+  },
+  coverLetterPlan: {
+    controllingThesis,
+    paragraphs: paragraphs.map((paragraph, paragraphIndex) => ({
+      paragraph,
+      argumentativeJob: paragraphIndex === 0
+        ? 'Establish the controlling evidence-to-need connection.'
+        : 'Develop the controlling argument with a distinct supported step.',
+      relationToThesis: 'Connect this paragraph’s supported proof to the exact capability named in the thesis.',
+      relationToPreviousParagraph: paragraphIndex === 0
+        ? 'opening'
+        : 'Develops the previous paragraph by adding a distinct supporting mechanism.',
+      sentences: auditSentences(paragraph).map((sentence, sentenceIndex) => ({
+        sentence,
+        function: sentenceIndex === 0
+          ? 'Establishes this paragraph’s argumentative direction.'
+          : 'Adds the next concrete step in this paragraph’s proof.',
+        relationToPreviousSentence: sentenceIndex === 0
+          ? 'opening'
+          : 'Develops the prior sentence by adding its next supported mechanism.',
+      })),
+    })),
+  },
+  finalDecisionSummary: 'The final documents use the strongest supported evidence without introducing a second cover-letter argument.',
 });
 
 // The app validates these records only when it has the trusted queued career
@@ -309,6 +358,9 @@ export default [
         && localSource.includes('Each additional proof must have one explicit supporting role in the same argument')
         && localSource.includes('distinct systems or responsibilities side by side merely because they occurred in the same role or job')
         && localSource.includes('adjacency and “the same job” are not a bridge')
+        && localSource.includes('do not make the letter narrate its own outline')
+        && localSource.includes('Reject mirrored scaffolding')
+        && localSource.includes('use neutral parallel framing that claims neither')
         && localSource.includes('Name actors and referents explicitly wherever pronouns would be ambiguous')
         && localSource.includes('keep general domain principles distinct from personal experience')
         && localSource.includes('listing’s description rather than independently verified fact')
@@ -465,9 +517,13 @@ export default [
           fs.promises.readFile(path.join(queued.folder, 'context', 'career-data.txt'), 'utf8'),
         ]);
         const parsedInput = JSON.parse(input);
-        assert(JSON.parse(manifest).status === 'queued' && parsedInput.jobId === queued.id
+        const parsedManifest = JSON.parse(manifest);
+        assert(parsedManifest.status === 'queued' && parsedInput.jobId === queued.id
           && parsedInput.qualityChecklist?.version === APPLICATION_QUALITY_CHECKLIST_VERSION
-          && JSON.stringify(parsedInput.qualityChecklist.criteria) === JSON.stringify(APPLICATION_QUALITY_CRITERIA),
+          && JSON.stringify(parsedInput.qualityChecklist.criteria) === JSON.stringify(APPLICATION_QUALITY_CRITERIA)
+          && parsedInput.generationAudit?.version === LOCAL_AI_GENERATION_AUDIT_VERSION
+          && parsedInput.generationAudit?.required === true
+          && JSON.stringify(parsedManifest.generationAudit) === JSON.stringify(parsedInput.generationAudit),
           'job manifest and input are tied to the exact queued job id');
         const expectedJobFolder = path.join(jobsRoot, queued.id);
         const expectedReceiptPath = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
@@ -491,8 +547,10 @@ export default [
             JOB_ID: queued.id,
             JOB_FORMAT_VERSION: LOCAL_AI_APPLICATION_VERSION,
             QUALITY_CHECKLIST_VERSION: APPLICATION_QUALITY_CHECKLIST_VERSION,
+            GENERATION_AUDIT_VERSION: LOCAL_AI_GENERATION_AUDIT_VERSION,
           })
           && prompt.includes('execution handoff, not a request to explain')
+          && prompt.includes('generation-audit versions')
           && prompt.includes('Matching `invalid`, `revision-required`, and legacy `revision-exhausted` feedback are nonterminal')
           && prompt.includes('Apart from RESULT_PATH, create no files'),
         'job is beside the saved canvas and gives a provider-neutral local agent an exact, versioned, execution-oriented handoff contract');
@@ -503,6 +561,14 @@ export default [
           ...parsedInput,
           qualityChecklist: { ...parsedInput.qualityChecklist, version: 1 },
         };
+        delete legacyInput.generationAudit;
+        await fs.promises.writeFile(path.join(queued.folder, 'input.json'), JSON.stringify(legacyInput), 'utf8');
+        const mismatchedAuditContract = await localApplicationStatus(queued.id, project.canvasFilePath)
+          .then(() => null, error => error);
+        assert(/input and manifest generation-audit contracts do not match/u.test(String(mismatchedAuditContract?.message || mismatchedAuditContract)),
+          'removing only one app-owned audit contract cannot downgrade a newly queued job to legacy behavior');
+        const legacyManifest = { ...parsedManifest };
+        delete legacyManifest.generationAudit;
         const legacyEvidence = 'Built reliable systems with measurable outcomes.';
         const legacyResult = {
           version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
@@ -516,12 +582,13 @@ export default [
             checklistVersion: 1,
           },
         };
-        await fs.promises.writeFile(path.join(queued.folder, 'input.json'), JSON.stringify(legacyInput), 'utf8');
-        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), JSON.stringify(legacyResult), 'utf8');
+        await Promise.all([
+          fs.promises.writeFile(path.join(queued.folder, 'manifest.json'), JSON.stringify(legacyManifest), 'utf8'),
+          fs.promises.writeFile(path.join(queued.folder, 'result.json'), JSON.stringify(legacyResult), 'utf8'),
+        ]);
         const legacyStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(legacyStatus.status === 'completed',
           'status accepts a v1 result only when this already queued app-owned input explicitly expects the supported legacy checklist version');
-        const parsedManifest = JSON.parse(manifest);
         assert(parsedManifest.canvasFilePath === project.canvasFilePath && parsedInput.canvasRoot === project.root,
           'manifest and input bind the job to one canonical saved canvas and its folder');
         if (process.platform !== 'win32') {
@@ -693,6 +760,52 @@ export default [
     },
   },
   {
+    name: 'Local AI import staging replaces a Generation Audit symlink without following it',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-audit-staging-')));
+      const outDir = path.join(root, 'imported-workspace');
+      const outsidePath = path.join(root, 'outside-sentinel.json');
+      const generationAuditPath = path.join(outDir, 'Generation Audit.json');
+      const outsideSentinel = '{"outside":"must remain unchanged"}\n';
+      const generationAuditArtifact = `${JSON.stringify({
+        version: LOCAL_AI_GENERATION_AUDIT_VERSION,
+        schema: 'infinite-canvas-generation-audit',
+      }, null, 2)}\n`;
+      try {
+        await fs.promises.mkdir(outDir);
+        await Promise.all([
+          fs.promises.writeFile(outsidePath, outsideSentinel),
+          fs.promises.writeFile(path.join(outDir, 'Resume.pdf'), 'stale resume'),
+          fs.promises.writeFile(path.join(outDir, 'Cover Letter.pdf'), 'stale cover letter'),
+        ]);
+        await fs.promises.symlink(outsidePath, generationAuditPath, process.platform === 'win32' ? 'file' : undefined);
+
+        const staged = await stageLocalApplicationWorkspaceArtifacts({
+          outDir,
+          applicationHtml: '<!doctype html><main class="page">Application</main>',
+          resumePdf: null,
+          coverLetterPdf: null,
+          jobListingMarkdown: '# Example role\n',
+          generationAuditArtifact,
+        });
+        const auditStat = await fs.promises.lstat(generationAuditPath);
+        assert(await fs.promises.readFile(outsidePath, 'utf8') === outsideSentinel,
+          'staging must never follow Generation Audit.json to overwrite its outside target');
+        assert(auditStat.isFile() && !auditStat.isSymbolicLink()
+          && await fs.promises.readFile(generationAuditPath, 'utf8') === generationAuditArtifact,
+        'the staged audit replaces the link itself with the exact app-authored regular file');
+        assert(staged.generationAuditPath === generationAuditPath
+          && staged.resumePdfPath === null && staged.coverLetterPdfPath === null
+          && !fs.existsSync(path.join(outDir, 'Resume.pdf'))
+          && !fs.existsSync(path.join(outDir, 'Cover Letter.pdf')),
+        'the same atomic staging unit returns fixed paths and removes stale optional PDFs');
+        return { outsideUnchanged: true, linkReplaced: true, stalePdfsRemoved: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Local AI application: project routine cannot traverse a linked local_ai folder',
     run: async () => {
       const routineProject = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-routine-project-')));
@@ -770,7 +883,7 @@ export default [
         resumeMainHtml: validResumeMain,
         coverLetter: normalizedCoverLetter(),
         coverLetterArgument: validCoverLetterArgument(),
-        qualityReview: draftedQualityReview(),
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
       }, id, path.join(os.tmpdir(), 'local-ai-project'));
       assert(good.coverLetter.paragraphs.length === 1
         && good.coverLetterArgument.roleThesis === validCoverLetterArgument().roleThesis,
@@ -1361,6 +1474,305 @@ export default [
     },
   },
   {
+    name: 'Local AI application: generation audit binds final thesis, paragraphs, and sentence relationships without exposing private fields',
+    run: () => {
+      const id = LOCAL_AI_TEST_JOB_ID;
+      const resumeMainHtml = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+      const paragraphs = [
+        'Reliable system delivery connects my supported systems work to this role. The implementation evidence explains how I make those delivery decisions.',
+        'Concrete implementation decisions extend the same delivery responsibility. Their role is to connect system choices to reliable operation.',
+      ];
+      const coverLetter = { ...normalizedCoverLetter(), paragraphs };
+      const coverLetterArgument = validCoverLetterArgument();
+      const base = {
+        version: LOCAL_AI_APPLICATION_VERSION,
+        jobId: id,
+        status: 'completed',
+        outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml,
+        coverLetter,
+        coverLetterArgument,
+        qualityReview: draftedQualityReview(),
+        generationAudit: generationAuditFor({
+          paragraphs,
+          controllingThesis: coverLetterArgument.roleThesis,
+        }),
+      };
+      const validate = result => validateLocalApplicationResult(
+        result,
+        id,
+        path.join(os.tmpdir(), 'local-ai-project'),
+        {},
+        { generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION },
+      );
+      const clone = value => JSON.parse(JSON.stringify(value));
+      const accepted = validate(base);
+      assert(accepted.generationAudit?.version === LOCAL_AI_GENERATION_AUDIT_VERSION
+        && accepted.generationAudit.coverLetterPlan.paragraphs.length === paragraphs.length
+        && accepted.generationAudit.coverLetterPlan.paragraphs[0].sentences.length === 2,
+      'a new-job audit preserves bounded final-state decisions and exact paragraph/sentence bindings');
+      const technicalCopy = clone(base);
+      technicalCopy.coverLetter.paragraphs = ['I logged tool calls to trace supported system behavior.'];
+      technicalCopy.generationAudit = generationAuditFor({
+        paragraphs: technicalCopy.coverLetter.paragraphs,
+        controllingThesis: coverLetterArgument.roleThesis,
+      });
+      assert(validate(technicalCopy).generationAudit.coverLetterPlan.paragraphs[0].paragraph.includes('tool calls'),
+        'exact final document text may discuss technical tool calls without being mistaken for a private tool transcript');
+
+      const expectRejected = (mutate, pattern, message) => {
+        const candidate = clone(base);
+        mutate(candidate);
+        let errorText = '';
+        try { validate(candidate); } catch (error) { errorText = String(error?.message || error); }
+        assert(pattern.test(errorText), `${message}; got ${JSON.stringify(errorText)}`);
+      };
+      expectRejected(result => { delete result.generationAudit; }, /structured generationAudit object/u,
+        'new app-owned contracts reject a missing generation audit');
+      expectRejected(result => { result.generationAudit.version = 99; }, /generationAudit\.version must be 1/u,
+        'new app-owned contracts reject an unsupported result audit version');
+      expectRejected(result => { result.generationAudit.coverLetterPlan.controllingThesis = 'A different controlling thesis replaces the actual argument.'; }, /must exactly match coverLetterArgument\.roleThesis/u,
+        'the audit cannot report a thesis different from the rendered argument contract');
+      expectRejected(result => { result.generationAudit.coverLetterPlan.paragraphs[0].paragraph = 'Stale paragraph text from an earlier draft.'; }, /exact normalized final paragraph/u,
+        'the audit cannot bind a stale paragraph');
+      expectRejected(result => { result.generationAudit.coverLetterPlan.paragraphs[0].sentences[1].sentence = 'A stale sentence from an earlier draft.'; }, /exact normalized final sentence/u,
+        'the audit cannot bind a stale sentence');
+      expectRejected(result => { result.generationAudit.coverLetterPlan.paragraphs[1].relationToPreviousParagraph = 'opening'; }, /substantive relation to the previous paragraph/u,
+        'every later paragraph must state how it follows the prior paragraph');
+      expectRejected(result => { result.generationAudit.coverLetterPlan.paragraphs[0].sentences[1].relationToPreviousSentence = 'opening'; }, /substantive relation to the previous sentence/u,
+        'every later sentence must state how it follows the prior sentence');
+      expectRejected(result => { result.generationAudit.finalDecisionSummary = 'sync_token: abcdefghijklmnopqrstuvwxyz123456'; }, /must not contain a credential, secret, or access token/u,
+        'a permitted audit field cannot carry a credential-like value');
+      expectRejected(result => { result.generationAudit.finalDecisionSummary = 'Private reasoning: here is my step-by-step reasoning transcript.'; }, /bounded final-state conclusion/u,
+        'a permitted audit field cannot carry private chain-of-thought or a transcript');
+
+      const projected = clone(base);
+      projected.generationAudit.privateReasoning = 'SECRET_SENTINEL private chain-of-thought';
+      projected.generationAudit.toolTranscript = 'SECRET_SENTINEL tool transcript';
+      projected.generationAudit.coverLetterPlan.syncToken = 'SECRET_SENTINEL sync token';
+      projected.generationAudit.coverLetterPlan.paragraphs[0].discardedDraft = 'SECRET_SENTINEL discarded copy';
+      const projectedAudit = validate(projected).generationAudit;
+      assert(!JSON.stringify(projectedAudit).includes('SECRET_SENTINEL')
+        && projectedAudit.privateReasoning === undefined
+        && projectedAudit.toolTranscript === undefined,
+      'validation projects only declared final-state conclusions and drops private/raw extra fields');
+
+      const legacy = clone(base);
+      delete legacy.generationAudit;
+      const acceptedLegacy = validateLocalApplicationResult(
+        legacy,
+        id,
+        path.join(os.tmpdir(), 'local-ai-project'),
+      );
+      assert(acceptedLegacy.generationAudit === null,
+        'a legacy queued job with no app-owned audit contract remains compatible');
+      let unsupportedExpected = '';
+      try {
+        validateLocalApplicationResult(base, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+          generationAuditVersion: 99,
+        });
+      } catch (error) { unsupportedExpected = String(error?.message || error); }
+      assert(/unsupported generation-audit version/u.test(unsupportedExpected),
+        'an unknown app-owned generation-audit version fails closed');
+      return { boundParagraphs: paragraphs.length, projected: true, legacyCompatible: true };
+    },
+  },
+  {
+    name: 'Local AI application: durable generation audit composes projected decisions, grounding, host checks, fit, and handoff history',
+    run: () => {
+      const coverLetterArgument = validCoverLetterArgument();
+      const paragraphs = ['A concise factual letter.'];
+      const result = {
+        resumeMainHtml: '<main class="page">Resume</main>',
+        coverLetter: { ...normalizedCoverLetter(), paragraphs },
+        coverLetterArgument,
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+        generationAudit: generationAuditFor({
+          paragraphs,
+          controllingThesis: coverLetterArgument.roleThesis,
+        }),
+        hostValidation: {
+          resumeProse: [{ id: 'resume-copy', passed: true, detail: 'Host check passed.' }],
+          coverLetter: [{ id: 'cover-continuity', passed: true, detail: 'Host check passed.' }],
+        },
+        undeclaredRawField: 'RAW_RESULT_OBJECT_SENTINEL',
+      };
+      result.generationAudit.privateReasoning = 'WRITER_PRIVATE_REASONING_SENTINEL';
+      result.generationAudit.toolTranscript = 'WRITER_TOOL_TRANSCRIPT_SENTINEL';
+      result.coverLetterArgument.primaryEvidence.privateReasoning = 'ARGUMENT_PRIVATE_REASONING_SENTINEL';
+      result.qualityReview.resume.rationale = 'api_key: QUALITY_REVIEW_SECRET_SENTINEL_abcdefghijklmnopqrstuvwxyz';
+      result.qualityReview.privateReasoning = 'QUALITY_PRIVATE_REASONING_SENTINEL';
+      result.hostValidation.resumeProse[0].privateReasoning = 'HOST_PRIVATE_REASONING_SENTINEL';
+      result.hostValidation.resumeProse[0].detail = '/Users/jack/SECRET_HOST_CHECK_PATH_SENTINEL.log';
+      const careerData = 'CAREER_DATA_SENTINEL Built supported systems.';
+      const listing = '# Developer\n\nA supported job listing.';
+      const resultRaw = '{"undeclared":"RAW_RESULT_TEXT_SENTINEL"}';
+      const resumePdf = Buffer.from('resume-pdf-bytes');
+      const coverPdf = Buffer.from('cover-pdf-bytes');
+      const artifactText = buildLocalGenerationAuditArtifact({
+        jobId: LOCAL_AI_TEST_JOB_ID,
+        input: {
+          createdAt: '2026-09-05T12:00:00.000Z',
+          job: {
+            title: 'Developer', company: 'Acme', location: 'Remote', source: 'test',
+            url: 'https://SECRET_JOB_URL_SENTINEL.test',
+          },
+          canvasFilePath: '/SECRET_CANVAS_PATH_SENTINEL/canvas.json',
+          matchScore: 88,
+          reasoning: 'api_key: abcdefghijklmnopqrstuvwxyz123456',
+          targetPageCount: 1,
+          qualityChecklist: { version: APPLICATION_QUALITY_CHECKLIST_VERSION },
+          additionalNotes: 'RAW_ADDITIONAL_NOTES_SENTINEL',
+        },
+        careerData,
+        jobListingMarkdown: listing,
+        result,
+        resultRaw,
+        applicationHtml: '<html>application</html>',
+        resumePdf,
+        coverPdf,
+        resumeFit: {
+          targetPageCount: 1, pageCount: 1, compactApplied: true, fontsLoaded: true,
+          contentUtilization: 0.94, layout: { contentHeightPx: 940 },
+          attempts: [{
+            attempt: 1,
+            density: 'default',
+            pageCount: 2,
+            error: '/Users/jack/SECRET_RENDER_PATH_SENTINEL.log',
+            privateReasoning: 'FIT_PRIVATE_REASONING_SENTINEL',
+          }, { attempt: 2, density: 'compact', pageCount: 1 }],
+        },
+        coverLetterFit: {
+          targetPageCount: 1, pageCount: 1, fontsLoaded: true,
+          contentUtilization: 0.48, layout: { contentHeightPx: 480 },
+        },
+        importedManifest: {
+          handoffEventCount: 40,
+          handoffHistory: [{
+            at: '2026-09-05T12:05:00.000Z',
+            type: 'result-imported',
+            resultSha256: 'a'.repeat(64),
+            detail: 'sync_token: EVENT_SECRET_SENTINEL_abcdefghijklmnopqrstuvwxyz',
+            privateReasoning: 'HANDOFF_PRIVATE_REASONING_SENTINEL',
+            toolTranscript: 'HANDOFF_TOOL_TRANSCRIPT_SENTINEL',
+            resume: {
+              pageCount: 1,
+              attempts: [{ attempt: 1, error: '/private/tmp/SECRET_EVENT_RENDER_PATH_SENTINEL.log' }],
+              internalPath: '/Users/jack/SECRET_EVENT_INTERNAL_PATH_SENTINEL',
+            },
+          }],
+        },
+        generationAuditRequired: true,
+        createdAt: '2026-09-05T12:06:00.000Z',
+      });
+      const artifact = JSON.parse(artifactText);
+      assert(artifact.version === LOCAL_AI_GENERATION_AUDIT_VERSION
+        && artifact.schema === 'infinite-canvas-generation-audit'
+        && artifact.jobId === LOCAL_AI_TEST_JOB_ID
+        && artifact.createdAt === '2026-09-05T12:06:00.000Z',
+      'the app authors a stable, versioned durable audit envelope');
+      assert(artifact.writerAudit.coverLetterPlan.controllingThesis === coverLetterArgument.roleThesis
+        && artifact.writerQualityReview.criteria.length === APPLICATION_QUALITY_CRITERIA.length
+        && artifact.writerQualityReview.sourceGrounding.resumeBullets[0].careerDataQuotes[0] === 'Built supported systems.'
+        && artifact.coverLetterArgument.roleThesis === coverLetterArgument.roleThesis
+        && artifact.hostValidation.coverLetter[0].passed === true,
+      'the durable file composes projected writer decisions, full validated review/grounding, argument contract, and host checks');
+      assert(artifact.measuredFit.resume.pageCount === 1
+        && artifact.measuredFit.resume.attempts.length === 2
+        && artifact.measuredFit.coverLetter.pageCount === 1
+        && artifact.handoff.eventCount === 40
+        && artifact.handoff.retainedEventCount === 1
+        && artifact.handoff.historyTruncated === true,
+      'the audit preserves app-owned fit attempts and makes bounded handoff-history truncation explicit');
+      assert(artifact.finalArtifacts.resultSha256 === sha256(resultRaw)
+        && artifact.finalArtifacts.resumePdfSha256 === sha256(resumePdf)
+        && artifact.finalArtifacts.coverLetterPdfSha256 === sha256(coverPdf)
+        && artifact.inputSummary.inputDigests.careerDataSha256 === sha256(careerData),
+      'the audit binds final and source inputs with full hashes without copying raw private corpora');
+      assert(artifact.inputSummary.matchRationale.includes('omitted from durable audit')
+        && !artifactText.includes('abcdefghijklmnopqrstuvwxyz123456')
+        && !artifactText.includes('RAW_RESULT_OBJECT_SENTINEL')
+        && !artifactText.includes('RAW_RESULT_TEXT_SENTINEL')
+        && !artifactText.includes('CAREER_DATA_SENTINEL')
+        && !artifactText.includes('RAW_ADDITIONAL_NOTES_SENTINEL')
+        && !artifactText.includes('SECRET_JOB_URL_SENTINEL')
+        && !artifactText.includes('SECRET_CANVAS_PATH_SENTINEL')
+        && !artifactText.includes('PRIVATE_REASONING_SENTINEL')
+        && !artifactText.includes('TOOL_TRANSCRIPT_SENTINEL')
+        && !artifactText.includes('SECRET_SENTINEL_abcdefghijklmnopqrstuvwxyz')
+        && !artifactText.includes('SECRET_RENDER_PATH_SENTINEL')
+        && !artifactText.includes('SECRET_HOST_CHECK_PATH_SENTINEL')
+        && !artifactText.includes('SECRET_EVENT_RENDER_PATH_SENTINEL')
+        && !artifactText.includes('SECRET_EVENT_INTERNAL_PATH_SENTINEL')
+        && !artifactText.includes('privateReasoning')
+        && !artifactText.includes('toolTranscript'),
+      'the durable projection omits credentials, undeclared raw/result/manifest fields, private reasoning, transcripts, corpora, notes, job URLs, and live filesystem paths');
+      return { version: artifact.version, checks: artifact.writerQualityReview.criteria.length, attempts: artifact.measuredFit.resume.attempts.length };
+    },
+  },
+  {
+    name: 'Local AI application: durable audit requiredness preserves true legacy jobs without weakening new jobs',
+    run: async () => {
+      const dir = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-legacy-audit-')));
+      const legacyPath = path.join(dir, 'legacy-audit.json');
+      const requiredPath = path.join(dir, 'required-audit.json');
+      const coverLetterArgument = validCoverLetterArgument();
+      const result = {
+        resumeMainHtml: '<main class="page">Resume</main>',
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument,
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+        hostValidation: {
+          resumeProse: [{ id: 'resume-copy', passed: true, detail: 'Host check passed.' }],
+          resumeRoleLocations: { id: 'resume-role-locations', passed: true, detail: 'Host check passed.' },
+          resumeProjectProvenance: { id: 'resume-project-provenance', passed: true, detail: 'Host check passed.' },
+          coverLetter: [{ id: 'cover-continuity', passed: true, detail: 'Host check passed.' }],
+          dashPunctuation: { id: 'candidate-dash-punctuation', passed: true, detail: 'Host check passed.' },
+        },
+      };
+      try {
+        const build = generationAuditRequired => buildLocalGenerationAuditArtifact({
+          jobId: LOCAL_AI_TEST_JOB_ID,
+          input: { job: { title: 'Developer', company: 'Acme' } },
+          result,
+          generationAuditRequired,
+          createdAt: '2026-09-05T12:06:00.000Z',
+        });
+        const legacyArtifact = build(false);
+        const requiredArtifact = build(true);
+        await Promise.all([
+          fs.promises.writeFile(legacyPath, legacyArtifact, 'utf8'),
+          fs.promises.writeFile(requiredPath, requiredArtifact, 'utf8'),
+        ]);
+        const legacyInspection = await inspectApplicationExport([{
+          path: legacyPath,
+          expectedData: legacyArtifact,
+          kind: 'generation-audit',
+          expectedJobId: LOCAL_AI_TEST_JOB_ID,
+          expectedGenerationAuditRequired: false,
+        }]);
+        assert(legacyInspection[0]?.integrityVerified
+          && legacyInspection[0].generationAuditRequirednessValid
+          && legacyInspection[0].generationAuditStructureValid
+          && JSON.parse(legacyArtifact).writerAudit === null,
+        'a true legacy job emits a valid app-owned durable audit with explicit required=false and writerAudit=null');
+
+        const requiredError = await inspectApplicationExport([{
+          path: requiredPath,
+          expectedData: requiredArtifact,
+          kind: 'generation-audit',
+          expectedJobId: LOCAL_AI_TEST_JOB_ID,
+          expectedGenerationAuditRequired: true,
+        }]).then(() => null, error => error);
+        assert(/readback failed/u.test(String(requiredError?.message || requiredError)),
+          'a new-job durable audit cannot claim required=true while omitting its writerAudit');
+        return { legacyAccepted: true, requiredNullRejected: true };
+      } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Local AI application: status treats malformed result.json as invalid without importing it',
     run: async () => {
       const project = await createCanvasProject();
@@ -1396,6 +1808,12 @@ export default [
           && rejection.error.length > 0 && rejection.error.length <= 500
           && rejection.resume === undefined && rejection.coverLetter === undefined,
           'a hard validation rejection writes a non-measured invalid record carrying the rejected bytes\' hash, and no page/layout data that could read as a measurement');
+        const rejectionManifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        const rejectionEvent = rejectionManifest.handoffHistory?.at(-1);
+        assert(rejectionEvent?.type === 'result-validation-rejected'
+          && typeof rejectionEvent.resultSha256 === 'string' && rejectionEvent.resultSha256.length === 64
+          && /JSON|Unexpected/i.test(String(rejectionEvent.detail || '')),
+        'a distinct validation rejection also enters app-owned handoff history with its full result hash so the final durable audit retains the repair sequence');
         assert(status.status === 'invalid' && /JSON|Unexpected/i.test(status.message),
           'bad result JSON is surfaced as an actionable invalid state');
         const linkedResultTarget = path.join(project.root, 'outside-result.json');
@@ -1471,6 +1889,7 @@ export default [
           resumeMainHtml: validResumeMain,
           coverLetter: normalizedCoverLetter(),
           coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
           qualityReview: groundedQualityReview(sourceGroundingFor()),
         };
         const resultText = `${JSON.stringify(result)}\n`;
@@ -1756,6 +2175,8 @@ export default [
       const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
       const applicationSource = await fs.promises.readFile(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
       const registrationAt = localSource.indexOf('const workDir = registerPendingApplicationWorkspace({');
+      const auditBuildAt = localSource.indexOf('const generationAuditArtifact = buildLocalGenerationAuditArtifact({');
+      const artifactStageAt = localSource.indexOf('} = await stageLocalApplicationWorkspaceArtifacts({');
       const receiptCalls = [...localSource.matchAll(/await writeLocalAiTerminalReceipt\(/g)].map(match => match.index);
       assert(registrationAt >= 0
         && /cleanupOnSaveFailure\s*:\s*false/.test(localSource.slice(registrationAt))
@@ -1763,6 +2184,9 @@ export default [
       'a Local AI import registers failure-retention plus a post-save receipt callback');
       assert(receiptCalls.length === 1 && receiptCalls[0] > registrationAt,
         'the terminal receipt is not emitted during measured import before save-application owns the workspace');
+      assert(auditBuildAt >= 0 && artifactStageAt > auditBuildAt && registrationAt > artifactStageAt
+        && /generationAuditPath[\s\S]{0,1600}generationAudit:\s*generationAuditArtifact/.test(localSource.slice(registrationAt, registrationAt + 4_000)),
+      'the app composes and atomically stages the durable generation audit before registering its exact path and bytes for final-save promotion');
 
       const cleanupAt = applicationSource.indexOf("await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save')");
       const finalizerAt = applicationSource.indexOf('await pending.onSuccessfulSave(');
@@ -2395,6 +2819,129 @@ export default [
     },
   },
   {
+    name: 'Local AI validation: personal-project provenance survives selection, markup variants, and rendering',
+    run() {
+      const careerData = [
+        'Built supported systems.',
+        'A concise factual letter.',
+        '',
+        '## Personal Projects',
+        '',
+        'AI-Chalkboard',
+        'A native macOS MCP server for transparent on-screen annotation.',
+        '',
+        'Marketplace Hub',
+        'Uses AI to draft and monitor resale listings.',
+        '',
+        'Infinite Canvas A spatial productivity app built on a pannable canvas.',
+        '',
+        '## Open Source',
+        '',
+        'Canvas Exporter',
+        'A community-maintained exporter for spatial boards.',
+        '',
+        '## Professional Projects',
+        '',
+        'Acme Platform',
+        'An employer-owned workflow platform.',
+        '',
+        '## Skills',
+        'JavaScript',
+      ].join('\n');
+      const section = (heading, body = '<article class="project"><h3 class="project-name">AI-Chalkboard</h3><p class="project-desc">A native macOS MCP server.</p></article>') => `
+        <section class="section" aria-labelledby="sec-projects">
+          <div class="section-head"><h2 id="sec-projects">${heading}</h2><span class="rule"></span></div>
+          ${body}
+        </section>`;
+      const experience = '<section class="section"><div class="section-head"><h2>Experience</h2></div><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section>';
+      const resume = (heading, body) => `<main class="page">${experience}${section(heading, body)}</main>`;
+
+      const selectedFailures = resumeProjectProvenanceFailures(resume('Selected Projects'), careerData);
+      assert(selectedFailures.length === 1
+        && selectedFailures[0].includes('AI-Chalkboard')
+        && selectedFailures[0].includes('Personal Projects')
+        && selectedFailures[0].includes('Selected Projects'),
+      `a retained personal project under Selected Projects must report the lost provenance, got ${JSON.stringify(selectedFailures)}`);
+      assert(resumeProjectProvenanceFailures(resume('Projects'), careerData).length === 1,
+        'a generic Projects heading cannot erase explicit personal-project provenance');
+      assert(resumeProjectProvenanceFailures(resume('Selected Personal Projects'), careerData).length === 1,
+        'adding Selected is not an exact preservation of the source category');
+      assert(resumeProjectProvenanceFailures(resume('Personal Projects'), careerData).length === 0,
+        'the exact Personal Projects heading preserves the source attribution');
+      assert(resumeProjectProvenanceFailures(resume('Personal Projects'), careerData.replace('## Personal Projects', 'Personal Projects')).length === 0
+        && resumeProjectProvenanceFailures(resume('Selected Projects'), careerData.replace('## Personal Projects', 'Personal Projects')).length === 1,
+      'both markdown and faithfully transcribed plain Personal Projects headings are recognized');
+
+      for (const body of [
+        '<div class="project"><h3 class="project-name">Marketplace Hub</h3></div>',
+        '<div class="project"><span class="title">Infinite Canvas</span></div>',
+        '<article class="role"><span class="title">AI-Chalkboard</span><ul class="highlights"><li>A native macOS MCP server.</li></ul></article>',
+      ]) {
+        assert(resumeProjectProvenanceFailures(resume('Selected Projects', body), careerData).length === 1,
+          `project provenance must not depend on one generated component shape: ${body}`);
+      }
+      assert(resumeProjectProvenanceFailures(`<main class="page">${experience}</main>`, careerData).length === 0,
+        'omitting an optional personal-project section remains valid');
+      const ordinaryExperienceNameCollision = experience.replace('>Engineer<', '>AI-Chalkboard<');
+      assert(resumeProjectProvenanceFailures(`<main class="page">${ordinaryExperienceNameCollision}</main>`, careerData).length === 0,
+        'an ordinary Experience role title that happens to equal a personal project must not be relabelled as a project');
+      const ambiguousCareerData = `${careerData}\n\n## Open Source\n\nAI-Chalkboard\nA separate community project with the same name.`;
+      assert(resumeProjectProvenanceFailures(resume('Selected Projects'), ambiguousCareerData).length === 0,
+        'a same-name project in two different source categories is ambiguous and must not trigger a guessed attribution');
+      assert(resumeProjectProvenanceFailures(resume('Projects'), careerData.replace('## Personal Projects', '## Featured Work')).length === 0,
+        'the targeted gate does not invent a project attribution when the source heading is generic');
+
+      const openSourceBody = '<article class="project"><h3 class="project-name">Canvas Exporter</h3><p class="project-desc">A community-maintained exporter.</p></article>';
+      const openSourceFailures = resumeProjectProvenanceFailures(resume('Selected Projects', openSourceBody), careerData);
+      assert(openSourceFailures.length === 1
+        && openSourceFailures[0].includes('Canvas Exporter')
+        && openSourceFailures[0].includes('Open Source')
+        && openSourceFailures[0].includes('Selected Projects'),
+      `an explicit open-source project category must not be flattened either, got ${JSON.stringify(openSourceFailures)}`);
+      assert(resumeProjectProvenanceFailures(resume('Open Source', openSourceBody), careerData).length === 0,
+        'the source’s explicit Open Source heading preserves that project’s provenance');
+      assert(resumeProjectProvenanceFailures(resume('Personal Projects', openSourceBody), careerData).length === 1,
+        'a project cannot inherit a different provenance category merely because it is a project section');
+
+      const professionalBody = '<article class="project"><h3 class="project-name">Acme Platform</h3><p class="project-desc">An employer-owned workflow platform.</p></article>';
+      const professionalFailures = resumeProjectProvenanceFailures(resume('Selected Projects', professionalBody), careerData);
+      assert(professionalFailures.length === 1
+        && professionalFailures[0].includes('Acme Platform')
+        && professionalFailures[0].includes('Professional Projects'),
+      `an employer-affiliated project cannot be presented as attribution-free selected work, got ${JSON.stringify(professionalFailures)}`);
+      assert(resumeProjectProvenanceFailures(resume('Professional Projects', professionalBody), careerData).length === 0,
+        'the explicit Professional Projects heading preserves employer-affiliated project provenance');
+
+      const result = (heading) => ({
+        version: LOCAL_AI_APPLICATION_VERSION,
+        jobId: LOCAL_AI_TEST_JOB_ID,
+        status: 'completed',
+        outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: resume(heading),
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+      });
+      let mismatch = '';
+      try {
+        validateLocalApplicationResult(result('Selected Projects'), LOCAL_AI_TEST_JOB_ID, process.cwd(), {}, { careerData });
+      } catch (error) { mismatch = String(error?.message || error); }
+      assert(/provenance-bearing heading exactly as “Personal Projects”/u.test(mismatch),
+        `the production trusted-context validator must reject the mismatch, got ${JSON.stringify(mismatch)}`);
+
+      const valid = validateLocalApplicationResult(result('Personal Projects'), LOCAL_AI_TEST_JOB_ID, process.cwd(), {}, { careerData });
+      const rendered = new JSDOM(buildResumeDocument({ resumeMainHtml: valid.resumeMainHtml }));
+      try {
+        const heading = rendered.window.document.querySelector('[data-ic-document-panel="resume"] #sec-projects')?.textContent;
+        assert(heading === 'Personal Projects',
+          `the accepted provenance heading must survive final document construction, got ${JSON.stringify(heading)}`);
+      } finally {
+        rendered.window.close();
+      }
+      return { enforced: true, variants: 3 };
+    },
+  },
+  {
     name: 'Local AI validation: a dropped work location is rejected only when the career data actually states one',
     async run() {
       const CAREER = 'Jack Wu\n\n**Thomson School District — Loveland, Colorado**\n- Built the nightly district extract.\n';
@@ -2556,6 +3103,18 @@ export default [
         ['bullet character budget', '180 visible characters'],
         ['literal-form qualifier matching', 'The match is on the literal word form'],
         ['closing construction', 'authorship clause'],
+        ['personal-project provenance', 'A source-stated project category is factual provenance'],
+        ['generation audit input contract', '`manifest.json.generationAudit` both have `version: 1` and `required: true`'],
+        ['legacy generation audit compatibility', 'A queued legacy job may have no `generationAudit` contract'],
+        ['generation audit mismatch handling', 'If only one file has the contract or their values differ, stop and report the mismatch'],
+        ['natural branch realization', 'do not make the cover letter narrate its own outline'],
+        ['mirrored category scaffolding', 'Reject mirrored scaffolding such as `I handled <category> by ... I addressed <category> by ...`'],
+        ['mechanism versus example wording', 'Use `by` when the action is the supported mechanism; use `such as` only'],
+        ['scope-neutral parallel framing', 'use neutral parallel framing that claims neither'],
+        ['exact audit paragraph binding', 'must bind every final cover-letter paragraph exactly once'],
+        ['exact audit sentence binding', 'must do the same for every sentence in that paragraph'],
+        ['audit chain-of-thought boundary', 'Do not add private reasoning, intermediate drafts, discarded alternatives, hidden chain-of-thought'],
+        ['app-owned audit output', 'the app writes the durable file from the validated, projected fields'],
       ]) {
         assert(routine.includes(needle), `the routine must state the enforced ${label}`);
       }
@@ -2563,6 +3122,10 @@ export default [
       const style = fs.readFileSync(new URL('../../Job Application Design System/STYLE.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
       assert(skill.includes('authorship clause') && style.includes('authorship clause'),
         'the design references must carry the same closing construction as the routine and the validator');
+      assert(skill.includes('Project-category provenance is binding too')
+        && skill.includes('Personal Projects` must remain `Personal Projects')
+        && style.includes('source-labelled "Personal Projects" stays exactly "Personal Projects"'),
+      'the design references must preserve explicit personal-project provenance instead of steering the writer to a generic heading');
       return { documented: true };
     },
   },

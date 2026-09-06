@@ -47,7 +47,9 @@ const MANIFEST_SUFFIX = '.jobs-run.json';
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
 const LAST_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
-const JOB_RUN_RECEIPT_VERSION = 1;
+// Version 2 adds the redacted, run-scoped scoring aggregate and safe source-cap
+// coverage. Readers remain compatible with v1 because every added field is optional.
+const JOB_RUN_RECEIPT_VERSION = 2;
 // A manifest older than this is "stale" — not auto-offered for resume (the user
 // likely abandoned it). 24h; the renderer can still surface a manual choice.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -143,6 +145,7 @@ const RECEIPT_REVEAL_EXITS = new Set([
   'target-reached',
   'aborted',
 ]);
+const RECEIPT_MAX_PAGES_WALKED = 100_000;
 
 function sanitizeReceiptRevealOutcomes(values) {
   const outcomes = [];
@@ -162,6 +165,48 @@ function sanitizeReceiptRevealOutcomes(values) {
   return outcomes;
 }
 
+function sanitizeReceiptSourceCap(cap) {
+  if (!cap || typeof cap !== 'object' || Array.isArray(cap)) return null;
+  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(cap.type)) return null;
+  // A cap is completion evidence, not a display hint. Do not coerce truthy
+  // values or fractions into a different integer cap (for example, 0.5 → 0),
+  // since that could make a malformed receipt look like a user-configured
+  // boundary in restart diagnostics.
+  if (typeof cap.limit !== 'number' || !Number.isSafeInteger(cap.limit) || cap.limit <= 0) return null;
+  return { type: cap.type, limit: cap.limit };
+}
+
+function sanitizeReceiptStopReason(value) {
+  // Stop reasons are a slash-joined set assembled across API fan-out queries.
+  // Bound individual controlled tokens, never the joined string: a blind
+  // 80-character slice can cut `pages-per-platform` in half and turn a valid
+  // configured-cap receipt into restart-time unproven coverage.
+  const seen = new Set();
+  const stops = [];
+  for (const raw of String(value ?? '').split('/').slice(0, 24)) {
+    const token = receiptToken(raw, 32);
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    stops.push(token);
+    if (stops.length >= 8) break;
+  }
+  return stops.join('/') || null;
+}
+
+function sanitizeReceiptSourceCaps(caps) {
+  const seen = new Set();
+  const safe = [];
+  for (const cap of (Array.isArray(caps) ? caps : []).slice(0, 3)) {
+    const normalized = sanitizeReceiptSourceCap(cap);
+    if (!normalized) continue;
+    const key = `${normalized.type}:${normalized.limit}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    safe.push(normalized);
+  }
+  return safe;
+}
+
 function sanitizeReceiptSource(source = {}) {
   const warning = source.warning && typeof source.warning === 'object'
     ? {
@@ -170,22 +215,69 @@ function sanitizeReceiptSource(source = {}) {
       }
     : null;
   const revealOutcomes = sanitizeReceiptRevealOutcomes(source.revealOutcomes);
+  const cap = sanitizeReceiptSourceCap(source.cap);
+  const caps = sanitizeReceiptSourceCaps(source.caps);
+  const stopReason = sanitizeReceiptStopReason(source.stopReason);
   return {
     count: receiptNumber(source.count),
     providerGathered: receiptNumber(source.providerGathered),
+    // This is a safe aggregate only: no titles, URLs, or provider text. It
+    // explains why distinct candidate identities can exceed returned usable
+    // rows after a detail page confirms that a posting is unavailable.
+    ...(receiptNumber(source.unavailableDetailDropped) > 0
+      ? { unavailableDetailDropped: receiptNumber(source.unavailableDetailDropped) }
+      : {}),
+    // A known Glassdoor nation-tier caveat. This is intentionally independent
+    // from the source warning slot, so a benign scope disclosure cannot mask a
+    // later block/error and remains available after process restart.
+    ...(source.locationScopeUnenforced === true ? { locationScopeUnenforced: true } : {}),
     // Numbers only, same as every other field here: the provider's own corpus
     // size for this query plus the walk's own truncation flag. They are what
     // separates "this source has 44 postings" from "this source has 973 and we
     // read 44", which no other retained field can express.
-    ...(Number.isFinite(Number(source.providerTotal)) && Number(source.providerTotal) >= 0
+    ...(source.providerTotal != null && source.providerTotal !== ''
+      && Number.isFinite(Number(source.providerTotal)) && Number(source.providerTotal) >= 0
       ? { providerTotal: receiptNumber(source.providerTotal) }
       : {}),
     ...(source.truncated === true ? { truncated: true } : {}),
+    ...(source.pagesWalked != null && source.pagesWalked !== ''
+      && Number.isFinite(Number(source.pagesWalked)) && Number(source.pagesWalked) >= 0
+      ? { pagesWalked: Math.min(RECEIPT_MAX_PAGES_WALKED, receiptNumber(source.pagesWalked)) }
+      : {}),
     relevanceDropped: receiptNumber(source.relevanceDropped),
     ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),
-    ...(receiptToken(source.stopReason) ? { stopReason: receiptToken(source.stopReason) } : {}),
+    ...(cap ? { cap } : {}),
+    ...(caps.length > 0 ? { caps } : {}),
+    ...(stopReason ? { stopReason } : {}),
     ...(warning && Object.keys(warning).length > 0 ? { warning } : {}),
     ...(revealOutcomes.length > 0 ? { revealOutcomes } : {}),
+  };
+}
+
+function sanitizeReceiptScoring(scoring) {
+  if (!scoring || typeof scoring !== 'object' || Array.isArray(scoring)) return null;
+  const coreFields = ['input', 'selected', 'scored', 'placeholders', 'unscored', 'failedBatches'];
+  if (!coreFields.every(key => (
+    scoring[key] != null
+    && scoring[key] !== ''
+    && Number.isFinite(Number(scoring[key]))
+    && Number(scoring[key]) >= 0
+  ))) return null;
+  // These are aggregate counters only. In particular, never retain a model
+  // response, failure text, listing field, prompt, provider metadata, or URL.
+  return {
+    input: receiptNumber(scoring.input),
+    selected: receiptNumber(scoring.selected),
+    scored: receiptNumber(scoring.scored),
+    placeholders: receiptNumber(scoring.placeholders),
+    unscored: receiptNumber(scoring.unscored),
+    failedBatches: receiptNumber(scoring.failedBatches),
+    ...(Number.isFinite(Number(scoring.cappedForBudget)) && Number(scoring.cappedForBudget) >= 0
+      ? { cappedForBudget: receiptNumber(scoring.cappedForBudget) }
+      : {}),
+    ...(Number.isFinite(Number(scoring.providerCalls)) && Number(scoring.providerCalls) >= 0
+      ? { providerCalls: receiptNumber(scoring.providerCalls) }
+      : {}),
   };
 }
 
@@ -223,6 +315,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
     kept: receiptNumber(receipt.funnel.kept),
   } : null;
+  const scoring = sanitizeReceiptScoring(receipt.scoring);
   return {
     version: JOB_RUN_RECEIPT_VERSION,
     runId,
@@ -236,6 +329,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
       ...(scoreReadyCount != null ? { scoreReadyCount } : {}),
     },
     ...(funnel ? { funnel } : {}),
+    ...(scoring ? { scoring } : {}),
     sources,
     stagingStarted: receipt.stagingStarted === true,
     cleanup: {
@@ -420,7 +514,25 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     },
     sources,
   };
-  const ok = await withManifestLock(files.manifest, async () => {
+  const result = await withManifestLock(files.manifest, async () => {
+    // A canvas has one staging ledger. A fresh run from another hub cannot
+    // safely replace it: doing so truncates the first hub's recoverable pages
+    // and lets its late completion race the successor. Same-hub reruns retain
+    // the established replacement behaviour.
+    const existing = await readManifest(canvasFilePath);
+    const existingNodeId = existing?.inputs?.nodeId || null;
+    if (existing && nodeId && existingNodeId !== nodeId) {
+      // A legacy manifest without node ownership is still a real unfinished
+      // recovery record. Treat its owner as unknown rather than overwriting it
+      // from a different modern hub and losing its staged pages. An explicit
+      // Reset/Discard remains the deliberate escape hatch for that legacy run.
+      return {
+        conflict: true,
+        ownerNodeId: existingNodeId,
+        ownerUnknown: !existingNodeId,
+        ownerRunId: existing.runId || null,
+      };
+    }
     // Do not truncate the prior recovery file until the replacement manifest
     // has committed. A manifest write can fail (read-only volume, a path that
     // was replaced by a directory, disk-full), and losing the old JSONL while
@@ -447,7 +559,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
         // rather than falsely reporting start failure after its commit.
         logger.warn(`[JobRunStaging] could not remove prior staging backup: ${error?.message || error}`);
       });
-      return true;
+      return { started: true };
     } catch (e) {
       if (createdFreshStaging) await fs.promises.unlink(files.staging).catch(() => {});
       if (movedPriorStaging) {
@@ -459,10 +571,11 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
         }
       }
       logger.warn(`[JobRunStaging] startRun failed: ${e?.message || e}`);
-      return false;
+      return { started: false };
     }
   });
-  return ok ? manifest : null;
+  if (result?.conflict) return result;
+  return result?.started ? manifest : null;
 }
 
 /**
@@ -598,16 +711,19 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
  *   function is INJECTED, not imported, so this module stays electron-free and
  *   unit-testable in the plain-node runner.
  */
-export async function clearRun(canvasFilePath, { trashItem = null, expectedRunId = null } = {}) {
+export async function clearRun(canvasFilePath, { trashItem = null, expectedRunId = null, expectedNodeId = null, expectedOwnerUnknown = false } = {}) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return false;
   return withManifestLock(files.manifest, async () => {
     // Completion is renderer-driven and may arrive after the user has already
     // started another search on this canvas. Compare under the same manifest
     // lock as startRun so an old completion can never delete a newer run.
-    if (expectedRunId != null) {
+    if (expectedRunId != null || expectedNodeId != null || expectedOwnerUnknown) {
       const manifest = await readManifest(canvasFilePath);
-      if (!manifest || manifest.runId !== expectedRunId) return false;
+      if (!manifest
+        || (expectedRunId != null && manifest.runId !== expectedRunId)
+        || (expectedNodeId != null && manifest.inputs?.nodeId !== expectedNodeId)
+        || (expectedOwnerUnknown && manifest.inputs?.nodeId)) return false;
     }
     return clearRunFiles(files, trashItem);
   });
@@ -646,7 +762,7 @@ async function clearRunFiles(files, trashItem = null) {
  * checked under the same lock as startRun/clearRun, so a delayed completion from
  * an older hub run cannot overwrite a newer run's receipt or delete its files.
  */
-export async function completeRunWithReceipt(canvasFilePath, receipt, { trashItem = null } = {}) {
+export async function completeRunWithReceipt(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null } = {}) {
   const files = runFilesForCanvas(canvasFilePath);
   const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath);
   const expectedRunId = String(receipt?.runId || '');
@@ -655,7 +771,8 @@ export async function completeRunWithReceipt(canvasFilePath, receipt, { trashIte
   }
   return withManifestLock(files.manifest, async () => withReceiptLock(receiptPath, async () => {
     const manifest = await readManifest(canvasFilePath);
-    if (!manifest || manifest.runId !== expectedRunId) {
+    if (!manifest || manifest.runId !== expectedRunId
+      || (expectedNodeId != null && manifest.inputs?.nodeId !== expectedNodeId)) {
       return { ok: false, cleared: false, receipt: null, tokenMismatch: true };
     }
     const initial = sanitizeLastRunReceipt({

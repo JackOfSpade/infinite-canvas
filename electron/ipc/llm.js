@@ -197,7 +197,16 @@ const TASK_MAX_TOKENS = {
   // scanned (one consolidated call covers all of a platform's watch URLs).
   'marketplace-hub-scan':      ({ urlCount = 1 } = {}) =>
     Math.min(4096, 1536 + Math.max(0, urlCount - 1) * 512),
-  'resume-parse':              4096,  // full structured profile
+  // Full structured profile. Sized off the merged career-data corpus rather than
+  // pinned flat: the profile grows with the number of roles, skills and
+  // workHistory rows the corpus contains, and a multi-file drop (resume +
+  // portfolio + brag doc + a dashboard export) is the designed-for case, not the
+  // edge case. A flat 4096 truncated the JSON mid-object on a large corpus, and
+  // on the copy/paste transport there is no automatic cap-raise retry to catch
+  // it - the person just gets a schema-violation rejection and re-pastes by
+  // hand. Caps bill on actual output, so the headroom is free insurance.
+  'resume-parse':              ({ promptLength = 0 } = {}) =>
+    Math.min(12288, 4096 + Math.floor(promptLength / 4000) * 512),
   // Career-file extract reproduces a whole document as faithful text, so it
   // scales with the source. Sized generously: a truncated transcription
   // silently DROPS the candidate's career history and weakens everything

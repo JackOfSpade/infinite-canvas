@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build:compile": "vite build",
-    "build": "npm run build:compile && electron-builder",
+    "build": "node scripts/build-macos.mjs",
     "lint": "eslint .",
     "test:unit": "node --import ./scripts/test-stubs/register.mjs scripts/test-runner.js",
     "test:resume-pdf": "npm --prefix 'Job Application Design System/build' test",

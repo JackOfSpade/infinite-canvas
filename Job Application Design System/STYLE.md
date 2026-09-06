@@ -110,11 +110,17 @@ figure.
   point.
 - `h3` is **always** the role-title line and the project-name line.
   Bold (600). Never coloured.
-- Section name text is fixed and conventional: "Experience" /
-  "Work Experience", "Selected Systems" or "Projects", "Skills".
-  **Never** "My Journey", "Adventures", or similar. There is **no
-  Education section** — the degree lives in the header subtitle
-  (§5.8).
+- Section name text is conventional: "Experience" / "Work Experience",
+  "Skills", and a source-accurate project category. A provenance-bearing
+  project heading is factual content, not decoration: source-labelled
+  "Personal Projects" stays exactly "Personal Projects" even when only a
+  subset is retained. Never shorten it to "Projects", rewrite it as "Selected
+  Projects" / "Selected Systems", or mix it with professional, employer-owned,
+  academic, volunteer, or open-source work whose attribution differs. Use a
+  generic "Projects" or "Selected Systems" heading only when the source itself
+  makes no more specific attribution. **Never** "My Journey", "Adventures", or
+  similar. There is **no Education section** — the degree lives in the header
+  subtitle (§5.8).
 
 ### 2.4 Numerals
 

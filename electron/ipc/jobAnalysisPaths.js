@@ -55,6 +55,16 @@ export function getJobAnalysisPaths(canvasFilePath, fallbackDir) {
   };
 }
 
+/** A private per-canvas, per-run recovery checkpoint for post-gather Solves. */
+export function getJobDescriptionRecoveryCheckpointPath(canvasFilePath, runId, fallbackDir) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return null;
+  const paths = getJobAnalysisPaths(canvasFilePath, fallbackDir);
+  const runHash = crypto.createHash('sha256').update(normalizedRunId).digest('hex').slice(0, 24);
+  const prefix = paths.namespace ? `job-search-${paths.namespace}` : 'job-search';
+  return path.join(paths.dir, `${prefix}-description-recovery-${runHash}.json`);
+}
+
 /** True only when a legacy snapshot explicitly belongs to this saved canvas. */
 export function snapshotOwnedByCanvas(snapshot, canvasFilePath) {
   const expected = savedCanvasPath(canvasFilePath);

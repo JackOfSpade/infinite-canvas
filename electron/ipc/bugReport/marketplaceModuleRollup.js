@@ -4,7 +4,6 @@
  * pressing Check All complete, and what did each platform's notification hub
  * return?" — which is invisible everywhere else in the report: the Node
  * Diagnostics preview has no `platformStatus` branch (the module row reads blank).
- * Rendered EARLY so it survives clipboard truncation.
  *
  * Per platform it shows: read status (ok / needs-login / error / unknown), how
  * long ago it was checked (a recent age proves the check actually just ran vs a
@@ -115,8 +114,8 @@ export function buildMarketplaceModuleRollup(nodes) {
       // pages" and the err/blk column is only a count, so without this a
       // "swappa/mercari read error" report can't tell a Cloudflare wall (retry)
       // from a client-rendered shell (unreadable headless) from a real logout
-      // (re-login) — a distinction that otherwise lives ONLY in the fast-rotating
-      // main-process logs (which the 50k clipboard cap routinely truncates).
+      // (re-login) — a distinction that otherwise lives only in the fast-rotating
+      // main-process logs.
       // Reasons are deduped (5 identical Mercari shells → one line ×5).
       const problemSources = sources.filter(s => s?.status && s.status !== 'ok');
       if (problemSources.length > 0) {

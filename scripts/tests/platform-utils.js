@@ -1,4 +1,4 @@
-import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, readPlainTextDocument, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
@@ -929,6 +929,62 @@ export default [
       assert(isWordDoc('archive.docx.bak') === false, 'only the final extension counts');
       assert(WORD_DOC_EXT.has('.docx') && WORD_DOC_EXT.has('.doc'), 'the extension set');
       return { ok: true };
+    },
+  },
+{
+    name: 'docUtils.readPlainTextDocument: reads text career files verbatim and defers everything else',
+    run: async () => {
+      // Not os.tmpdir(): macOS resolves it under /var/folders, and /var is a
+      // sensitive root, so every read here would defer for the wrong reason.
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-plain-text-doc-'));
+      const write = (name, body) => {
+        const file = path.join(dir, name);
+        fs.writeFileSync(file, body);
+        return file;
+      };
+      try {
+        assert(PLAIN_TEXT_EXT.has('.md') && PLAIN_TEXT_EXT.has('.txt') && !PLAIN_TEXT_EXT.has('.pdf'),
+          'only genuinely plain-text extensions are read directly');
+
+        // A .txt is returned byte-for-byte: the achievement miner requires a
+        // quote to appear in the career data exactly as written.
+        const body = 'Software Engineer\nAcme — Denver, Colorado\n- Shipped a thing\n';
+        assert(await readPlainTextDocument(write('history.txt', body)) === body.trim(),
+          'a .txt career file is returned verbatim');
+
+        // Markdown is reduced to the plain text the extractor contract promises,
+        // because jobApplication.js anchors its heading regexes to whole lines.
+        const md = await readPlainTextDocument(write('resume.md', [
+          '## Personal Projects',
+          '**Acme Health — Getzville, New York**',
+          '* Built an ETL pipeline',
+          '+ Kept snake_case and 3 * 4 intact',
+          '### Education ###',
+        ].join('\n')));
+        assert(md === [
+          'Personal Projects',
+          'Acme Health — Getzville, New York',
+          '- Built an ETL pipeline',
+          '- Kept snake_case and 3 * 4 intact',
+          'Education',
+        ].join('\n'), `markdown headings, bullets and emphasis unwrap to plain lines: ${JSON.stringify(md)}`);
+
+        // Deferring (null) hands the file to the normal extraction path, which
+        // is strictly the previous behaviour — never a silent empty section.
+        assert(await readPlainTextDocument(write('resume.pdf', 'x')) === null, 'a non-text extension defers');
+        assert(await readPlainTextDocument(write('empty.md', '   \n  ')) === null, 'a blank file defers rather than reporting text');
+        assert(await readPlainTextDocument(path.join(dir, 'missing.txt')) === null, 'an unreadable path defers');
+        assert(await readPlainTextDocument(write('binary.txt', Buffer.from([0x68, 0x00, 0x69]))) === null,
+          'a NUL byte means the extension is lying about the contents');
+        assert(await readPlainTextDocument(write('latin1.txt', Buffer.from([0x4a, 0x61, 0x63, 0x6b, 0xe9]))) === null,
+          'bytes that are not valid UTF-8 defer instead of ingesting mojibake as career history');
+        assert(await readPlainTextDocument(null) === null && await readPlainTextDocument(undefined) === null, 'null-safe');
+        assert(await readPlainTextDocument(path.join(os.homedir(), '.ssh', 'notes.txt')) === null,
+          'a sensitive path defers to the attachment guard that refuses it by name');
+        return { ok: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     },
   },
 {

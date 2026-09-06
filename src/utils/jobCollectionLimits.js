@@ -9,10 +9,9 @@
  *     look-back window (see makeJobPageStop in electron/ipc/jobPageStop.js),
  *     or until the JOB_COLLECTION_PAGE_CEILING backstop below.
  * Feed sources (RemoteOK, WeWorkRemotely) are single un-paginated requests and
- * have no page count to limit. The API sources DO paginate — LinkedIn walks
- * `start` in steps of 25 and USAJobs walks `Page` — but each bounds its own walk
- * internally (LinkedIn on an enrichment-budget ceiling, USAJobs on the
- * provider's reported total), so neither reads pagesPerPlatform today.
+ * have no page count to limit. Dice, however, walks its API `page` parameter
+ * and honors pagesPerPlatform directly (with the finite backstop below when
+ * Pages is All). LinkedIn and USAJobs retain their source-specific walk bounds.
  */
 export const JOB_COLLECTION_LIMITS_DEFAULT = Object.freeze({
   jobsPerPlatform: null,

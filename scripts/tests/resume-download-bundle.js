@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   assert,
   __applicationSyncStatePathForTests,
@@ -13,15 +14,26 @@ import {
   extractVariantAttrs,
   fs,
   formatOriginalJobListingMarkdown,
+  GENERATION_AUDIT_VERSION,
+  inspectApplicationExport,
   inspectApplicationSyncRevision,
+  ipcMain,
   isDualMode,
   JSDOM,
   normaliseResumeDownloadBundle,
   path,
   PDFLib,
+  registerJobApplicationHandlers,
+  registerPendingApplicationWorkspace,
   sanitizeApplicationBundlePart,
 } from '../test-dependencies.js';
 import { __assertApplicationSyncWorkspaceSnapshotForTests } from '../../electron/ipc/applicationSync.js';
+
+const sha256 = value => value == null
+  ? null
+  : crypto.createHash('sha256')
+    .update(typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value))
+    .digest('hex');
 
 export default [
   {
@@ -493,6 +505,284 @@ export default [
       assert(note.textContent.includes('Save this application from Infinite Canvas'), 'legacy HTML must explain how to make Sync available');
       dom.window.close();
       return { legacyResumeRetained: true, syncRequiresSave: true };
+    },
+  },
+  {
+    name: 'application save: Generation Audit is fingerprint-bound, versioned, transactional, and legacy-optional',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-generation-audit-'));
+      const sourceDir = path.join(root, 'source');
+      const legacySourceDir = path.join(root, 'legacy-source');
+      const outputRoot = path.join(root, 'applications');
+      const sourceHtmlPath = path.join(sourceDir, 'Application.html');
+      const sourceListingPath = path.join(sourceDir, 'Original Job Listing.md');
+      const sourceAuditPath = path.join(sourceDir, 'generation-audit.json');
+      const legacyHtmlPath = path.join(legacySourceDir, 'Application.html');
+      const legacyListingPath = path.join(legacySourceDir, 'Original Job Listing.md');
+      const sourceHtml = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">Resume</main></section><section data-ic-document-panel="cover"><main class="page">Cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const sourceListing = '# Systems Architect\n\nOriginal listing text.\n';
+      const generationAuditJobId = '123e4567-e89b-42d3-a456-426614174000';
+      const generationAudit = `${JSON.stringify({
+        version: GENERATION_AUDIT_VERSION,
+        schema: 'infinite-canvas-generation-audit',
+        jobId: generationAuditJobId,
+        createdAt: '2026-09-05T12:00:00.000Z',
+        scope: { description: 'Validated final-state application audit.' },
+        job: { title: 'Systems Architect', company: 'Audit Co' },
+        inputSummary: { generationAuditRequired: true },
+        finalArtifacts: {
+          resultSha256: 'a'.repeat(64),
+          resumeContentSha256: 'b'.repeat(64),
+          coverLetterContentSha256: 'c'.repeat(64),
+          stagedApplicationHtmlSha256: sha256(sourceHtml),
+          resumePdfSha256: null,
+          coverLetterPdfSha256: null,
+          originalJobListingSha256: sha256(sourceListing),
+        },
+        writerAudit: { version: GENERATION_AUDIT_VERSION },
+        coverLetterArgument: { roleThesis: 'Systems migration and data interoperability.' },
+        writerQualityReview: { checklistVersion: 2 },
+        hostValidation: { coverLetter: [] },
+        measuredFit: { resume: null, coverLetter: null },
+        handoff: { eventCount: 1, retainedEventCount: 1, historyTruncated: false, events: [] },
+      }, null, 2)}\n`;
+      const senderId = 912;
+      const sender = {
+        id: senderId,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+      };
+      const saveArgs = {
+        resumeHtmlPath: sourceHtmlPath,
+        resumePdfPath: null,
+        coverLetterPdfPath: null,
+        jobListingPath: sourceListingPath,
+        generationAuditPath: sourceAuditPath,
+        workDir: sourceDir,
+        jobTitle: 'Systems Architect',
+        location: 'Toronto, ON',
+        canvasFilePath: path.join(root, 'canvas.json'),
+        suppressReveal: true,
+      };
+      try {
+        await Promise.all([
+          fs.promises.mkdir(sourceDir, { recursive: true }),
+          fs.promises.mkdir(legacySourceDir, { recursive: true }),
+          fs.promises.mkdir(outputRoot, { recursive: true }),
+        ]);
+        await Promise.all([
+          fs.promises.writeFile(sourceHtmlPath, sourceHtml),
+          fs.promises.writeFile(sourceListingPath, sourceListing),
+          fs.promises.writeFile(sourceAuditPath, generationAudit),
+          fs.promises.writeFile(legacyHtmlPath, sourceHtml),
+          fs.promises.writeFile(legacyListingPath, sourceListing),
+        ]);
+
+        let missingFingerprintRejected = false;
+        try {
+          registerPendingApplicationWorkspace({
+            workDir: sourceDir, senderId, company: 'Audit Co', applicationRoot: outputRoot,
+            resumeHtmlPath: sourceHtmlPath, jobListingPath: sourceListingPath,
+            generationAuditPath: sourceAuditPath,
+            generationAuditJobId,
+            generationAuditRequired: true,
+            artifactData: { resumeHtml: sourceHtml, jobListing: sourceListing },
+          });
+        } catch (error) {
+          missingFingerprintRejected = /trusted source fingerprints/.test(error.message);
+        }
+        assert(missingFingerprintRejected,
+          'declaring a generation-audit path without its app-owned source bytes cannot create a pending save capability');
+
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        assert(typeof saveApplication === 'function', 'the save-application handler must be registered for the integration fixture');
+        const registerAuditWorkspace = (auditData = generationAudit) => registerPendingApplicationWorkspace({
+          workDir: sourceDir, senderId, company: 'Audit Co', applicationRoot: outputRoot,
+          resumeHtmlPath: sourceHtmlPath, jobListingPath: sourceListingPath,
+          generationAuditPath: sourceAuditPath,
+          generationAuditJobId,
+          generationAuditRequired: true,
+          cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml: sourceHtml, jobListing: sourceListing, generationAudit: auditData },
+        });
+        registerAuditWorkspace();
+
+        const omittedPath = await saveApplication({ sender }, { ...saveArgs, generationAuditPath: null });
+        assert(!omittedPath.success && /paths did not match/.test(omittedPath.error),
+          'a renderer cannot omit or substitute an audit path from an audit-bearing registered workspace');
+
+        await fs.promises.writeFile(sourceAuditPath, `${generationAudit} `);
+        const changedSource = await saveApplication({ sender }, saveArgs);
+        assert(!changedSource.success && /changed after it was registered/.test(changedSource.error),
+          'audit bytes changed after registration must fail the same source-fingerprint gate as the generated documents');
+
+        const unsupportedSourceAudit = generationAudit.replace(
+          `"version": ${GENERATION_AUDIT_VERSION}`,
+          `"version": ${GENERATION_AUDIT_VERSION + 1}`,
+        );
+        await fs.promises.writeFile(sourceAuditPath, unsupportedSourceAudit);
+        let unsupportedSourceRejected = false;
+        try { registerAuditWorkspace(unsupportedSourceAudit); }
+        catch (error) { unsupportedSourceRejected = /unsupported version/.test(error.message); }
+        assert(unsupportedSourceRejected,
+          'an unsupported audit version is rejected before a destination capability can be registered');
+
+        const expectRegistrationRejected = (auditText, pattern, message) => {
+          let rejected = false;
+          try { registerAuditWorkspace(auditText); }
+          catch (error) { rejected = pattern.test(error.message); }
+          assert(rejected, message);
+        };
+        expectRegistrationRejected(
+          generationAudit.replace('infinite-canvas-generation-audit', 'untrusted-generation-audit'),
+          /must use schema/u,
+          'a same-version audit with an unrecognized schema cannot be registered',
+        );
+        expectRegistrationRejected(
+          generationAudit.replace(generationAuditJobId, '123e4567-e89b-42d3-a456-426614174999'),
+          /does not belong/u,
+          'a structurally valid audit for a different job cannot be registered',
+        );
+        const auditWithPrivateRoot = `${JSON.stringify({
+          ...JSON.parse(generationAudit),
+          privateReasoning: 'do not persist this hidden field',
+        }, null, 2)}\n`;
+        expectRegistrationRejected(
+          auditWithPrivateRoot,
+          /unexpected top-level fields/u,
+          'undeclared root fields cannot hitchhike into the durable audit',
+        );
+
+        await fs.promises.writeFile(sourceAuditPath, generationAudit);
+        registerAuditWorkspace();
+        const saved = await saveApplication({ sender }, saveArgs);
+        const [savedAuditText, savedHtml] = await Promise.all([
+          fs.promises.readFile(saved.generationAuditFile, 'utf8'),
+          fs.promises.readFile(saved.applicationFile, 'utf8'),
+        ]);
+        const savedAudit = JSON.parse(savedAuditText);
+        assert(saved.success && saved.saved
+          && path.basename(saved.generationAuditFile || '') === 'Generation Audit.json'
+          && savedAudit.jobId === generationAuditJobId
+          && savedAudit.finalArtifacts.stagedApplicationHtmlSha256 === sha256(sourceHtml)
+          && savedAudit.savedArtifacts.applicationHtmlSha256 === sha256(savedHtml)
+          && savedAudit.savedArtifacts.resumePdfSha256 === null
+          && savedAudit.savedArtifacts.coverLetterPdfSha256 === null
+          && savedAudit.savedArtifacts.originalJobListingSha256 === sha256(sourceListing),
+        'a valid audit is finalized against the exact saved siblings, promoted under its fixed user-facing filename, and returned to the renderer');
+        const auditManifest = await inspectApplicationExport([{
+          path: saved.generationAuditFile,
+          expectedData: savedAuditText,
+          kind: 'generation-audit',
+          expectedVersion: GENERATION_AUDIT_VERSION,
+          expectedJobId: generationAuditJobId,
+          expectedGenerationAuditRequired: true,
+          expectedStagedArtifacts: {
+            applicationHtml: sourceHtml,
+            resumePdf: null,
+            coverLetterPdf: null,
+            jobListing: sourceListing,
+          },
+          expectedSavedArtifacts: {
+            applicationHtml: savedHtml,
+            resumePdf: null,
+            coverLetterPdf: null,
+            jobListing: sourceListing,
+          },
+        }]);
+        assert(auditManifest[0]?.integrityVerified
+          && auditManifest[0].generationAuditParsed
+          && auditManifest[0].generationAuditVersion === GENERATION_AUDIT_VERSION
+          && auditManifest[0].generationAuditVersionValid
+          && auditManifest[0].generationAuditSchemaValid
+          && auditManifest[0].generationAuditJobIdValid
+          && auditManifest[0].generationAuditRequirednessValid
+          && auditManifest[0].generationAuditStructureValid
+          && auditManifest[0].generationAuditStagedArtifactsValid
+          && auditManifest[0].generationAuditSavedArtifactsValid,
+        'destination readback must prove exact bytes, schema/job identity, required sections, and staged/final artifact bindings');
+
+        const staleSavedHashPath = path.join(root, 'stale-saved-hash-audit.json');
+        const staleSavedHashAudit = `${JSON.stringify({
+          ...savedAudit,
+          savedArtifacts: { ...savedAudit.savedArtifacts, applicationHtmlSha256: 'd'.repeat(64) },
+        }, null, 2)}\n`;
+        await fs.promises.writeFile(staleSavedHashPath, staleSavedHashAudit);
+        let staleSavedHashRejected = false;
+        try {
+          await inspectApplicationExport([{
+            path: staleSavedHashPath,
+            expectedData: staleSavedHashAudit,
+            kind: 'generation-audit',
+            expectedJobId: generationAuditJobId,
+            expectedGenerationAuditRequired: true,
+            expectedStagedArtifacts: {
+              applicationHtml: sourceHtml,
+              resumePdf: null,
+              coverLetterPdf: null,
+              jobListing: sourceListing,
+            },
+            expectedSavedArtifacts: {
+              applicationHtml: savedHtml,
+              resumePdf: null,
+              coverLetterPdf: null,
+              jobListing: sourceListing,
+            },
+          }]);
+        } catch (error) {
+          staleSavedHashRejected = /readback failed/.test(error.message);
+        }
+        assert(staleSavedHashRejected,
+          'matching audit bytes are insufficient when their saved-artifact hashes do not bind the durable siblings');
+
+        const wrongVersionPath = path.join(root, 'wrong-version-audit.json');
+        const wrongVersionAudit = JSON.stringify({ version: GENERATION_AUDIT_VERSION + 1 });
+        await fs.promises.writeFile(wrongVersionPath, wrongVersionAudit);
+        let wrongVersionRejected = false;
+        try {
+          await inspectApplicationExport([{
+            path: wrongVersionPath,
+            expectedData: wrongVersionAudit,
+            kind: 'generation-audit',
+            expectedVersion: GENERATION_AUDIT_VERSION,
+          }]);
+        } catch (error) {
+          wrongVersionRejected = /readback failed/.test(error.message);
+        }
+        assert(wrongVersionRejected, 'matching bytes are insufficient when Generation Audit.json uses an unsupported version');
+
+        registerPendingApplicationWorkspace({
+          workDir: legacySourceDir, senderId, company: 'Audit Co', applicationRoot: outputRoot,
+          resumeHtmlPath: legacyHtmlPath, jobListingPath: legacyListingPath,
+          cleanupOnDiscard: false,
+          artifactData: { resumeHtml: sourceHtml, jobListing: sourceListing },
+        });
+        const legacySaved = await saveApplication({ sender }, {
+          ...saveArgs,
+          resumeHtmlPath: legacyHtmlPath,
+          jobListingPath: legacyListingPath,
+          generationAuditPath: null,
+          workDir: legacySourceDir,
+        });
+        assert(legacySaved.success && legacySaved.saved && legacySaved.generationAuditFile === null
+          && !fs.existsSync(path.join(legacySaved.dir, 'Generation Audit.json')),
+        'a legacy pending workspace with no registered audit still saves and removes any stale audit from the replaced bundle');
+
+        const [fallbackSource, cardSource] = await Promise.all([
+          fs.promises.readFile(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8'),
+          fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8'),
+        ]);
+        assert(/generationAuditPath\s*:\s*result\.generationAuditPath/.test(fallbackSource)
+          && /generationAuditPath\s*:\s*local\.generationAuditPath/.test(cardSource),
+        'both card-owned and orphan-recovery renderer saves forward only the main-process-returned audit path');
+        return { auditPromoted: true, hashBound: true, wrongVersionRejected, legacySaved: true };
+      } finally {
+        await __resetApplicationSyncWorkspacesForTests();
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {

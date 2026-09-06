@@ -104,9 +104,8 @@ export function buildSellHubPriceDropRollup(nodes) {
 
   return `
 ## SellHub Price-Drop Plans
-> Compact per-item price-drop state from SellHub nodes. This section renders
-> before the large Node Diagnostics table so a clipboard-capped FULL report can
-> still answer whether a target price like \`$0\` was accepted and persisted.
+> Compact per-item price-drop state from SellHub nodes. This section can answer
+> whether a target price like \`$0\` was accepted and persisted.
 
 ${summary.join('\n')}
 

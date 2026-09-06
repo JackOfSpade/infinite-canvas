@@ -62,6 +62,33 @@ export function normalizeApplicationAdditionalNotes(value) {
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
+export const GENERATION_AUDIT_VERSION = 1;
+const GENERATION_AUDIT_SCHEMA = 'infinite-canvas-generation-audit';
+const GENERATION_AUDIT_TOP_LEVEL_KEYS = new Set([
+  'version',
+  'schema',
+  'jobId',
+  'createdAt',
+  'scope',
+  'job',
+  'inputSummary',
+  'finalArtifacts',
+  'savedArtifacts',
+  'writerAudit',
+  'coverLetterArgument',
+  'writerQualityReview',
+  'hostValidation',
+  'measuredFit',
+  'handoff',
+]);
+const GENERATION_AUDIT_SHA256_RE = /^[a-f0-9]{64}$/iu;
+
+function applicationArtifactSha256(data) {
+  if (data == null) return null;
+  return crypto.createHash('sha256')
+    .update(typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data))
+    .digest('hex');
+}
 
 /**
  * Verify that one generated PDF is actually derived from the selected HTML
@@ -129,6 +156,7 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
 export function registerPendingApplicationWorkspace({
   workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
+  generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
   artifactData = {}, cleanupOnSaveFailure = true, onSuccessfulSave = null,
 } = {}) {
@@ -140,7 +168,7 @@ export function registerPendingApplicationWorkspace({
   }
   const resolvedWorkDir = path.resolve(String(workDir || ''));
   const required = [resumeHtmlPath, jobListingPath].map(value => path.resolve(String(value || '')));
-  const optional = [resumePdfPath, coverLetterPdfPath]
+  const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath]
     .map(value => value ? path.resolve(String(value)) : null);
   const paths = [...required, ...optional.filter(Boolean)];
   if (paths.some(value => !isWithinDirectory(resolvedWorkDir, value))) {
@@ -155,23 +183,44 @@ export function registerPendingApplicationWorkspace({
     dev: workspaceStat.dev,
     ino: workspaceStat.ino,
   };
-  const sha256 = data => data == null
-    ? null
-    : crypto.createHash('sha256').update(typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)).digest('hex');
   const artifactSha256 = {
-    resumeHtml: sha256(artifactData.resumeHtml),
-    resumePdf: sha256(artifactData.resumePdf),
-    coverLetterPdf: sha256(artifactData.coverLetterPdf),
-    jobListing: sha256(artifactData.jobListing),
+    resumeHtml: applicationArtifactSha256(artifactData.resumeHtml),
+    resumePdf: applicationArtifactSha256(artifactData.resumePdf),
+    coverLetterPdf: applicationArtifactSha256(artifactData.coverLetterPdf),
+    jobListing: applicationArtifactSha256(artifactData.jobListing),
+    generationAudit: applicationArtifactSha256(artifactData.generationAudit),
   };
   if (!artifactSha256.resumeHtml || !artifactSha256.jobListing
     || (optional[0] && !artifactSha256.resumePdf)
-    || (optional[1] && !artifactSha256.coverLetterPdf)) {
+    || (optional[1] && !artifactSha256.coverLetterPdf)
+    || (optional[2] && !artifactSha256.generationAudit)) {
     throw new Error('Cannot register application artifacts without trusted source fingerprints.');
+  }
+  const expectedGenerationAuditJobId = String(generationAuditJobId || '').trim();
+  if (optional[2]) {
+    if (!expectedGenerationAuditJobId || expectedGenerationAuditJobId.length > 80) {
+      throw new Error('Cannot register Generation Audit.json without its app-owned job id.');
+    }
+    if (typeof generationAuditRequired !== 'boolean') {
+      throw new Error('Cannot register Generation Audit.json without its app-owned requiredness marker.');
+    }
+    assertGenerationAuditData(artifactData.generationAudit, {
+      expectedJobId: expectedGenerationAuditJobId,
+      expectedGenerationAuditRequired: generationAuditRequired,
+      expectedStagedArtifacts: {
+        applicationHtml: artifactData.resumeHtml,
+        resumePdf: artifactData.resumePdf,
+        coverLetterPdf: artifactData.coverLetterPdf,
+        jobListing: artifactData.jobListing,
+      },
+    });
   }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
+    generationAuditPath: optional[2],
+    generationAuditJobId: optional[2] ? expectedGenerationAuditJobId : null,
+    generationAuditRequired: optional[2] ? generationAuditRequired : null,
     jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
     cleanupOnSaveFailure: cleanupOnSaveFailure !== false,
     onSuccessfulSave: typeof onSuccessfulSave === 'function' ? onSuccessfulSave : null,
@@ -768,6 +817,174 @@ export function careerDataRoleLocation(careerData, company) {
   return unambiguous(headings.filter(entry => careerDataNamesMatch(entry.employer, employer)));
 }
 
+// A project category can carry factual provenance just as an employer heading
+// does. Calling source-labelled work merely "Projects" or "Selected Projects"
+// erases the distinction between independent, employer-owned, academic, and
+// community work. Keep this parser deliberately conservative: it recognizes
+// only an explicit attribution-bearing project heading and only associates a
+// rendered project when its displayed name begins a source line inside that
+// heading's own region. A generic `Projects` heading is deliberately not a
+// provenance category, so the validator never invents an attribution.
+const PROJECT_PROVENANCE_HEADING_RE = /^(?:personal|professional|academic|school|coursework|student|volunteer(?:ing)?|work|client|employer(?:[-\s]owned)?|open[-\s]?source)\s+projects?$/iu;
+const OPEN_SOURCE_PROJECTS_HEADING_RE = /^open[-\s]?source(?:\s+projects?)?$/iu;
+const PROJECT_SHAPED_SECTION_HEADING_RE = /^(?:(?:selected|featured)\s+)?(?:(?:personal|professional|academic|school|coursework|student|volunteer(?:ing)?|work|client|employer(?:[-\s]owned)?|open[-\s]?source)\s+)?(?:projects?|systems?)$/iu;
+const CAREER_DATA_FILE_BOUNDARY_RE = /^={3,}\s*FILE\s*:/iu;
+const PLAIN_CAREER_SECTION_HEADING_RE = /^(?:summary|profile|experience|work experience|professional experience|employment|skills|education|certifications?|awards?|publications?|volunteer(?:ing)?|projects?|selected projects?|personal projects?)$/iu;
+
+function isProjectProvenanceHeading(label) {
+  return PROJECT_PROVENANCE_HEADING_RE.test(label) || OPEN_SOURCE_PROJECTS_HEADING_RE.test(label);
+}
+
+function cleanCareerDataHeading(value) {
+  return normalizeCareerDataText(value)
+    .replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/gu, '')
+    .replace(/\s*[:：]\s*$/u, '')
+    .trim();
+}
+
+function careerDataMarkdownHeading(value) {
+  const match = /^\s{0,3}(#{1,6})[\t ]+(.+?)[\t ]*#*[\t ]*$/.exec(String(value || ''));
+  if (!match) return null;
+  const label = cleanCareerDataHeading(match[2]);
+  return label ? { level: match[1].length, label } : null;
+}
+
+function careerDataProjectProvenanceRegions(careerData) {
+  const lines = String(careerData || '').split(/\r?\n/);
+  const regions = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const markdownHeading = careerDataMarkdownHeading(lines[index]);
+    const plainLabel = markdownHeading ? '' : cleanCareerDataHeading(lines[index]);
+    const heading = markdownHeading || (isProjectProvenanceHeading(plainLabel)
+      ? { level: null, label: plainLabel }
+      : null);
+    if (!heading || !isProjectProvenanceHeading(heading.label)) continue;
+
+    let end = lines.length;
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const candidateLine = lines[cursor];
+      if (CAREER_DATA_FILE_BOUNDARY_RE.test(normalizeCareerDataText(candidateLine))) {
+        end = cursor;
+        break;
+      }
+      const nextMarkdownHeading = careerDataMarkdownHeading(candidateLine);
+      if (nextMarkdownHeading && (heading.level == null || nextMarkdownHeading.level <= heading.level)) {
+        end = cursor;
+        break;
+      }
+      if (heading.level == null) {
+        const nextPlainLabel = cleanCareerDataHeading(candidateLine);
+        if (PLAIN_CAREER_SECTION_HEADING_RE.test(nextPlainLabel) || isProjectProvenanceHeading(nextPlainLabel)) {
+          end = cursor;
+          break;
+        }
+      }
+    }
+    regions.push({ label: heading.label, lines: lines.slice(index + 1, end) });
+  }
+  return regions;
+}
+
+function projectIdentityKey(value) {
+  return normalizeCareerDataText(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function projectProvenanceRegionContainsName(region, renderedName) {
+  const needle = projectIdentityKey(renderedName);
+  if (!needle || needle.length < 3) return false;
+  return region.lines.some((rawLine) => {
+    const sourceLine = String(rawLine || '')
+      .replace(/^\s{0,3}#{1,6}[\t ]+/u, '')
+      .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/u, '');
+    const sourceKey = projectIdentityKey(sourceLine);
+    return sourceKey === needle || sourceKey.startsWith(`${needle} `);
+  });
+}
+
+// A title alone is only enforceable when it maps to exactly one source
+// attribution. The same name can legitimately occur under Personal Projects
+// and Open Source (or in separate imported files), and guessing which one the
+// writer meant would turn a provenance guard into a false rejection.
+function projectProvenanceRegionForRenderedName(regions, renderedName) {
+  const matches = regions.filter(region => projectProvenanceRegionContainsName(region, renderedName));
+  const labels = new Set(matches.map(region => projectIdentityKey(region.label)));
+  return labels.size === 1 ? matches[0] : null;
+}
+
+function directSectionHeading(section) {
+  for (const child of Array.from(section?.children || [])) {
+    if (child.classList?.contains('section-head')) {
+      const heading = child.querySelector('h2');
+      if (heading) return normalizeCareerDataText(heading.textContent);
+    }
+    if (child.tagName === 'H2') return normalizeCareerDataText(child.textContent);
+  }
+  return '';
+}
+
+function projectCandidateNamesForSection(section, renderedHeading) {
+  const selector = '.project-name, .project > h3, .project > .title';
+  const candidates = Array.from(section.querySelectorAll(selector));
+  // Some older writers used role-shaped markup for projects. Keep catching
+  // that malformed project section, but never treat a genuine Experience role
+  // title as a project simply because it shares a name with one.
+  if (PROJECT_SHAPED_SECTION_HEADING_RE.test(renderedHeading)) {
+    candidates.push(...section.querySelectorAll('article.role .title'));
+  }
+  return [...new Set(candidates
+    .map(node => normalizeCareerDataText(node.textContent))
+    .filter(Boolean))];
+}
+
+/**
+ * Reject a résumé that strips explicit source attribution from a retained
+ * project. Optional projects may still be omitted; this gate applies only when
+ * a displayed project name maps unambiguously to a source line under an
+ * explicit provenance-bearing project heading.
+ */
+export function resumeProjectProvenanceFailures(mainHtml, careerData) {
+  const projectRegions = careerDataProjectProvenanceRegions(careerData);
+  if (!projectRegions.length) return [];
+
+  const dom = new JSDOM(String(mainHtml || ''));
+  const problems = [];
+  try {
+    const main = dom.window.document.querySelector('main.page') || dom.window.document.querySelector('main');
+    if (!main) return [];
+    const sections = Array.from(main.children).filter(child => child.matches?.('section.section'));
+    for (const section of sections) {
+      const renderedHeading = directSectionHeading(section);
+      const renderedHeadingKey = projectIdentityKey(renderedHeading);
+      const candidateNames = projectCandidateNamesForSection(section, renderedHeading);
+      if (!candidateNames.length) continue;
+
+      const mismatchesByRegion = new Map();
+      for (const name of candidateNames) {
+        const region = projectProvenanceRegionForRenderedName(projectRegions, name);
+        if (!region || renderedHeadingKey === projectIdentityKey(region.label)) continue;
+        const regionKey = projectIdentityKey(region.label);
+        const names = mismatchesByRegion.get(regionKey) || { region, names: [] };
+        names.names.push(name);
+        mismatchesByRegion.set(regionKey, names);
+      }
+      for (const { region, names: matchedNames } of mismatchesByRegion.values()) {
+        const shown = renderedHeading ? `“${renderedHeading}”` : 'a section with no heading';
+        problems.push(
+          `${matchedNames.join(', ')} ${matchedNames.length === 1 ? 'is' : 'are'} identified under “${region.label}” in the career data but presented under ${shown}. `
+          + `Preserve the provenance-bearing heading exactly as “${region.label}”; selecting only some projects does not erase their source attribution or make them generic selected work.`,
+        );
+      }
+    }
+  } finally {
+    dom.window.close();
+  }
+  return [...new Set(problems)];
+}
+
 /**
  * The résumé must show the employment location the career data supplied with a
  * role (STYLE.md §5.2, routine step 4). This is the deterministic half of that
@@ -1332,6 +1549,151 @@ function sanitizeFilePart(s, fallback) {
   return sanitizeApplicationBundlePart(s, fallback);
 }
 
+function isGenerationAuditObject(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function generationAuditHashMatches(value, data) {
+  return data == null
+    ? value == null
+    : GENERATION_AUDIT_SHA256_RE.test(String(value || ''))
+      && value === applicationArtifactSha256(data);
+}
+
+function inspectGenerationAuditData(data, {
+  expectedVersion = GENERATION_AUDIT_VERSION,
+  expectedJobId = null,
+  expectedGenerationAuditRequired = null,
+  expectedStagedArtifacts = null,
+  expectedSavedArtifacts = null,
+} = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(data).toString('utf8'));
+  } catch {
+    return {
+      generationAuditParsed: false,
+      generationAuditVersion: null,
+      generationAuditVersionValid: false,
+      generationAuditSchemaValid: false,
+      generationAuditJobIdValid: false,
+      generationAuditRequirednessValid: false,
+      generationAuditStructureValid: false,
+      generationAuditTopLevelKeysValid: false,
+      generationAuditStagedArtifactsValid: false,
+      generationAuditSavedArtifactsValid: false,
+      generationAuditError: 'invalid JSON',
+    };
+  }
+  const objectRoot = isGenerationAuditObject(parsed);
+  const version = objectRoot ? parsed.version : null;
+  const schemaValid = objectRoot && parsed.schema === GENERATION_AUDIT_SCHEMA;
+  const jobIdValid = objectRoot && typeof parsed.jobId === 'string' && parsed.jobId.trim()
+    && (!expectedJobId || parsed.jobId === expectedJobId);
+  const unexpectedTopLevelKeys = objectRoot
+    ? Object.keys(parsed).filter(key => !GENERATION_AUDIT_TOP_LEVEL_KEYS.has(key))
+    : [];
+  const requiredObjectKeys = [
+    'scope', 'job', 'inputSummary', 'finalArtifacts',
+    'coverLetterArgument', 'writerQualityReview', 'hostValidation',
+    'measuredFit', 'handoff',
+  ];
+  const auditRequired = parsed?.inputSummary?.generationAuditRequired === true;
+  const requirednessValid = typeof parsed?.inputSummary?.generationAuditRequired === 'boolean'
+    && (typeof expectedGenerationAuditRequired !== 'boolean'
+      || parsed.inputSummary.generationAuditRequired === expectedGenerationAuditRequired);
+  const writerAuditValid = auditRequired
+    ? isGenerationAuditObject(parsed?.writerAudit)
+    : parsed?.writerAudit == null || isGenerationAuditObject(parsed?.writerAudit);
+  const structureValid = objectRoot
+    && typeof parsed.createdAt === 'string' && Boolean(parsed.createdAt.trim())
+    && requiredObjectKeys.every(key => isGenerationAuditObject(parsed[key]))
+    && writerAuditValid;
+  const stagedArtifactsValid = !expectedStagedArtifacts || (isGenerationAuditObject(parsed?.finalArtifacts)
+    && generationAuditHashMatches(parsed.finalArtifacts.stagedApplicationHtmlSha256, expectedStagedArtifacts.applicationHtml)
+    && generationAuditHashMatches(parsed.finalArtifacts.resumePdfSha256, expectedStagedArtifacts.resumePdf)
+    && generationAuditHashMatches(parsed.finalArtifacts.coverLetterPdfSha256, expectedStagedArtifacts.coverLetterPdf)
+    && generationAuditHashMatches(parsed.finalArtifacts.originalJobListingSha256, expectedStagedArtifacts.jobListing));
+  const savedArtifactsValid = !expectedSavedArtifacts || (isGenerationAuditObject(parsed?.savedArtifacts)
+    && generationAuditHashMatches(parsed.savedArtifacts.applicationHtmlSha256, expectedSavedArtifacts.applicationHtml)
+    && generationAuditHashMatches(parsed.savedArtifacts.resumePdfSha256, expectedSavedArtifacts.resumePdf)
+    && generationAuditHashMatches(parsed.savedArtifacts.coverLetterPdfSha256, expectedSavedArtifacts.coverLetterPdf)
+    && generationAuditHashMatches(parsed.savedArtifacts.originalJobListingSha256, expectedSavedArtifacts.jobListing));
+  return {
+    generationAuditParsed: objectRoot,
+    generationAuditVersion: version ?? null,
+    generationAuditVersionValid: objectRoot && version === expectedVersion,
+    generationAuditSchemaValid: schemaValid,
+    generationAuditJobIdValid: Boolean(jobIdValid),
+    generationAuditRequirednessValid: requirednessValid,
+    generationAuditStructureValid: structureValid,
+    generationAuditTopLevelKeysValid: objectRoot && unexpectedTopLevelKeys.length === 0,
+    generationAuditUnexpectedTopLevelKeys: unexpectedTopLevelKeys,
+    generationAuditStagedArtifactsValid: stagedArtifactsValid,
+    generationAuditSavedArtifactsValid: savedArtifactsValid,
+    ...(!objectRoot ? { generationAuditError: 'root must be an object' } : {}),
+  };
+}
+
+function assertGenerationAuditData(data, options = {}) {
+  const inspection = inspectGenerationAuditData(data, options);
+  if (!inspection.generationAuditParsed) {
+    throw new Error(`Generation Audit.json is invalid: ${inspection.generationAuditError}.`);
+  }
+  if (!inspection.generationAuditVersionValid) {
+    throw new Error(`Generation Audit.json has unsupported version “${String(inspection.generationAuditVersion)}”; expected ${GENERATION_AUDIT_VERSION}.`);
+  }
+  if (!inspection.generationAuditSchemaValid) {
+    throw new Error(`Generation Audit.json must use schema “${GENERATION_AUDIT_SCHEMA}”.`);
+  }
+  if (!inspection.generationAuditJobIdValid) {
+    throw new Error('Generation Audit.json does not belong to the registered Local AI job.');
+  }
+  if (!inspection.generationAuditRequirednessValid) {
+    throw new Error('Generation Audit.json does not match the registered generation-audit requiredness contract.');
+  }
+  if (!inspection.generationAuditStructureValid) {
+    throw new Error('Generation Audit.json is missing required app-owned sections.');
+  }
+  if (!inspection.generationAuditTopLevelKeysValid) {
+    throw new Error(`Generation Audit.json contains unexpected top-level fields: ${inspection.generationAuditUnexpectedTopLevelKeys.join(', ')}.`);
+  }
+  if (!inspection.generationAuditStagedArtifactsValid) {
+    throw new Error('Generation Audit.json does not match the registered staged application artifacts.');
+  }
+  if (!inspection.generationAuditSavedArtifactsValid) {
+    throw new Error('Generation Audit.json does not match the final saved application artifacts.');
+  }
+  return JSON.parse(Buffer.from(data).toString('utf8'));
+}
+
+function finalizeGenerationAuditData(data, {
+  expectedJobId,
+  generationAuditRequired,
+  stagedArtifacts,
+  savedArtifacts,
+} = {}) {
+  const parsed = assertGenerationAuditData(data, {
+    expectedJobId,
+    expectedGenerationAuditRequired: generationAuditRequired,
+    expectedStagedArtifacts: stagedArtifacts,
+  });
+  const finalized = {
+    ...parsed,
+    scope: {
+      ...parsed.scope,
+      hashSemantics: 'finalArtifacts records the validated producer-stage bytes; savedArtifacts records the exact durable sibling files after save-time transformations.',
+    },
+    savedArtifacts: {
+      applicationHtmlSha256: applicationArtifactSha256(savedArtifacts?.applicationHtml),
+      resumePdfSha256: applicationArtifactSha256(savedArtifacts?.resumePdf),
+      coverLetterPdfSha256: applicationArtifactSha256(savedArtifacts?.coverLetterPdf),
+      originalJobListingSha256: applicationArtifactSha256(savedArtifacts?.jobListing),
+    },
+  };
+  return `${JSON.stringify(finalized, null, 2)}\n`;
+}
+
 export async function inspectApplicationExport(files) {
   const manifest = [];
   for (const file of files) {
@@ -1394,6 +1756,14 @@ export async function inspectApplicationExport(files) {
           }
         } else if (kind === 'markdown') {
           row.markdownNonEmpty = data.toString('utf8').trim().length > 0;
+        } else if (kind === 'generation-audit') {
+          Object.assign(row, inspectGenerationAuditData(data, {
+            expectedVersion: file.expectedVersion ?? GENERATION_AUDIT_VERSION,
+            expectedJobId: file.expectedJobId ?? null,
+            expectedGenerationAuditRequired: file.expectedGenerationAuditRequired ?? null,
+            expectedStagedArtifacts: file.expectedStagedArtifacts ?? null,
+            expectedSavedArtifacts: file.expectedSavedArtifacts ?? null,
+          }));
         }
       }
     } catch (error) {
@@ -1405,7 +1775,12 @@ export async function inspectApplicationExport(files) {
     ? (!row.exists || !row.readable || row.bytes <= 0
       || !row.sourceExpected || row.matchesSource !== true
       || row.pdfHeaderValid === false || row.pdfParsed === false
-      || row.htmlStructureValid === false || row.markdownNonEmpty === false)
+      || row.htmlStructureValid === false || row.markdownNonEmpty === false
+      || row.generationAuditParsed === false || row.generationAuditVersionValid === false
+      || row.generationAuditSchemaValid === false || row.generationAuditJobIdValid === false
+      || row.generationAuditRequirednessValid === false
+      || row.generationAuditStructureValid === false || row.generationAuditTopLevelKeysValid === false
+      || row.generationAuditStagedArtifactsValid === false || row.generationAuditSavedArtifactsValid === false)
     : row.exists);
   if (invalid.length) throw new Error(`Application export readback failed for: ${invalid.map(row => row.name).join(', ')}`);
   for (const row of manifest) row.integrityVerified = row.expected
@@ -1417,8 +1792,8 @@ export async function inspectApplicationExport(files) {
 // Bug-report only: how many verify items to keep full detail for. The
 // analysis prompt already gates hard on "significantly improve this
 // candidate's odds" (§ analyzeSkillOpportunities), so a real response is
-// small — this cap exists only so a pathological response can't blow the
-// clipboard budget, not because the ordinary case needs trimming.
+// small — this cap keeps a pathological response from overwhelming the
+// application diagnostic, not because the ordinary case needs trimming.
 const SKILL_OPPORTUNITY_VERIFY_SAMPLE_CAP = 20;
 
 // Last application lifecycle record, captured for bug reports. Local AI imports
@@ -1464,14 +1839,15 @@ export function registerJobApplicationHandlers() {
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
+  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
     const matchesPending = path.resolve(String(resumeHtmlPath || '')) === pending.resumeHtmlPath
       && path.resolve(String(jobListingPath || '')) === pending.jobListingPath
       && (resumePdfPath ? path.resolve(resumePdfPath) : null) === pending.resumePdfPath
-      && (coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null) === pending.coverLetterPdfPath;
+      && (coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null) === pending.coverLetterPdfPath
+      && (generationAuditPath ? path.resolve(generationAuditPath) : null) === pending.generationAuditPath;
     if (!matchesPending) {
       throw new Error('Generated application paths did not match this generation session — please regenerate.');
     }
@@ -1479,6 +1855,7 @@ export function registerJobApplicationHandlers() {
     resumePdfPath = pending.resumePdfPath;
     coverLetterPdfPath = pending.coverLetterPdfPath;
     jobListingPath = pending.jobListingPath;
+    generationAuditPath = pending.generationAuditPath;
     const company = pending.company;
     let exportPhase = 'validating generated sources';
     let exportDir = null;
@@ -1530,11 +1907,12 @@ export function registerJobApplicationHandlers() {
     const resumeFile = path.join(dir, 'Resume.pdf');
     const coverLetterFile = path.join(dir, 'Cover Letter.pdf');
     const jobListingFile = path.join(dir, 'Original Job Listing.md');
+    const generationAuditFile = path.join(dir, 'Generation Audit.json');
     exportPhase = 'reading generated artifacts';
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
     };
-    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData] = await Promise.all([
+    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData, generationAuditData] = await Promise.all([
       readRegisteredApplicationArtifact(resolvedWorkDir, resumeHtmlPath, {
         ...registeredReadOptions,
         encoding: 'utf8',
@@ -1555,7 +1933,24 @@ export function registerJobApplicationHandlers() {
         optional: true,
         expectedSha256: pending.artifactSha256?.jobListing,
       }) : null,
+      generationAuditPath ? readRegisteredApplicationArtifact(resolvedWorkDir, generationAuditPath, {
+        ...registeredReadOptions,
+        encoding: 'utf8',
+        expectedSha256: pending.artifactSha256?.generationAudit,
+      }) : null,
     ]);
+    if (generationAuditData != null) {
+      assertGenerationAuditData(generationAuditData, {
+        expectedJobId: pending.generationAuditJobId,
+        expectedGenerationAuditRequired: pending.generationAuditRequired,
+        expectedStagedArtifacts: {
+          applicationHtml: sourceHtml,
+          resumePdf: sourceResumePdfData,
+          coverLetterPdf: sourceCoverLetterPdfData,
+          jobListing: jobListingData,
+        },
+      });
+    }
     const [resumePdfData, coverLetterPdfData] = await Promise.all([
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume' }),
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover' }),
@@ -1563,6 +1958,7 @@ export function registerJobApplicationHandlers() {
     const hasPdf = resumePdfData != null;
     const hasCoverLetterPdf = coverLetterPdfData != null;
     const hasListing = jobListingData != null;
+    const hasGenerationAudit = generationAuditData != null;
     // Embed a fresh capability before the transaction, but do not revoke the
     // previous saved workspace until every file has been promoted and passed
     // readback. Registration runs inside the transaction verifier, so a
@@ -1574,8 +1970,27 @@ export function registerJobApplicationHandlers() {
       coverPdf: coverLetterPdfData,
     });
     const generatedHtml = embedApplicationSyncConfig(sourceHtml, sync);
+    const savedArtifactData = {
+      applicationHtml: generatedHtml,
+      resumePdf: resumePdfData,
+      coverLetterPdf: coverLetterPdfData,
+      jobListing: jobListingData,
+    };
+    const finalizedGenerationAuditData = generationAuditData == null
+      ? null
+      : finalizeGenerationAuditData(generationAuditData, {
+        expectedJobId: pending.generationAuditJobId,
+        generationAuditRequired: pending.generationAuditRequired,
+        stagedArtifacts: {
+          applicationHtml: sourceHtml,
+          resumePdf: sourceResumePdfData,
+          coverLetterPdf: sourceCoverLetterPdfData,
+          jobListing: jobListingData,
+        },
+        savedArtifacts: savedArtifactData,
+      });
 
-    // The workspace is deliberately unzipped and predictable. Treat all four
+    // The workspace is deliberately unzipped and predictable. Treat all five
     // siblings as one transaction: unavailable optional artifacts remove stale
     // predecessors, while any promotion/readback failure restores the complete
     // prior generation instead of leaving a mixed bundle.
@@ -1585,6 +2000,7 @@ export function registerJobApplicationHandlers() {
         { destination: resumeFile, data: resumePdfData },
         { destination: coverLetterFile, data: coverLetterPdfData },
         { destination: jobListingFile, data: jobListingData },
+        { destination: generationAuditFile, data: finalizedGenerationAuditData },
       ], {
         verify: async () => {
           const readback = await inspectApplicationExport([
@@ -1592,6 +2008,22 @@ export function registerJobApplicationHandlers() {
             { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf' },
             { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf' },
             { path: jobListingFile, expected: hasListing, expectedData: jobListingData, kind: 'markdown' },
+            {
+              path: generationAuditFile,
+              expected: hasGenerationAudit,
+              expectedData: finalizedGenerationAuditData,
+              kind: 'generation-audit',
+              expectedVersion: GENERATION_AUDIT_VERSION,
+              expectedJobId: pending.generationAuditJobId,
+              expectedGenerationAuditRequired: pending.generationAuditRequired,
+              expectedStagedArtifacts: {
+                applicationHtml: sourceHtml,
+                resumePdf: sourceResumePdfData,
+                coverLetterPdf: sourceCoverLetterPdfData,
+                jobListing: jobListingData,
+              },
+              expectedSavedArtifacts: savedArtifactData,
+            },
           ]);
           await registerApplicationSyncWorkspace(dir, syncToken);
           return readback;
@@ -1658,6 +2090,7 @@ export function registerJobApplicationHandlers() {
       resumeFile: hasPdf ? resumeFile : null,
       coverLetterFile: hasCoverLetterPdf ? coverLetterFile : null,
       jobListingFile: hasListing ? jobListingFile : null,
+      generationAuditFile: hasGenerationAudit ? generationAuditFile : null,
       bundleError,
     };
     } catch (error) {

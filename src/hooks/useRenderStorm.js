@@ -11,7 +11,7 @@ import { EventLogger } from '../utils/EventLogger';
  *
  * Low-volume by design: it counts commits in a sliding window and emits ONE
  * event per burst (then a cooldown) — never per render, which would flood the
- * timeline and the clipboard cap. A sustained-but-slow re-render source (e.g.
+ * timeline. A sustained-but-slow re-render source (e.g.
  * startup verification re-rendering a hub ~once/sec) deliberately does NOT trip
  * it; that flicker class is diagnosed from the `[Focus]` timeline + the report's
  * task-timing sections instead.
