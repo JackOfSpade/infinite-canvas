@@ -19,6 +19,7 @@ import { closeAllPages } from './ipc/browserPool.js';
 import { closeAllAuthWindows, closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
+import { clearSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { registerLlmHandlers } from './ipc/llm.js';
@@ -629,6 +630,29 @@ if (!gotTheLock) {
   app.commandLine.appendSwitch('disable-accelerated-video-decode');
 
   app.whenReady().then(() => {
+    // Clear last session's saved bug-report files (see bugReport/reportFile.js)
+    // before anything else in this callback. "Copy to clipboard" now writes the
+    // full report to an app-managed directory instead of pasting it inline, and
+    // that directory is deliberately session-scoped, not a permanent archive —
+    // this is what enforces that. It must be FIRE-AND-FORGET (`.then`/`.catch`,
+    // no `await`) and impossible to throw synchronously: this whole callback is
+    // one function body, so an uncaught throw anywhere in it — including from a
+    // rejected promise awaited here — would abort every later step, up to and
+    // including `createWindow()` below. clearSavedBugReports() itself already
+    // never throws/rejects (every failure path resolves with `{ error }`), but
+    // it is wrapped in `.catch` anyway as a second line of defense.
+    // Placed first (not just "early") for the same reason: nothing after it in
+    // this callback should ever be able to delay app startup on a slow/locked
+    // disk, and nothing before it exists to race against.
+    // The single-instance lock (`gotTheLock` above) plus the `second-instance`
+    // handler (which opens a new window in this SAME process rather than
+    // spawning another one) guarantee this callback — and therefore this clear
+    // — runs exactly once per real app session, so it can never race a second
+    // live instance and wipe files a report in that instance still points at.
+    clearSavedBugReports()
+      .then((r) => { if (r.removed > 0) logger.info(`[BugReport] cleared ${r.removed} saved report(s) from the previous session`); })
+      .catch((err) => logger.warn(`[BugReport] could not clear saved reports: ${err?.message || err}`));
+
     protocol.handle('local-file', async (request) => {
       let requestParams = new URLSearchParams();
       try {

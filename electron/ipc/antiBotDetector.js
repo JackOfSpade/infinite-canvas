@@ -599,7 +599,17 @@ export async function safeApiFetch(url, opts = {}, sourceLabel = '') {
     // user sees something rather than silent zero. Aborts (user cancel)
     // are not anti-bot signals; the caller can filter those upstream.
     const msg = error?.message || String(error);
-    const isAbort = /abort/i.test(msg) || error?.name === 'AbortError';
+    // Classify from the SIGNAL, not from the thrown error's prose. Matching
+    // /abort/i on the message got both directions wrong: `fetch` rejects with
+    // the AbortController's own reason verbatim, so this app's cancel sentinel
+    // (`Error('Node deleted')`) read as a network failure and published a
+    // bogus `api-fetch-failed` throttle warning for a run the USER stopped —
+    // while `AbortSignal.timeout()` rejects with "The operation was aborted due
+    // to timeout", which matched /abort/i and silently swallowed a real
+    // timeout. A timeout is a genuine symptom and must stay reportable; a
+    // cancelled signal never is.
+    const isTimeout = error?.name === 'TimeoutError';
+    const isAbort = !isTimeout && (error?.name === 'AbortError' || opts?.signal?.aborted === true);
     return {
       ok: false,
       status: 0,

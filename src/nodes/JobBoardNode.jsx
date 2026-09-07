@@ -353,7 +353,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     epoch.bump();
     combineRunRef.current = null;
     compensationRequestIdRef.current = null;
-    window.electronAPI?.cancelNodeTask?.(id);
+    window.electronAPI?.cancelNodeTask?.(id, 'board-unmounted');
     clearBoardChildren();
   }, [clearBoardChildren, epoch, id]);
 
@@ -363,7 +363,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     epoch.bump();
     combineRunRef.current = null;
     compensationRequestIdRef.current = null;
-    window.electronAPI?.cancelNodeTask?.(id);
+    window.electronAPI?.cancelNodeTask?.(id, 'board-cleared');
     setCombining(false);
     setCompensationProgress(null);
     document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));

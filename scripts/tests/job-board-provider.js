@@ -284,10 +284,17 @@ export default [
       const clearEnd = board.indexOf('const handleCombine', clearStart);
       const cleanupBlock = board.slice(cleanupStart, clearStart);
       const clearBlock = board.slice(clearStart, clearEnd);
-      const releasesBeforeCancellation = (section) => section.indexOf('combineRunRef.current = null;') >= 0
-        && section.indexOf('compensationRequestIdRef.current = null;') >= 0
-        && section.indexOf('combineRunRef.current = null;') < section.indexOf('window.electronAPI?.cancelNodeTask?.(id)')
-        && section.indexOf('compensationRequestIdRef.current = null;') < section.indexOf('window.electronAPI?.cancelNodeTask?.(id)');
+      // Match the call PREFIX, not the whole call: each cancel site now passes
+      // its own cause label (`cancelNodeTask(id, 'board-cleared')`) so the bug
+      // report can name why a run stopped. The ordering invariant is unchanged.
+      const releasesBeforeCancellation = (section) => {
+        const cancelAt = section.indexOf('window.electronAPI?.cancelNodeTask?.(id');
+        return cancelAt >= 0
+          && section.indexOf('combineRunRef.current = null;') >= 0
+          && section.indexOf('compensationRequestIdRef.current = null;') >= 0
+          && section.indexOf('combineRunRef.current = null;') < cancelAt
+          && section.indexOf('compensationRequestIdRef.current = null;') < cancelAt;
+      };
       assert(releasesBeforeCancellation(cleanupBlock) && releasesBeforeCancellation(clearBlock),
         'Clear and unmount cleanup must synchronously release the Combine lock and request id before cancelling backend work');
       const bucket = combine.indexOf('await window.electronAPI.bucketJobs');

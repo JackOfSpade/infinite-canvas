@@ -29,7 +29,7 @@ import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES 
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
 import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
-import { stripHtmlToText } from '../../../src/utils/textEncoding.js';
+import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
@@ -40,13 +40,34 @@ const CONTENT_TIMEOUT_MS     = 20_000;        // max wait for content before pro
 // skip a source out from under someone mid-solve. The escape hatches are an abort
 // (Reset / hub close) and a hard block (nothing to solve, skipped immediately).
 // This is just the cadence for a "still waiting" heartbeat log during that wait.
-const CHALLENGE_HEARTBEAT_MS = 30_000;
+// It BACKS OFF: the main-process ring buffer that a bug report reads holds 200
+// lines total, so a fixed 30s beat evicts every other main-process line after
+// ~100 minutes of waiting — erasing exactly the history needed to explain why
+// the wait started. Doubling to a 10-minute ceiling keeps an unattended wait
+// visibly alive while costing the ring ~8 lines an hour instead of ~120.
+const CHALLENGE_HEARTBEAT_BASE_MS = 30_000;
+const CHALLENGE_HEARTBEAT_MAX_MS  = 600_000;
+// The liveness beat is deliberately NOT backed off with the log line above. It
+// costs the log ring nothing (it updates one in-memory slot and a throttled
+// renderer sink), and letting it go stale makes the bug report assert
+// "⚠️ possibly hung" over a wait that is doing exactly what it was designed to
+// do — wait for a human. It also keeps the elapsed time moving on the source
+// card, which is the only place the user can see the wait is still theirs.
+const CHALLENGE_ACTIVITY_BEAT_MS = 30_000;
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 // Cloudflare can remove a solved Turnstile iframe before it either redirects or
 // re-renders the challenge. Do not mistake that short DOM transition for a final
 // terminal block: keep the visible browser open long enough for a human to see
 // what happened and for the widget to return.
 const CHALLENGE_TERMINAL_TRANSITION_GRACE_MS = 10_000;
+// Anti-bot interstitials REPLACE the document with a few hundred characters of
+// copy (a headline, one sentence, a Ray ID). A job board's results or detail
+// page is thousands. That size difference is the only source-agnostic way to
+// tell "this page IS the challenge" from "this page merely CONTAINS words a
+// challenge also uses" — the latter is ordinary posting prose, e.g. a Canadian
+// role that requires passing a "security check". Measured, not selector-based,
+// so it holds for every board without per-site markup knowledge.
+export const CHALLENGE_INTERSTITIAL_MAX_CHARS = 2_000;
 const DESC_CHANGE_POLL_MS    = 200;           // poll interval waiting for description panel update
 const DESC_CHANGE_TIMEOUT_MS = 3_000;         // max wait for description to change after a card click
 const DESC_RETRY_PAUSE_MS    = 900;           // pause before re-clicking when the first attempt's panel never updated (catches transient anti-bot 403s)
@@ -311,6 +332,51 @@ export function isIgnorableManualBrowserTelemetry({ url = '', text = '' } = {}) 
   return isKnownTelemetryNoiseUrl(target);
 }
 
+// A stuck single-card retry loop can emit dozens of byte-identical card-walk
+// batch summaries in a row — same source/strategy/attempted/expanded/timeout
+// counts, same failureSamples keys+reasons, nothing different except the
+// timestamp. Left alone, the plain oldest-first `events` ring treats each
+// retry as new history, so ~13 identical retries evicted 13 DISTINCT earlier
+// batches before anyone read the report ("5 earlier card-walk batch
+// summary(s) omitted"). Compare everything except the bookkeeping fields
+// (`ts`, `repeatCount`, `firstTs`, `lastTs`) — a JSON-identical match is
+// deliberately conservative: any real difference (even one more failed card)
+// serializes differently and is never folded.
+function cardWalkFingerprint(entry) {
+  // `_`-prefixed to match the repo's destructure-to-omit convention (the lint
+  // config's varsIgnorePattern allows it); these four are dropped, never read.
+  const { ts: _ts, repeatCount: _repeatCount, firstTs: _firstTs, lastTs: _lastTs, ...rest } = entry;
+  try {
+    return JSON.stringify(rest);
+  } catch {
+    return null; // circular/unserializable — never collapse, never crash
+  }
+}
+
+/**
+ * Folds `entry` into the previous ring slot IN PLACE when it is a
+ * byte-identical repeat of the last card-walk event, returning true. Returns
+ * false (no mutation) for the first occurrence of a batch, for any batch that
+ * differs from the previous one, or when the previous slot isn't a card-walk
+ * event at all — so the caller can push normally in every one of those cases.
+ */
+function collapseRepeatedCardWalk(events, entry) {
+  if (entry.phase !== 'card-walk') return false;
+  const prev = events[events.length - 1];
+  if (!prev || prev.phase !== 'card-walk') return false;
+  const prevKey = cardWalkFingerprint(prev);
+  const nextKey = cardWalkFingerprint(entry);
+  if (prevKey === null || nextKey === null || prevKey !== nextKey) return false;
+  prev.repeatCount = (prev.repeatCount || 1) + 1;
+  prev.firstTs = prev.firstTs || prev.ts;
+  prev.lastTs = entry.ts;
+  // Re-anchor `ts` to the latest occurrence so the report's age ("-Ns ago")
+  // reflects when the loop last repeated, not when it first started — a
+  // repeat that is STILL happening must not read as old.
+  prev.ts = entry.ts;
+  return true;
+}
+
 // `updateActive: false` records an event into the trail WITHOUT advancing the
 // "current phase". Per-job outcomes (desc-miss / date-miss / detail-unavailable)
 // are not scrape phases: `active` is a merge that never deletes fields, so
@@ -323,8 +389,10 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
     ts: Date.now(),
     ...event,
   };
-  manualScraperTelemetry.events.push(entry);
-  if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+  if (!collapseRepeatedCardWalk(manualScraperTelemetry.events, entry)) {
+    manualScraperTelemetry.events.push(entry);
+    if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+  }
   // Sources run strictly sequentially, so the last phase to name a source names
   // the source every subsequent overlay paint belongs to. This is what lets the
   // beat below carry a sourceId without threading one through ~30 call sites.
@@ -338,7 +406,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // the single `detail-panel-rate-limit` event that explained the whole run.
   // The rate-limit / panel-HTTP phases are the CAUSE rows — keep them in the
   // longer-lived anomaly ring so a report written an hour later still has them.
-  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'].includes(entry.phase)) {
+  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -348,7 +416,13 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // detail key/reason/evidence from being reported as the current Google item
   // after the next source starts. Fine-grained phases within one context still
   // merge so browser/challenge metadata can accumulate while it is current.
-  const resetsContext = new Set(['source-start', 'query-start', 'page-extract', 'source-finished']);
+  // 'recovery-start' is the same kind of boundary for a post-completion
+  // recovery pass (Solve/Continue re-opening a stalled source): every per-card
+  // phase inside that pass passes updateActive:false by design (see
+  // expandDescriptions), so without a reset here `active` stays pinned to
+  // whatever the main run last recorded — naming the WRONG source while a
+  // different one silently recovers.
+  const resetsContext = new Set(['source-start', 'query-start', 'page-extract', 'source-finished', 'recovery-start']);
   manualScraperTelemetry.active = resetsContext.has(entry.phase)
     ? entry
     : { ...(manualScraperTelemetry.active || {}), ...entry };
@@ -360,9 +434,18 @@ export function recordIssuedManualQuery(executedQueries, entry, navigationIssued
   return executedQueries;
 }
 
+// A terminal phase (finished/idle/aborted) must not keep vouching for the
+// PRIOR active entry's source/count/URL/reason as though it were still
+// current. That is exactly what let a bug report read "Current: phase
+// finished · source Glassdoor · count 722" hours after Glassdoor's own run
+// had ended, while a DIFFERENT source's post-completion recovery was the
+// thing actually running — the reader had no way to tell the number was
+// inherited rather than live. `ts` already tells a reader this is over; keep
+// only phase + ts and drop every field that names a specific source's
+// in-progress state.
 function clearManualScraperTelemetry(status = 'idle') {
   manualScraperTelemetry.active = manualScraperTelemetry.active
-    ? { ...manualScraperTelemetry.active, ts: Date.now(), phase: status }
+    ? { phase: status, ts: Date.now() }
     : null;
 }
 
@@ -474,6 +557,18 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
     expandedCount: probeExpanded,
     unavailableDetailDropped: probeUnavailable,
   };
+}
+
+/**
+ * Cadence for the "still waiting for the user" beat, by how many beats have
+ * already been emitted for this wait. Exported so the backoff is asserted
+ * directly rather than inferred from wall-clock log spacing.
+ */
+export function challengeHeartbeatIntervalMs(beatsEmitted = 0) {
+  const beats = Math.max(0, Math.floor(Number(beatsEmitted) || 0));
+  // Cap the exponent before it overflows into Infinity on a very long wait.
+  const doublings = Math.min(beats, 32);
+  return Math.min(CHALLENGE_HEARTBEAT_BASE_MS * (2 ** doublings), CHALLENGE_HEARTBEAT_MAX_MS);
 }
 
 export function getManualScraperTelemetry() {
@@ -886,8 +981,37 @@ export function buildPhysicalCardWalkPlan(extractedJobs, selectedJobs) {
   };
 }
 
+// The two sides of a detail-selection check are produced by different DOM
+// mechanisms, and that asymmetry is what makes decoding here mandatory rather
+// than cosmetic. Entity decoding is a property of HTML *parsing*, not of the
+// textContent/innerText read APIs:
+//   - the expected title is read off a server-rendered list card, so the
+//     browser's parser already turned `&#8211;` in the markup into `–`;
+//   - the observed title is read off a detail panel Google populates
+//     programmatically from a JSON blob. Assigning a text node never runs an
+//     entity decode, so a title double-escaped upstream stays the literal
+//     characters `&#8211;`.
+// Comparing the parsed `–` against the literal `&#8211;` declared a mismatch
+// between a job and ITSELF, which threw away a correctly-read description
+// panel as "another job's text" and left the row unresolvable — no number of
+// retries can fix a check that rejects the right answer.
+//
+// Decoding repeats (bounded) because decodeHtmlEntities makes a single
+// `String.replace` pass and does not re-scan its own output: one pass turns
+// `&amp;#8211;` into `&#8211;`, which still is not the character the expected
+// side carries. Mojibake is repaired alongside it so a source that serves
+// UTF-8-as-Latin-1 compares equal to its repaired counterpart. This
+// normalization is comparison-only — no stored field is rewritten by it.
+const DETAIL_TITLE_DECODE_PASSES = 3;
+
 function normalizedDetailTitle(title) {
-  return String(title || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  let text = String(title || '');
+  for (let pass = 0; pass < DETAIL_TITLE_DECODE_PASSES; pass++) {
+    const decoded = decodeHtmlEntities(repairMojibake(text));
+    if (decoded === text) break;
+    text = decoded;
+  }
+  return text.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 }
 
 /**
@@ -1653,16 +1777,42 @@ export function classifyManualChallengeSignals(signals = {}) {
     || signals.hasDataDomeFrame
     || signals.hasDataDomeScript
   );
-  const hardBlockCandidate = !!signals.hasTerminalHardBlockText
+  // `verification-text` is the ONLY verdict derived from free page prose, so it
+  // is the only one an ordinary listing can trip by itself. Left uncorroborated
+  // it is the most expensive false positive this module can produce: on a list
+  // page it parks the run on an indefinite human-solve wait, and on a detail
+  // page it hard-blocks the whole enrichment pass — both while the real content
+  // is sitting right there on screen. Require corroboration before honouring
+  // it: a widget the user could actually solve, a document small enough to BE
+  // an interstitial, or the specific post-solve "verification successful"
+  // transient (a real challenge state that must not be read as clean).
+  const bodyTextLength = Number(signals.bodyTextLength);
+  // An unmeasured length (legacy caller, failed probe) keeps the prior
+  // behaviour rather than silently widening what counts as a challenge.
+  const interstitialSized = Number.isFinite(bodyTextLength)
+    ? bodyTextLength <= CHALLENGE_INTERSTITIAL_MAX_CHARS
+    : true;
+  const textOnlyUncorroborated = signals.reason === 'verification-text'
+    && !interactive
+    && !interstitialSized
+    && !signals.verificationCompleted;
+  const hardBlockCandidate = (!!signals.hasTerminalHardBlockText
     || signals.reason === 'verification-text'
-    || signals.reason === 'google-sorry-recaptcha';
+    || signals.reason === 'google-sorry-recaptcha')
+    && !textOnlyUncorroborated;
   const isHardBlock = hardBlockCandidate && !interactive && !signals.hasNormalContent;
   return {
     ...signals,
     interactive,
     isHardBlock,
-    isChallenge: isHardBlock || !!signals.isChallenge,
-    reason: isHardBlock ? 'hard-block' : (signals.reason || 'none'),
+    isChallenge: !textOnlyUncorroborated && (isHardBlock || !!signals.isChallenge),
+    reason: textOnlyUncorroborated
+      ? 'none'
+      : (isHardBlock ? 'hard-block' : (signals.reason || 'none')),
+    // Retained so a report can state what was observed and what was done with
+    // it, rather than showing a silently clean page.
+    suppressedReason: textOnlyUncorroborated ? 'verification-text-in-page-content' : null,
+    bodyTextLength: Number.isFinite(bodyTextLength) ? bodyTextLength : null,
   };
 }
 
@@ -1759,9 +1909,14 @@ async function getChallengeSignals(page) {
     const hasVerificationSuccessful =
       bodyText.includes('verification successful') ||
       (bodyText.includes('waiting for') && bodyText.includes('indeed.com to respond'));
+    // Keep the markers that actually matched. `reason=verification-text` alone
+    // cannot be checked: it never says WHICH phrase fired, so a false positive
+    // caused by ordinary posting copy (a role requiring a "security check") is
+    // indistinguishable in a report from a genuine anti-bot wall.
+    const matchedVerificationMarkers = verificationTextMarkers.filter(marker => bodyText.includes(marker));
     const hasVerificationText =
       hasVerificationSuccessful ||
-      verificationTextMarkers.some(marker => bodyText.includes(marker));
+      matchedVerificationMarkers.length > 0;
     const hasTerminalHardBlockText = hardBlockTextMarkers.some(marker => bodyText.includes(marker));
     const hasNormalContent = !!document.querySelector(
       'main [data-jk], main a[href*="/viewjob"], main [data-testid="jobDescriptionSection"], main #jobDescriptionSection, main h1'
@@ -1821,6 +1976,10 @@ async function getChallengeSignals(page) {
       url: window.location.href,
       title: titleRaw.slice(0, 120),
       bodyHead: bodyTextRaw.replace(/\s+/g, ' ').trim().slice(0, 240),
+      // Whitespace-collapsed so an indentation-heavy document is measured by
+      // the prose a reader would actually see, not by its markup formatting.
+      bodyTextLength: bodyTextRaw.replace(/\s+/g, ' ').trim().length,
+      matchedVerificationMarkers: matchedVerificationMarkers.slice(0, 4),
       hasChallengeShell,
       hasPerimeterXBlock,
       hasVerificationText,
@@ -1843,6 +2002,10 @@ async function getChallengeSignals(page) {
     url: page.url(),
     title: '',
     bodyHead: '',
+    // null, not 0: the document was never measured. Reporting it as an empty
+    // body would assert an observation this probe did not make.
+    bodyTextLength: null,
+    matchedVerificationMarkers: [],
     hasChallengeShell: false,
     hasPerimeterXBlock: false,
     hasVerificationText: false,
@@ -1867,6 +2030,10 @@ function formatChallengeEvidence(signals, key = null) {
     signals.url ? `url=${signals.url}` : null,
     signals.title ? `title=${JSON.stringify(signals.title)}` : null,
     `normalContent=${signals.hasNormalContent ? 'yes' : 'no'}`,
+    Number.isFinite(signals.bodyTextLength) ? `bodyChars=${signals.bodyTextLength}` : null,
+    signals.matchedVerificationMarkers?.length
+      ? `matchedText=${JSON.stringify(signals.matchedVerificationMarkers.join(' | '))}`
+      : null,
     signals.hasChallengeShell ? 'challengeShell=yes' : null,
     signals.hasPerimeterXBlock ? 'perimeterX=yes' : null,
     signals.hasVerificationText ? 'verificationText=yes' : null,
@@ -2093,6 +2260,8 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
   let inChallenge              = false;
   let challengeStartedAt       = 0; // when the current challenge wait began (for the heartbeat)
   let lastChallengeHeartbeat   = 0;
+  let challengeHeartbeats      = 0; // log lines emitted for the current wait (drives the backoff)
+  let lastChallengeBeatAt      = 0; // liveness beat, on its own un-backed-off cadence
   let cleanSince               = null; // tracks when page first went challenge-free
   let shownVerifiedOverlay     = false;
   let didHomeLandingRecover    = false; // true if recoverFromChallengeHomeLanding fired
@@ -2103,12 +2272,36 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
     ? initialChallengeState.terminalSince
     : null;
   let terminalTransitionCount  = 0;
+  let recordedTextSuppression  = false;
 
   while (true) {
     if (signal?.aborted) return 'abort';
 
     const signals     = await getChallengeSignals(page);
     const isChallenge = !!signals?.isChallenge;
+    if (signals?.suppressedReason && !recordedTextSuppression) {
+      // Say what was seen and what was done with it. Without this the report
+      // shows an ordinary page and no trace of the words that used to stop it,
+      // so a later regression here would be invisible.
+      recordedTextSuppression = true;
+      recordManualScraperTelemetry({
+        phase: 'challenge-text-suppressed',
+        srcName: overlayBase.srcName,
+        reason: signals.suppressedReason,
+        title: signals.title,
+        bodyHead: signals.bodyHead,
+        url: signals.url,
+        bodyTextLength: signals.bodyTextLength,
+        interstitialMaxChars: CHALLENGE_INTERSTITIAL_MAX_CHARS,
+        matchedVerificationMarkers: signals.matchedVerificationMarkers || [],
+        pageState: {
+          interactive: false,
+          normalContent: !!signals.hasNormalContent,
+          terminalHardBlockText: !!signals.hasTerminalHardBlockText,
+        },
+      }, { updateActive: false });
+      logger.info(`[BrowserScraper] ${overlayBase.srcName}: verification wording found inside a ${signals.bodyTextLength}-char content page (interstitials are ≤${CHALLENGE_INTERSTITIAL_MAX_CHARS}) — treating it as page text, not a challenge`);
+    }
     const hasContent  = challengeOnly || !contentSel || await page.evaluate(
       s => !!document.querySelector(s), contentSel
     ).catch(() => false);
@@ -2210,6 +2403,9 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
             terminalGraceMs: CHALLENGE_TERMINAL_TRANSITION_GRACE_MS,
             closeCause: 'stable-terminal-after-interactive-challenge',
           } : { closeCause: 'initial-terminal-hard-block' }),
+          matchedVerificationMarkers: signals.matchedVerificationMarkers || [],
+          bodyTextLength: signals.bodyTextLength ?? null,
+          interstitialMaxChars: CHALLENGE_INTERSTITIAL_MAX_CHARS,
           pageState: {
             interactive: !!signals.interactive,
             normalContent: !!signals.hasNormalContent,
@@ -2235,6 +2431,8 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         inChallenge = true;
         challengeStartedAt = Date.now();
         lastChallengeHeartbeat = Date.now();
+        lastChallengeBeatAt = Date.now();
+        challengeHeartbeats = 0;
         // This source made the user manually solve something this run — feeds the
         // "manual-verification-first" scrape ordering (scrapeVerification.js). The
         // orchestrator records the outcome per source; we only flag it here.
@@ -2258,6 +2456,9 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           url:      signals?.url,
           cfFrame:  signals?.hasCloudflareChallengeFrame,
           recaptcha: signals?.visibleRecaptchaFrames,
+          matchedVerificationMarkers: signals?.matchedVerificationMarkers || [],
+          bodyTextLength: signals?.bodyTextLength ?? null,
+          interstitialMaxChars: CHALLENGE_INTERSTITIAL_MAX_CHARS,
           pageState: {
             interactive: !!signals?.interactive,
             normalContent: !!signals?.hasNormalContent,
@@ -2291,10 +2492,23 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       // on a timer. The escape hatches are the abort check at the top of the loop
       // (Reset / hub close) and the hard-block return above (nothing to solve). A
       // periodic heartbeat keeps an unattended wait visible in the logs.
-      if (Date.now() - lastChallengeHeartbeat >= CHALLENGE_HEARTBEAT_MS) {
+      const challengeElapsedMs = Date.now() - challengeStartedAt;
+      const formatChallengeElapsed = (ms) => {
+        const sec = Math.floor(ms / 1000);
+        return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`;
+      };
+      if (Date.now() - lastChallengeBeatAt >= CHALLENGE_ACTIVITY_BEAT_MS) {
+        lastChallengeBeatAt = Date.now();
+        recordActivityBeat({
+          ...overlayBase,
+          status: `⚠️ Complete the challenge above to continue (${formatChallengeElapsed(challengeElapsedMs)} waiting)`,
+          challenge: true,
+        });
+      }
+      if (Date.now() - lastChallengeHeartbeat >= challengeHeartbeatIntervalMs(challengeHeartbeats)) {
         lastChallengeHeartbeat = Date.now();
-        const elapsedSec = Math.floor((Date.now() - challengeStartedAt) / 1000);
-        logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m${elapsedSec % 60}s`} elapsed)`);
+        challengeHeartbeats++;
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${formatChallengeElapsed(challengeElapsedMs)} elapsed)`);
       }
       await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
       continue;
@@ -2684,6 +2898,24 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // appends its iframe/Turnstile just after DOMContentLoaded, but adding a
           // fixed delay to every healthy row would needlessly slow the detail pass.
           let challengeSignals = await getChallengeSignals(fetchPage);
+          if (challengeSignals?.suppressedReason) {
+            // Same policy as the list page. A detail page has no source-shaped
+            // content selector here, so before this gate a posting that merely
+            // mentioned verification wording hard-blocked the entire pass.
+            recordManualScraperTelemetry({
+              phase: 'challenge-text-suppressed',
+              sourceId,
+              srcName: overlayBase.srcName,
+              key: (job.title || job.url || '?').slice(0, 65),
+              reason: challengeSignals.suppressedReason,
+              title: challengeSignals.title,
+              bodyHead: challengeSignals.bodyHead,
+              url: challengeSignals.url,
+              bodyTextLength: challengeSignals.bodyTextLength,
+              interstitialMaxChars: CHALLENGE_INTERSTITIAL_MAX_CHARS,
+              matchedVerificationMarkers: challengeSignals.matchedVerificationMarkers || [],
+            }, { updateActive: false });
+          }
           let detailSawInteractiveChallenge = !!challengeSignals?.interactive;
           let detailTerminalSince = null;
           if (challengeSignals?.isChallenge) {
@@ -2869,6 +3101,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 key: (job.title || job.url || '?').slice(0, 80),
                 reason: challengeSignals?.reason, title: challengeSignals?.title,
                 hardBlock: !!challengeSignals?.isHardBlock,
+                // The discriminator between "this page IS the challenge" and
+                // "this page mentions a challenge's words". Reported so a
+                // hard-block verdict can be checked, not just trusted.
+                bodyTextLength: challengeSignals?.bodyTextLength ?? null,
+                interstitialMaxChars: CHALLENGE_INTERSTITIAL_MAX_CHARS,
+                matchedVerificationMarkers: challengeSignals?.matchedVerificationMarkers || [],
                 disposition: detailChallengeAction === 'terminal-stop' ? 'terminal-hard-block' : 'interactive-presented',
                 navigationStatus,
                 finalUrl: String(challengeSignals?.url || fetchPage.url()).slice(0, 240),
@@ -3054,6 +3292,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             logger.info(`[BrowserScraper] ${overlayBase.srcName}: human verification detected during description expansion — waiting for user (no timeout; Reset to cancel)`);
             let solved = false;
             let descHeartbeatAt = Date.now();
+            let descHeartbeats = 0;
+            let descBeatAt = Date.now();
             const descChallengeStart = Date.now();
             // Wait INDEFINITELY for the user to solve. The only exits are abort
             // (Reset / hub close) or the user closing the window — never a timer.
@@ -3065,10 +3305,26 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
               const stillChallenge = await detectChallengePage(page);
               if (!stillChallenge) { solved = true; break; }
-              if (Date.now() - descHeartbeatAt >= CHALLENGE_HEARTBEAT_MS) {
+              const descElapsedSec = Math.floor((Date.now() - descChallengeStart) / 1000);
+              const descElapsedLabel = descElapsedSec < 60
+                ? `${descElapsedSec}s`
+                : `${Math.floor(descElapsedSec / 60)}m${descElapsedSec % 60}s`;
+              // Same split as the list-page wait: the beat stays on a fixed
+              // cadence so this wait is never reported as a hang, while the log
+              // line backs off so it cannot evict the main-process ring.
+              if (Date.now() - descBeatAt >= CHALLENGE_ACTIVITY_BEAT_MS) {
+                descBeatAt = Date.now();
+                recordActivityBeat({
+                  ...overlayBase,
+                  count: baseCount + i + 1,
+                  status: `⚠️ Complete the verification to continue (${descElapsedLabel} waiting)`,
+                  challenge: true,
+                });
+              }
+              if (Date.now() - descHeartbeatAt >= challengeHeartbeatIntervalMs(descHeartbeats)) {
                 descHeartbeatAt = Date.now();
-                const elapsedSec = Math.floor((Date.now() - descChallengeStart) / 1000);
-                logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m${elapsedSec % 60}s`} elapsed)`);
+                descHeartbeats++;
+                logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${descElapsedLabel} elapsed)`);
               }
             }
             if (!solved) break;
@@ -4023,10 +4279,29 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // the left list cannot validate a stale right panel.
             let selectedTitle = '';
             if (panelSourceId === 'glassdoor' && active && expectedTitle) {
-              const expected = String(expectedTitle).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+              // Decode before comparing, for the same reason the Google heading
+              // probe does: a heading written into the DOM programmatically can
+              // still read `&#8211;` where the parsed list card reads `–`. Here
+              // the failure is quieter than Google's — no match simply leaves
+              // selectedTitle empty, which marks the panel UNVERIFIED — but an
+              // unverified title is exactly what stops a legitimately repeated
+              // Glassdoor description from being accepted, turning a correct
+              // panel read into a false timeout.
+              const decodeEntities = (raw) => {
+                let out = String(raw || '');
+                for (let pass = 0; pass < 3; pass++) {
+                  const holder = document.createElement('textarea');
+                  holder.innerHTML = out;
+                  const next = holder.value;
+                  if (next === out) break;
+                  out = next;
+                }
+                return out;
+              };
+              const expected = decodeEntities(expectedTitle).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
               const equivalent = (value) => {
                 const title = String(value || '').replace(/\s+/g, ' ').trim();
-                const normalized = title.toLocaleLowerCase();
+                const normalized = decodeEntities(title).toLocaleLowerCase();
                 return title && (normalized === expected || normalized.includes(expected) || expected.includes(normalized));
               };
               let scope = active.parentElement;
@@ -4168,15 +4443,35 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // missing heading is tolerated (markup varies); an explicit different
       // heading is not.
       const readSelectedGoogleTitle = () => page.evaluate((expectedTitle) => {
-        const activeRoots = Array.from(document.querySelectorAll('[aria-hidden="false"]'));
-        const headings = activeRoots.flatMap(region => Array.from(region.querySelectorAll('h1, h2, h3, [role="heading"]')))
+        // Same asymmetry as `normalizedDetailTitle` in this module: the expected
+        // title arrives entity-decoded from the pipeline while a heading's
+        // textContent can still read `&#8211;` when Google double-encodes it.
+        // Left unhandled, the correct heading fails this match and the picker
+        // falls through to `headings[0]` — handing the verdict a heading that
+        // belongs to a different job. A detached <textarea> is the standard
+        // in-page decoder and never executes scripts; the bounded repeat
+        // unwraps `&amp;#8211;`, which one pass leaves as `&#8211;`.
+        const decodeEntities = (raw) => {
+          let out = String(raw || '');
+          for (let pass = 0; pass < 3; pass++) {
+            const holder = document.createElement('textarea');
+            holder.innerHTML = out;
+            const next = holder.value;
+            if (next === out) break;
+            out = next;
+          }
+          return out;
+        };
+        const normalize = (raw) => decodeEntities(raw).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+        const headings = Array.from(document.querySelectorAll('[aria-hidden="false"]'))
+          .flatMap(region => Array.from(region.querySelectorAll('h1, h2, h3, [role="heading"]')))
           .filter(el => !el.closest('[aria-hidden="true"]'))
           .filter(el => !el.closest('[data-share-url]'))
           .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
           .filter(Boolean);
-        const expected = String(expectedTitle || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+        const expected = normalize(expectedTitle);
         return headings.find((heading) => {
-          const value = heading.toLocaleLowerCase();
+          const value = normalize(heading);
           return expected && (value === expected || value.includes(expected) || expected.includes(value));
         }) || headings[0] || '';
       }, job.title).catch(() => '');
@@ -4394,7 +4689,23 @@ export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal
     qLabel: 'Recovered results',
     qText: '',
   };
-  return expandDescriptions(page, list, sourceId, overlayBase, list.length, signal, walkPlan);
+  // This pass runs AFTER the main multi-source run's own completion, so
+  // `active` may still be pinned to a stale/unrelated source (or a `finished`
+  // state — see clearManualScraperTelemetry). Every per-card phase inside
+  // expandDescriptions passes updateActive:false by design (a card's outcome
+  // must never overwrite the run's current context), so without one reset
+  // here nothing would ever re-point `active` at the source actually
+  // recovering — a report opened mid-pass would keep naming whatever ran
+  // before it, however many hours ago that was.
+  recordManualScraperTelemetry({ phase: 'recovery-start', sourceId, srcName, count: list.length });
+  try {
+    return await expandDescriptions(page, list, sourceId, overlayBase, list.length, signal, walkPlan);
+  } finally {
+    // Settle the slot the same way an ordinary run's completion does, so a
+    // report opened after this pass ends sees it as over — not as a recovery
+    // that has been silently "in progress" ever since.
+    clearManualScraperTelemetry('finished');
+  }
 }
 
 // ── Next-page clicker ─────────────────────────────────────────────────────────

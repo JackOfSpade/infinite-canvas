@@ -444,6 +444,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
   const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(enabledBrowserLoginSourceIds);
+  const lastCompletedRunAtText = Number.isFinite(Number(data.lastCompletedRunAt))
+    ? new Date(Number(data.lastCompletedRunAt)).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+    : null;
 
   useEffect(() => {
     if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
@@ -3397,7 +3403,21 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
-    if (data.locked) return;
+    if (data.locked) {
+      // A locked hub still renders this control, so the click reaches here and
+      // then vanished without a trace. That made a real report ("I stopped it")
+      // indistinguishable from one where the button was never pressed: nothing
+      // in the event history, nothing in the backend task registry. Record the
+      // refusal and say so, so the user is not left watching a run they believe
+      // they cancelled.
+      EventLogger.log(`[JobSearch][${id}] Cancel/Reset refused — hub is locked; backend tasks left running`);
+      addToast({
+        title: 'This job search is locked',
+        description: 'Unlock the module to cancel its run. The search is still running in the background.',
+        type: 'info',
+      });
+      return;
+    }
 
     const reanalysisRestore = reanalysisRestoreRef.current;
     if (reanalysisRestore) {
@@ -3407,7 +3427,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       EventLogger.log(`[JobSearch][${id}] Re-analysis cancelled; restoring prior hiring-fit results`);
       epoch.bump();
       moduleRunQueue.cancelQueuedRunsForNode(id);
-      window.electronAPI?.cancelNodeTask?.(id);
+      window.electronAPI?.cancelNodeTask?.(id, 'reanalysis-cancelled');
       updateGlobal(id, {
         hubState: 'done',
         queuedModuleRun: null,
@@ -3432,7 +3452,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Actually abort the backend — without this the AbortControllers registered
     // against this nodeId keep running and finish a few seconds later, often
     // bouncing the UI back to a "done" state the user just dismissed.
-    window.electronAPI?.cancelNodeTask?.(id);
+    window.electronAPI?.cancelNodeTask?.(id, 'user-reset');
 
     // Also clear filePath. The one-shot auto-start latch prevents a failed run
     // from recursively launching itself, but Reset is an explicit abandonment
@@ -3495,7 +3515,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     resetSourceProgress();
     cleanupAllJobChildren();
     processingRunsRef.current.cancel();
-  }, [data.locked, hasReusableCareerProfile, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.jobRunId, data.pendingBatch, canvasFilePath, moduleRunQueue]);
+  }, [addToast, data.locked, hasReusableCareerProfile, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.jobRunId, data.pendingBatch, canvasFilePath, moduleRunQueue]);
 
   // Non-API scoring is controlled by an app-level dialog, outside this node.
   // Its Cancel action aborts the backend operation, then broadcasts the owning
@@ -3877,7 +3897,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // write the old profile straight back onto the cleared hub.
     epoch.bump();
     moduleRunQueue.cancelQueuedRunsForNode(id);
-    window.electronAPI?.cancelNodeTask?.(id);
+    window.electronAPI?.cancelNodeTask?.(id, 'career-files-cleared');
 
     // Capture sidecar tokens BEFORE the updateGlobal below nulls them.
     const batchId = data.pendingBatch?.batchId || null;
@@ -4393,13 +4413,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 </>
               ) : (
                 <>
-                  {/* A LOCKED virgin hub lands here (nothing retained to describe),
-                      and its drops are silently refused — don't invite one. */}
+                {/* A LOCKED virgin hub lands here (nothing retained to describe),
+                    and its drops are silently refused — don't invite one. */}
                   <p className="text-white/40 text-sm font-medium">{data.locked ? 'Module locked' : 'Drop your career files'}</p>
                   <p className="text-white/25 text-[10px] mt-1 text-center">{data.locked
                     ? 'Unlock it to drop career files'
                     : 'Résumé, portfolio, project notes — any number of files'}</p>
                 </>
+              )}
+              {!!lastCompletedRunAtText && hasCareerIdentity && (
+                <p className="text-white/35 text-[9px] mt-1">Last completed: {lastCompletedRunAtText}</p>
               )}
               {!platformsVerifying && <div
                 className="nodrag mt-4 w-full flex flex-col items-stretch gap-1.5 text-[10px] text-white/40"

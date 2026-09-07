@@ -1654,8 +1654,10 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     moduleRunQueue.cancelQueuedRunsForNode(id);
 
     // Actually cancel the backend pipeline. The IPC is fire-and-forget; the
-    // backend's finally{} clears its own progress. We don't await it.
-    window.electronAPI?.cancelNodeTask?.(id);
+    // backend's finally{} clears its own progress. We don't await it. The cause
+    // is named so diagnostics report a Reset as a Reset — every node-scoped
+    // abort otherwise shares the "Node deleted" sentinel.
+    window.electronAPI?.cancelNodeTask?.(id, 'user-reset');
 
     // Revert intelligently: when aborting price research the user wants to
     // keep their draft (title/description/condition they already approved),

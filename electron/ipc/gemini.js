@@ -1250,7 +1250,14 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       } catch (err) {
         const errMsg = err.message || String(err);
         const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
-        const classification = classifyGeminiFailure(err.status, failureText);
+        // Classify a cancellation from the SIGNAL, not the error prose.
+        // `classifyGeminiFailure` can only sniff the message, and this app's
+        // cancel sentinel reads "Node deleted" — no 'abort' token — so a user's
+        // Reset was logged here as a provider failure (and pushed into
+        // `attemptedErrors` as one) before the abort check below rethrew it.
+        const classification = (genConfig.signal?.aborted || err?.name === 'AbortError')
+          ? 'aborted'
+          : classifyGeminiFailure(err.status, failureText);
         logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
         // `classification` is decided from failureText, which folds in err.details (the
         // structured google.rpc QuotaFailure/RetryInfo blocks) — but only errMsg above

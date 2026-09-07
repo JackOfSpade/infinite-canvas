@@ -2,12 +2,19 @@ import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, get
 import { __canWriteJobResolveTelemetryForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
+import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '../test-dependencies.js';
 import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
 import { buildMainProcessLogsMarkdown, newestFirstLogLines, timestampedLogLines } from '../test-dependencies.js';
 import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/utils/EventLogger.js';
+// Imported directly rather than through test-dependencies.js (a file this task
+// must not touch): clipboardCap.js has zero electron/module dependencies, so
+// this is safe and mirrors the EventLogger.js direct-import pattern above.
+import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } from '../../electron/ipc/bugReport/clipboardCap.js';
+import { SAVED_REPORT_RETENTION, __resetSavedBugReportClearForTests, buildClipboardPointer, clearSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
+import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
-import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, classifyManualChallengeSignals, descriptionPanelPacing, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
+import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
 import { sanitizeLastRunReceipt } from '../test-dependencies.js';
@@ -481,15 +488,19 @@ export default [
           bucketing: { ts: Date.now() - 6_000, input: 16, roleCount: 1, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [] },
         });
 
-        const report = generateMarkdown({
+        const reportPayload = {
           description: 'Verify the whole run completed.', filterCode: 'FULL',
           filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], omittedSections: [] },
           nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
           frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
-        });
+        };
+        // The uncapped path (Save to file / no options) — the fixture's 300-row
+        // remoteRelevance audit is deliberately larger than the clipboard cap,
+        // and this path must keep every byte of it regardless.
+        const report = generateMarkdown(reportPayload);
 
         assert(report.markdown.length > 50_000 && !report.hardTruncated,
-          'completion assessment fixture exceeds the former 50k clipboard ceiling without truncation');
+          'uncapped completion assessment report exceeds the 50k clipboard ceiling without truncation');
         assert(report.markdown.includes('## Job Completion Assessment')
           && report.markdown.includes('✅ **VERIFIED COMPLETE**')
           && report.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
@@ -500,7 +511,26 @@ export default [
         'completion assessment reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot in the full report');
         assert(report.markdown.indexOf('## Job Completion Assessment') < report.markdown.indexOf('## Job Search Pipeline')
           && report.markdown.includes('### Scoring'),
-        'assessment is ordered before the long pipeline without clipping detailed scoring evidence');
+        'assessment is ordered before the long pipeline without clipping detailed scoring evidence in the uncapped report');
+
+        // The capped path (Copy to clipboard / generate-bug-report-markdown)
+        // must still surface the completion verdict even though the fixture's
+        // 300-row audit forces a hard truncation — the whole point of the cap
+        // is that the highest-value evidence (here, the completion verdict
+        // near the top of the base) survives even when a later section doesn't.
+        const capped = generateMarkdown(reportPayload, null, { maxChars: 50_000 });
+        assert(capped.hardTruncated && capped.markdown.length <= 50_000,
+          'completion assessment fixture must exercise the hard 50k clipboard cap');
+        assert(capped.markdown.includes('## Job Completion Assessment')
+          && capped.markdown.includes('✅ **VERIFIED COMPLETE**')
+          && capped.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
+          && capped.markdown.includes('input 16 → scored 16')
+          && capped.markdown.includes('terminal score-ready 16')
+          && capped.markdown.includes('Saved score-ready snapshot: 16 job(s)')
+          && capped.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree on `completion-run-16`'),
+        'capped completion assessment still reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot before the cap');
+        assert(capped.markdown.indexOf('## Job Completion Assessment') < capped.markdown.indexOf('## Job Search Pipeline'),
+          'capped assessment is ordered before the long pipeline that the cap clips');
 
         // A current, non-stale board is part of the claimed completion only
         // when it names this source in its saved combine provenance and its
@@ -1063,14 +1093,414 @@ export default [
         && !fileReport.includes('routine jobcard row(s) omitted'),
       'Save to file retains every routine jobcard row with no omission footer');
 
-      const clipboardReport = generateMarkdown(payload).markdown;
-      assert(nodes.every(node => clipboardReport.includes(`| \`${node.id}\``))
+      // Clipboard generation (maxChars set) samples ROUTINE_JOBCARD_CAP=15
+      // routine cards and omits the rest — a collapsed cascade spawns hundreds
+      // of hidden-by-default routine cards, and without this cap they alone
+      // can consume the whole clipboard budget before the far more valuable
+      // logs/event history ever render. Anomalous cards (an expanded hiring-fit
+      // disclosure, here card0017-19) are never sampled away.
+      const clipboardReport = generateMarkdown(payload, null, { maxChars: 1_000_000 }).markdown;
+      assert(clipboardReport.includes('| `card0014`')
+        && !clipboardReport.includes('| `card0015`')
         && clipboardReport.includes('reasoningExpanded')
         && clipboardReport.includes('scoreAuditExpanded')
         && clipboardReport.includes('compensationExpanded')
-        && !clipboardReport.includes('routine jobcard row(s) omitted'),
-      'clipboard generation retains the same complete node inventory as file export');
-      return { fileRows: nodes.length, clipboardRows: nodes.length };
+        && clipboardReport.includes('2 routine jobcard row(s) omitted to preserve the clipboard budget'),
+      'clipboard generation samples routine cards but retains every expanded hiring-fit disclosure as a flagged anomaly');
+      return { fileRows: nodes.length, clipboardRows: 18 };
+    },
+  },
+{
+    // The header contract this guards: `## Report Filtering` states how many
+    // event lines the FULL/filter selection kept, computed BEFORE the
+    // clipboard cap ever runs. If the cap later sheds oldest events, that
+    // sentence would still read "kept all N line(s)" while the copied
+    // markdown actually holds fewer — the report asserting something untrue
+    // about itself. clarifyCappedFilterSummary rewrites the sentence whenever
+    // trimming (or folding) changed what the clipboard actually retained.
+    name: 'Clipboard cap rewrites the filter-summary sentence whenever it trims or folds',
+    run: () => {
+      const ts = (i) => `12:00:${String(Math.floor(i / 60)).padStart(2, '0')}.${String(i % 60).padStart(3, '0')}`;
+      const events = Array.from({ length: 200 }, (_, i) => `[${ts(i)}] EVT ${i} something happened on the canvas`);
+      const fullFilterSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+      });
+      assert(fullFilterSummary.includes(`event log kept all ${events.length} line(s)`),
+        'fixture sanity: the FULL filter summary must claim it kept every event before any cap runs');
+
+      // Roomy budget: nothing trimmed, nothing folded — the pre-cap sentence
+      // is still true, so clarifyCappedFilterSummary must leave it untouched.
+      const roomy = enforceClipboardMarkdownCap('# Bug Report\n' + fullFilterSummary + '\n', events, [], 1_000_000);
+      assert(roomy.markdown.includes(`event log kept all ${events.length} line(s)`),
+        'a report that fits under the cap keeps the untouched "kept all N line(s)" sentence — nothing was trimmed');
+
+      // A tight cap forces the cap to shed oldest events. The header's claim
+      // must be rewritten so it can never say "kept all" while lines were
+      // actually dropped from the copied markdown.
+      const tight = enforceClipboardMarkdownCap('# Bug Report\n' + fullFilterSummary + '\n', events, [], 3_000);
+      assert(tight.trimmedEventCount > 0,
+        'fixture sanity: a 3,000-char cap over 200 event lines must trim at least one event');
+      assert(!tight.markdown.includes(`event log kept all ${events.length} line(s)`),
+        'the clipboard cap must never let the header claim "kept all N line(s)" once lines were dropped');
+      const retained = events.length - tight.trimmedEventCount;
+      assert(tight.markdown.includes(`event log selected all ${events.length} line(s) before clipboard capping`)
+        && tight.markdown.includes(`clipboard retained ${retained} of ${events.length} event line(s)`),
+      'the rewritten sentence states what FULL selected before capping and what the clipboard actually retained after it');
+      return { retained, trimmed: tight.trimmedEventCount };
+    },
+  },
+{
+    name: 'Bug report clipboard cap reserves the logs + event timeline',
+    run: () => {
+      const ts = (i) => `12:00:${String(Math.floor(i / 60)).padStart(2, '0')}.${String(i % 60).padStart(3, '0')}`;
+      // Fixture event/log lines carry a recognized `[HH:MM:SS.mmm]` capture
+      // timestamp (the legacy shape `timestampedLogLines` still passes through
+      // unchanged) so the cap's char-budget math matches real captured lines —
+      // an unstamped raw line would instead get a "(timestamp assigned at
+      // report export)" marker spliced in, which would throw off every exact
+      // byte-budget assertion below. The log lines additionally start with a
+      // bracketed non-word module tag (`[Marketplace]`) rather than a bare
+      // level word, so they never accidentally match collapseLogRepeats' own
+      // fold pattern — this test is about EVENT trimming, not log folding
+      // (log folding gets its own dedicated test below).
+      const events = Array.from({ length: 200 }, (_, i) => `[${ts(i)}] EVT ${i} something happened on the canvas`);
+      const logs = Array.from({ length: 60 }, (_, i) => `[${ts(i)}] [Marketplace] LOG ${i} scrape/resolve detail line`);
+      const fullFilterSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+      });
+
+      // Small base, tiny cap unreachable: nothing truncated, everything present.
+      const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
+      assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
+        'Clipboard cap: roomy budget keeps logs + full event history untouched');
+      assert(roomy.markdown.includes('Up to 200 lines from the main process') && !roomy.markdown.includes('Last ~60 lines'),
+        'Main-process log heading matches the current 200-line ring-buffer request');
+      assert(roomy.markdown.includes('Timestamps:** full ISO UTC')
+        && roomy.markdown.includes('Timestamps:** full local ISO with numeric UTC offset'),
+      'Clipboard cap: timestamp bases are labeled for main-process (UTC) and renderer (local) evidence');
+      assert(roomy.markdown.includes('EVT 0 ') && roomy.markdown.includes('EVT 199 '),
+        'Clipboard cap: roomy budget keeps both oldest and newest events');
+
+      // The normal file/export path does not invoke the clipboard cap. Its
+      // independently assembled Event History heading must carry the same local
+      // time basis as the cap helper's shared tail.
+      const uncapped = generateMarkdown({
+        description: 'Timestamp-basis regression fixture.',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: ['12:00:00 renderer event'],
+      }).markdown;
+      assert(uncapped.includes('## Event History\n> **Order within this section:** newest first')
+        && uncapped.includes('Timestamps:** full local ISO with numeric UTC offset'),
+      'Uncapped report labels renderer Event History timestamps with the shared local-ISO basis');
+      assert(uncapped.includes('## Runtime Identity') && uncapped.includes('timezone ') && uncapped.includes('UTC offset '),
+        'FULL report renders runtime versions and the date/timezone correlation anchor it already collects');
+
+      // Phase 1: base fits but full tail doesn't — oldest events trimmed first,
+      // newest events + the logs survive.
+      const cap = 8_000;
+      const smallBase = '# Bug Report\n' + fullFilterSummary + '\n' + 'x'.repeat(2_000) + '\n';
+      const phase1 = enforceClipboardMarkdownCap(smallBase, events, logs, cap);
+      assert(phase1.markdown.length <= cap, `Clipboard cap: phase-1 output must respect the cap (${phase1.markdown.length} <= ${cap})`);
+      assert(phase1.trimmedEventCount > 0 && !phase1.hardTruncated, 'Clipboard cap: phase-1 should trim oldest events, not hard-truncate');
+      assert(phase1.markdown.includes('EVT 199 ') && !phase1.markdown.includes('EVT 0 '),
+        'Clipboard cap: phase-1 keeps the NEWEST events and sheds the oldest');
+      assert(phase1.markdown.includes('## Recent Main-Process Logs') && phase1.markdown.includes('LOG 59'),
+        'Clipboard cap: phase-1 must not sacrifice the main-process logs');
+      assert(phase1.markdown.includes(`clipboard retained ${events.length - phase1.trimmedEventCount} of ${events.length} event line(s)`)
+        && !phase1.markdown.includes(`event log kept all ${events.length} line(s)`),
+      'Clipboard cap: phase-1 FULL summary reports final retained events, not the pre-cap selection');
+      assert(phase1.markdown.includes(`retained ${events.length - phase1.trimmedEventCount} of ${events.length} most-recent event line(s)`)
+        && phase1.markdown.includes(`${logs.length - phase1.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: phase-1 banner quantifies retained event and log lines');
+
+      // Phase 2: the static base ALONE exceeds the cap (the bug from this report).
+      // The logs + most-recent events MUST survive; the base tail is what gets cut.
+      const giantBase = '# Bug Report\n' + fullFilterSummary + '\nNARRATIVE TOP\n' + 'Z'.repeat(40_000) + '\n## Node Diagnostics\nNODE TAIL\n';
+      const phase2 = enforceClipboardMarkdownCap(giantBase, events, logs, cap);
+      assert(phase2.markdown.length <= cap, `Clipboard cap: phase-2 output must respect the cap (${phase2.markdown.length} <= ${cap})`);
+      assert(phase2.hardTruncated, 'Clipboard cap: phase-2 should flag a hard truncation');
+      assert(phase2.markdown.includes('## Event History') && phase2.markdown.includes('EVT 199 '),
+        'Clipboard cap: phase-2 MUST preserve the recent event timeline (regression guard)');
+      assert(phase2.markdown.includes('Timestamps:** full ISO UTC')
+        && phase2.markdown.includes('Timestamps:** full local ISO with numeric UTC offset'),
+      'Clipboard hard cap preserves both timestamp-basis notes with the retained diagnostics');
+      assert(phase2.markdown.includes('## Recent Main-Process Logs') && phase2.markdown.includes('LOG 59'),
+        'Clipboard cap: phase-2 MUST preserve the main-process logs (regression guard)');
+      assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
+        'Clipboard cap: phase-2 keeps the curated top of the base and sheds its low-value tail');
+      assert(phase2.markdown.includes(`clipboard retained ${events.length - phase2.trimmedEventCount} of ${events.length} event line(s)`)
+        && !phase2.markdown.includes(`event log kept all ${events.length} line(s)`),
+      'Clipboard cap: hard-capped FULL summary reports final retained events, not the pre-cap selection');
+      assert(phase2.markdown.includes(`retained ${events.length - phase2.trimmedEventCount} of ${events.length} most-recent event line(s)`)
+        && phase2.markdown.includes(`${logs.length - phase2.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: hard-cap banner quantifies retained event and log lines');
+      assert(phase2.markdown.includes('static report content')
+        && phase2.markdown.includes('oldest event history line(s)')
+        && phase2.markdown.includes('oldest main-process log line(s)')
+        && phase2.markdown.includes('Report content after this point was omitted by the clipboard cap')
+        && !phase2.markdown.includes('older timeline entries')
+        && !phase2.markdown.includes('static node/session tail'),
+      'Clipboard cap: hard-cap copy names only the static/event/log content actually omitted');
+
+      // A hard cap can truncate the large static base while preserving EVERY
+      // event. Its banner must not claim that older event/timeline entries were
+      // lost merely because other content was cut (the real FULL-report case).
+      const shortEvents = Array.from({ length: 8 }, (_, i) => `[${ts(i)}] SHORT EVT ${i}`);
+      const longLogs = Array.from({ length: 60 }, (_, i) => `[${ts(i)}] [Main] LONG LOG ${i} ${'detail '.repeat(12)}`);
+      const staticAndLogsOnly = enforceClipboardMarkdownCap(giantBase, shortEvents, longLogs, cap);
+      assert(staticAndLogsOnly.hardTruncated && staticAndLogsOnly.trimmedEventCount === 0
+        && staticAndLogsOnly.trimmedLogCount > 0,
+      'Clipboard cap: fixture hard-truncates static/log content while retaining the full event history');
+      assert(staticAndLogsOnly.markdown.includes(`retained ${shortEvents.length} of ${shortEvents.length} most-recent event line(s)`)
+        && !staticAndLogsOnly.markdown.includes('oldest event history line(s)')
+        && !staticAndLogsOnly.markdown.includes('older timeline entries')
+        && staticAndLogsOnly.markdown.includes('oldest main-process log line(s)'),
+      'Clipboard cap: hard-cap banner does not claim event loss when every event was retained');
+
+      // Name both kinds of static loss. The exact cap assertion is especially
+      // important here because adding the names makes the banner longer and
+      // therefore leaves less room for the base than the initial generic pass.
+      const namedHardBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(5_000)
+        + '\n## Partial Audit\n' + 'B'.repeat(5_000)
+        + '\n## Dropped Diagnostics\nbody\n## Also Dropped\nbody\n';
+      const namedHard = enforceClipboardMarkdownCap(namedHardBase, events, logs, cap);
+      assert(namedHard.hardTruncated && namedHard.markdown.length <= cap,
+        `Clipboard cap: named hard-cap output respects the exact cap (${namedHard.markdown.length} <= ${cap})`);
+      assert(namedHard.markdown.includes('3 section(s) dropped: Partial Audit, Dropped Diagnostics, Also Dropped')
+        && namedHard.markdown.includes('"Kept Summary" cut mid-section'),
+      'Clipboard cap: hard-cap banner names whole dropped sections and the section cut in progress');
+
+      // This begins on the soft path (the base plus reserved tail fits), then
+      // the event/log notice tips it into its secondary static hard-cap path.
+      // It must use the same final-cut section diagnostics as the direct hard
+      // path rather than reporting the stale generic or first-pass omission.
+      const secondaryCap = 2_000;
+      const secondarySections = Array.from({ length: 12 }, (_, i) => `## S${i}\n${String(i).repeat(84)}\n`).join('');
+      const secondaryEvents = Array.from({ length: 100 }, (_, i) => `[${ts(i)}] EVENT ${i} ${'x'.repeat(18)}`);
+      // `[S]` (bracket, not a bare level word) keeps this fixture out of
+      // collapseLogRepeats' own fold pattern — see the file-level comment above.
+      const secondaryLogs = Array.from({ length: 60 }, (_, i) => `[${ts(i)}] [S] LOG ${i} ${'x'.repeat(18)}`);
+      const secondaryHard = enforceClipboardMarkdownCap(secondarySections, secondaryEvents, secondaryLogs, secondaryCap);
+      assert(secondaryHard.hardTruncated && secondaryHard.markdown.length <= secondaryCap,
+        `Clipboard cap: secondary hard-cap output respects the exact cap (${secondaryHard.markdown.length} <= ${secondaryCap})`);
+      assert(secondaryHard.markdown.includes('2 section(s) dropped: S10, S11')
+        && secondaryHard.markdown.includes('"S9" cut mid-section'),
+      'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
+
+      // A `##` cut mid-body silently took its `###` children with it: the
+      // heading scan is /^## (.+)$/gm, so named diagnostics (the Non-API AI
+      // handoff receipt, the Glassdoor location cache) disappeared with the
+      // notice reporting only that the PARENT was "cut mid-section". The
+      // subsection tally is reported separately — folding it into the `##`
+      // count would misstate how many top-level sections were lost.
+      const subsectionBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(4_000)
+        + '\n## Big Section\n' + 'B'.repeat(4_000)
+        + '\n### Handoff Lifecycle\nbody\n### Location Cache\nbody\n'
+        + '\n## Dropped Whole\nbody\n';
+      const subsectionCut = enforceClipboardMarkdownCap(subsectionBase, events, logs, cap);
+      assert(subsectionCut.markdown.includes('subsection(s) lost with them: ')
+        && subsectionCut.markdown.includes('Handoff Lifecycle')
+        && !/\d+ section\(s\) dropped:[^;]*Handoff Lifecycle/.test(subsectionCut.markdown),
+      'Clipboard cap: dropped ### subsections are named in their own clause, never folded into the ## dropped-section tally');
+
+      // The base is being cut mid-document either way, so spending only the
+      // FLOOR on the tail wasted budget the static cut could not use. The tail
+      // grows toward the full logs+events, bounded at half the cap so the
+      // static prefix stays meaningful.
+      const grownEvents = Array.from({ length: 120 }, (_, i) => `[${ts(i)}] EVENT ${i} ${'x'.repeat(40)}`);
+      const grownLogs = Array.from({ length: 125 }, (_, i) => `[${ts(i)}] [G] LOG ${i} ${'y'.repeat(45)}`);
+      const grownBase = '# Bug Report\n## Job Search Pipeline\n'
+        + Array.from({ length: 500 }, (_, i) => `- audit row ${i}: ${'P'.repeat(70)}`).join('\n')
+        + '\n\n## Dropped Diagnostics\nbody\n';
+      const grownCap = 50_000;
+      const grown = enforceClipboardMarkdownCap(grownBase, grownEvents, grownLogs, grownCap);
+      const retainedEvents = grownEvents.length - grown.trimmedEventCount;
+      const retainedLogs = grownLogs.length - grown.trimmedLogCount;
+      assert(grown.hardTruncated && grown.markdown.length <= grownCap,
+        `Clipboard cap: grown-tail hard-cap output still respects the exact cap (${grown.markdown.length} <= ${grownCap})`);
+      assert(retainedEvents === grownEvents.length && retainedLogs === grownLogs.length,
+        `Clipboard cap: a hard-truncated report spends leftover budget on the tail instead of the floor (kept ${retainedEvents}/${grownEvents.length} events, ${retainedLogs}/${grownLogs.length} logs)`);
+      assert(grown.markdown.includes(`retained ${retainedEvents} of ${grownEvents.length} most-recent event line(s)`)
+        && grown.markdown.includes(`${retainedLogs} of ${grownLogs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: the banner reports the tail actually retained, not the floor it started from');
+      assert(grown.markdown.length >= grownCap * 0.9,
+        `Clipboard cap: the grown tail keeps overall utilisation high (${grown.markdown.length} of ${grownCap})`);
+
+      // A single board re-combine tears down hundreds of uniquely-id'd nodes in
+      // a couple of milliseconds. Capture-time collapsers cannot merge unique
+      // ids, so those bursts arrive whole and can eat most of the retained-event
+      // budget; the clipboard path folds them at render time only.
+      const teardownStamp = 'board-6f7c1a2e-3b9d-4c05-8e21-0d4a7b6c9e13-1755820000000';
+      const burstTs = (i) => `12:00:${String(Math.floor(i / 100)).padStart(2, '0')}.${String(i % 100).padStart(3, '0')}`;
+      const teardownBurst = Array.from({ length: 300 }, (_, i) => `[${burstTs(i)}] node removed id=${teardownStamp}-job-${i}`);
+      const distinctEvents = Array.from({ length: 50 }, (_, i) => `[12:01:${String(i % 60).padStart(2, '0')}.000] DISTINCT-${i} unique canvas activity`);
+      const FOLD_SIGNATURE = /×\d+ \(id prefix/;
+
+      // Save to file is the uncapped artifact and the primary evidence for
+      // "my card disappeared" reports: every raw id must survive it verbatim.
+      const savedToFile = generateMarkdown({
+        description: 'Burst-fold save-to-file fidelity fixture.',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: teardownBurst,
+      }).markdown;
+      assert(teardownBurst.every((line) => savedToFile.includes(line)) && !FOLD_SIGNATURE.test(savedToFile),
+        'Save to file keeps every raw node-removed id: burst folding must never reach the uncapped export');
+
+      const roomyBurst = enforceClipboardMarkdownCap('# Bug Report\nbody\n', teardownBurst, logs, 1_000_000);
+      assert(!roomyBurst.truncated && teardownBurst.every((line) => roomyBurst.markdown.includes(line))
+        && !FOLD_SIGNATURE.test(roomyBurst.markdown),
+      'Clipboard cap: a report that fits keeps every id verbatim — folding is a last-resort transform');
+
+      const foldedEvents = [...teardownBurst, ...distinctEvents];
+      const folded = enforceClipboardMarkdownCap('# Bug Report\nbody\n', foldedEvents, [], cap);
+      assert(folded.markdown.length <= cap, `Clipboard cap: folded output must respect the cap (${folded.markdown.length} <= ${cap})`);
+      assert((folded.markdown.match(new RegExp(FOLD_SIGNATURE, 'g')) || []).length === 1
+        && folded.markdown.includes(`node removed ×${teardownBurst.length} (id prefix ${teardownStamp}-job-`),
+      'Clipboard cap: one structural teardown burst folds into exactly one run line');
+      assert(folded.markdown.includes(`first ${teardownStamp}-job-0`)
+        && folded.markdown.includes(`last ${teardownStamp}-job-${teardownBurst.length - 1}`),
+      'Clipboard cap: the fold line carries the full first/last ids that identify which tree was torn down');
+      assert(distinctEvents.every((line) => folded.markdown.includes(line)),
+        'Clipboard cap: folding repetitive churn buys room for every distinct event line');
+      assert(folded.markdown.includes(`${teardownBurst.length} repeated event line(s) from ${foldedEvents.length} captured line(s) were folded into 1 run line(s) before capping`),
+        'Clipboard cap: the banner states how many captured lines were folded into how many run lines');
+
+      const foldedFilterBase = '# Bug Report\n' + buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: foldedEvents.length, eventsTotal: foldedEvents.length, omittedSections: [] },
+      }) + '\n';
+      const foldedFull = enforceClipboardMarkdownCap(foldedFilterBase, foldedEvents, [], cap);
+      assert(foldedFull.markdown.includes(`event log selected all ${foldedEvents.length} line(s) before clipboard capping`)
+        && foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${distinctEvents.length + 1} rendered event line(s)`)
+        && foldedFull.markdown.includes(`after folding ${teardownBurst.length} repeated line(s) from ${foldedEvents.length} captured line(s) into 1 run line(s)`)
+        && !foldedFull.markdown.includes(`clipboard retained ${distinctEvents.length + 1} of ${foldedEvents.length} event line(s)`),
+      'Clipboard cap: the rewritten FULL summary distinguishes raw captured events from fully retained post-fold lines');
+
+      const foldedHard = enforceClipboardMarkdownCap(giantBase, foldedEvents, logs, cap);
+      assert(foldedHard.hardTruncated && foldedHard.markdown.length <= cap,
+        `Clipboard cap: a folded hard-cap report still respects the exact cap (${foldedHard.markdown.length} <= ${cap})`);
+      assert(foldedHard.markdown.includes('were folded into 1 run line(s) before capping'),
+        'Clipboard cap: the hard-cap banner also accounts for folded churn');
+
+      // Direct folding contracts: short runs, unrelated ids, verb boundaries and
+      // the non-structural allowlist all keep their lines verbatim.
+      const shortRun = teardownBurst.slice(0, 7);
+      const shortFold = collapseEventBursts(shortRun);
+      assert(shortFold.collapsedRuns === 0 && shortFold.foldedLineCount === 0
+        && JSON.stringify(shortFold.lines) === JSON.stringify(shortRun),
+      'Burst folding leaves a small deletion verbatim: every id of a 7-node teardown survives');
+
+      const unrelatedRemovals = Array.from({ length: 20 }, (_, i) =>
+        `[12:02:${String(i).padStart(2, '0')}.000] node removed id=${String.fromCharCode(97 + i)}${i}-node`);
+      const unrelatedFold = collapseEventBursts(unrelatedRemovals);
+      assert(unrelatedFold.collapsedRuns === 0
+        && JSON.stringify(unrelatedFold.lines) === JSON.stringify(unrelatedRemovals),
+      'Burst folding is data-driven: ids without a shared prefix are never summarized as one run');
+
+      const rebuildBurst = Array.from({ length: 10 }, (_, i) => `[12:03:00.${String(i).padStart(3, '0')}] node added id=${teardownStamp}-job-${i}`);
+      const verbBoundary = collapseEventBursts([...teardownBurst.slice(0, 10), ...rebuildBurst]);
+      assert(verbBoundary.collapsedRuns === 2 && verbBoundary.lines.length === 2
+        && verbBoundary.lines[0].includes('node removed ×10 ') && verbBoundary.lines[1].includes('node added ×10 '),
+      'Burst folding never merges across verbs: a teardown and the rebuild that follows stay separate runs');
+
+      const noisyLines = [
+        ...Array.from({ length: 30 }, (_, i) => `[12:04:${String(i % 60).padStart(2, '0')}.000] CONSOLE-ERROR render failed id=${teardownStamp}-job-${i}`),
+        ...Array.from({ length: 30 }, (_, i) => `[12:05:${String(i % 60).padStart(2, '0')}.000] [LocalAI] import rejected id=${teardownStamp}-job-${i}`),
+      ];
+      const noisyFold = collapseEventBursts(noisyLines);
+      assert(noisyFold.collapsedRuns === 0 && JSON.stringify(noisyFold.lines) === JSON.stringify(noisyLines),
+        'Burst folding is verb-allowlisted: error and module lines are never folded, however repetitive');
+
+      const firstFoldPass = collapseEventBursts([...teardownBurst, ...distinctEvents, ...rebuildBurst]);
+      const secondFoldPass = collapseEventBursts(firstFoldPass.lines);
+      assert(secondFoldPass.collapsedRuns === 0
+        && JSON.stringify(secondFoldPass.lines) === JSON.stringify(firstFoldPass.lines),
+      'Burst folding is idempotent: an emitted run line can never be folded again');
+
+      const orderedFold = collapseEventBursts([
+        '[12:06:00.000] viewport changed zoom=1.2',
+        ...Array.from({ length: 10 }, (_, i) => `[12:06:01.${String(i).padStart(3, '0')}] node removed id=${teardownStamp}-job-${i}`),
+        '[12:06:02.000] [JobSearch] combine finished',
+      ]);
+      assert(orderedFold.lines.length === 3
+        && orderedFold.lines[0].startsWith('[12:06:00.000]')
+        && orderedFold.lines[1].startsWith('[12:06:01.000–12:06:01.009] node removed ×10 ')
+        && orderedFold.lines[2].startsWith('[12:06:02.000]'),
+      'Burst folding preserves ordering: the run line carries its first timestamp between its neighbours');
+      return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount, foldedRuns: firstFoldPass.collapsedRuns };
+    },
+  },
+{
+    name: 'Clipboard cap folds repeated log bursts and never leaves a fence open',
+    run: () => {
+      // A deep paginating walk emits one near-identical progress pair per page.
+      // Before folding, 54 of a real report's 93 retained log lines were these,
+      // crowding out whole diagnostic sections.
+      const walk = [];
+      for (let page = 1; page <= 15; page++) {
+        const ts = `23:${String(page).padStart(2, '0')}`;
+        walk.push(`[${ts}:08.719] INFO  [BrowserScraper] Glassdoor q1 descriptions: 30/30 expanded (sel: x)`);
+        walk.push(`[${ts}:08.733] INFO  [BrowserScraper] Glassdoor page ${page}: 30 new jobs (${page * 30} total)`);
+      }
+      const warn = '[23:18:16.782] WARN  [BrowserScraper] glassdoor: denied the list-panel request with HTTP 502';
+      const done = '[00:25:03.941] INFO  [BrowserScraper] Glassdoor done: 612 jobs (completed)';
+      const folded = collapseLogRepeats([...walk, warn, done]);
+      assert(folded.lines.length < walk.length,
+        'Clipboard log fold: a repeated progress shape must shrink the block');
+      assert(folded.lines.includes(warn),
+        'Clipboard log fold: WARN lines always pass through verbatim — a swallowed error is the most valuable line here');
+      assert(folded.lines.includes(done) && folded.lines.includes(walk[0]) && folded.lines.includes(walk.at(-1)),
+        'Clipboard log fold: the first and last occurrences of a folded shape survive so the walk stays readable');
+      assert(folded.lines.some(l => l.includes('repeat(s) elided') && l.includes('Glassdoor page #')),
+        'Clipboard log fold: the summary names the shape it stands for');
+      assert(collapseLogRepeats(folded.lines).foldedLineCount === 0,
+        'Clipboard log fold: a second pass over already-folded lines is a no-op');
+
+      // Distinct messages must never be merged just because they repeat nearby.
+      const distinct = Array.from({ length: 12 }, (_, i) => `[00:00:0${i % 10}.000] INFO  [A] step ${'x'.repeat(i + 1)} ran`);
+      assert(collapseLogRepeats(distinct).foldedLineCount === 0,
+        'Clipboard log fold: lines whose non-numeric shape differs are never folded together');
+
+      // Fenced blocks: the base carries ```json/```html samples. A cut inside
+      // one used to swallow the omission marker and render the whole tail as code.
+      const rows = (n, ch) => Array.from({ length: n }, (_, i) => `- row ${i} ${ch.repeat(40)}`).join('\n');
+      const fenced = '# R\n## Kept\n' + rows(60, 'A') + '\n\n## Samples\n```html\n' + rows(200, 'B') + '\n```\n\n## Tail\nbody\n';
+      const cut = enforceClipboardMarkdownCap(fenced, ['[00:00:00] E1', '[00:00:01] E2'], ['[00:00:00] [L] L1', '[00:00:01] [L] L2'], 6_000);
+      const fenceCount = (cut.markdown.match(/^ {0,3}```/gm) || []).length;
+      assert(cut.hardTruncated && cut.markdown.length <= 6_000,
+        `Clipboard fence balance: output still respects the cap (${cut.markdown.length} <= 6000)`);
+      assert(fenceCount % 2 === 0,
+        'Clipboard fence balance: a cut inside a fenced block must be closed, or the omission note renders as code');
+      assert(cut.markdown.includes('Report content after this point was omitted by the clipboard cap'),
+        'Clipboard fence balance: the omission marker survives the cut it describes');
+      return { foldedLineCount: folded.foldedLineCount, fenceCount };
+    },
+  },
+{
+    name: 'Clipboard hard cap grows its tail proportionally, not as a cliff',
+    run: () => {
+      // A base one char past the floor path used to forfeit (ceiling - floor)
+      // chars of static diagnostics immediately — that cliff is what cost a real
+      // report six whole sections plus a mid-section cut.
+      const ts = (i) => `12:00:${String(Math.floor(i / 60)).padStart(2, '0')}.${String(i % 60).padStart(3, '0')}`;
+      const cap = 50_000;
+      const events = Array.from({ length: 40 }, (_, i) => `[${ts(i)}] EVENT ${i} ${'x'.repeat(40)}`);
+      // `[X]` keeps this fixture out of collapseLogRepeats' own fold pattern —
+      // this test is about the tail-growth curve, not log folding.
+      const logs = Array.from({ length: 40 }, (_, i) => `[${ts(i)}] [X] LOG ${i} ${'y'.repeat(60)}`);
+      const tailish = 'Z'.repeat(200);
+      const sections = (n) => Array.from({ length: n }, (_, i) => `## S${i}\n${tailish}\n`).join('');
+      const marginal = '# Bug Report\n' + sections(160);
+      const out = enforceClipboardMarkdownCap(marginal, events, logs, cap);
+      assert(out.markdown.length <= cap, 'Clipboard proportional tail: output respects the cap');
+      // With a small overflow the static base must keep far more than half the cap.
+      const staticKept = out.markdown.length - (cap - Math.floor(cap * 0.5));
+      assert(staticKept > 0, 'Clipboard proportional tail: a marginal overflow keeps a majority static prefix');
+      assert(out.markdown.includes('## S0') && out.markdown.includes('## S100'),
+        'Clipboard proportional tail: a marginal overflow must not discard a third of the static sections');
+      return { length: out.markdown.length };
     },
   },
 {
@@ -1372,8 +1802,15 @@ export default [
       });
       assert(result.markdown.length > 50_000 && !result.truncated && !result.hardTruncated,
         'Report generation retains content larger than the former 50k clipboard ceiling');
+      // The FULL guidance must describe the CURRENT delivery model: both actions
+      // generate identical uncapped content, but Copy writes it to a file and
+      // clipboards a pointer while Save to file prompts for a location. The old
+      // wording ("export the same report") now reads as "the clipboard holds
+      // what Save produces", which is exactly what stopped being true.
       assert(result.markdown.includes('EVT 0 ') && result.markdown.includes('EVT 2999 ')
-        && result.markdown.includes('Copy and Save to file export the same report.'),
+        && result.markdown.includes('byte-identical uncapped report content')
+        && result.markdown.includes('clipboards a short path pointer')
+        && !result.markdown.includes('Copy and Save to file export the same report.'),
       'both the oldest and newest retained event lines remain present with accurate export guidance');
       assert(result.markdown.indexOf('EVT 2999 ') < result.markdown.indexOf('EVT 0 ')
         && result.markdown.includes('(timestamp assigned at report export) EVT 2999')
@@ -1417,32 +1854,132 @@ export default [
     },
   },
 {
-    name: 'registered clipboard report IPC returns the complete uncapped markdown contract',
+    // Regression guard for the commit that quietly deleted the clipboard cap:
+    // that rewrite left `generate-bug-report-markdown` (Copy to clipboard) and
+    // `export-bug-report` (Save to file) producing byte-IDENTICAL output for an
+    // oversized report, because neither applied a size cap any more. This test
+    // asserts the two paths must DIVERGE once a report is oversized — that
+    // divergence is exactly the assertion that would have caught the deletion.
+    name: 'clipboard report IPC saves the full report and clipboards only a pointer to it',
     run: async () => {
       const events = Array.from({ length: 3_000 }, (_, i) => `[12:00:${String(i % 60).padStart(2, '0')}.000] IPC EVT ${i} ${'evidence '.repeat(8)}`);
       const payload = {
-        description: 'IPC uncapped report regression fixture.', filterCode: 'FULL',
+        description: 'IPC pointer-delivery fixture.', filterCode: 'FULL',
+        filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: events,
+      };
+      // The direct, no-options call is the same code path "Save to file" uses
+      // (export-bug-report never passes maxChars) — it must stay the complete,
+      // uncapped artifact regardless of how large the event history is.
+      const direct = generateMarkdown(payload);
+      assert(direct.markdown.length > 50_000 && !direct.truncated && !direct.hardTruncated
+        && direct.markdown.includes('IPC EVT 0 ') && direct.markdown.includes('IPC EVT 2999 '),
+      'direct/uncapped generation (the Save-to-file path) retains the full oversized event history with no cap');
+
+      __resetSavedBugReportClearForTests();
+      registerBugReportHandlers();
+      const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
+      const sender = { id: 42_501, isDestroyed: () => false, once: () => {}, removeListener: () => {} };
+      const viaIpc = await invoke({ sender }, payload);
+
+      assert(viaIpc.success && viaIpc.delivery === 'file-pointer' && viaIpc.savedPath,
+        `the clipboard action should save a report file and return a pointer, got ${JSON.stringify({ delivery: viaIpc.delivery, error: viaIpc.error })}`);
+      assert(viaIpc.markdown === undefined,
+        'the response must not carry a `markdown` field — a field of that name holding a path pointer would be a lie, and the renderer reads clipboardText');
+
+      // The saved FILE is the complete artifact: it must match the uncapped
+      // Save-to-file content exactly, including the oldest event the old capped
+      // clipboard path used to shed.
+      const savedBody = fs.readFileSync(viaIpc.savedPath, 'utf8');
+      assert(savedBody.includes('IPC EVT 0 ') && savedBody.includes('IPC EVT 2999 ')
+        && savedBody.length === direct.markdown.length,
+      `the saved report file must be the full uncapped report (saved ${savedBody.length} vs direct ${direct.markdown.length})`);
+
+      // The load-bearing assertion, restated for the pointer design: what
+      // reaches the clipboard is a SHORT pointer that names the file — never
+      // the report body. A regression that reverted to pasting the report
+      // inline would fail on both the size and the body-content checks.
+      assert(viaIpc.clipboardText.includes(viaIpc.savedPath)
+        && viaIpc.clipboardText.length < 4_000
+        && viaIpc.clipboardText.length < savedBody.length / 10,
+      `the clipboard pointer must name the file and stay far smaller than it (pointer ${viaIpc.clipboardText.length} vs report ${savedBody.length})`);
+      assert(!viaIpc.clipboardText.includes('IPC EVT 2999 ') && !viaIpc.clipboardText.includes('IPC EVT 0 '),
+        'the clipboard pointer must not carry report body content');
+      assert(viaIpc.clipboardText.includes('IPC pointer-delivery fixture.')
+        && viaIpc.clipboardText.includes('deleted when this app next starts'),
+      'the pointer should carry the issue description and state the file is session-scoped');
+
+      fs.rmSync(viaIpc.savedPath, { force: true });
+      return { directLength: direct.markdown.length, pointerLength: viaIpc.clipboardText.length };
+    },
+  },
+{
+    name: 'clipboard report falls back to a capped inline report when the file cannot be written',
+    run: async () => {
+      const events = Array.from({ length: 3_000 }, (_, i) => `[12:00:${String(i % 60).padStart(2, '0')}.000] FB EVT ${i} ${'evidence '.repeat(8)}`);
+      const payload = {
+        description: 'IPC write-failure fallback fixture.', filterCode: 'FULL',
         filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
         nodes: [], edges: [], drawings: [], frontEndState: {},
         nodeInternals: [], nodeComponentStates: [], eventLogs: events,
       };
       const direct = generateMarkdown(payload);
-      registerBugReportHandlers();
-      const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
-      const sender = {
-        id: 42_501,
-        isDestroyed: () => false,
-        once: () => {},
-        removeListener: () => {},
-      };
-      const viaIpc = await invoke({ sender }, payload);
-      const directHistory = direct.markdown.slice(direct.markdown.indexOf('## Event History'));
-      assert(viaIpc.success && viaIpc.markdown.length > 50_000
-        && !viaIpc.truncated && !viaIpc.hardTruncated
-        && viaIpc.markdown.includes('IPC EVT 0 ') && viaIpc.markdown.includes('IPC EVT 2999 ')
-        && viaIpc.markdown.endsWith(directHistory),
-      'registered generate-bug-report-markdown IPC returns the full direct-generator event history without a max-character cap');
-      return { length: viaIpc.markdown.length };
+
+      // Occupy the reports directory path with a regular FILE so mkdir fails.
+      // A user is never left with nothing to paste just because the disk write
+      // failed — the cap machinery survives precisely to serve this path.
+      __resetSavedBugReportClearForTests();
+      const dir = savedBugReportDir();
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(dir), { recursive: true });
+      fs.writeFileSync(dir, 'not a directory', 'utf8');
+      try {
+        registerBugReportHandlers();
+        const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
+        const sender = { id: 42_502, isDestroyed: () => false, once: () => {}, removeListener: () => {} };
+        const viaIpc = await invoke({ sender }, payload);
+        assert(viaIpc.success && viaIpc.delivery === 'inline-fallback' && viaIpc.saveError,
+          `an unwritable reports directory must fall back to inline delivery, got ${JSON.stringify({ delivery: viaIpc.delivery, error: viaIpc.error })}`);
+        // These are the ORIGINAL capped-clipboard assertions, re-anchored to the
+        // fallback branch they now describe.
+        assert(viaIpc.clipboardText.length <= 50_000 && (viaIpc.truncated || viaIpc.hardTruncated)
+          && viaIpc.clipboardText.includes('FB EVT 2999 ') && !viaIpc.clipboardText.includes('FB EVT 0 '),
+        'the fallback keeps the newest events and sheds the oldest, within the cap');
+        assert(viaIpc.clipboardText !== direct.markdown && viaIpc.clipboardText.length < direct.markdown.length,
+          'capped fallback output and uncapped direct/save-to-file output must diverge for an oversized report');
+        // `reduced` drives the wording the user sees. For THIS oversized payload
+        // the fallback genuinely lost content, so it must say so.
+        assert(viaIpc.reduced === true,
+          'an oversized fallback must report that the copied report was reduced');
+
+        // ...but a SMALL report that merely failed to save is delivered whole,
+        // and must not be described as size-capped. `truncated`/`hardTruncated`
+        // cannot answer this (routine node-row sampling also switches on with
+        // maxChars without setting them), which is why `reduced` is measured.
+        const smallPayload = {
+          description: 'Small write-failure fixture.', filterCode: 'FULL',
+          filterStats: { eventsShown: 2, eventsTotal: 2, omittedSections: [] },
+          nodes: [], edges: [], drawings: [], frontEndState: {},
+          nodeInternals: [], nodeComponentStates: [],
+          eventLogs: ['[12:00:00.000] SMALL EVT 0', '[12:00:01.000] SMALL EVT 1'],
+        };
+        const smallViaIpc = await invoke({ sender }, smallPayload);
+        assert(smallViaIpc.success && smallViaIpc.delivery === 'inline-fallback',
+          'the small payload must also take the write-failure fallback');
+        // Assert on CONTENT, not byte-equality against a second render: each
+        // render stamps its own generation time and relative ages, so two
+        // renders of the same payload legitimately differ by a character.
+        assert(smallViaIpc.reduced === false,
+          `a small fallback report is delivered whole and must not be reported as reduced, got reduced=${smallViaIpc.reduced}`);
+        assert(smallViaIpc.clipboardText.includes('SMALL EVT 0') && smallViaIpc.clipboardText.includes('SMALL EVT 1')
+          && !smallViaIpc.truncated && !smallViaIpc.hardTruncated
+          && !smallViaIpc.clipboardText.includes('row(s) omitted to preserve the clipboard budget'),
+        'a small fallback must carry every event with no truncation or row-sampling marker');
+        return { fallbackLength: viaIpc.clipboardText.length, smallReduced: smallViaIpc.reduced };
+      } finally {
+        fs.rmSync(dir, { force: true });
+      }
     },
   },
 {
@@ -5537,6 +6074,25 @@ export default [
       } catch (error) { strictFailure = error; }
       assert(strictFailure?.message.includes('missing score rows at index 3'),
         'an incomplete final recovery stays pending with an accurate missing-row error');
+
+      // The merge mapping is POSITIONAL — recovered[i] restores indexes[i] —
+      // and holds only because scoreBatch returns one row per input job. This is
+      // the single place a "scored N/N" total could go wrong with every stage
+      // still agreeing, so pin what a short array does: the covered slots stay
+      // correctly aligned and the uncovered ones become placeholders (visible in
+      // the report), never a silent off-by-one that scores a job as another job.
+      const shortMerge = mergeRecoveredScoreRows(
+        initial.responsePlan.alignedScores,
+        initial.responsePlan.missingIndices,
+        recovered.responsePlan.alignedScores.slice(0, 2),
+      );
+      const missing = initial.responsePlan.missingIndices;
+      assert(shortMerge.length === 15
+        && missing.slice(0, 2).every(index => shortMerge[index]?.index === index)
+        && missing.slice(2).every(index => shortMerge[index] === null),
+      'a short recovery array leaves placeholders at the uncovered slots and never shifts a score onto the wrong job');
+      assert(shortMerge.every((row, index) => row === null || row.index === index),
+        'every surviving row still names the slot it occupies');
       return { acceptedInitialRows: partialRows.length, recoveryRows: recoveryJobs.length };
     },
   },
@@ -7062,6 +7618,150 @@ export default [
     },
   },
 {
+    name: 'verification wording inside a full content page never parks or blocks a scrape',
+    run: () => {
+      // Reproduces the ZipRecruiter run that sat on `challenge-detected` for
+      // 49 minutes: page 4 of a normal results list, no widget of any kind, and
+      // a posting whose own copy mentioned a security check.
+      const listPage = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasVerificationText: true,
+        hasNormalContent: true,
+        bodyTextLength: 18_400,
+        title: '267 Software Architect Jobs (NOW HIRING) in Canada - ZipRecruiter',
+      });
+      assert(!listPage.isChallenge && !listPage.isHardBlock && listPage.reason === 'none'
+        && listPage.suppressedReason === 'verification-text-in-page-content',
+      'a results page carrying verification wording is scraped, not parked on an indefinite human-solve wait');
+
+      // The same root cause on the detail path, where `hasNormalContent` uses
+      // Indeed-shaped selectors and is therefore false on every other board —
+      // which turned the identical false positive into a hard block that cost
+      // the page its remaining descriptions.
+      const detailPage = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasVerificationText: true,
+        hasNormalContent: false,
+        bodyTextLength: 6_100,
+        title: 'Software Developer, job in Gatineau, Quebec, Canada at ZipRecruiter',
+      });
+      assert(!detailPage.isChallenge && !detailPage.isHardBlock,
+        'a full-length detail page is never hard-blocked on page text alone, even with no source-shaped content selector');
+
+      // Real interstitials replace the document, so they stay on the solve path.
+      const interstitial = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasVerificationText: true,
+        hasNormalContent: false,
+        bodyTextLength: 180,
+      });
+      assert(interstitial.isChallenge && interstitial.isHardBlock && !interstitial.suppressedReason,
+        'an interstitial-sized document keeps its terminal verdict');
+
+      const boundary = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'verification-text', bodyTextLength: CHALLENGE_INTERSTITIAL_MAX_CHARS,
+      });
+      assert(boundary.isChallenge,
+        'the interstitial ceiling is inclusive, so a page exactly at the bound is still treated as a challenge');
+
+      // A widget is corroboration on its own — never suppress something the
+      // user can actually solve, however long the page is.
+      const widgetOnLongPage = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        hasCloudflareTurnstileWidget: true,
+        bodyTextLength: 22_000,
+      });
+      assert(widgetOnLongPage.isChallenge && widgetOnLongPage.interactive && !widgetOnLongPage.suppressedReason,
+        'a live Turnstile widget keeps the solve wait no matter how much content surrounds it');
+
+      // Cloudflare's post-solve hand-off must keep reading as challenge state,
+      // or the stable-clean timer starts before the redirect lands.
+      const postSolve = classifyManualChallengeSignals({
+        isChallenge: true,
+        reason: 'verification-text',
+        verificationCompleted: true,
+        bodyTextLength: 9_000,
+      });
+      assert(postSolve.isChallenge && !postSolve.suppressedReason,
+        'the "verification successful, waiting to redirect" transient is never read as a clean page');
+
+      // Reasons that do not rest on free prose are untouched by this gate.
+      const shell = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'challenge-shell', hasChallengeShell: true, bodyTextLength: 30_000,
+      });
+      const googleSorry = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'google-sorry-recaptcha', hasNormalContent: false, bodyTextLength: 40_000,
+      });
+      assert(shell.isChallenge && googleSorry.isChallenge && googleSorry.isHardBlock,
+        'structural and URL-derived verdicts are unaffected by document size');
+
+      // An unmeasured document keeps the prior behaviour instead of silently
+      // widening what counts as a challenge.
+      const unmeasured = classifyManualChallengeSignals({
+        isChallenge: true, reason: 'verification-text', hasNormalContent: false,
+      });
+      assert(unmeasured.isChallenge && unmeasured.isHardBlock && unmeasured.bodyTextLength === null,
+        'a probe that could not measure the document falls back to the pre-existing verdict');
+      return { suppressed: listPage.suppressedReason, interstitialHardBlock: interstitial.isHardBlock };
+    },
+  },
+{
+    name: 'a challenge report states the page size and matched phrase behind a verification-text verdict',
+    run: () => {
+      const falsePositive = formatChallengeTextEvidence({
+        bodyTextLength: 18_400,
+        interstitialMaxChars: 2_000,
+        matchedVerificationMarkers: ['security check'],
+      });
+      assert(falsePositive.includes('18400 chars') && falsePositive.includes('past the 2000-char interstitial ceiling')
+        && falsePositive.includes('security check'),
+      'the report names the phrase that fired and shows the page was full content — the two facts a verification-text verdict cannot be checked without');
+
+      const genuine = formatChallengeTextEvidence({
+        bodyTextLength: 210,
+        interstitialMaxChars: 2_000,
+        matchedVerificationMarkers: ['verify you are human'],
+      });
+      assert(genuine.includes('interstitial-sized') && genuine.includes('verify you are human'),
+        'a real interstitial is reported as interstitial-sized rather than merely asserted to be a challenge');
+
+      assert(formatChallengeTextEvidence(null) === '' && formatChallengeTextEvidence({}) === '',
+        'a phase that carries no text evidence adds no line, so unrelated phases are not padded with empty claims');
+      const unmeasured = formatChallengeTextEvidence({ matchedVerificationMarkers: ['humans only'] });
+      assert(!unmeasured.includes('chars') && unmeasured.includes('humans only'),
+        'an unmeasured document reports the matched phrase without asserting a size it never observed');
+      return { falsePositive };
+    },
+  },
+{
+    name: 'challenge heartbeat backs off so a long wait cannot evict the main-process log ring',
+    run: () => {
+      assert(challengeHeartbeatIntervalMs(0) === 30_000,
+        'the first beat still lands 30s in, so a short wait reads exactly as before');
+      assert(challengeHeartbeatIntervalMs(1) === 60_000 && challengeHeartbeatIntervalMs(2) === 120_000,
+        'each subsequent beat doubles its interval');
+      assert(challengeHeartbeatIntervalMs(20) === 600_000 && Number.isFinite(challengeHeartbeatIntervalMs(1e9)),
+        'the cadence saturates at ten minutes and never overflows on an unbounded wait');
+
+      // The observed failure: 49 minutes of waiting emitted ~99 lines into a
+      // 200-line ring, evicting every main-process line from before the run.
+      const RING = 200;
+      let elapsed = 0;
+      let beats = 0;
+      while (elapsed < 49 * 60_000) {
+        elapsed += challengeHeartbeatIntervalMs(beats);
+        beats++;
+      }
+      assert(beats < RING / 10,
+        `a 49-minute wait must cost the 200-line ring a small fraction of its capacity, emitted ${beats}`);
+      return { beatsIn49Minutes: beats };
+    },
+  },
+{
     name: 'Glassdoor Humans only page remains solvable when interactive challenge machinery is present',
     run: () => {
       const turnstile = classifyManualChallengeSignals({
@@ -7721,7 +8421,9 @@ export default [
         && boardSource.includes("new CustomEvent('canvas-take-snapshot')")
         && boardSource.includes('const cancelled = epoch.start()')
         && boardSource.includes('if (cancelled() || !getNode(id))')
-        && boardSource.includes('cancelNodeTask?.(id)')
+        // Cause-labelled: `cancelNodeTask(id, 'board-cleared' | 'board-unmounted')`,
+        // so an aborted run's bug report names why it stopped.
+        && boardSource.includes('cancelNodeTask?.(id,')
         && boardSource.includes('combine cancelled before spawn'),
       'board tracks scored terminal zero-result modules, excludes explicitly unscored completions, and confirms an undoable empty replacement before deleting stale children');
       assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
@@ -9282,6 +9984,195 @@ export default [
     },
   },
   {
+    name: 'an aborted search reports its inputs and the real cancel cause',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        searchIntent: telemetry.searchIntent, resolves: telemetry.resolves, scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing, pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const nodeId = 'aborted-search-hub';
+      try {
+        // `search` is stamped only when the FUNNEL finishes, so an aborted
+        // gather reported "no search recorded this session" for a run whose own
+        // log proves it launched with 1 query across 9 sources. `searchIntent`
+        // is stamped at launch and survives the abort.
+        Object.assign(telemetry, {
+          nodeId, search: null, resolves: {}, scoring: null, bucketing: null, history: null,
+          pipeline: {
+            runId: `${nodeId}-1`, phase: 'aborted', active: false,
+            // Every node-scoped abort shares one sentinel message ("Node
+            // deleted"), so a user's Reset used to be reported as a deletion of
+            // a node that is still on the canvas. jobs.js now resolves the
+            // renderer-supplied cause to this label instead.
+            error: 'Cancelled by user — clicked Reset on this hub',
+          },
+          searchIntent: {
+            ts: Date.now(), runId: `${nodeId}-1`, nodeId, runOrigin: 'initial',
+            profileInputMode: 'fresh-files', queries: 1, queryStrings: ['System Architect'],
+            selectedSourceIds: ['google', 'linkedin', 'ziprecruiter'],
+            maxAgeDays: 14, collectionLimits: {}, location: 'United States',
+          },
+        });
+        const pipeline = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(!pipeline.includes('no search recorded this session'),
+          `an aborted search must not report as no search at all, got:\n${pipeline.slice(0, 900)}`);
+        assert(pipeline.includes('This search launched but never reached the funnel stage')
+          && pipeline.includes('so no raw/deduped/kept counts exist'),
+          'the aborted search states what it is missing rather than implying nothing ran');
+        assert(pipeline.includes('1 query: `System Architect`')
+          && pipeline.includes('3 selected source(s): `google`, `linkedin`, `ziprecruiter`')
+          && pipeline.includes('Max posting age 14d · location `United States`'),
+          `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
+        assert(pipeline.includes('Last stage error: `Cancelled by user — clicked Reset on this hub`')
+          && !pipeline.includes('Last stage error: `Node deleted`'),
+          'a user Reset is never reported as a deleted node');
+
+        // With no intent retained (e.g. scoring resumed from a captcha-resolve)
+        // the original honest line is still the right answer. Keep a pipeline
+        // stamp so the section still renders at all — an empty telemetry store
+        // omits the whole section by design.
+        Object.assign(telemetry, {
+          searchIntent: null,
+          pipeline: { runId: `${nodeId}-2`, phase: 'completed', active: false },
+        });
+        assert(buildJobsPipelineSnapshot(new Set([nodeId]), null, null).includes('no search recorded this session'),
+          'a session that recorded no search and retained no launch intent still says so');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+
+      // Source pins: the cause must be produced by the renderer and resolved to
+      // a label by the backend, or the report falls back to the shared sentinel.
+      const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+      const network = fs.readFileSync(path.resolve('electron/ipc/network.js'), 'utf8');
+      const ipcUtilsSource = fs.readFileSync(path.resolve('electron/ipc/ipcUtils.js'), 'utf8');
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(preload.includes("cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause)")
+        && network.includes('abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause))'),
+        'the renderer-supplied cancel cause reaches abortNodeTasks');
+      assert(ipcUtilsSource.includes("Object.assign(new Error(message), { name: 'AbortError' })")
+        && ipcUtilsSource.includes("return cancellationError('Node deleted', cause);"),
+        'the cancel sentinel keeps its load-bearing message while identifying itself as an abort');
+      assert(jobsSource.includes('CANCEL_CAUSE_LABELS[reason?.cancelCause]')
+        && jobsSource.includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'"),
+        'the pipeline stage error prefers the stated cause over the shared sentinel');
+      assert(jobSearchSource.includes("cancelNodeTask?.(id, 'user-reset')")
+        && jobSearchSource.includes("cancelNodeTask?.(id, 'career-files-cleared')"),
+        'Job Search names why it cancelled');
+      // Every cancel site must name a cause, or that hub's aborted run falls
+      // back to the shared sentinel and reports a Reset as a deleted node.
+      const sellHubSource = fs.readFileSync(path.resolve('src/nodes/SellHubNode.jsx'), 'utf8');
+      const canvasInteractions = fs.readFileSync(path.resolve('src/utils/canvasInteractions.js'), 'utf8');
+      const boardSourceForCancel = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
+      for (const [label, source] of [
+        ['SellHub', sellHubSource], ['Job Board', boardSourceForCancel],
+        ['recursive deletion', canvasInteractions], ['Job Search', jobSearchSource],
+      ]) {
+        assert(!/cancelNodeTask\?\.\((?:id|n\.id)\)/.test(source),
+          `${label} must pass a cancel cause, not the bare sentinel`);
+      }
+      assert(canvasInteractions.includes("cancelNodeTask?.(n.id, 'node-deleted')"),
+        'the recursive deletion helper is the one caller whose cancel really is a deletion');
+      // Same class as the safeApiFetch defect: classify a cancellation from the
+      // signal, never from the error prose — the sentinel says "Node deleted".
+      const geminiSource = fs.readFileSync(path.resolve('electron/ipc/gemini.js'), 'utf8');
+      assert(geminiSource.includes("(genConfig.signal?.aborted || err?.name === 'AbortError')")
+        && geminiSource.includes("? 'aborted'"),
+        'a cancelled Gemini call is classified as aborted rather than as a provider failure');
+      assert(jobsSource.includes('jobsTelemetry.searchIntent = {')
+        && jobsSource.includes('jobsTelemetry.searchIntent = null;'),
+        'the search intent is stamped at launch and cleared for a fresh run');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'a later run on another hub does not turn a completed run INDETERMINATE',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        searchIntent: telemetry.searchIntent, resolves: telemetry.resolves, scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing, pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-foreign-live-run-'));
+      const canvas = path.join(dir, 'canvas.json');
+      // Hub A finished; hub B started a second search and the user stopped it.
+      // `jobsTelemetry` is a process-global re-stamped by whichever hub starts
+      // LAST, so hub B's aborted pipeline used to be compared against hub A's
+      // durable receipt and reported as "run tokens disagree" — and hub B's
+      // never-combined board was named as hub A's missing consumer.
+      const hubA = 'completed-hub-a';
+      const hubB = 'stopped-hub-b';
+      const runA = `${hubA}-1788724953082`;
+      const runB = `${hubB}-1788738847578`;
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId: runA, sourceHubId: hubA, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: [{}, {}, {}],
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId: runA, nodeId: hubA,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 3 },
+          scoring: { selected: 3, scored: 3, placeholders: 0, unscored: 0, failedBatches: 0 },
+          cleanup: { attempted: true, cleared: true },
+          sources: {
+            // gathered ABOVE the advertised total: a provider revises its own
+            // estimate while paginating, so "traversed 158 of 157" was a
+            // nonsense ratio printed under a ✅.
+            ziprecruiter: { count: 4, providerGathered: 6, providerTotal: 5, stopReason: 'empty-page' },
+            glassdoor: { count: 9, providerGathered: 9, stopReason: 'completed' },
+          },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId: hubB, search: null, searchIntent: null, resolves: {}, scoring: null,
+          bucketing: null, history: null,
+          pipeline: { runId: runB, phase: 'aborted', active: false, error: 'Cancelled by user — clicked Reset on this hub' },
+        });
+
+        const boards = [
+          { id: 'board-of-a', hubState: 'empty', resultCount: 0, renderedCardCount: 0, stale: false, connectedSourceHubIds: [hubA] },
+          { id: 'board-of-b', hubState: 'empty', resultCount: null, renderedCardCount: 0, stale: false, connectedSourceHubIds: [hubB] },
+        ];
+        const assessment = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]), boards, boards.length);
+
+        assert(assessment.includes('✅ **DURABLE OUTPUT COMPLETE**') && !assessment.includes('INDETERMINATE'),
+          `a completed run stays completed when another hub's run is stopped, got:\n${assessment}`);
+        assert(!assessment.includes('run tokens disagree')
+          && assessment.includes('- Run correlation: ✅ receipt + snapshot agree'),
+          'another hub’s run token is not a second opinion about this run');
+        assert(assessment.includes('Separate later run in this process: hub `stopped-hub-b` reached phase `aborted`')
+          && assessment.includes('Cancelled by user — clicked Reset on this hub'),
+          'the stopped run is reported as its own fact, with the real cancel cause rather than the shared sentinel');
+        assert(assessment.includes('Live search stage: not retained for this run'),
+          'another hub’s phase is never presented as this run’s gather stage');
+        // The board that actually consumed hub A must be the one assessed.
+        assert(assessment.includes('`board-of-a` is `empty`') && !assessment.includes('board-of-b` is'),
+          `the connected board of the assessed hub is named, not the other hub’s board, got:\n${assessment}`);
+        assert(assessment.includes('Combine can still render them without re-scraping'),
+          'an unconsumed board states that the score-ready rows are recoverable');
+        assert(assessment.includes('✅ `ziprecruiter` traversed all 6 candidate identities (provider advertised ~5)')
+          && !assessment.includes('traversed 6 of 5'),
+          `an over-count reads as a traversal fact plus an estimate, got:\n${assessment}`);
+        assert(assessment.includes('`glassdoor` reported no candidate corpus size — coverage unproven (9 traversed; walk ended at `completed`)'),
+          'an unproven source still states the traversal and stop reason it did observe');
+
+        // Same-node token drift is a real bug signal and must still fire.
+        Object.assign(telemetry, { nodeId: hubA, pipeline: { runId: 'drifted-token', phase: 'completed', active: false } });
+        const sameNode = buildJobCompletionAssessment(canvas, new Set([hubA]), [], 0);
+        assert(sameNode.includes('⚠️ **INDETERMINATE**') && sameNode.includes('run tokens disagree'),
+          'a token mismatch on the SAME hub is still reported as a disagreement');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { ok: true };
+    },
+  },
+  {
     name: 'completion assessment distinguishes revealed, country-inapplicable, and user-accepted source limits',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -9674,6 +10565,202 @@ export default [
       assert(descEvidence.dropped.length === 1, 'short description is dropped');
       assert(descEvidence.quality.short === 1, `quality summary records short=1 for description field, got ${JSON.stringify(descEvidence.quality)}`);
       return { ok: true };
+    },
+  },
+{
+    name: 'Report trails fold identical repeats so a stuck loop cannot evict distinct evidence',
+    run: () => {
+      // A wedged recovery pass re-emitted the SAME Google reveal outcome nine
+      // times. Because the trail is bounded by COUNT, the bounded window filled
+      // with copies and the report printed six identical lines above "3 earlier
+      // reveal outcome(s) omitted" — the three distinct source outcomes that
+      // actually mattered had been evicted by the repetition.
+      const signature = e => `${e.sourceId}|${e.count}|${e.iterations}|${e.exit}`;
+      const distinct = [
+        { sourceId: 'ziprecruiter', count: 268, iterations: 15, exit: 'end-of-list' },
+        { sourceId: 'indeed', count: 35, iterations: 2, exit: 'plateau' },
+        { sourceId: 'glassdoor', count: 722, iterations: 25, exit: 'end-of-list' },
+      ];
+      const stuck = Array.from({ length: 9 }, () => ({ sourceId: 'google', count: 71, iterations: 3, exit: 'end-of-list' }));
+      const folded = collapseConsecutiveIdentical([...distinct, ...stuck], signature);
+      assert(folded.length === 4 && folded[3].occurrences === 9,
+        `nine identical outcomes must fold into one entry carrying its count, got ${JSON.stringify(folded.map(f => f.occurrences))}`);
+      const window = folded.slice(-6).map(f => f.entry.sourceId);
+      assert(['ziprecruiter', 'indeed', 'glassdoor', 'google'].every(id => window.includes(id)),
+        `every distinct source must survive the bounded window, got ${window.join(',')}`);
+      // Folding must be consecutive-only: an interleaved different entry proves
+      // the collapse never reorders or merges across a genuine change.
+      const interleaved = collapseConsecutiveIdentical([stuck[0], distinct[0], stuck[0]], signature);
+      assert(interleaved.length === 3 && interleaved.every(f => f.occurrences === 1),
+        'a differing entry between two identical ones must break the run rather than merge them');
+      // The newest member of a run is the one rendered, so its timing is current.
+      const timed = collapseConsecutiveIdentical(
+        [{ sourceId: 'google', count: 71, ts: 1 }, { sourceId: 'google', count: 71, ts: 2 }],
+        e => `${e.sourceId}|${e.count}`,
+      );
+      assert(timed.length === 1 && timed[0].entry.ts === 2,
+        'a folded run must render its most recent occurrence, not its first');
+      return { folded: folded.length, repeats: folded[3].occurrences };
+    },
+  },
+{
+    name: 'Post-completion recovery count reports passes, not the number of sources',
+    run: () => {
+      // `resolves[sourceId]` is last-write-wins, so counting rows counted a
+      // SOURCE per recovery. A real run re-walked Google ~13 times and reported
+      // "superseded by 2 post-completion recovery attempts".
+      const completedAt = 1_000;
+      const pipeline = { active: false, ts: completedAt };
+      const stamps = n => Array.from({ length: n }, (_, i) => completedAt + 10 + i);
+      const perPass = postPipelineRecoveryAttemptCount({
+        resumeAttempts: {}, linkedinEnrich: [],
+        resolves: {
+          google: { ts: completedAt + 500, passTimestamps: stamps(13) },
+          glassdoor: { ts: completedAt + 200, passTimestamps: stamps(1) },
+        },
+      }, pipeline);
+      assert(perPass.count === 14 && perPass.atLeast === false,
+        `each recorded pass must be counted, got ${JSON.stringify(perPass)}`);
+      // Passes that ran BEFORE completion are not post-completion recoveries.
+      const mixed = postPipelineRecoveryAttemptCount({
+        resumeAttempts: {}, linkedinEnrich: [],
+        resolves: { google: { ts: completedAt + 5, passTimestamps: [completedAt - 50, completedAt - 10, completedAt + 5] } },
+      }, pipeline);
+      assert(mixed.count === 1, `only passes after completion count, got ${JSON.stringify(mixed)}`);
+      // Telemetry captured before the trail existed must still count as one.
+      const legacy = postPipelineRecoveryAttemptCount({
+        resumeAttempts: {}, linkedinEnrich: [], resolves: { google: { ts: completedAt + 5 } },
+      }, pipeline);
+      assert(legacy.count === 1, `a legacy row without a trail still counts once, got ${JSON.stringify(legacy)}`);
+      // A saturated trail is a FLOOR, not a fact — the report must say so.
+      const saturated = postPipelineRecoveryAttemptCount({
+        resumeAttempts: {}, linkedinEnrich: [],
+        resolves: { google: { ts: completedAt + 5, passTimestamps: stamps(50) } },
+      }, pipeline);
+      assert(saturated.count === 50 && saturated.atLeast === true,
+        `a full trail whose every stamp is post-completion must be flagged as a floor, got ${JSON.stringify(saturated)}`);
+      return { perPass: perPass.count, saturated: saturated.atLeast };
+    },
+  },
+{
+    name: 'Saved bug reports are session-scoped: cleared on start, pruned in-session, and never blanket-delete the directory',
+    run: async () => {
+      __resetSavedBugReportClearForTests();
+      const dir = savedBugReportDir();
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+
+      // Clearing is what stops the directory growing across app sessions. It
+      // must be surgical: a file a user or another tool dropped in there is not
+      // ours to delete, so only our own bug-report-*.md names are removed.
+      fs.writeFileSync(path.join(dir, 'bug-report-2020-01-01T00-00-00-000Z.md'), 'stale', 'utf8');
+      fs.writeFileSync(path.join(dir, 'bug-report-2020-01-02T00-00-00-000Z.md'), 'stale', 'utf8');
+      fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep me', 'utf8');
+      const cleared = await clearSavedBugReports();
+      assert(cleared.removed === 2 && !cleared.error,
+        `clearing should remove exactly the saved reports, got ${JSON.stringify(cleared)}`);
+      assert(fs.existsSync(path.join(dir, 'notes.txt')),
+        'clearing must never remove a file it did not write');
+      assert(fs.readdirSync(dir).filter(f => /^bug-report-.*\.md$/.test(f)).length === 0,
+        'no saved report should survive the clear');
+
+      // A missing directory is the normal first-run state, not an error.
+      __resetSavedBugReportClearForTests();
+      fs.rmSync(dir, { recursive: true, force: true });
+      const onMissing = await clearSavedBugReports();
+      assert(onMissing.removed === 0 && !onMissing.error,
+        `clearing an absent directory must succeed quietly, got ${JSON.stringify(onMissing)}`);
+
+      // Within one long session a user can generate many reports; retention
+      // bounds that without waiting for the next app start.
+      __resetSavedBugReportClearForTests();
+      const written = [];
+      for (let i = 0; i < SAVED_REPORT_RETENTION + 5; i++) {
+        written.push(await writeSavedBugReport(`# Report ${i}\nbody ${i}\n`, {}));
+      }
+      const remaining = fs.readdirSync(dir).filter(f => /^bug-report-.*\.md$/.test(f));
+      assert(remaining.length === SAVED_REPORT_RETENTION,
+        `retention should bound in-session growth to ${SAVED_REPORT_RETENTION}, got ${remaining.length}`);
+      assert(fs.existsSync(written.at(-1).filePath),
+        'the most recent report must never be the one pruned');
+      // Distinct filenames, so two reports in the same session cannot clobber
+      // each other and a pointer can never name a file holding another report.
+      assert(new Set(written.map(w => w.filePath)).size === written.length,
+        'every saved report must claim its own filename');
+
+      const body = '# Bug Report\nline two\nline three\n';
+      const saved = await writeSavedBugReport(body, {});
+      assert(fs.readFileSync(saved.filePath, 'utf8') === body
+        && saved.bytes === Buffer.byteLength(body) && saved.chars === body.length,
+      'the saved file must contain exactly the report it was given, with accurate byte and character counts');
+      // Multi-byte content is where the two counts diverge — the pointer reports
+      // characters, so the write must expose both rather than conflating them.
+      const accented = await writeSavedBugReport('# Rapport — Montréal\n', {});
+      assert(accented.bytes > accented.chars,
+        `byte and character counts must be tracked separately for multi-byte content, got ${JSON.stringify(accented)}`);
+
+      fs.rmSync(dir, { recursive: true, force: true });
+      __resetSavedBugReportClearForTests();
+      return { retention: SAVED_REPORT_RETENTION, remaining: remaining.length };
+    },
+  },
+{
+    name: 'Clipboard pointer names the file and stays short instead of carrying the report',
+    run: () => {
+      // The pointer exists so an AI reads the report from disk in segments. It
+      // must therefore say WHERE, HOW BIG, and that the file is session-scoped —
+      // and must stay small enough that pasting it costs nothing.
+      const pointer = buildClipboardPointer({
+        filePath: '/Users/jack/Library/Application Support/infinite-canvas/bug-reports/bug-report-2026-09-06T17-34-08-094Z.md',
+        chars: 412_883,
+        bytes: 431_002,
+        lines: 5_120,
+        eventLines: 662,
+        filterCode: 'FULL',
+        generatedAt: '2026-09-06T17:34:08.094Z',
+        description: 'Check that everything completed smoothly as expected.',
+      });
+      assert(pointer.includes('/bug-report-2026-09-06T17-34-08-094Z.md')
+        && pointer.includes('412,883') && pointer.includes('5,120') && pointer.includes('662')
+        && pointer.includes('FULL') && pointer.includes('2026-09-06T17:34:08.094Z'),
+      `the pointer must carry path, size, line counts, filter code and timestamp, got:\n${pointer}`);
+      // Size must be the CHARACTER count, not the byte count — the byte figure
+      // overstates what a reader is about to consume on any multi-byte content.
+      assert(pointer.includes('412,883 chars') && !pointer.includes('431,002'),
+        `the pointer must report characters, not bytes on disk, got:\n${pointer}`);
+      assert(pointer.includes('deleted when this app next starts')
+        && pointer.includes(`${SAVED_REPORT_RETENTION} newer reports`),
+      'the pointer must name BOTH deletion triggers — app restart and the retention prune — or it promises survival it cannot deliver');
+      assert(pointer.includes('segments'),
+        'the pointer should tell its reader to read the file in segments rather than inline');
+      assert(pointer.includes('Check that everything completed smoothly as expected.'),
+        'the pointer should carry the issue description so intent travels with the paste');
+      assert(pointer.length < 1_500, `the pointer must stay short, got ${pointer.length} chars`);
+
+      // A path with spaces sits on its own backticked line so it survives both
+      // markdown rendering and a copy/paste into a shell.
+      assert(/\n`\/Users\/jack\/Library\/Application Support\/[^`\n]+`\n/.test(pointer),
+        `the path must occupy its own backticked line, got:\n${pointer}`);
+
+      // Optional pieces degrade instead of printing empty scaffolding.
+      const minimal = buildClipboardPointer({
+        filePath: '/tmp/bug-reports/bug-report-x.md', chars: 10, bytes: 10, lines: 1,
+        eventLines: null, filterCode: '', generatedAt: '2026-09-06T00:00:00.000Z', description: '',
+      });
+      assert(!minimal.includes('## Issue Description') && !minimal.includes('event log'),
+        `absent description and event count must be omitted, not rendered blank, got:\n${minimal}`);
+      // An unset filter code means an unfiltered report. Rendering a blank
+      // "Filter code:" line would misreport it as unknown scope.
+      assert(minimal.includes('Filter code: FULL'),
+        `an empty filter code must render as FULL, got:\n${minimal}`);
+
+      const longDescription = buildClipboardPointer({
+        filePath: '/tmp/bug-reports/bug-report-y.md', chars: 10, bytes: 10, lines: 1, eventLines: 2,
+        filterCode: 'FULL', generatedAt: '2026-09-06T00:00:00.000Z', description: 'x'.repeat(2_000),
+      });
+      assert(longDescription.length < 1_500,
+        `a runaway description must not turn the pointer back into a giant paste, got ${longDescription.length} chars`);
+      return { pointerLength: pointer.length };
     },
   },
 ];

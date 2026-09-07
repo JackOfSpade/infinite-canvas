@@ -15,7 +15,7 @@ import path from 'node:path';
 import electronPkg from 'electron';
 import { parseAiJson } from './jsonRepair.js';
 import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './schemaValidation.js';
-import { abortNodeTasks, getCurrentIpcRequestContext } from './ipcUtils.js';
+import { abortNodeTasks, cancellationError, getCurrentIpcRequestContext } from './ipcUtils.js';
 import { logger } from '../logger.js';
 
 const { app, ipcMain, shell } = electronPkg;
@@ -720,10 +720,10 @@ export function registerNonApiAiHandlers() {
     // merely one prompt. In particular, scoring must not mistake it for a
     // recoverable model failure and split/reissue more prompts.
     if (record.nodeId) {
-      abortNodeTasks(record.nodeId, record.sender, new Error('Manual AI job cancelled'));
+      abortNodeTasks(record.nodeId, record.sender, cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'));
       return { cancelled: true, nodeCancelled: true };
     }
-    abortPending(record, new Error('Manual AI job cancelled'));
+    abortPending(record, cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'));
     return { cancelled: true, nodeCancelled: false };
   });
 

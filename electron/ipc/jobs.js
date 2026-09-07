@@ -1207,6 +1207,16 @@ export function mergeRecoveredScoreRows(alignedScores, recoveryIndices, recovere
   const merged = Array.isArray(alignedScores) ? [...alignedScores] : [];
   const indexes = Array.isArray(recoveryIndices) ? recoveryIndices : [];
   const recovered = Array.isArray(recoveredScores) ? recoveredScores : [];
+  // The mapping is POSITIONAL: recovered[i] restores the job at indexes[i]. It
+  // holds only because `scoreBatch` returns one row per input job, an invariant
+  // nothing asserts. This is the single place a "scored N/N" total could go
+  // wrong without any stage disagreeing, so state it out loud rather than
+  // silently null-filling a short array into placeholder scores. Merging still
+  // proceeds — the missing rows surface as placeholders in the report, which is
+  // a better outcome for the user than failing the whole scoring pass.
+  if (recovered.length !== indexes.length) {
+    logger.error(`[Jobs] Score recovery returned ${recovered.length} row(s) for ${indexes.length} requested index(es) — merge will leave ${Math.max(0, indexes.length - recovered.length)} placeholder(s)`);
+  }
   indexes.forEach((originalIndex, recoveredIndex) => {
     const row = recovered[recoveredIndex];
     merged[originalIndex] = row && typeof row === 'object'
@@ -1624,6 +1634,20 @@ function clearLinkedInCeiling() {
   linkedinLastCeilingIp = null;
   linkedinLastCeilingAt = 0;
 }
+
+// Human-readable stage-error text per renderer-supplied cancel cause. Every
+// node-scoped abort shares one sentinel message ("Node deleted") because that
+// string is a load-bearing IPC/control-flow contract; these labels are what the
+// bug report shows instead, so a user's Reset never reads as a deleted node.
+const CANCEL_CAUSE_LABELS = {
+  'user-reset': 'Cancelled by user — clicked Reset on this hub',
+  'career-files-cleared': 'Cancelled by user — cleared the career files on this hub',
+  'reanalysis-cancelled': 'Cancelled by user — stopped saved-result re-analysis',
+  'board-cleared': 'Cancelled by user — cleared the connected Job Board',
+  'board-unmounted': 'Cancelled — the Job Board node left the canvas',
+  'node-deleted': 'Cancelled — this node was deleted from the canvas',
+  'manual-ai-cancelled': 'Cancelled by user — dismissed the manual AI copy/paste prompt',
+};
 
 const jobsTelemetry = {
   // The hub node that produced this run. Stamped by every stage handler so the
@@ -2043,6 +2067,21 @@ export async function __canPerformJobSourceActionForTests(canvasFilePath, nodeId
   return canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId);
 }
 
+// A source's `resolves` row is last-write-wins, so N Solve passes on one source
+// leave exactly ONE row and get counted as one attempt. LinkedIn escaped that
+// only because it has a separate bounded trail; every other source reported "1"
+// no matter how many times it actually ran. A real run showed "2 post-completion
+// recovery attempts" while Google alone had been re-walked ~13 times.
+// `cumulativeMergeNet` below already establishes the rule this follows: session
+// accounting must survive the row being replaced. Bounded — this is diagnostic
+// detail, not a ledger.
+const RESOLVE_PASS_TRAIL_CAP = 50;
+
+function nextResolvePassTrail(previous) {
+  const prior = Array.isArray(previous?.passTimestamps) ? previous.passTimestamps : [];
+  return [...prior, Date.now()].slice(-RESOLVE_PASS_TRAIL_CAP);
+}
+
 export function recordLinkedinResolveAttempt(sourceId, extra = {}, ownership = null) {
   if (!canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return null;
   const previous = jobsTelemetry.resolves[sourceId];
@@ -2055,6 +2094,7 @@ export function recordLinkedinResolveAttempt(sourceId, extra = {}, ownership = n
     // 3→7→15→52→54 run read as "5 gathered, 49 carried over".
     cumulativeMergeNet: Number(previous?.cumulativeMergeNet) || 0,
     hasMergeTelemetry: previous?.hasMergeTelemetry === true,
+    passTimestamps: nextResolvePassTrail(previous),
     ...extra,
   };
   jobsTelemetry.resolves[sourceId] = snapshot;
@@ -2453,6 +2493,26 @@ export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeR
     };
   }
 
+  // A repeated Solve that opens the same listings and recovers nothing from any
+  // of them is not a retry that needs one more go — it is a stall. Saying
+  // "Click Solve again" into that state is what let a real run spend hours on
+  // ~13 identical passes. State the observation and stop recommending the
+  // action that has already failed that many times; Retry stays AVAILABLE
+  // (a rate-limit really can clear), it just stops being the advice.
+  const stallGuidance = rootWarning?.recoveryGuidance || null;
+  if (stallGuidance?.stalled === true) {
+    const stalledPasses = Math.max(0, Number(stallGuidance.consecutiveNoProgressPasses) || 0);
+    return {
+      ...rootWarning,
+      code: rootWarning?.code || 'resolve-description-incomplete',
+      severity: 'block',
+      shortLabel: 'Skip recommended',
+      actionLabel: 'Retry anyway',
+      evidence: `${rootWarning?.evidence ? `${rootWarning.evidence} ` : ''}${accounting} The last ${stalledPasses} Solve passes each opened these listings and recovered no description from any of them.`,
+      suggestion: `Repeating the same pass is not making progress. Skip to continue without ${emptyRows.length === 1 ? 'this listing' : 'these listings'} — they are not recorded as seen, so a later run can still collect them — or choose Retry anyway if you have since changed network/IP or waited out a source throttle.`,
+    };
+  }
+
   return {
     ...(rootWarning || {}),
     code: rootWarning?.code || 'resolve-description-incomplete',
@@ -2638,15 +2698,30 @@ export function partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sou
 
 /**
  * Advance the durable recommendation shown for an unresolved provider row.
- * Only an exact no-card observation counts toward Skip: a full list loaded,
- * nothing was attempted/recovered, and the same residual identities and totals
- * remained. Any real card attempt or progress resets the consecutive streak so
- * an extractor/detail failure is never mislabeled as an external disappearance.
+ *
+ * TWO separate streaks are tracked, and they must stay separate. The first,
+ * `consecutiveNoMatchPasses`, counts only an exact no-card observation: a full
+ * list loaded, nothing attempted/recovered, and the same residual identities
+ * and totals remained. Any real card attempt resets it, so an extractor/detail
+ * failure is never mislabeled as an external disappearance.
+ *
+ * That deliberate narrowness left a gap with no stall signal at all: a row that
+ * IS found on the list every pass and fails during detail extraction never
+ * qualifies, so the recommendation stayed 'retry' forever and the source card
+ * kept inviting "Click Solve again" for an operation that could not succeed.
+ * A real run spent hours on ~13 identical Solve passes against one card that
+ * failed the same way every time. `consecutiveNoProgressPasses` closes that
+ * gap with its own streak — cards attempted, none recovered, the same residual
+ * set — surfaced as `stalled` rather than as `skip` so the two causes keep
+ * their distinct explanations to the user.
  */
 export function nextDescriptionRecoveryGuidance(previousState, observation, skipAfter = 2) {
   const rows = Array.isArray(observation?.unavailableRows) ? observation.unavailableRows : [];
   const unavailableKeys = [...new Set(rows.map(sourceJobKey).filter(Boolean))].sort();
   const unavailableSignature = unavailableKeys.join('|');
+  const emptyRows = Array.isArray(observation?.emptyRows) ? observation.emptyRows : [];
+  const emptyKeys = [...new Set(emptyRows.map(sourceJobKey).filter(Boolean))].sort();
+  const emptySignature = emptyKeys.join('|');
   const providerRowsLoaded = Math.max(0, Number(observation?.providerRowsLoaded) || 0);
   const attempted = Math.max(0, Number(observation?.attempted) || 0);
   const recovered = Math.max(0, Number(observation?.recovered) || 0);
@@ -2663,11 +2738,26 @@ export function nextDescriptionRecoveryGuidance(previousState, observation, skip
   const consecutiveNoMatchPasses = qualifies
     ? (sameResidual ? Math.max(0, Number(previousState?.consecutiveNoMatchPasses) || 0) + 1 : 1)
     : 0;
+  // Cards were opened and none of them yielded a description. Recovering even
+  // one row is progress and resets the streak, because the next pass then has
+  // a genuinely smaller problem to solve.
+  const noProgressQualifies = providerRowsLoaded > 0
+    && attempted > 0
+    && recovered === 0
+    && emptyKeys.length > 0;
+  const sameEmptyResidual = noProgressQualifies
+    && previousState?.emptySignature === emptySignature
+    && Number(previousState?.completeTotal) === completeTotal;
+  const consecutiveNoProgressPasses = noProgressQualifies
+    ? (sameEmptyResidual ? Math.max(0, Number(previousState?.consecutiveNoProgressPasses) || 0) + 1 : 1)
+    : 0;
   const threshold = Math.max(2, Math.floor(Number(skipAfter) || 2));
   const state = {
     consecutiveNoMatchPasses,
+    consecutiveNoProgressPasses,
     unavailableSignature,
     unavailableCount: unavailableKeys.length,
+    emptySignature,
     empty,
     completeTotal,
     providerRowsLoaded,
@@ -2680,6 +2770,8 @@ export function nextDescriptionRecoveryGuidance(previousState, observation, skip
     guidance: {
       recommendation: consecutiveNoMatchPasses >= threshold ? 'skip' : 'retry',
       consecutiveNoMatchPasses,
+      consecutiveNoProgressPasses,
+      stalled: consecutiveNoProgressPasses >= threshold,
       threshold,
     },
   };
@@ -4863,6 +4955,7 @@ Return a JSON object with four arrays of search query strings:
     // current pipeline token with the previous funnel, and a terminal zero run
     // never reaches scoring to overwrite the old record at all.
     jobsTelemetry.search = null;
+    jobsTelemetry.searchIntent = null; // re-stamped below once this run's inputs are resolved
     jobsTelemetry.scoring = null;
     jobsTelemetry.preferences = null; // scoped to this run, same reasoning as resolves below
     jobsTelemetry.scoringHeartbeat = null;
@@ -5095,6 +5188,25 @@ Return a JSON object with four arrays of search query strings:
     }
     const limitsDescription = describeJobCollectionLimits(normalizedCollectionLimits);
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${activeSourceIds.length} selected source(s) (origin=${normalizedRunOrigin}, careerInput=${normalizedProfileInputMode}, maxAge=${ageDays}d, jobs/platform=${limitsDescription.jobs}, browser pages/query=${limitsDescription.pages}, location=${location || 'none'})`);
+    // `jobsTelemetry.search` is only stamped once the funnel finishes, so an
+    // aborted or crashed gather left the report saying "no search recorded this
+    // session" for a run whose own log proves it launched — the exact case
+    // where the inputs matter most. Record the INTENT under its own key: it
+    // must not be `search`, because that key means "the funnel produced these
+    // counts" and is a run-correlation token everywhere downstream.
+    jobsTelemetry.searchIntent = {
+      ts: Date.now(),
+      runId: activeRunId,
+      nodeId,
+      runOrigin: normalizedRunOrigin,
+      profileInputMode: normalizedProfileInputMode,
+      queries: queries.length,
+      queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [],
+      selectedSourceIds: activeSourceIds.slice(0, 25),
+      maxAgeDays: ageDays,
+      collectionLimits: normalizedCollectionLimits,
+      location: location || '',
+    };
 
     // Country applicability is enforced before any source request. On resume,
     // intersect it with the unfinished-source scope so an older staged run cannot
@@ -5295,7 +5407,10 @@ Return a JSON object with four arrays of search query strings:
       jobsTelemetry.pipeline = {
         ...(jobsTelemetry.pipeline || {}),
         phase: 'aborted', ts: Date.now(), active: false, pendingSources: [],
-        error: String(reason.message || reason).slice(0, 240),
+        // Prefer the renderer's stated cause. The sentinel's message is
+        // "Node deleted" for EVERY node-scoped cancel, so reporting it verbatim
+        // told a user who clicked Reset that their hub had been deleted.
+        error: CANCEL_CAUSE_LABELS[reason?.cancelCause] || String(reason.message || reason).slice(0, 240),
       };
       throw reason;
     };
@@ -5398,6 +5513,34 @@ Return a JSON object with four arrays of search query strings:
       terminalManualSourceIds.add(sourceId);
     };
 
+    // Record a browser source's terminal status the MOMENT it finishes, instead
+    // of waiting for the post-gather loop far below. Browser sources run
+    // strictly one at a time and a single one can hold the phase for a very long
+    // time (a challenge wait is unbounded by design), so a run that dies during
+    // the gather used to leave every already-finished source at 'pending' — and
+    // resume re-scrapes anything not marked 'done', discarding rows that are
+    // already staged on disk. Conservative by construction: only a source that
+    // actually produced rows with no block-severity warning is called done, so a
+    // wrong guess can only cost a re-scrape, never staged results.
+    const markGatheredSourceTerminal = async (sourceId, results) => {
+      if (!canvasFilePath) return;
+      const rows = Array.isArray(results) ? results : [];
+      // manualScraper results carry `data`; the Indeed driver carries `jobs`.
+      const produced = rows.reduce(
+        (n, r) => n + (Array.isArray(r?.data) ? r.data.length : Array.isArray(r?.jobs) ? r.jobs.length : 0),
+        0,
+      );
+      const blocked = rows.some(r => r?.warning?.severity === 'block' || r?.error);
+      if (!blocked && produced === 0) return; // nothing proven yet — leave it pending
+      await markSourceStatus(
+        canvasFilePath,
+        sourceId,
+        blocked ? 'blocked' : 'done',
+        Date.now(),
+        { expectedRunId: activeRunId },
+      ).catch(() => {});
+    };
+
     const runBrowserSourcesInOrder = async () => {
       let indeedResult = null;
       const manualResults = [];
@@ -5408,6 +5551,7 @@ Return a JSON object with four arrays of search query strings:
         const sid = browserOrder[i];
         if (sid === 'indeed') {
           indeedResult = await runIndeed();
+          await markGatheredSourceTerminal('indeed', indeedResult ? [indeedResult] : []);
         } else {
           const sourceTasks = tasks.filter(t => t.sourceId === sid);
           if (!sourceTasks.length) continue;
@@ -5438,6 +5582,7 @@ Return a JSON object with four arrays of search query strings:
             },
           });
           manualResults.push(...r);
+          await markGatheredSourceTerminal(sid, r);
         }
         // Record this source's outcome for the NEXT run's order: did it require
         // user-operated verification? Manual drivers mark while waiting. Indeed
@@ -5455,10 +5600,16 @@ Return a JSON object with four arrays of search query strings:
     // (they don't paginate through the page hook); browser sources stage
     // per-page via stageOnPage. So a crash anywhere in the long browser phase
     // already has every finished HTTP source's jobs on disk.
-    const stageHttpSource = ({ sourceId, jobs }) =>
-      recordSourcePage(canvasFilePath, {
+    const stageHttpSource = async ({ sourceId, jobs }) => {
+      await recordSourcePage(canvasFilePath, {
         sourceId, query: '', page: 0, jobs, now: Date.now(), expectedRunId: activeRunId,
       });
+      // Same durability gap as the browser sources: an HTTP source finishes
+      // early and then waits out the whole browser phase before the post-gather
+      // loop records that it is done. Mark it here so a run that never reaches
+      // that loop can still resume without re-fetching it.
+      await markGatheredSourceTerminal(sourceId, [{ jobs }]);
+    };
 
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
@@ -6248,15 +6399,21 @@ Return a JSON object with four arrays of search query strings:
       // API walkers can hit their finite request limit exactly, so their outer
       // merge has no post-fetch cap overflow to expose. Preserve the walker's
       // own compact cap fact before a restart loses in-memory sourceResults.
+      // 'source-internal' is the source's OWN result ceiling (LinkedIn stops at
+      // 150), not a user setting. It was excluded here, so a run that stopped at
+      // that ceiling reported the bare stop reason `result-ceiling` with no
+      // number — leaving a reader unable to tell whether 150 or 1000 rows were
+      // left behind. Persist it; the report labels it distinctly from the
+      // user-configured caps and it is still rejected as configured-cap PROOF.
       if (data.cap && typeof data.cap === 'object'
-          && ['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(data.cap.type)
+          && ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(data.cap.type)
           && data.cap.limit != null && data.cap.limit !== ''
           && Number.isFinite(Number(data.cap.limit)) && Number(data.cap.limit) > 0) {
         bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };
       }
       if (Array.isArray(data.caps)) {
         const caps = data.caps
-          .filter(cap => ['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(cap?.type)
+          .filter(cap => ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(cap?.type)
             && Number.isSafeInteger(cap.limit) && cap.limit > 0)
           .filter((cap, index, values) => values.findIndex(other => other.type === cap.type && other.limit === cap.limit) === index)
           .slice(0, 3)
@@ -8317,6 +8474,7 @@ Return a JSON object with four arrays of search query strings:
             sourceRecoverySnapshot?.descriptionRecoveryState?.[sourceId],
             {
               unavailableRows: unavailableRecoveryRows,
+              emptyRows: resolvedEmptyRows,
               providerRowsLoaded: providerRows.length,
               attempted: expanded?.attemptedCount ?? candidates.length,
               recovered: completeRows.length,
@@ -8351,7 +8509,15 @@ Return a JSON object with four arrays of search query strings:
                 suggestion: expansionWarning?.suggestion || 'The missing listing may have expired, or it may sit deeper in the results than this pass loaded. Deferred listings are not recorded as seen, so a later run can still collect them.',
                 recoveryGuidance: guidanceOutcome.guidance,
               }
-            : expansionWarning;
+            // The found-but-unrecovered path needs the guidance too, or the
+            // stall streak has no way to reach the message the user reads.
+            // Only attach it when rows are actually outstanding: with none,
+            // buildResolvedDescriptionWarning returns its root warning as-is,
+            // and a synthesized object here would invent a warning where the
+            // pass genuinely produced none.
+            : (resolvedEmptyRows.length > 0
+              ? { ...(expansionWarning || {}), recoveryGuidance: guidanceOutcome.guidance }
+              : expansionWarning);
           const warning = persistenceWarning || buildResolvedDescriptionWarning(
             sourceId,
             unavailableWarning,
@@ -8378,6 +8544,8 @@ Return a JSON object with four arrays of search query strings:
               unavailable: unavailableRecoveryRows.length,
               recoveryRecommendation: guidanceOutcome.guidance.recommendation,
               consecutiveNoMatchPasses: guidanceOutcome.guidance.consecutiveNoMatchPasses,
+              consecutiveNoProgressPasses: guidanceOutcome.guidance.consecutiveNoProgressPasses,
+              recoveryStalled: guidanceOutcome.guidance.stalled,
               unavailableSamples: unavailableRecoveryRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
               relevanceRejected: [],
               emptySamples: resolvedEmptyRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
@@ -8472,6 +8640,7 @@ Return a JSON object with four arrays of search query strings:
       resolved: !!result.resolved,
       cumulativeMergeNet: priorResolveMergeNet,
       hasMergeTelemetry: jobsTelemetry.resolves[sourceId]?.hasMergeTelemetry === true,
+      passTimestamps: nextResolvePassTrail(jobsTelemetry.resolves[sourceId]),
       extracted: extractedRaw.length,
       relevanceDropped,
       relevanceRejected,
@@ -8945,6 +9114,7 @@ Return a JSON object with four arrays of search query strings:
       resolved,
       cumulativeMergeNet: priorResolveMergeNet,
       hasMergeTelemetry: jobsTelemetry.resolves[sourceId]?.hasMergeTelemetry === true,
+      passTimestamps: nextResolvePassTrail(jobsTelemetry.resolves[sourceId]),
       extracted: extracted.length,
       relevanceDropped: 0,
       relevanceRejected: [],

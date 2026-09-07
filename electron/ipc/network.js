@@ -1,7 +1,7 @@
 /**
  * Network IPC handlers — URL title fetching and task cancellation.
  */
-import { handleSafe, abortNodeTasks } from './ipcUtils.js';
+import { handleSafe, abortNodeTasks, nodeCancellationError } from './ipcUtils.js';
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
 
@@ -14,8 +14,11 @@ const TITLE_FETCH_TIMEOUT_MS = 3000;
 
 export function registerNetworkHandlers() {
   // Add direct listener for node task cancellation
-  ipcMain.on('cancel-node-task', (event, nodeId) => {
-    if (nodeId) abortNodeTasks(nodeId, event.sender);
+  ipcMain.on('cancel-node-task', (event, nodeId, cause = null) => {
+    // `cause` is the renderer's own account of WHY (Reset / cleared files /
+    // board clear / node deleted). Without it the main process could only see
+    // the generic sentinel and reported every user Reset as "Node deleted".
+    if (nodeId) abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause));
   });
 
   handleSafe('fetch-url-title', async (event, url, signal) => {

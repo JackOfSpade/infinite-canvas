@@ -1,5 +1,5 @@
 import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, CLAUDE_FAMILY, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, VERTEX_GEMINI_MODEL_FALLBACKS, VERTEX_LOCATION, appendGroundedSourceAppendix, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, fetchDiceListings, entitledTiersFor, effectiveCap, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatClaudeGroundedResponse, formatDiceBaseSalary, formatGeminiGroundedResponse, gatedTiers, geminiGroundingTools, geminiModelsInTier, getClaudeBatchResults, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, getTokenBudgetSnapshot, groundedMetadataUrls, inspectJobTaxonomyRoleIndexes, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, normalizeAIProvider, normalizeGeminiApiKey, normalizeJobTaxonomyPlan, orderGeminiModels, orderVertexGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, runBoundedJobTaxonomy, settleEntitlementProbes, taskMaxTokensFor, taskModelRoutingSnapshot, toGeminiSchema, validateJobTaxonomyPlan, vertexGenerateContentUrl, webSearchToolType } from '../test-dependencies.js';
-import { isNonApiJobTask } from '../test-dependencies.js';
+import { isNonApiJobTask, safeApiFetch, cancellationError, nodeCancellationError } from '../test-dependencies.js';
 // __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
 // electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
 // barrel — imported directly from the source module so the ladder-exhaustion
@@ -1896,6 +1896,58 @@ export default [
       assert(!/\\n|\\t/.test(rzContent), 'résumé must contain NO literal backslash-n/t');
       assert(/Maya\s+Chen/.test(rzContent), 'résumé literal \\n became collapsing whitespace');
       return { ok: true };
+    },
+  }
+
+  ,
+  {
+    name: 'safeApiFetch: a user cancel is silent, a timeout is still reported',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        // The app's own cancel sentinel. `fetch` rejects with the
+        // AbortController's reason VERBATIM, so this exact object is what the
+        // catch block sees — a plain Error whose message says nothing about
+        // aborting. Classifying on the message text reported the user's Stop
+        // as an `api-fetch-failed` network warning and stamped the source
+        // `blocked`, sending the user hunting a provider failure they caused.
+        const cancel = nodeCancellationError('user-reset');
+        assert(cancel.message === 'Node deleted',
+          'the cancel sentinel MESSAGE is a load-bearing IPC/control-flow contract and must not change');
+        assert(cancel.name === 'AbortError' && cancel.cancelCause === 'user-reset',
+          'the sentinel identifies itself as a cancellation and carries the renderer-supplied cause');
+
+        globalThis.fetch = async () => { throw cancel; };
+        const controller = new AbortController();
+        controller.abort(cancel);
+        const cancelled = await safeApiFetch('https://example.test/api', { signal: controller.signal }, 'linkedin');
+        assert(cancelled.ok === false && cancelled.warning === null,
+          `a cancelled fetch must publish NO warning, got ${JSON.stringify(cancelled.warning)}`);
+
+        // The mirror-image bug: AbortSignal.timeout rejects with "The operation
+        // was aborted due to timeout", which the old /abort/i message test
+        // swallowed — so a real timeout produced no warning at all. A timeout is
+        // a genuine symptom and must stay reportable.
+        const timeoutError = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+        globalThis.fetch = async () => { throw timeoutError; };
+        const timedOut = await safeApiFetch('https://example.test/api', { signal: AbortSignal.abort() }, 'linkedin');
+        assert(timedOut.ok === false && timedOut.warning?.code === 'api-fetch-failed',
+          `a timeout must still surface api-fetch-failed, got ${JSON.stringify(timedOut.warning)}`);
+
+        // An ordinary transport failure on a live signal is unchanged.
+        globalThis.fetch = async () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { name: 'TypeError' }); };
+        const offline = await safeApiFetch('https://example.test/api', { signal: new AbortController().signal }, 'linkedin');
+        assert(offline.warning?.code === 'api-fetch-failed' && offline.warning?.severity === 'throttle',
+          'a genuine network error is still reported');
+
+        // A cancellation raised without any signal at all is still recognised.
+        globalThis.fetch = async () => { throw cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'); };
+        const bare = await safeApiFetch('https://example.test/api', {}, 'linkedin');
+        assert(bare.warning === null, 'an AbortError-named cancellation is silent even with no signal passed');
+        return { cases: 4 };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   }
 ];

@@ -60,6 +60,18 @@ function createTimeoutSignal(baseSignal, timeoutMs) {
 }
 
 /**
+ * True when a failed fetch failed because the USER cancelled, not because the
+ * provider did anything. Every page loop below bails on `!r.ok`, and those
+ * branches log a warning and stamp the source `blocked`/`scrape-failed` — so a
+ * Reset mid-walk used to be reported as a source failure the user would then go
+ * hunting for. `safeApiFetch` already suppresses the warning object on an
+ * aborted signal; this is the matching check for the log line and stop reason.
+ */
+function abortedDuringFetch(signal, result) {
+  return !!signal?.aborted && result?.ok === false;
+}
+
+/**
  * A tiny bespoke HTML stripper for snippets (no heavy external dom parser)
  * Real rendering to markdown is handled in python/gemini stages if needed.
  */
@@ -218,6 +230,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       // First detected warning wins — the rest of the loop bails. LinkedIn is
       // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
       if (r.warning && !warning) warning = r.warning;
+      if (abortedDuringFetch(signal, r)) { stopReason = 'aborted'; break; }
       if (!r.ok) {
         logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
         stopReason = 'blocked';
@@ -1204,6 +1217,16 @@ export function jobRelevanceRejection(roleText, query, geoTerms = EMPTY_GEO) {
   return {
     reason: decision.reason,
     matched: decision.matchedConcepts.map(match => match.queryTerm),
+    // The query term alone cannot be checked against the title printed beside
+    // it: a concept can be satisfied by a SYNONYM, so a rejection sample read
+    // "matched software+architect" for a title whose only related word was
+    // "Platform". A reader asked to judge whether the gate is too strict then
+    // sees the report claim a word that is visibly absent. Carry the surface
+    // form that actually matched, using the same `queryTerm→matched` notation
+    // the surviving-jobs relevance audit already uses.
+    matchedConcepts: decision.matchedConcepts.map(match => ({
+      queryTerm: match.queryTerm, matched: match.matched, kind: match.kind,
+    })),
     required: decision.requiredMatches,
   };
 }
@@ -1455,6 +1478,7 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
       signal: createTimeoutSignal(signal, apiTimeout('usajobs-api')),
     }, 'usajobs');
 
+    if (abortedDuringFetch(signal, r)) break;
     if (!r.ok) {
       if (r.warning) logger.warn(`[USAJobs] ${r.warning.code}: ${r.warning.evidence}`);
       else logger.error(`[USAJobs] API returned ${r.status}`);
@@ -1655,8 +1679,10 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   const r = await fetchRemoteOkFeed('https://remoteok.com/api', signal);
 
   if (!r.ok) {
-    if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
-    else logger.warn(`[RemoteOK API] Returned ${r.status}`);
+    if (!abortedDuringFetch(signal, r)) {
+      if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
+      else logger.warn(`[RemoteOK API] Returned ${r.status}`);
+    }
     return { items: [], warning: r.warning, sponsoredDropped: 0 };
   }
 
@@ -1892,8 +1918,10 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   const r = await fetchWwrFeed('https://weworkremotely.com/remote-jobs.rss', signal);
 
   if (!r.ok) {
-    if (r.warning) logger.warn(`[WWR RSS] ${r.warning.code}: ${r.warning.evidence}`);
-    else logger.warn(`[WWR RSS] Returned ${r.status}`);
+    if (!abortedDuringFetch(signal, r)) {
+      if (r.warning) logger.warn(`[WWR RSS] ${r.warning.code}: ${r.warning.evidence}`);
+      else logger.warn(`[WWR RSS] Returned ${r.status}`);
+    }
     return { items: [], warning: r.warning };
   }
 

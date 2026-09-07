@@ -22,8 +22,9 @@ import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
-import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING } from './bugReport/clipboardCap.js';
+import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
+import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -788,6 +789,27 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
+// Both now generate the FULL uncapped report: "copy to clipboard" writes it to
+// an app-managed file (see bugReport/reportFile.js) and returns a short path
+// pointer for the clipboard instead of the report text itself, so an AI reads
+// the file from disk in segments rather than receiving one giant paste.
+//
+// CLIPBOARD_BUG_REPORT_MAX_CHARS is no longer the normal clipboard path's cap —
+// it is now ONLY the write-FAILURE fallback. If writeSavedBugReport throws
+// (disk full, permissions, userData unwritable, ...) the user must never be
+// left with nothing to paste, so the handler falls back to the old capped-
+// inline behavior: a canvas-scale report handed to a clipboard/chat consumer
+// that truncates blindly front-to-back would otherwise cut mid-section
+// through the curated base and discard the entire (highest-value, most-
+// recent) logs + event history that render after it. "Save to file" never
+// applies this cap; it is the promised complete artifact.
+const CLIPBOARD_BUG_REPORT_MAX_CHARS = 50_000;
+
+// buildNodeDiagnosticsMarkdown samples routine job rows whenever a cap is in
+// force, and emits this marker when it actually dropped any. It is the only
+// evidence that reduction happened, because that sampling never sets the
+// truncated/hardTruncated flags.
+const ROUTINE_ROW_OMISSION_RE = /row\(s\) omitted to preserve the clipboard budget/;
 
 function buildMissingPreviewRelinkMarkdown() {
   const snapshot = getMissingPreviewRelinkDiagnostics();
@@ -823,7 +845,7 @@ ${rows}
 `;
 }
 
-function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, sectionOmitted) {
+function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted) {
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
@@ -846,9 +868,41 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
     // "omitted by filter code", not "no nodes".
     nodeDiagMarkdown = '\n## Node Diagnostics\n*(omitted by filter code — per-node positions/sizes/component state)*\n';
   } else if (nodeInternals && nodeInternals.length > 0) {
-    // Copy and Save both retain every node row. A collapsed cascade is normal
-    // state, but its complete inventory is still evidence for a report.
-    const rows = nodeInternals.map(n => {
+    // Cap the routine nodes a hub spawns into its results cascade (jobcard +
+    // jobgroup) so a large board doesn't blow the clipboard char budget — at
+    // ~150-200 chars/row, a 739-card cascade is >150KB and forces the far more
+    // valuable main-process logs + pipeline funnel + event history (which render
+    // AFTER this table) to be dropped entirely. Crucially, a cascade spawns
+    // COLLAPSED, so every card/group is `hidden` by default — that is the normal
+    // tree state, NOT an anomaly, so `hidden` must NOT exempt a node from the cap
+    // (the old predicate did, which is why all 739 rendered). The score/url and
+    // band/salary/role breakdown are summarized in the Job Search Pipeline /
+    // Taxonomy sections; only a genuine anomaly (selected/editing/resizing/
+    // edge-cursor/error or an expanded hiring-fit disclosure) forces a row to
+    // always show.
+    // Only clipboard output needs sampling; Save to file is the promised full
+    // artifact and must retain every routine row as well as every anomaly.
+    const ROUTINE_JOBCARD_CAP = options?.maxChars ? 15 : Infinity;
+    const ROUTINE_JOBGROUP_CAP = options?.maxChars ? 25 : Infinity; // keep enough to convey the taxonomy shape
+    const hasAnomaly = (n) => {
+      const cs = compStateById[n.id] || {};
+      return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor
+        || cs.reasoningExpanded || cs.scoreAuditExpanded || cs.compensationExpanded
+        || nodeDataById[n.id]?.errorMessage);
+    };
+    let cardShown = 0, cardOmitted = 0, groupShown = 0, groupOmitted = 0;
+    const nodesToRender = [];
+    for (const n of nodeInternals) {
+      if (n.type === 'jobcard' && !hasAnomaly(n)) {
+        if (cardShown >= ROUTINE_JOBCARD_CAP) { cardOmitted++; continue; }
+        cardShown++;
+      } else if (n.type === 'jobgroup' && !hasAnomaly(n)) {
+        if (groupShown >= ROUTINE_JOBGROUP_CAP) { groupOmitted++; continue; }
+        groupShown++;
+      }
+      nodesToRender.push(n);
+    }
+    const rows = nodesToRender.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
         n.hidden ? 'hidden' : null,
@@ -890,6 +944,11 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const dropLock = getHubDropLockReason({ type: 'jobhub', data: d });
         previewParts.push(`careerIdentity: ${hubHasAcceptedInitialDrop({ type: 'jobhub', data: d }) ? 'present' : 'none'}`);
         previewParts.push(`dropLock: ${dropLock || 'none'}`);
+        // A locked hub refuses its own Cancel/Reset. Without this field a
+        // report cannot separate "the user pressed Cancel and the hub declined"
+        // from "the user never pressed it" — the two look identical from the
+        // task registry, which shows a live task either way.
+        if (d.locked) previewParts.push('locked: true (Cancel/Reset refused while locked)');
         if (Array.isArray(d.enabledSourceIds)) {
           previewParts.push(`enabledSourceIds: ${d.enabledSourceIds.length ? d.enabledSourceIds.map(sourceId => String(sourceId)).join(',') : '∅ none'}`);
         } else {
@@ -1150,7 +1209,8 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
 
 | ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | height (prop) | style.width | style.height | measured.width | measured.height | currentSize | state flags | data preview |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-${rows}`;
+${rows}
+${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
   return nodeDiagMarkdown;
 }
@@ -1816,7 +1876,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
   return aiConfigMarkdown;
 }
 
-export function generateMarkdown(payload, reportWindowId = null) {
+export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
 
   // A filter code (e.g. LEAN) may have dropped whole sections before the payload
@@ -1877,7 +1937,7 @@ export function generateMarkdown(payload, reportWindowId = null) {
   // (the exact kind of state a bug report is filed about), so it must never take
   // down every other section if one node's shape throws (e.g. a non-numeric
   // position/size field hitting `.toFixed`).
-  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, sectionOmitted); }
+  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted); }
   catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
 
   // ── Media player state section ────────────────────────────────────────────
@@ -2329,6 +2389,12 @@ ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMark
   const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
 
   const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + eventsMarkdown;
+  // Logs and the Event History heading live outside baseMarkdown so the
+  // clipboard path (enforceClipboardMarkdownCap) can trim them independently of
+  // the curated static sections above.
+  if (options?.maxChars) {
+    return enforceClipboardMarkdownCap(baseMarkdown, chronologicalEventLines, mainProcessLogLines, options.maxChars);
+  }
   return { markdown: fullMarkdown, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
 }
 
@@ -2336,6 +2402,9 @@ ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMark
 export function registerBugReportHandlers() {
 
   // Save report to a file chosen by the user via a native save dialog.
+  // Deliberately uncapped: this is the promised complete artifact, so no
+  // maxChars is passed here even though the clipboard path below shares this
+  // same generateMarkdown function.
   handleSafe('export-bug-report', async (event, payload) => {
     const { markdown: markdownContent } = generateMarkdown(payload, event.sender?.id ?? null);
 
@@ -2351,9 +2420,78 @@ export function registerBugReportHandlers() {
     return { filePath };
   });
 
-  // Return the report as a string so the renderer can copy it to the clipboard.
-  // No file dialog, no disk I/O — just generate and return the markdown.
+  // "Copy to clipboard": generate the FULL uncapped report (byte-identical to
+  // "Save to file" above — same generateMarkdown call, no maxChars) and write
+  // it to an app-managed file instead of returning it inline. A canvas-scale
+  // report pasted whole into a clipboard/chat consumer either gets silently
+  // truncated downstream or burns most of a context window in one message;
+  // a short path pointer lets an AI read the file from disk in segments
+  // instead. See electron/ipc/bugReport/reportFile.js for the file lifecycle
+  // (cleared on every app start, pruned to SAVED_REPORT_RETENTION per session).
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
-    return generateMarkdown(payload, event.sender?.id ?? null);
+    const full = generateMarkdown(payload, event.sender?.id ?? null); // UNCAPPED — the file is the artifact
+
+    // Mirror filterSummary.js's own read of these two payload fields (see
+    // buildFilterSummaryMarkdown) instead of re-deriving them from inside
+    // generateMarkdown, which doesn't expose its internal event-line count.
+    const filterCode = String(payload?.filterCode || '').trim();
+    const statsEventsShown = Number(payload?.filterStats?.eventsShown);
+    const eventLines = Number.isFinite(statsEventsShown) ? statsEventsShown : null;
+    const generatedAt = new Date().toISOString();
+    const description = typeof payload?.description === 'string' ? payload.description : '';
+
+    try {
+      const saved = await writeSavedBugReport(full.markdown, { reportWindowId: event.sender?.id ?? null });
+      return {
+        delivery: 'file-pointer',
+        clipboardText: buildClipboardPointer({
+          filePath: saved.filePath,
+          chars: saved.chars,
+          bytes: saved.bytes,
+          lines: saved.lines,
+          eventLines,
+          filterCode,
+          generatedAt,
+          description,
+        }),
+        savedPath: saved.filePath,
+        chars: saved.chars,
+        bytes: saved.bytes,
+        lines: saved.lines,
+        eventLines,
+        filterCode: filterCode || null,
+        generatedAt,
+      };
+    } catch (error) {
+      // Never leave the user with nothing to paste: the disk write failed
+      // (full disk, permissions, unwritable userData, ...), so fall back to
+      // the old capped-inline clipboard content rather than surfacing a bare
+      // error with no report at all.
+      const capped = generateMarkdown(payload, event.sender?.id ?? null, { maxChars: CLIPBOARD_BUG_REPORT_MAX_CHARS });
+      // Whether the fallback ACTUALLY lost anything is a measurement, not an
+      // assumption: passing maxChars also switches on routine node-row sampling
+      // inside buildNodeDiagnosticsMarkdown, which `truncated`/`hardTruncated`
+      // never report — so those flags alone cannot answer "did the user get
+      // less than the full report?".
+      //
+      // Deliberately NOT a length comparison against the uncapped render: the
+      // two renders are produced milliseconds apart and each stamps its own
+      // generation time and relative ages ("38m ago"), so their lengths drift
+      // by a character or two for reasons that have nothing to do with capping.
+      // Ask each reducer whether it fired instead.
+      const reduced = !!capped.truncated
+        || !!capped.hardTruncated
+        || ROUTINE_ROW_OMISSION_RE.test(capped.markdown);
+      return {
+        delivery: 'inline-fallback',
+        clipboardText: capped.markdown,
+        reduced,
+        saveError: error?.message || String(error),
+        truncated: capped.truncated,
+        hardTruncated: capped.hardTruncated,
+        trimmedEventCount: capped.trimmedEventCount,
+        trimmedLogCount: capped.trimmedLogCount,
+      };
+    }
   });
 }

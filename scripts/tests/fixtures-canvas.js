@@ -4,6 +4,7 @@ import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCa
 import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
 
 import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
+import { getManualScraperTelemetry, recordManualScraperTelemetry, resetManualScraperTelemetry, scrapeManualSources } from '../test-dependencies.js';
 
 export default [
 {
@@ -671,6 +672,82 @@ export default [
       assert(!absent.selectionMismatch && !absent.selectionVerified,
         'missing detail headings must remain resilient/unverified rather than becoming false mismatches');
       return { selectedTitle };
+    },
+  },
+{
+    name: 'Repeated Solve passes that recover nothing stop recommending another retry',
+    run: () => {
+      // The found-but-unrecovered case: the card IS on the list every pass, so
+      // the no-match streak never engages. Before this guard the guidance stayed
+      // 'retry' forever and the warning kept saying "Click Solve again" — a real
+      // run burned hours on ~13 identical passes against one such card.
+      const stuck = [{ title: 'Stuck Listing', url: 'https://www.google.com/search?htidocid=stuck-1', snippet: '' }];
+      const observation = {
+        unavailableRows: [],
+        emptyRows: stuck,
+        providerRowsLoaded: 71,
+        attempted: 1,
+        recovered: 0,
+        empty: 1,
+        completeTotal: 23,
+      };
+      const first = nextDescriptionRecoveryGuidance(null, observation);
+      const second = nextDescriptionRecoveryGuidance(first.state, observation);
+      const warnAfterFirst = buildResolvedDescriptionWarning('google', { recoveryGuidance: first.guidance }, [], stuck);
+      const warnAfterSecond = buildResolvedDescriptionWarning('google', { recoveryGuidance: second.guidance }, [], stuck);
+      // Recovering even one row makes the next pass a genuinely smaller problem,
+      // so progress must reset the streak rather than counting toward a stall.
+      const afterProgress = nextDescriptionRecoveryGuidance(second.state, { ...observation, recovered: 1 });
+      // The two streaks stay independent: a detail failure is never reported as
+      // the listing having disappeared from the provider's results.
+      assert(first.guidance.consecutiveNoProgressPasses === 1 && !first.guidance.stalled,
+        'a single unproductive pass is an ordinary retry, not yet a stall');
+      assert(second.guidance.stalled && second.guidance.consecutiveNoProgressPasses === 2,
+        'a second identical unproductive pass must be reported as stalled');
+      assert(first.guidance.consecutiveNoMatchPasses === 0 && second.guidance.consecutiveNoMatchPasses === 0,
+        'a found-but-unrecovered row must never count as an unavailable/disappeared listing');
+      assert(afterProgress.guidance.consecutiveNoProgressPasses === 0 && !afterProgress.guidance.stalled,
+        'recovering a description must reset the no-progress streak');
+      assert(warnAfterFirst.suggestion.includes('Click Solve again'),
+        'the first unproductive pass should still offer a plain retry');
+      assert(!warnAfterSecond.suggestion.includes('Click Solve again')
+        && warnAfterSecond.shortLabel === 'Skip recommended'
+        && warnAfterSecond.actionLabel === 'Retry anyway'
+        && warnAfterSecond.evidence.includes('recovered no description'),
+        'a stalled recovery must stop advising the action that has already failed twice');
+      return { stalled: second.guidance.stalled, shortLabel: warnAfterSecond.shortLabel };
+    },
+  },
+{
+    name: 'Detail selection compares entity-encoded headings against their decoded job title',
+    run: () => {
+      // Observed in a real run: a Google detail panel whose heading text is the
+      // literal `&#8211;` while the list card the title came from was parsed
+      // from markup, giving a real en dash. The two spellings are the SAME job;
+      // reading them as different discarded a correctly-read description panel
+      // and left the row permanently unresolvable across repeated Solve passes.
+      const decoded = '.NET Software Architect – Vancouver,BC';
+      const numeric = assessDetailSelection(decoded, '.NET Software Architect &#8211; Vancouver,BC');
+      const hex = assessDetailSelection(decoded, '.NET Software Architect &#x2013; Vancouver,BC');
+      const named = assessDetailSelection(decoded, '.NET Software Architect &ndash; Vancouver,BC');
+      // One decode pass leaves `&amp;#8211;` as `&#8211;`, which is still not
+      // the character the expected side carries — the comparator has to reach a
+      // fixpoint, not just call the decoder once.
+      const doubled = assessDetailSelection(decoded, '.NET Software Architect &amp;#8211; Vancouver,BC');
+      // Decoding must not blunt the guard into accepting anything: a genuinely
+      // different heading stays a mismatch even when it also carries entities.
+      const stillMismatched = assessDetailSelection(decoded, 'Warehouse Associate &#8211; Vancouver,BC');
+      assert(numeric.selectionVerified && !numeric.selectionMismatch,
+        'a decimal-entity heading must verify against its decoded job title');
+      assert(hex.selectionVerified && !hex.selectionMismatch,
+        'a hex-entity heading must verify against its decoded job title');
+      assert(named.selectionVerified && !named.selectionMismatch,
+        'a named-entity heading must verify against its decoded job title');
+      assert(doubled.selectionVerified && !doubled.selectionMismatch,
+        'a double-encoded heading must decode to a fixpoint before being compared');
+      assert(stillMismatched.selectionMismatch && !stillMismatched.selectionVerified,
+        'entity decoding must not stop a genuinely different heading from being a mismatch');
+      return { numeric: numeric.selectionVerified, doubled: doubled.selectionVerified };
     },
   },
 {
@@ -3168,6 +3245,20 @@ export default [
         && splitPhraseRejection.required === 2
         && splitPhraseRejection.matched.join('|') === 'property|assistant',
       `relevance rejection diagnostics: disconnected title concepts are explicit, got ${JSON.stringify(splitPhraseRejection)}`);
+      // A rejection sample is printed next to the title it describes and the
+      // report asks the reader to judge whether the gate was too strict. Naming
+      // only the query term made that impossible when a SYNONYM satisfied the
+      // concept: this real title reported "matched software+architect" while
+      // containing no "software" at all.
+      const synonymRejection = jobRelevanceRejection(
+        'Stibo Sr. Architect/Platform Owner for Global Fortune 500', 'Software Architect', new Set(),
+      );
+      assert(synonymRejection?.reason === 'not-one-title-phrase'
+        && synonymRejection.matchedConcepts?.some(concept => concept.queryTerm === 'software'
+          && concept.matched === 'platform' && concept.kind === 'synonym')
+        && synonymRejection.matchedConcepts?.some(concept => concept.queryTerm === 'architect'
+          && concept.kind === 'exact'),
+      `relevance rejection diagnostics: a synonym-satisfied concept names the word actually found, got ${JSON.stringify(synonymRejection)}`);
       assert(jobRelevanceMatch('Maintenance Tech', 'Maintenance Technician', new Set())
         && jobRelevanceMatch('Building Maintenance Tech I or II', 'Maintenance Technician', new Set())
         && jobRelevanceMatch('General Trades Maintenance Worker', 'Maintenance Technician', new Set())
@@ -3596,6 +3687,121 @@ export default [
       assert(fullXnodesSummary.includes('FULL was combined with section exclusions') && fullXnodesSummary.includes('sections omitted: nodeInternals'),
         'Bug report filter summary: FULL+exclusion explains unfiltered events and omitted sections');
       return { filtered: filtered.filteredLogs.length, unknown: preview.unknownCodes };
+    },
+  },
+{
+    name: 'manualScraper telemetry: a post-completion recovery pass re-points active at the recovering source, and a finished/idle state stops vouching for the prior one',
+    run: async () => {
+      // Reproduces the observed defect: a long Google recovery pass was
+      // running while the report's "Current" line still read "phase finished
+      // · source Glassdoor · count 722" — hours stale and naming the wrong
+      // source, because the top-level run-completion path kept spreading the
+      // last active entry's fields forward under a new phase.
+      resetManualScraperTelemetry();
+      recordManualScraperTelemetry({
+        phase: 'source-finished', sourceId: 'glassdoor', srcName: 'Glassdoor', count: 722,
+      });
+
+      // scrapeManualSources([], ...) takes the exact same top-level
+      // "run completion" branch the real orchestrator's finally block does
+      // (clearManualScraperTelemetry), without needing a browser. Passing
+      // resetDiagnostics:false keeps the fixture's prior state in place, the
+      // way the per-source dispatcher does mid-run.
+      await scrapeManualSources([], null, null, null, { resetDiagnostics: false });
+      const afterFinish = getManualScraperTelemetry();
+      assert(afterFinish.active?.phase === 'idle',
+        `precondition: the run-completion path must have run, got ${JSON.stringify(afterFinish.active)}`);
+      assert(afterFinish.active?.sourceId === undefined
+        && afterFinish.active?.srcName === undefined
+        && afterFinish.active?.count === undefined,
+      `a finished/idle state must stop asserting the prior source's identity/count as current, got ${JSON.stringify(afterFinish.active)}`);
+
+      // A different source's post-completion recovery pass (Solve/Continue
+      // reopening a stalled source) now starts. Its per-card telemetry all
+      // records with updateActive:false by design, so this one context reset
+      // is the ONLY thing that can re-point `active` at the source actually
+      // recovering.
+      recordManualScraperTelemetry({
+        phase: 'recovery-start', sourceId: 'google', srcName: 'Google for Jobs', count: 4,
+      });
+      const duringRecovery = getManualScraperTelemetry();
+      assert(duringRecovery.active?.phase === 'recovery-start' && duringRecovery.active?.sourceId === 'google',
+        `a recovery pass must re-point the active slot at the recovering source, got ${JSON.stringify(duringRecovery.active)}`);
+      assert(duringRecovery.active?.count === 4,
+        'recovery-start must report its own target count, not inherit the stale prior source\'s count');
+
+      // A per-card outcome recorded with updateActive:false during the
+      // recovery pass must not silently reassign `active` back to Glassdoor
+      // or leak a stale key into it — same contract as the ordinary walk.
+      recordManualScraperTelemetry(
+        { phase: 'desc-miss', sourceId: 'google', srcName: 'Google for Jobs', key: 'Some Google job' },
+        { updateActive: false },
+      );
+      const afterCardMiss = getManualScraperTelemetry();
+      assert(afterCardMiss.active?.phase === 'recovery-start' && afterCardMiss.active?.sourceId === 'google',
+        'a per-card recovery outcome (updateActive:false) must not move the active slot off the recovering source');
+
+      resetManualScraperTelemetry();
+      return { ok: true };
+    },
+  },
+{
+    name: 'manualScraper telemetry: identical consecutive card-walk retries collapse into one entry with repeatCount, distinct batches survive untouched',
+    run: () => {
+      // A stuck single-card retry loop can emit the SAME card-walk batch
+      // summary over and over (same attempted/expanded/failure keys+reasons) —
+      // nothing changes but the clock. Before this fix each retry was a new
+      // ring slot, so ~13 identical retries evicted 13 distinct earlier
+      // batches ("5 earlier card-walk batch summary(s) omitted").
+      resetManualScraperTelemetry();
+      const stuckBatch = {
+        phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor', pageNum: 4,
+        total: 6, attempted: 5, expanded: 4, missing: 1,
+        failureSamples: [{ itemIndex: 3, key: 'Stuck Card', reason: 'panel-timeout' }],
+      };
+      for (let i = 0; i < 13; i++) recordManualScraperTelemetry({ ...stuckBatch });
+      const afterStuckRun = getManualScraperTelemetry();
+      const stuckEntries = afterStuckRun.events.filter(e => e.phase === 'card-walk');
+      assert(stuckEntries.length === 1,
+        `13 byte-identical card-walk retries must collapse to one ring entry, got ${stuckEntries.length}`);
+      assert(stuckEntries[0].repeatCount === 13,
+        `the collapsed entry must carry the full occurrence count, got ${stuckEntries[0].repeatCount}`);
+      assert(Number.isFinite(stuckEntries[0].firstTs) && Number.isFinite(stuckEntries[0].lastTs)
+        && stuckEntries[0].firstTs <= stuckEntries[0].lastTs,
+      'the collapsed entry must retain the first and last occurrence timestamps');
+
+      // A card-walk batch that differs in ANY diagnostic field (here: page 5
+      // instead of page 4, and a different failing card) must never be folded
+      // into the run above — this is what proves distinct history survives.
+      const differentBatch = {
+        phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor', pageNum: 5,
+        total: 6, attempted: 6, expanded: 6, missing: 0,
+        failureSamples: [],
+      };
+      recordManualScraperTelemetry({ ...differentBatch });
+
+      // A second stuck run for a later batch must collapse on its own,
+      // separately from both the first stuck run and the batch in between.
+      const laterStuckBatch = {
+        phase: 'card-walk', sourceId: 'glassdoor', srcName: 'Glassdoor', pageNum: 9,
+        total: 6, attempted: 3, expanded: 2, missing: 1,
+        failureSamples: [{ itemIndex: 1, key: 'Another Stuck Card', reason: 'panel-timeout' }],
+      };
+      for (let i = 0; i < 4; i++) recordManualScraperTelemetry({ ...laterStuckBatch });
+
+      const finalTelemetry = getManualScraperTelemetry();
+      const cardWalkEntries = finalTelemetry.events.filter(e => e.phase === 'card-walk');
+      assert(cardWalkEntries.length === 3,
+        `a distinct batch between two repeating runs must survive as its own entry, got ${cardWalkEntries.length} card-walk entries`);
+      assert(cardWalkEntries[0].repeatCount === 13 && cardWalkEntries[0].pageNum === 4,
+        'the first collapsed run must keep its own identity and repeat count');
+      assert((cardWalkEntries[1].repeatCount || 1) === 1 && cardWalkEntries[1].pageNum === 5,
+        'the lone differing batch in between must not carry a repeat count from either neighbor');
+      assert(cardWalkEntries[2].repeatCount === 4 && cardWalkEntries[2].pageNum === 9,
+        'the second collapsed run must be counted independently of the first');
+
+      resetManualScraperTelemetry();
+      return { ok: true };
     },
   }
 ];

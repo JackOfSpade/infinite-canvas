@@ -10,7 +10,9 @@
  *   User → AI: "The app crashed when I resized a node"
  *   AI  → User: "Please use bug report code: CRASH+UI+LEAN"
  *   User pastes "CRASH+UI+LEAN" into the filter code box, writes their
- *   description, then presses Copy to Clipboard.
+ *   description, then presses Copy to Clipboard. That saves the full report
+ *   to a file and copies its path (not the report text) — the AI reads the
+ *   report from that file on disk instead of receiving it pasted inline.
  *
  * Codes are combined with '+':  ERR+LEAN,  SAVE+QUICK,  CRASH+UI
  */
@@ -396,7 +398,7 @@ export function buildAiPrompt(description) {
 
 "${bug}"
 
-From the filter codes below, pick the one(s) that capture the telemetry needed to debug this and reply with ONLY the code string (e.g. "CRASH+UI+LEAN"). Combine codes with "+". I'll paste it straight into the bug reporter to attach exactly the relevant data — I won't edit the code by hand.
+From the filter codes below, pick the one(s) that capture the telemetry needed to debug this and reply with ONLY the code string (e.g. "CRASH+UI+LEAN"). Combine codes with "+". I'll paste it straight into the bug reporter to attach exactly the relevant data — I won't edit the code by hand. The generated report is saved to a file on disk, not pasted inline: when I hand you its file path next, read the report yourself from that file (in segments if it's large) rather than waiting for the text to be pasted.
 
 Available codes:
 ${codeLines}

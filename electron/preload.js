@@ -217,5 +217,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onChromeLaunchDismissed: createListener('browser-chrome-launch-dismissed'),
 
   // ── Lifecycle Control ────────────────────────────────────────────────────
-  cancelNodeTask: (nodeId) => ipcRenderer.send('cancel-node-task', nodeId),
+  cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause),
 });

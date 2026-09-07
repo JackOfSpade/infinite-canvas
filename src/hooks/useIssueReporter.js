@@ -321,16 +321,45 @@ export function useIssueReporter({
         if (!isMountedRef.current) return;
 
         if (res.success) {
+          // 'file-pointer' is the normal path: the full uncapped report was
+          // written to disk and the clipboard gets a short pointer, not the
+          // report body. 'inline-fallback' means the file write itself failed,
+          // so clipboardText is the old size-capped report text instead.
+          const isFilePointer = res.delivery === 'file-pointer';
           try {
-            await navigator.clipboard.writeText(res.markdown);
-            addToast({
-              title: 'Bug Report Copied',
-              description: 'Report copied to clipboard.',
-              type: "success",
-            });
+            await navigator.clipboard.writeText(res.clipboardText);
+            if (isFilePointer) {
+              addToast({
+                title: 'Bug Report Saved',
+                description: `Saved to ${res.savedPath} — its path (not the report itself) is on your clipboard.`,
+                type: "success",
+              });
+            } else {
+              // `reduced` is measured against the uncapped render, not inferred
+              // from the cap being applied — a small report that failed to save
+              // is copied WHOLE, and telling the user it was size-capped would
+              // send them hunting for data that never went missing.
+              addToast({
+                title: 'Bug Report Copied',
+                description: res.reduced
+                  ? `Could not save the report file (${res.saveError}), so a size-capped report was copied to the clipboard instead.`
+                  : `Could not save the report file (${res.saveError}), so the full report was copied to the clipboard instead.`,
+                type: "warning",
+              });
+            }
           } catch (clipErr) {
             EventLogger.error('Clipboard failed:', clipErr);
-            addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy it automatically. Use Save to File to keep the report.', type: "warning" });
+            if (isFilePointer) {
+              // Better news than the legacy failure: the full report already
+              // exists on disk, so the clipboard miss is fully recoverable.
+              addToast({
+                title: 'Clipboard Error',
+                description: `The report is saved at ${res.savedPath} — clipboard copy failed, but you can open the file directly.`,
+                type: "warning",
+              });
+            } else {
+              addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy it automatically. Use Save to File to keep the report.', type: "warning" });
+            }
           }
         } else {
           addToast({ title: 'Bug Report Failed', description: res.error || 'Could not generate the report.', type: "error" });

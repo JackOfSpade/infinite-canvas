@@ -32,6 +32,18 @@ export default [
         && staging.includes('if (!resumeGatheredOnly) {\n        await setJobRunStage')
         && staging.includes('} else {\n      const startedRun = await startJobRun'),
       'gathered-only recovery remains inside the resume branch, preserving its original manifest token and staged rows instead of starting/truncating a fresh run');
+      // A run that dies DURING the gather never reaches the finalization loop
+      // below, so a source's terminal status has to be durable the moment that
+      // source finishes. Browser sources run one at a time and one of them can
+      // hold the phase indefinitely (an unbounded human-solve wait), which is
+      // exactly when a crash leaves finished sources looking unstarted.
+      assert(source.includes('const markGatheredSourceTerminal = async (sourceId, results)')
+        && source.includes('await markGatheredSourceTerminal(sid, r);')
+        && source.includes("await markGatheredSourceTerminal('indeed', indeedResult ? [indeedResult] : []);")
+        && source.includes('await markGatheredSourceTerminal(sourceId, [{ jobs }]);'),
+      'every source records its terminal manifest status as it finishes, so resume after a mid-gather crash reuses staged rows instead of re-scraping them');
+      assert(source.includes("if (!blocked && produced === 0) return; // nothing proven yet — leave it pending"),
+        'the in-gather mark is conservative: only a source that demonstrably produced rows or blocked is written, so a wrong guess costs a re-scrape and never staged results');
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);
       const finalization = source.slice(finalizationStart, gatheredStage);

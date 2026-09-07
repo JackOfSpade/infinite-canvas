@@ -237,10 +237,13 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
             {activeMode === 'file' ? 'Saving…' : 'Save to File'}
           </button>
 
-          {/* Copy to clipboard — primary action */}
+          {/* Copy to clipboard — primary action. Saves the full report to a
+              file and copies its PATH, not the report body — an AI assistant
+              reads the file from disk instead of receiving a giant paste. */}
           <button
             type="submit"
             disabled={noDesc || isSubmitting}
+            title="Saves the full report to a file and copies its file path — not the report text — to your clipboard."
             className="flex items-center gap-1.5 px-4 py-2 text-sm
                        bg-blue-600 hover:bg-blue-500 disabled:opacity-50
                        text-white rounded-md transition-colors"

@@ -23,7 +23,8 @@ import { useRef, useEffect, useCallback, useMemo } from 'react';
  *
  *   const handleCancel = () => {
  *     epoch.bump();           // every in-flight pipeline starts returning early
- *     window.electronAPI?.cancelNodeTask?.(id);   // abort the backend too
+ *     window.electronAPI?.cancelNodeTask?.(id, 'user-reset');  // abort the backend too,
+ *                                                  // naming why (see CANCEL_CAUSE_LABELS)
  *   };
  *
  * Auto-bumps on component unmount so any pipeline mid-flight when the hub

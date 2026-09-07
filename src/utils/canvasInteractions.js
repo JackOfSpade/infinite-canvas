@@ -36,7 +36,10 @@ export function cancelNodeTasksRecursively(nodes, skipIds) {
   if (!Array.isArray(nodes)) return;
   nodes.forEach(n => {
     if (skipIds?.has(n.id)) return;
-    window.electronAPI?.cancelNodeTask?.(n.id);
+    // This helper is only reached from the two real deletion paths, so it is
+    // the one caller whose cancel genuinely IS a node deletion — every other
+    // caller passes its own cause so diagnostics stop calling a Reset a delete.
+    window.electronAPI?.cancelNodeTask?.(n.id, 'node-deleted');
     if (n.data?.canvasData?.nodes) cancelNodeTasksRecursively(n.data.canvasData.nodes, skipIds);
     // Legacy nodes shape fallback
     if (n.data?.nodes) cancelNodeTasksRecursively(n.data.nodes, skipIds);

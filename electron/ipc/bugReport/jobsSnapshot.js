@@ -51,6 +51,33 @@ export function buildJobsConfigSnapshot() {
   };
 }
 
+/**
+ * Render what a `verification-text` challenge verdict actually rested on.
+ *
+ * `reason=verification-text` alone is uncheckable: it names neither the phrase
+ * that matched nor the size of the document it matched inside. Both are what
+ * separate a genuine anti-bot interstitial from ordinary posting copy that
+ * happens to use the same words, so a report that omits them can only be
+ * trusted, never verified.
+ */
+export function formatChallengeTextEvidence(entry) {
+  if (!entry) return '';
+  const chars = Number(entry.bodyTextLength);
+  const ceiling = Number(entry.interstitialMaxChars);
+  const markers = Array.isArray(entry.matchedVerificationMarkers) ? entry.matchedVerificationMarkers : [];
+  const bits = [];
+  if (Number.isFinite(chars)) {
+    const verdict = Number.isFinite(ceiling)
+      ? (chars > ceiling
+        ? ` — full page content, past the ${ceiling}-char interstitial ceiling`
+        : ` — interstitial-sized (ceiling ${ceiling})`)
+      : '';
+    bits.push(`body ${chars} chars${verdict}`);
+  }
+  if (markers.length) bits.push(`matched ${JSON.stringify(markers.join(' | ')).slice(0, 200)}`);
+  return bits.join(' · ');
+}
+
 function collectJobLinkRows(nodes) {
   const rows = [];
   const seenObjects = new WeakSet();
@@ -362,6 +389,8 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
             ? 'per-platform job cap'
             : cap.type === 'pages-per-platform'
               ? 'Pages per platform cap'
+              : cap.type === 'source-internal'
+                ? "source's own result ceiling"
             : 'configured job cap';
         parts.push(`${capLabel} ${cap.limit}`);
       }
@@ -601,7 +630,10 @@ function sourceCaps(source) {
     const limit = typeof cap?.limit === 'number' && Number.isSafeInteger(cap.limit) && cap.limit > 0
       ? cap.limit
       : null;
-    if (!['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(type) || limit == null) continue;
+    // 'source-internal' is displayed but is deliberately NOT accepted by
+    // configuredSourceCap below: a board's own ceiling is an observation about
+    // the provider, never proof that the USER chose to limit collection.
+    if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(type) || limit == null) continue;
     const key = `${type}:${limit}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -777,10 +809,26 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     || (receiptPlaceholders || 0) > 0 || (receiptUnscored || 0) > 0 || (receiptFailedBatches || 0) > 0
   );
   const durableCompletedOutput = hasDurableCompletedOutput(receipt, snapshot);
+  // `jobsTelemetry` is process-GLOBAL: it describes whichever hub most recently
+  // started a run, which is not necessarily the hub whose durable receipt and
+  // snapshot this assessment reconciles. Starting a second search on a DIFFERENT
+  // hub rebinds `pipeline`/`nodeId` to that hub while receipt/snapshot still
+  // describe the finished one — so a user who kicked off another search and
+  // stopped it saw their completed run reported as "run tokens disagree", with
+  // the live search stage and the Job Board both resolved against the wrong
+  // node. Different node id = a different run, reported on its own line below.
+  // Same-node token drift is still a genuine bug signal and stays in `gaps`.
+  const liveTelemetryNodeId = receiptIdentifier(telemetry?.nodeId, '') || null;
+  const receiptNodeId = receiptIdentifier(receipt?.nodeId, '') || null;
+  const foreignLiveRun = !!liveTelemetryNodeId && !!receiptNodeId
+    && liveTelemetryNodeId !== receiptNodeId
+    && durableCompletedOutput;
   // This is the restart-shaped evidence set: live telemetry is process-local,
   // while receipt/snapshot facts are intentionally durable. Do not let stale
   // scoring/taxonomy residue turn that narrow durable claim into a live one.
-  const noLiveSearchTelemetry = !telemetry?.search && !telemetry?.pipeline;
+  // Another hub's live run is telemetry about a different run, so for THIS run
+  // it is the same evidentiary position as a restart: no live telemetry at all.
+  const noLiveSearchTelemetry = foreignLiveRun || (!telemetry?.search && !telemetry?.pipeline);
   const durableOutputOnly = durableCompletedOutput && noLiveSearchTelemetry && !receiptScoringInconsistent;
   // A completed zero-result run deliberately never invokes scoring or board
   // taxonomy: there is no score-ready input for either stage.  Prove that
@@ -812,8 +860,12 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     // Keep these independently: a stale search stamp and a newer pipeline
     // stamp can otherwise be collapsed by `pipeline || search` and make a
     // mixed run look correlated with a matching receipt/snapshot.
-    ['pipeline', recordedRunToken(telemetry?.pipeline?.runId)],
-    ['search', recordedRunToken(telemetry?.search?.runId)],
+    // A live run owned by another hub contributes no token here — it is not a
+    // second opinion about THIS run, so it cannot corroborate or contradict it.
+    ...(foreignLiveRun ? [] : [
+      ['pipeline', recordedRunToken(telemetry?.pipeline?.runId)],
+      ['search', recordedRunToken(telemetry?.search?.runId)],
+    ]),
     ['receipt', recordedRunToken(receipt?.runId)],
     ['snapshot', snapshot.runId],
   ].filter(([, token]) => !!token);
@@ -836,7 +888,11 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     };
   });
   const totalBoards = nonnegativeCount(jobBoardStateCount) ?? boards.length;
-  const activeSourceHubId = telemetry?.nodeId || receipt?.nodeId || null;
+  // Resolve boards against the hub this assessment is ABOUT. Preferring live
+  // telemetry unconditionally made a second hub's aborted run pick that hub's
+  // board — reporting an unrelated, never-combined board as this run's gap
+  // while the board that actually consumed the run went uninspected.
+  const activeSourceHubId = (foreignLiveRun ? receiptNodeId : telemetry?.nodeId || receipt?.nodeId) || null;
   const relevantBoards = activeSourceHubId
     ? boards.filter(board => board.combinedSourceHubIds.includes(activeSourceHubId)
       || board.connectedSourceHubIds.includes(activeSourceHubId))
@@ -1049,7 +1105,8 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
         : `\`${source.id}\` walk was truncated before the provider's result set ended`);
     }
   }
-  if (pipelinePhase && pipelinePhase !== 'completed') gaps.push(`live search stage is \`${pipelinePhase}\``);
+  // Another hub's phase is not this run's gather stage — see `foreignLiveRun`.
+  if (pipelinePhase && pipelinePhase !== 'completed' && !foreignLiveRun) gaps.push(`live search stage is \`${pipelinePhase}\``);
   if (receiptState.exists && !receiptCompleted) gaps.push('terminal receipt is not completed');
   if (receiptCompleted && !receiptCleanupConfirmed) gaps.push('terminal cleanup was not confirmed');
   if (receiptScoringInconsistent) {
@@ -1178,6 +1235,14 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     : unprovenSources.length > 0
       ? ` Gather completeness is unproven for ${unprovenSources.length} source(s) (${unprovenSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size, so this verdict covers the stages after collection.`
     : ' No per-source gather coverage was retained, so this verdict covers the stages after collection.';
+  // A durable receipt proves the run WROTE its score-ready output; it says
+  // nothing about whether a board ever rendered it. Without this, a completed
+  // run whose board was cleared or whose Combine was cancelled read as a clean
+  // finish, and "Job Board consumers: n/m correlate" implied the rows landed.
+  const unconsumedBoards = relevantBoards.filter(board => !board.stale && board.hubState !== 'done');
+  const boardConsumptionQualifier = unconsumedBoards.length > 0
+    ? ` ${unconsumedBoards.length} connected Job Board${unconsumedBoards.length === 1 ? '' : 's'} (${unconsumedBoards.map(board => `\`${board.id}\` is \`${board.hubState}\``).join(', ')}) ${unconsumedBoards.length === 1 ? 'has' : 'have'} not consumed this run; the score-ready rows remain on the hub and in the saved snapshot, so Combine can still render them without re-scraping.`
+    : '';
   const coverageQualifier = configuredCapSources.length > 0
     ? `${configuredCapQualifier}${unprovenUncappedSources.length > 0
       ? ` Gather completeness is also unproven for ${unprovenUncappedSources.length} uncapped source(s) (${unprovenUncappedSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size.`
@@ -1190,7 +1255,7 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
       ? `✅ **COMPLETED WITH COLLECTION QUALIFICATIONS** — every reconciled stage agrees.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}`
       : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}`
     : durableOutputOnly
-      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier} Live search/scoring telemetry was not retained after restart; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
+      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
@@ -1220,6 +1285,16 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const snapshotLine = snapshot.state === 'parseable'
     ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
     : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
+  // State the other run as a fact of its own instead of letting its phase and
+  // its error masquerade as this run's. Observations only — a stopped run is
+  // not evidence about the run reconciled above, in either direction.
+  const foreignPipelineToken = recordedRunToken(telemetry?.pipeline?.runId);
+  // Free prose (a cancel-cause label), not an identifier — `receiptIdentifier`
+  // would reject every one of them for containing spaces.
+  const foreignPipelineError = historyReportValue(telemetry?.pipeline?.error, '', 120);
+  const foreignRunLine = foreignLiveRun
+    ? `- Separate later run in this process: hub \`${liveTelemetryNodeId}\` reached phase \`${pipelinePhase || 'not retained'}\`${foreignPipelineToken ? ` (run \`${foreignPipelineToken}\`)` : ''}${foreignPipelineError ? ` · stage error: \`${foreignPipelineError}\`` : ''} — a different hub's run, excluded from the reconciliation above.`
+    : null;
   const runCorrelationLine = runTokens.length < 2
     ? '- Run correlation: insufficient retained run tokens — cannot verify this is one run.'
     : distinctRunTokens.length === 1
@@ -1282,7 +1357,16 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
         : `ended at ${source.stopReason}`;
       return `✅ \`${source.id}\` traversed all ${source.gathered ?? '?'} reachable candidate identities (${ending}${retainedDetail}${unavailableDetail})${regionQualifier}`;
     }
-    if (source.total == null) return `\`${source.id}\` reported no candidate corpus size — coverage unproven`;
+    // Coverage stays unproven — a fall-through stop reason is not an
+    // exhaustion receipt — but state the two facts that WERE observed, so a
+    // reader can weigh the walk instead of being told only what is unknown.
+    if (source.total == null) {
+      const observed = [
+        source.gathered != null ? `${source.gathered} traversed` : null,
+        source.stopReason ? `walk ended at \`${source.stopReason}\`` : null,
+      ].filter(Boolean);
+      return `\`${source.id}\` reported no candidate corpus size — coverage unproven${observed.length ? ` (${observed.join('; ')})` : ''}`;
+    }
     if (source.gathered == null) return `\`${source.id}\` provider advertised ${source.total} candidate identities; traversal count was not retained`;
     if (source.isExhausted && source.gathered < source.total) {
       const ending = source.exhaustionEvidence === 'scroll-end'
@@ -1290,8 +1374,15 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
         : `ended at ${source.stopReason}`;
       return `✅ \`${source.id}\` traversed all ${source.gathered} reachable candidate identities (board advertised ~${source.total}; ${ending}${retainedDetail}${unavailableDetail})${regionQualifier}`;
     }
-    return source.gathered < source.total
-      ? `⚠️ \`${source.id}\` traversed ${source.gathered} of ${source.total} advertised candidate identities${retainedDetail}${unavailableDetail}${regionQualifier}`
+    if (source.gathered < source.total) {
+      return `⚠️ \`${source.id}\` traversed ${source.gathered} of ${source.total} advertised candidate identities${retainedDetail}${unavailableDetail}${regionQualifier}`;
+    }
+    // A provider's advertised total is an estimate it revises while paginating,
+    // so the walk can legitimately end ABOVE it. "traversed 158 of 157" read as
+    // a broken ratio; state the traversal as the fact and the advertised count
+    // as the estimate it is.
+    return source.gathered > source.total
+      ? `✅ \`${source.id}\` traversed all ${source.gathered} candidate identities (provider advertised ~${source.total})${retainedDetail}${unavailableDetail}${regionQualifier}`
       : `✅ \`${source.id}\` traversed ${source.gathered} of ${source.total} advertised candidate identities${retainedDetail}${unavailableDetail}${regionQualifier}`;
   });
   const coverageItems = [...perSourceCoverage, ...(googleCoverage ? [googleCoverage] : [])];
@@ -1303,8 +1394,8 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
 > Compact reconciliation of the search/recovery funnel, scoring, taxonomy, terminal receipt, and the owned saved score-ready snapshot. Detailed per-job evidence remains in Job Search Pipeline.
 
 - ${verdict}
-- Live search stage: ${pipelinePhase || 'not retained'} _(this phase is stamped when the GATHER ends; scoring and taxonomy run after it — the terminal receipt is durable proof of the scoring output, while taxonomy and Job Board consumption are reconciled separately below)._
-${receiptLine}
+- Live search stage: ${foreignLiveRun ? `not retained for this run — the in-process phase belongs to a later run on hub \`${liveTelemetryNodeId}\`` : pipelinePhase || 'not retained'} _(this phase is stamped when the GATHER ends; scoring and taxonomy run after it — the terminal receipt is durable proof of the scoring output, while taxonomy and Job Board consumption are reconciled separately below)._
+${foreignRunLine ? `${foreignRunLine}\n` : ''}${receiptLine}
 ${searchLine}
 ${scoringLine}
 ${taxonomyLine}
@@ -1569,8 +1660,41 @@ function resolvedResumeCount(attempt) {
   return match ? Math.max(0, Number(match[1]) || 0) : null;
 }
 
-function postPipelineRecoveryAttemptCount(telemetry, pipeline) {
-  if (pipeline?.active || !pipeline?.ts) return 0;
+// Mirrors RESOLVE_PASS_TRAIL_CAP in jobs.js. Only used to detect a saturated
+// trail, so a drift between the two makes the report slightly more cautious
+// rather than wrong.
+const RESOLVE_PASS_TRAIL_REPORT_CAP = 50;
+
+// A repeating failure loop emits the SAME diagnostic over and over. Because
+// these trails are bounded by COUNT rather than by distinct content, those
+// copies EVICT the different earlier entries the section exists to surface: a
+// real report printed six byte-identical Google reveal lines above "3 earlier
+// reveal outcome(s) omitted", having spent its whole window on one repetition.
+// Fold consecutive identical entries into one that carries its occurrence
+// count, so the bound applies to distinct evidence. Folding is consecutive-only
+// so genuine ordering is never rearranged, and the newest member of a run is
+// the one rendered (its timing is the most recent observation).
+export function collapseConsecutiveIdentical(entries, signatureOf) {
+  const folded = [];
+  for (const entry of entries) {
+    const signature = signatureOf(entry);
+    const previous = folded[folded.length - 1];
+    if (previous && previous.signature === signature) {
+      previous.occurrences += 1;
+      previous.entry = entry;
+      continue;
+    }
+    folded.push({ signature, occurrences: 1, entry });
+  }
+  return folded;
+}
+
+function occurrenceSuffix(occurrences) {
+  return occurrences > 1 ? ` · ×${occurrences} (identical repeats folded)` : '';
+}
+
+export function postPipelineRecoveryAttemptCount(telemetry, pipeline) {
+  if (pipeline?.active || !pipeline?.ts) return { count: 0, atLeast: false };
   const completedAt = Number(pipeline.ts) || 0;
   let count = 0;
   const sourcesWithResolvedAttempt = new Set();
@@ -1595,10 +1719,27 @@ function postPipelineRecoveryAttemptCount(telemetry, pipeline) {
   }
   // Some older paths emitted a resolve row but not a resume-attempt row. Count
   // that newer completion once, while avoiding double-counting the normal pair.
+  //
+  // `resolves[sourceId]` is last-write-wins, so counting the ROW counts a source,
+  // not its passes: a source re-walked 13 times still leaves one row and used to
+  // add exactly 1. Prefer the per-pass timestamp trail when the run recorded one
+  // and count only the passes that happened after completion. The single-row
+  // fallback stays for telemetry captured before the trail existed.
+  let trailSaturated = false;
   for (const [sourceId, resolve] of Object.entries(telemetry?.resolves || {})) {
-    if (!sourcesWithResolvedAttempt.has(sourceId) && (Number(resolve?.ts) || 0) > completedAt) count++;
+    if (sourcesWithResolvedAttempt.has(sourceId)) continue;
+    const stamps = Array.isArray(resolve?.passTimestamps) ? resolve.passTimestamps : null;
+    if (stamps && stamps.length > 0) {
+      const postCompletion = stamps.filter(ts => (Number(ts) || 0) > completedAt);
+      count += postCompletion.length;
+      // Every retained stamp is post-completion AND the trail is full, so older
+      // passes were evicted and the true total is higher than what is counted.
+      if (postCompletion.length === stamps.length && stamps.length >= RESOLVE_PASS_TRAIL_REPORT_CAP) trailSaturated = true;
+    } else if ((Number(resolve?.ts) || 0) > completedAt) {
+      count++;
+    }
   }
-  return count;
+  return trailSaturated ? { count, atLeast: true } : { count, atLeast: false };
 }
 
 export function formatGlassdoorCacheProvenance(entry = {}) {
@@ -1841,9 +1982,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   let savedSnapshotJobs = [];
   let savedRecoveryJobs = [];
 
-  const postCompletionRecoveryAttempts = t.pipeline
+  const postCompletionRecovery = t.pipeline
     ? postPipelineRecoveryAttemptCount(t, t.pipeline)
-    : 0;
+    : { count: 0, atLeast: false };
+  const postCompletionRecoveryAttempts = postCompletionRecovery.count;
 
   if (t.pipeline) {
     const p = t.pipeline;
@@ -1859,7 +2001,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       : compactElapsedDuration(durationMs, { decimalSeconds: true });
     lines.push(`### Live Search Stage`);
     const supersedingRecoveries = postCompletionRecoveryAttempts;
-    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${supersedingRecoveries > 0 ? ` · superseded by ${supersedingRecoveries} post-completion recovery attempt${supersedingRecoveries === 1 ? '' : 's'}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
+    // "at least" is not hedging: the per-source pass trail is bounded, so when
+    // every retained stamp is post-completion the older passes were evicted and
+    // the real total is higher. Say so rather than printing a floor as a fact.
+    const recoveryCountLabel = `${postCompletionRecovery.atLeast ? 'at least ' : ''}${supersedingRecoveries}`;
+    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${p.active && elapsedLabel != null ? ` · run age ${elapsedLabel}` : ''}${!p.active && durationLabel != null ? ` · completed in ${durationLabel}` : ''}${supersedingRecoveries > 0 ? ` · superseded by ${recoveryCountLabel} post-completion recovery attempt${supersedingRecoveries === 1 && !postCompletionRecovery.atLeast ? '' : 's'}` : ''}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
     if (p.runOrigin || p.profileInputMode) {
       const runOriginLabel = {
         initial: 'Initial career-file run',
@@ -2411,7 +2557,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             + `${!db.active && db.recovered ? '; enrichment resumed' : ''}`
             + `${unenrichedKnown
               ? (unenriched > 0
-                ? `; **${unenriched} row(s) ended the walk with no description** and are held back from scoring by the evidence gate before scoring and before seen-history (so they stay eligible for a later run)`
+                // State the walk observation, not a downstream outcome this
+                // scope cannot vouch for. These rows still face dedup, age,
+                // target-role and history gates BEFORE the evidence gate, so
+                // most never reach it — a run reporting 38 + 122 such rows had
+                // an `evidence-deferred` funnel count of 2. Claiming all of them
+                // were "held back by the evidence gate" read as a contradiction
+                // against the funnel and hid which gate actually dropped them.
+                ? `; **${unenriched} row(s) ended the walk with no description** — those that survive the dedup/age/role/history gates are then held back by the description-evidence gate before scoring and before seen-history (so they stay eligible for a later run); the funnel's \`evidence-deferred\` count above is how many actually reached that gate`
                 : '; every retained row still carries a description')
               : (db.active ? '; those rows carry no description and are held back from scoring' : '')}`
             + `${db.active ? '; the block was still armed when the walk ended' : ''})`
@@ -2483,7 +2636,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           if (!closest || rejection.matched.length > closest.matched.length) closest = rejection;
         }
         if (!closest) return '';
-        const matched = closest.matched.length ? closest.matched.join('+') : '(none)';
+        // Show the surface form when a concept was satisfied by a synonym, so
+        // the claim can be checked against the title printed next to it.
+        const matchedParts = Array.isArray(closest.matchedConcepts) && closest.matchedConcepts.length
+          ? closest.matchedConcepts.map(concept => (
+            concept?.kind === 'synonym' && concept?.matched && concept.matched !== concept.queryTerm
+              ? `${concept.queryTerm}→${concept.matched}`
+              : (concept?.queryTerm || '?')
+          ))
+          : closest.matched;
+        const matched = matchedParts.length ? matchedParts.join('+') : '(none)';
         switch (closest.reason) {
           case 'no-usable-query-terms': return ' [query had no usable terms]';
           case 'ambiguous-domain-conflict': return ` [matched ${matched}, but an ambiguous-domain guard term was present]`;
@@ -3040,7 +3202,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     } catch { /* snapshot absent or unreadable — omit silently */ }
   } else {
-    lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+    // `search` is stamped only when the funnel FINISHES, so an aborted or
+    // crashed gather used to report "no search recorded" for a run whose own
+    // log proves it launched. `searchIntent` is stamped at launch; render it so
+    // the inputs survive the abort. State the inputs as inputs — no funnel
+    // counts exist, and none may be implied.
+    const intent = t?.searchIntent || null;
+    if (intent) {
+      const intentPhase = String(t?.pipeline?.phase || '').toLowerCase();
+      const intentSources = Array.isArray(intent.selectedSourceIds)
+        ? intent.selectedSourceIds.map(id => receiptIdentifier(id, 'unknown')).filter(Boolean)
+        : [];
+      const intentQueries = Array.isArray(intent.queryStrings)
+        ? intent.queryStrings.map(q => historyReportValue(q, '', 80)).filter(Boolean)
+        : [];
+      lines.push('### Search');
+      lines.push(`- ⚠️ This search launched but never reached the funnel stage${intentPhase ? ` (live search stage: \`${intentPhase}\`)` : ''}, so no raw/deduped/kept counts exist. Its inputs were retained:`);
+      lines.push(`  - Run \`${receiptIdentifier(intent.runId, 'not recorded')}\` · origin \`${receiptIdentifier(intent.runOrigin, 'unknown')}\` · career input \`${receiptIdentifier(intent.profileInputMode, 'unknown')}\``);
+      lines.push(`  - ${nonnegativeCount(intent.queries) ?? '?'} quer${intent.queries === 1 ? 'y' : 'ies'}${intentQueries.length ? `: ${intentQueries.map(q => `\`${q}\``).join(', ')}` : ''}`);
+      lines.push(`  - ${intentSources.length} selected source(s)${intentSources.length ? `: ${intentSources.map(id => `\`${id}\``).join(', ')}` : ''}`);
+      lines.push(`  - Max posting age ${nonnegativeCount(intent.maxAgeDays) ?? '?'}d · location \`${historyReportValue(intent.location, 'none', 80)}\``);
+    } else {
+      lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+    }
   }
   // Indeed browser-session preflight (contract: jobsTelemetry.indeedSession,
   // electron/ipc/jobs.js) — recorded once the Indeed scrape browser has
@@ -3124,6 +3308,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - Egress IP: ${a.egressIp}${who ? ` · ${historyReportValue(who, '', 90)}` : ''}${hostingNote}`);
       }
       if (a.blockId) lines.push(`  - Anti-bot incident ID: ${a.blockId}`);
+      // Rendered on its OWN line rather than inside pageState: pageState is
+      // length-capped, so folding these in would let the very fields that make
+      // a challenge verdict checkable be the ones cut.
+      const challengeTextEvidence = formatChallengeTextEvidence(a);
+      if (challengeTextEvidence) lines.push(`  - Verification text evidence: ${challengeTextEvidence}`);
       if (a.pageState) {
         lines.push(`  - Page state: ${JSON.stringify(a.pageState).slice(0, 360)}`);
       }
@@ -3262,6 +3451,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           isChallengePhase && e.repeatCount ? `repeat=${e.repeatCount}`                           : null,
           isChallengePhase && e.title       ? `title=${JSON.stringify(historyReportValue(e.title, '', 100))}` : null,
           isChallengePhase && e.pageState   ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
+          isChallengePhase && formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
           isChallengePhase && e.bodyHead    ? `body=${JSON.stringify(historyReportValue(e.bodyHead, '', 160))}` : null,
           // A skipped source has to say WHY on its own line. Without this the
           // phase read "location-resolution-failed Glassdoor q1/12" and the
@@ -3288,6 +3478,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.hardBlock ? 'hardBlock=yes' : null,
           e.title ? `title=${JSON.stringify(historyReportValue(e.title, '', 100))}` : null,
           e.pageState ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
+          formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
           e.status != null ? `HTTP=${e.status}` : null,
           // The panel rate-limit / HTTP-error phases record `url`, not
           // `finalUrl`; reading only the latter printed a bare `HTTP=429` with
@@ -3371,8 +3562,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const abortLabel = aborted
           ? `${e.aborted === true || e.cancelled === true ? 'aborted' : 'interrupted'}${abortPosition}${abortReason ? ` (${historyReportValue(abortReason, '', 160)})` : ''}`
           : null;
+        // Identical consecutive retries are folded on write into ONE ring entry
+        // so a stuck loop cannot evict the distinct history around it. Say how
+        // many times it actually happened and over what span — without this the
+        // folded entry reads as a single attempt and understates a wedged
+        // recovery exactly as badly as the duplicates overstated it.
+        const repeatCount = Number(e.repeatCount);
+        const repeatSpan = Number(e.firstTs) > 0 && Number(e.lastTs) > Number(e.firstTs)
+          ? ` over ${compactElapsedDuration(Number(e.lastTs) - Number(e.firstTs))}`
+          : '';
         const label = [
           e.srcName || e.sourceId || 'source',
+          Number.isFinite(repeatCount) && repeatCount > 1
+            ? `×${repeatCount} identical retries${repeatSpan} (folded)`
+            : null,
           e.strategy ? `strategy=${String(e.strategy).slice(0, 80)}` : null,
           e.panelSelector ? `panel=${JSON.stringify(String(e.panelSelector).slice(0, 180))}` : null,
           e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
@@ -3553,13 +3756,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // board's own end-of-list marker. Measured bound for context: six unrelated
   // high-volume roles all exhausted between 174 and 194 cards, so a reveal that
   // plateaus in the low tens has almost certainly not seen the whole list.
-  const revealRuns = originPool.filter(e => e?.phase === 'reveal-finished');
+  const revealRuns = collapseConsecutiveIdentical(
+    originPool.filter(e => e?.phase === 'reveal-finished'),
+    e => `${e?.sourceId || '?'}|${Number(e?.count) || 0}|${Number(e?.iterations) || 0}|${e?.exit || ''}`,
+  );
   if (revealRuns.length > 0) {
     lines.push('\n### Scroll reveal');
     // Newest-last: one outcome is emitted per query, so a 12-query run would
     // otherwise print only the first six and silently drop the later plateau
     // this section exists to surface.
-    for (const e of revealRuns.slice(-6)) {
+    for (const folded of revealRuns.slice(-6)) {
+      const e = folded.entry;
       const count = Number(e.count) || 0;
       const viaMarker = e.exit === 'end-of-list';
       // State the observation; do NOT assert the cause. A small corpus plateaus
@@ -3569,10 +3776,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : e.exit === 'plateau'
           ? `ended on a no-growth plateau, NOT the board's end-of-list marker — completeness is unproven${count > 0 && count < 60 ? ' (and this count is far below the 174-194 range every high-volume query exhausted at, which is the signature of a reveal that never loaded)' : ''}`
           : `ended: ${e.exit || 'unknown'}`;
-      lines.push(`- \`${e.sourceId || '?'}\`: revealed ${count} card(s) over ${Number(e.iterations) || 0} pass(es) — ${note}`);
+      lines.push(`- \`${e.sourceId || '?'}\`: revealed ${count} card(s) over ${Number(e.iterations) || 0} pass(es) — ${note}${occurrenceSuffix(folded.occurrences)}`);
     }
     if (revealRuns.length > 6) {
-      lines.push(`- _${revealRuns.length - 6} earlier reveal outcome(s) omitted from the bounded trail._`);
+      lines.push(`- _${revealRuns.length - 6} earlier distinct reveal outcome(s) omitted from the bounded trail._`);
     }
   }
 

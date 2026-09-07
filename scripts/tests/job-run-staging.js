@@ -935,7 +935,11 @@ export default [
         && apiMerge.includes('if (Array.isArray(res.sourceCaps) && res.sourceCaps.length > 0)'),
       'HTTP result merging must publish page/cap diagnostics into the per-source funnel');
       assert(bySourceStart >= 0 && bySourceEnd > bySourceStart
-        && bySource.includes("['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(data.cap.type)")
+        // 'source-internal' joins the list so a board's OWN result ceiling
+        // (LinkedIn's 150) survives serialization and can be reported with its
+        // number instead of a bare `result-ceiling` stop reason. It is still
+        // refused as user-configured-cap proof by configuredSourceCap.
+        && bySource.includes("['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(data.cap.type)")
         && bySource.includes('Number(data.cap.limit) > 0')
         && bySource.includes("data.stopReasons.add('jobs-per-platform')")
         && bySource.includes('if (Array.isArray(data.caps))')

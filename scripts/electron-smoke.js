@@ -368,14 +368,42 @@ try {
     return {
       direct: { status: direct.status, contentType: direct.headers.get('content-type'), bytes: (await direct.arrayBuffer()).byteLength },
       svg: { status: svg.status, contentType: svg.headers.get('content-type'), bytes: svgText.length, movedMarker: svgText.includes('fill="red"') },
-      diagnostics: String(report?.markdown || '')
-        .split('\n')
-        .filter(line => line.includes('product-photo') || line.includes('[local-file]'))
-        .slice(-20),
+      // The clipboard path no longer returns the report body — it writes the
+      // full report to an app-managed file and returns a short pointer. Hand
+      // the pointer contract back to Node, which can actually read that file;
+      // this is the only place the redesigned flow runs in a real Electron
+      // process against a real userData directory.
+      report: {
+        success: report?.success === true,
+        delivery: report?.delivery || null,
+        savedPath: report?.savedPath || null,
+        clipboardText: String(report?.clipboardText || ''),
+        bytes: report?.bytes ?? null,
+      },
     };
   }, { pngPath: originalPhotoPath, svgPath: originalSvgPath });
+  const savedReport = runtimeRelinkProbe.report;
+  assert.equal(savedReport.success && savedReport.delivery, 'file-pointer',
+    `Copy to Clipboard should save a report file and return a pointer: ${JSON.stringify(savedReport)}`);
+  const savedReportBody = await fs.readFile(savedReport.savedPath, 'utf8');
+  assert.ok(savedReportBody.includes('## Issue Description'),
+    'the saved report file should contain the full report body');
+  assert.equal(Buffer.byteLength(savedReportBody), savedReport.bytes,
+    'the reported byte count should match the bytes actually written');
+  // The whole point of the redesign: what lands on the clipboard is a short
+  // pointer, not the report. Guard both halves — it names the file, and it is
+  // nowhere near the size of the thing it points at.
+  assert.ok(savedReport.clipboardText.includes(savedReport.savedPath),
+    `the clipboard pointer should name the saved file: ${savedReport.clipboardText.slice(0, 400)}`);
+  assert.ok(savedReport.clipboardText.length < 4_000
+    && savedReport.clipboardText.length < savedReportBody.length,
+  `the clipboard pointer should stay far smaller than the report it points at (pointer ${savedReport.clipboardText.length} vs report ${savedReportBody.length})`);
+  const relinkDiagnostics = savedReportBody
+    .split('\n')
+    .filter(line => line.includes('product-photo') || line.includes('[local-file]'))
+    .slice(-20);
   assert.equal(runtimeRelinkProbe.direct.status, 200,
-    `plain document-image requests should relink without a marketplace preview query: ${JSON.stringify(runtimeRelinkProbe)}`);
+    `plain document-image requests should relink without a marketplace preview query: ${JSON.stringify(runtimeRelinkProbe.direct)} · report diagnostics: ${JSON.stringify(relinkDiagnostics)}`);
   assert.equal(runtimeRelinkProbe.svg.status, 200,
     `accepted SVG preview requests should relink at runtime: ${JSON.stringify(runtimeRelinkProbe.svg)}`);
   assert.equal(runtimeRelinkProbe.svg.contentType, 'image/svg+xml',

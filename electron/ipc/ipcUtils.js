@@ -81,9 +81,32 @@ function unregisterNodeTask(sender, nodeId, ac) {
 }
 
 /**
+ * The cancellation sentinel every node-scoped abort carries. The MESSAGE is
+ * load-bearing — `jobs.js` keys its "intentional abandonment, drop this run's
+ * recovery sidecars" branch on `reason.message === 'Node deleted'`, and the IPC
+ * layer forwards it verbatim as the caller-visible error — so it must not
+ * change. The NAME is what identifies this as a cancellation to generic
+ * abort-aware code (`fetch` rejects with this exact object, and a bare `Error`
+ * made a user's Stop read as a network failure in `safeApiFetch`).
+ */
+export function cancellationError(message, cause = null) {
+  const error = Object.assign(new Error(message), { name: 'AbortError' });
+  // A bounded, renderer-supplied label for WHY this was cancelled. The message
+  // cannot carry it (control flow and IPC contracts key on the message), so
+  // diagnostics read this instead of guessing from the sentinel.
+  const label = String(cause || '').trim().toLowerCase().slice(0, 40);
+  if (/^[a-z][a-z0-9-]*$/.test(label)) error.cancelCause = label;
+  return error;
+}
+
+export function nodeCancellationError(cause = null) {
+  return cancellationError('Node deleted', cause);
+}
+
+/**
  * Cancel all active background tasks for a specific node.
  */
-export function abortNodeTasks(nodeId, sender = null, reason = new Error('Node deleted')) {
+export function abortNodeTasks(nodeId, sender = null, reason = nodeCancellationError()) {
   const owners = sender ? [[sender, senderTaskMap(sender)]] : [...nodeTasks.entries()];
   for (const [owner, tasks] of owners) {
     const set = tasks?.get(nodeId);
