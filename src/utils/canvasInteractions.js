@@ -1,3 +1,5 @@
+import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
+
 // ── Global Canvas Interaction State ──────────────────────────────────────────
 // These state objects are abstracted completely out of the React lifecycle to
 // ensure they survive Hot Module Replacement (HMR) seamlessly during development,
@@ -90,11 +92,102 @@ export function collectDeletedJobRunDiscards(nodes, canvasFilePath) {
 export function discardDeletedJobRuns(nodes, canvasFilePath, onError = null) {
   const discards = collectDeletedJobRunDiscards(nodes, canvasFilePath);
   for (const discard of discards) {
+    const discardRun = window.electronAPI?.discardJobRun;
+    if (typeof discardRun !== 'function') {
+      onError?.(new Error('Job run cleanup is unavailable'), discard, null);
+      continue;
+    }
     try {
-      const pending = window.electronAPI?.discardJobRun?.(discard);
-      pending?.catch?.((error) => onError?.(error, discard));
+      Promise.resolve(discardRun(discard)).then((result) => {
+        if (result?.success !== true || result?.ok !== true) {
+          onError?.(new Error(result?.error || result?.reason || 'Job run cleanup failed'), discard, result);
+        }
+      }).catch((error) => onError?.(error, discard, null));
     } catch (error) {
-      onError?.(error, discard);
+      onError?.(error, discard, null);
+    }
+  }
+  return discards;
+}
+
+/**
+ * Capture analysis-bundle cleanup ownership at a committed deletion boundary.
+ * The bundle is canvas-scoped, so the hub/run and clear timestamp must be
+ * captured before React Flow removes the node. Callers pass the actual removed
+ * roots: Clear Canvas has already excluded its top-level locked roots, while a
+ * locked descendant of an unlocked deleted group is still removed and must be
+ * cleaned rather than left resumable on disk.
+ */
+export function collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, clearedAt = Date.now()) {
+  if (!Array.isArray(nodes)) return [];
+  const discards = [];
+  const seen = new Set();
+  const visit = (items) => {
+    for (const node of items || []) {
+      if (node?.type === 'jobhub') {
+        const nodeId = typeof node.id === 'string' && node.id ? node.id : null;
+        const rawRunId = node.data?.hubState === 'scoring-batch'
+          ? (node.data?.pendingBatch?.jobRunId || node.data?.jobRunId || null)
+          : (node.data?.jobRunId || node.data?.pendingBatch?.jobRunId || null);
+        // A malformed persisted run token must not turn an otherwise safe
+        // boundary clear into an invalid IPC request. Null still deletes
+        // pre-boundary artifacts by exact hub/canvas ownership; a valid token
+        // simply adds the equal-time/late-write tombstone.
+        const runId = normalizeJobAnalysisClearRunId(rawRunId);
+        // A terminal hub can have saved analysis without a live staging token,
+        // so null runId still needs an exact hub-owned cleanup attempt.
+        if (nodeId && !seen.has(nodeId)) {
+          seen.add(nodeId);
+          discards.push({ canvasFilePath, nodeId, runId, clearedAt });
+        }
+      }
+      visit(node?.data?.canvasData?.nodes);
+      visit(node?.data?.nodes);
+    }
+  };
+  visit(nodes);
+  return discards;
+}
+
+// A cross-hub bundle can be mixed because `current` has already advanced to a
+// different hub/run while this deleted hub still owns an older last-success
+// record. Preserving the foreign/new artifacts and clearing the exact old one
+// is a successful safe outcome, not a warning. An `unpaired` prompt is NOT
+// safe: it has no owner metadata, may retain the removed hub's career data,
+// and needs an honest cleanup warning. Never silently accept malformed JSON,
+// uncertain removal, or an unknown state either.
+export function isSafeJobAnalysisCleanupNoop(result) {
+  if (result?.reason !== 'ownership-mismatch') return false;
+  const artifacts = Object.values(result?.artifacts || {});
+  const safeStates = new Set(['missing', 'ownership-mismatch', 'foreign-paired', 'post-clear', 'post-clear-paired', 'cleared']);
+  return artifacts.length > 0
+    && artifacts.every(artifact => safeStates.has(artifact?.state));
+}
+
+/**
+ * Dispatch best-effort analysis cleanup without delaying visual deletion. The
+ * main process rechecks canvas/hub ownership and uses the captured timestamp
+ * plus run tombstone to prevent Undo or a late same-run writer resurfacing
+ * pre-clear career-derived recovery.
+ */
+export function discardDeletedJobAnalysisSnapshots(nodes, canvasFilePath, onFailure = null, clearedAt = Date.now()) {
+  const discards = collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, clearedAt);
+  for (const discard of discards) {
+    const discardSnapshot = window.electronAPI?.discardJobAnalysisSnapshot;
+    if (!discardSnapshot) {
+      onFailure?.(new Error('Saved Job Search recovery cleanup is unavailable'), discard, null);
+      continue;
+    }
+    try {
+      Promise.resolve(discardSnapshot(discard)).then((result) => {
+        const safeNoop = isSafeJobAnalysisCleanupNoop(result);
+        if (result?.success !== true || (result?.ok !== true && !safeNoop)) {
+          const detail = result?.error || result?.reason;
+          onFailure?.(new Error(`Saved Job Search recovery cleanup failed${detail ? `: ${detail}` : ''}`), discard, result);
+        }
+      }).catch((error) => onFailure?.(error, discard, null));
+    } catch (error) {
+      onFailure?.(error, discard, null);
     }
   }
   return discards;

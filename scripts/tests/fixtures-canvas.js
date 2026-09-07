@@ -2,6 +2,8 @@ import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
+import { generateMarkdown } from '../test-dependencies.js';
+import { completionTimestampIso, formatCompletionTimestamp, normalizeCompletionTimestamp } from '../../src/utils/completionTimestamp.js';
 
 import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
 import { getManualScraperTelemetry, recordManualScraperTelemetry, resetManualScraperTelemetry, scrapeManualSources } from '../test-dependencies.js';
@@ -2282,9 +2284,12 @@ export default [
       const guarded = [
         ['initialDropAcceptedRef.current = false', 'the latched initial-drop ref would keep acceptCareerFiles bouncing every replacement drop'],
         ['lastDroppedPathsRef.current = null', 'the previous files\' paths would let Re-run silently re-parse the cleared career files'],
-        ['buildJobHubCareerClearPatch()', 'the career identity and its derived caches would survive the clear'],
+        ['buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId })', 'the persisted recovery watermark and exact-run tie-breaker would not fence a late stale snapshot'],
+        ['nextJobAnalysisClearWatermark(priorClearAt)', 'a second clear in the same millisecond could retain the first run token and misclassify the second run'],
         ['discardJobBatch', 'an abandoned batch sidecar would keep billing and could report results onto a cleared hub'],
         ['discardJobRun', 'the staged run sidecar would linger and re-offer a resume for career files that are gone'],
+        ['discardJobAnalysisSnapshot', 'the canvas-scoped saved scrape would remain resumable after this hub cleared its career files'],
+        ['setSavedAnalysisMeta(null)', 'the stale saved-scrape affordance could remain visible until the asynchronous sidecar cleanup returns'],
         ['setResumeOffer(null)', 'the resume banner would stay up offering to continue the very run this clear just discarded'],
         ['epoch.bump()', 'a late-settling parse would write the old profile straight back onto the cleared hub'],
         ['cancelNodeTask', 'the backend scrape would keep running and bounce the hub out of its cleared empty state'],
@@ -2298,6 +2303,21 @@ export default [
 
       assert(clear.indexOf('const runId =') >= 0 && clear.indexOf('const runId =') < clear.indexOf('updateGlobal('),
         'the run token must be captured before updateGlobal nulls pendingBatch/jobRunId, otherwise the recovery sidecars are orphaned on disk forever');
+      assert(clear.includes('discardJobAnalysisSnapshot({ canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId, clearedAt: jobAnalysisClearedAt })'),
+        'clearing career files must send the captured normalized run token, clear watermark, and exact canvas/hub ownership so a late same-run snapshot cannot resurrect');
+      assert(clear.includes('Promise.allSettled(cleanupPromises.map(entry => entry.promise))')
+        && clear.includes('Career Files Cleared with a Warning')
+        && clear.includes("Promise.reject(new Error('Saved job analysis cleanup is unavailable'))")
+        && clear.includes("Promise.reject(new Error('Job run cleanup is unavailable'))")
+        && clear.includes("Promise.reject(new Error('Job batch cleanup is unavailable'))"),
+      'clear UI state may update immediately, but all sidecar cleanup outcomes — including an HMR-stale missing preload API — must settle before reporting a clean success');
+
+      const clearUpdateStart = clear.indexOf('updateGlobal(id, {');
+      const clearUpdateEnd = clear.indexOf('});', clearUpdateStart);
+      const clearPatch = clear.slice(clearUpdateStart, clearUpdateEnd);
+      assert(clearUpdateStart >= 0 && clearUpdateEnd > clearUpdateStart
+        && !/\blastCompletedRunAt\s*:/.test(clearPatch),
+      'clearing career files must retain lastCompletedRunAt as module history; it is not career-derived state to wipe');
 
       // peekJobRun/discardJobRun are keyed by canvasFilePath ALONE — one staged
       // run per canvas — so the banner this hub happens to be showing may be
@@ -2411,6 +2431,53 @@ export default [
         && emptyState.includes('Unlock it to drop career files'),
       'a locked virgin hub falls through to the drop copy and invites a drop that handleDrop refuses without a word');
 
+      // Completion history survives Clear career files. The empty state must
+      // render a valid saved timestamp even when the clear patch removed every
+      // career-identity field; missing/non-finite values must remain invisible.
+      const completionDateStart = source.indexOf('const lastCompletedRunAtText =');
+      const completionDateEnd = source.indexOf('\n\n  useEffect', completionDateStart);
+      const completionDate = source.slice(completionDateStart, completionDateEnd);
+      assert(completionDate.includes('formatCompletionTimestamp(data.lastCompletedRunAt)')
+        && emptyState.includes('!!lastCompletedRunAtText && (')
+        && !emptyState.includes('!!lastCompletedRunAtText && hasCareerIdentity'),
+      'a valid persisted completion timestamp renders on a virgin/cleared empty hub without a career-identity gate');
+      const validTimestamp = Date.UTC(2026, 8, 7, 14, 30, 0);
+      const invalidCompletionTimestamps = [
+        null, undefined, true, false, '', '   ', 'not-a-date', Infinity, -1, 0,
+        Number.MAX_VALUE, 8_640_000_000_000_001, 'Infinity', '-1', '0', '0x10', '1e12', 1.5, '1.5', {}, [],
+      ];
+      assert(normalizeCompletionTimestamp(validTimestamp) === validTimestamp
+        && normalizeCompletionTimestamp(String(validTimestamp)) === validTimestamp
+        && formatCompletionTimestamp(validTimestamp, 'en-CA')
+        && completionTimestampIso(String(validTimestamp)) === '2026-09-07T14:30:00.000Z'
+        && invalidCompletionTimestamps.every(value => normalizeCompletionTimestamp(value) === null)
+        && invalidCompletionTimestamps.every(value => formatCompletionTimestamp(value, 'en-CA') === null)
+        && invalidCompletionTimestamps.every(value => completionTimestampIso(value) === null),
+      'completion timestamps accept legacy decimal-integer strings but reject missing, boolean, junk, zero, negative, non-finite, fractional, alternate-numeric, and out-of-Date-range values');
+      const completionDiagnostics = generateMarkdown({
+        description: 'Completion timestamp validation fixture.',
+        nodes: [
+          { id: 'valid-completion', type: 'jobhub', data: { lastCompletedRunAt: String(validTimestamp) } },
+          { id: 'invalid-completion', type: 'jobhub', data: { lastCompletedRunAt: true } },
+        ],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [
+          { id: 'valid-completion', type: 'jobhub', position: { x: 0, y: 0 }, measured: { width: 1, height: 1 } },
+          { id: 'invalid-completion', type: 'jobhub', position: { x: 1, y: 0 }, measured: { width: 1, height: 1 } },
+        ],
+      }).markdown;
+      assert(completionDiagnostics.includes('lastCompletedRunAt: 2026-09-07T14:30:00.000Z')
+        && completionDiagnostics.includes('lastCompletedRunAt: invalid'),
+      'Node Diagnostics shares the timestamp validator: legacy numeric strings render ISO, while booleans are never coerced into epoch dates');
+      const completionWriter = source.slice(
+        source.indexOf('const completeJobRun = useCallback'),
+        source.indexOf('const [savedAnalysisMeta', source.indexOf('const completeJobRun = useCallback')),
+      );
+      assert(completionWriter.includes('normalizeCompletionTimestamp(result?.receipt?.completedAt)')
+        && completionWriter.includes('updateGlobal(id, { lastCompletedRunAt: completedAt })')
+        && !completionWriter.includes('Number(result?.receipt?.completedAt)'),
+      'only a strictly valid backend completion timestamp may be persisted; null and booleans must never become epoch zero');
+
       // The hub rests at 'done' after every successful run, so the clear action
       // has to be reachable from there too — otherwise swapping career files
       // costs a full Re-run + Reset just to reach the empty state.
@@ -2420,6 +2487,25 @@ export default [
       assert(doneState.includes('onClearCareerFiles')
         && /!locked && onClearCareerFiles/.test(doneState),
       'the done state must render the clear action only when the hub is unlocked — the handler bails on data.locked, so a visible button there would be a dead click');
+      assert(doneState.includes('formatCompletionTimestamp(lastCompletedRunAt)'),
+        'done-state and empty-state completion dates must share the same strict timestamp validator');
+      const sourcesReadyState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchSourcesReadyState.jsx'), 'utf8');
+      const sourcesReadyStart = source.indexOf("{hubState === 'sources-ready' && (");
+      const sourcesReadyEnd = source.indexOf("hubState === 'done'", sourcesReadyStart);
+      const sourcesReadyWiring = source.slice(sourcesReadyStart, sourcesReadyEnd);
+      assert(sourcesReadyWiring.includes('onClearCareerFiles={handleClearCareerFiles}')
+        && sourcesReadyState.includes('Clear career files')
+        && /!locked && onClearCareerFiles/.test(sourcesReadyState),
+      'an unlocked paused search exposes a wired Clear career files action, while a locked card renders no dead control');
+
+      const clearConfirm = fs.readFileSync(path.resolve('src/hooks/useConfirmDialog.js'), 'utf8');
+      assert(clearConfirm.includes('This removes unlocked content from the current canvas.')
+        && clearConfirm.includes('confirmLabel: "Clear Unlocked Content"')
+        && clearConfirm.includes('restores the visual content')
+        && clearConfirm.includes('cannot restart background work or recovery data discarded for removed modules')
+        && clearConfirm.includes('At the root canvas, the workspace file association is also reset')
+        && !clearConfirm.includes('This will remove all nodes, edges, and drawings.'),
+      'Clear Canvas confirmation must distinguish retained locked content from undoable visuals and non-restorable run/recovery/file state');
 
       const resetStart = source.indexOf('const resetHandler = useCallback');
       const resetEnd = source.indexOf('const handleRerun = useCallback', resetStart);
@@ -2437,7 +2523,7 @@ export default [
         && /pendingJobs:\s*null/.test(reset)
         && /scrapeWarnings:\s*\[\]/.test(reset)
         && reset.includes('const retainedCareerData = hasReusableCareerProfile')
-        && reset.includes('buildJobHubCareerClearPatch()')
+        && reset.includes('buildJobHubCareerClearPatch({')
         && reset.includes('...retainedCareerData')
         && reset.includes('initialDropAcceptedRef.current = hasReusableCareerProfile')
         && reset.includes('const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null')
@@ -2445,7 +2531,7 @@ export default [
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
       // The presence checks above hold for either arm of the ternary; pin the
       // DIRECTION separately.
-      assert(/hasReusableCareerProfile\s*\?\s*\{\}\s*:\s*buildJobHubCareerClearPatch\(\)/.test(reset),
+      assert(/hasReusableCareerProfile\s*\?\s*\{\}\s*:\s*buildJobHubCareerClearPatch\(\{/.test(reset),
         'the cancel ternary is inverted: applying the clear patch when hasReusableCareerProfile is TRUE wipes the parsed profile exactly when it must be retained, leaving a cancelled hub with no career data and no rerun path');
 
       assert(canHubAcceptInitialDrop({

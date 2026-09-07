@@ -32,9 +32,11 @@ export const LOCAL_AI_CARD_POLL_IDLE_STATUSES = Object.freeze([
 // renderer died (or the card unmounted mid-import) — the on-disk job is safe
 // to validate again, so the manager resumes it. An import genuinely still
 // running in the main process rejects the retry with LOCAL_AI_IMPORT_IN_FLIGHT,
-// which the manager treats as "wait for the next tick".
+// which the manager treats as "wait for the next tick". A manual render retry
+// also remains manager-owned while its card is hidden so the canvas can expose
+// the hash-bound retry action without automatically re-importing the result.
 export const LOCAL_AI_FALLBACK_IDLE_STATUSES = Object.freeze([
-  'saved', 'failed', 'render-retry-required',
+  'saved', 'failed',
 ]);
 
 // ── Mounted-card registry ────────────────────────────────────────────────────

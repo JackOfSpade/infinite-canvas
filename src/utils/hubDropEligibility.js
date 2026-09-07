@@ -1,3 +1,5 @@
+import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
+
 const ACTIVE_INPUT_STATES = new Set([
   'analyzing',
   'parsing',
@@ -63,7 +65,7 @@ export function hubHasAcceptedInitialDrop(hub) {
 // Deliberately NOT cleared: targetRole, jobPreferences, preferredLocation, searchLocation,
 // remoteResidences, maxAgeDays, collectionLimits, enabledSourceIds — the search settings the
 // user is keeping when they swap career files.
-export function buildJobHubCareerClearPatch() {
+export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAnalysisClearedRunId = null } = {}) {
   return {
     inputLocked: false,
     resumeProfile: null,
@@ -93,6 +95,11 @@ export function buildJobHubCareerClearPatch() {
     preferenceCandidatePool: null,
     canonicalLocation: null,
     locationSnapshot: null,
+    // Kept separately from career identity because it fences a canvas-scoped
+    // sidecar that might otherwise arrive after this hub is cleared.
+    jobAnalysisClearedAt,
+    // The exact run token resolves the otherwise ambiguous Date.now() tie.
+    jobAnalysisClearedRunId: normalizeJobAnalysisClearRunId(jobAnalysisClearedRunId),
   };
 }
 

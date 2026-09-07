@@ -974,7 +974,7 @@ try {
   assert.equal(await nodeCount(page), countBeforeClear, 'canceling clear should preserve nodes');
 
   await clickToolbar(page, 'Clear Canvas');
-  await page.getByText('Clear Everything', { exact: true }).dblclick();
+  await page.getByText('Clear Unlocked Content', { exact: true }).dblclick();
   await page.getByRole('heading', { name: 'Clear Canvas', exact: true }).waitFor({ state: 'hidden' });
   assert.equal(await nodeCount(page), 0, 'confirming clear should remove all nodes');
   assert.equal(await page.title(), 'Untitled*', 'a cleared untitled workspace should remain marked unsaved');

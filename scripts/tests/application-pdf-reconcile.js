@@ -74,8 +74,37 @@ function visualResumeLines(body) {
   ];
 }
 
+function resumeBulletsWorkspace(bullets) {
+  const items = bullets.map(bullet => `<li>${bullet}</li>`).join('');
+  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><ul class="highlights">${items}</ul></section></main></section></body></html>`;
+}
+
 function resumeBulletWorkspace(firstBullet) {
-  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><ul class="highlights"><li>${firstBullet}</li><li>Kept the release process stable.</li></ul></section></main></section></body></html>`;
+  return resumeBulletsWorkspace([firstBullet, 'Kept the release process stable.']);
+}
+
+function wrappedResumeBulletLines(firstLine, continuationLine) {
+  return [
+    { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+    { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+    { page: 1, x: 56, y: 640, text: `• ${firstLine}` },
+    { page: 1, x: 72, y: 625, text: continuationLine },
+    { page: 1, x: 56, y: 600, text: '• Kept the release process stable.' },
+  ];
+}
+
+function wrappedCoverBodyLines(firstLine, continuationLine) {
+  return [
+    { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+    { page: 1, x: 56, y: 680, text: 'Engineer · B.S.' },
+    { page: 1, x: 56, y: 660, text: 'maya@example.test · 555-0100' },
+    { page: 1, x: 480, y: 620, text: 'August 2026' },
+    { page: 1, x: 56, y: 590, text: 'Dear Hiring Team,' },
+    { page: 1, x: 56, y: 550, text: firstLine },
+    { page: 1, x: 56, y: 535, text: continuationLine },
+    { page: 1, x: 56, y: 500, text: 'Sincerely,' },
+    { page: 1, x: 56, y: 480, text: 'Maya Chen' },
+  ];
 }
 
 export default [
@@ -87,6 +116,198 @@ export default [
       assert(normalizePdfText('word - next') === 'word - next',
         'a true spaced dash must not be collapsed into a hyphenated word');
       return { wrappedHyphenNormalized: true, spacedDashPreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: cross-line hyphens preserve compounds, spaced dashes, and suspended forms',
+    run: () => {
+      const fixtures = [
+        {
+          label: 'wrapped compound',
+          bullet: 'Built reliable full-scale systems.',
+          lines: ['Built reliable full-', 'scale systems.'],
+        },
+        {
+          label: 'spaced dash',
+          bullet: 'Kept the alpha - beta separator explicit.',
+          lines: ['Kept the alpha -', 'beta separator explicit.'],
+        },
+        {
+          label: 'suspended hyphen',
+          bullet: 'Supported part- and full-time schedules.',
+          lines: ['Supported part-', 'and full-time schedules.'],
+        },
+      ];
+      const failures = [];
+      for (const fixture of fixtures) {
+        const source = resumeBulletWorkspace(fixture.bullet);
+        const result = reconcileApplicationHtmlFromPdfBlocks({
+          html: source,
+          documentKind: 'resume',
+          blocks: wrappedResumeBulletLines(...fixture.lines),
+        });
+        if (!(result.success && result.status === 'unchanged' && result.changed === false
+          && result.exactTextMatch === true && result.html === source)) {
+          failures.push(`${fixture.label}: ${JSON.stringify(result)}`);
+        }
+      }
+      assert(failures.length === 0,
+        `hyphens split across visual lines must remain exact and byte-identical:\n${failures.join('\n')}`);
+      return { cases: fixtures.map(fixture => fixture.label) };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: export inspection accepts compound and suspended-hyphen visual wraps',
+    run: async () => {
+      const source = resumeBulletWorkspace('Built reliable full-scale systems.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdf(wrappedResumeBulletLines('Built reliable full-', 'scale systems.'));
+      const inspection = await inspectGeneratedApplicationPdf({ html: source, pdf, documentKind: 'resume' });
+      assert(inspection.valid && inspection.textMatches && inspection.variantMatches,
+        `save-time PDF inspection must accept a visually wrapped compound, got ${JSON.stringify(inspection)}`);
+      const suspendedSource = resumeBulletWorkspace('Supported part- and full-time schedules.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const suspendedPdf = await textPdf(wrappedResumeBulletLines('Supported part-', 'and full-time schedules.'));
+      const suspendedInspection = await inspectGeneratedApplicationPdf({
+        html: suspendedSource,
+        pdf: suspendedPdf,
+        documentKind: 'resume',
+      });
+      assert(suspendedInspection.valid && suspendedInspection.textMatches && suspendedInspection.variantMatches,
+        `save-time PDF inspection must preserve a visually wrapped suspended hyphen, got ${JSON.stringify(suspendedInspection)}`);
+      return { valid: inspection.valid, compoundMatches: inspection.textMatches, suspendedMatches: suspendedInspection.textMatches };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a wrapped compound cannot conceal an adjacent deletion',
+    run: () => {
+      const source = resumeBulletWorkspace('Built full-scale reliable systems.');
+      const deleted = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'resume',
+        blocks: wrappedResumeBulletLines('Built full-', 'scale systems.'),
+      });
+      const rejectedSafely = !deleted.success && deleted.status === 'conflict' && deleted.html === source;
+      const importedSafely = deleted.success && deleted.status === 'updated'
+        && deleted.html.includes('Built full-scale systems.')
+        && !deleted.html.includes('full- scale')
+        && !deleted.html.includes('full-scalesystems');
+      assert(rejectedSafely || importedSafely,
+        `a visual split must never turn a deletion into malformed same-count substitutions, got ${JSON.stringify(deleted)}`);
+
+      const edited = reconcileApplicationHtmlFromPdfBlocks({
+        html: resumeBulletWorkspace('Built reliable full-scale systems.'),
+        documentKind: 'resume',
+        blocks: wrappedResumeBulletLines('Shipped reliable full-', 'scale systems.'),
+      });
+      assert(edited.success && edited.status === 'updated' && edited.changed
+        && edited.html.includes('Shipped reliable full-scale systems.')
+        && !edited.html.includes('full- scale'),
+      `a one-for-one edit elsewhere must retain the known wrapped compound, got ${JSON.stringify(edited)}`);
+      return { deletionHandledSafely: true, adjacentEditPreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: mixed wrapped compound and suspended hyphen remain byte-identical',
+    run: () => {
+      const source = resumeBulletsWorkspace([
+        'Built reliable full-scale systems.',
+        'Supported part- and full-time schedules.',
+        'Kept the release process stable.',
+      ]);
+      const blocks = [
+        { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+        { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+        { page: 1, x: 56, y: 640, text: '• Built reliable full-' },
+        { page: 1, x: 72, y: 625, text: 'scale systems.' },
+        { page: 1, x: 56, y: 600, text: '• Supported part-' },
+        { page: 1, x: 72, y: 585, text: 'and full-time schedules.' },
+        { page: 1, x: 56, y: 560, text: '• Kept the release process stable.' },
+      ];
+      const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(result.success && result.status === 'unchanged' && result.changed === false
+        && result.exactTextMatch === true && result.html === source,
+      `mixed line-ending hyphens must not cancel into a false edit, got ${JSON.stringify(result)}`);
+      return { mixedBoundaries: true, htmlByteIdentical: result.html === source };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: shifted suspended-hyphen insertions conflict instead of guessing',
+    run: () => {
+      const source = resumeBulletWorkspace('Supported part- and full-time schedules.');
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'resume',
+        blocks: wrappedResumeBulletLines('Supported flexible part-', 'and full-time schedules.'),
+      });
+      assert(!result.success && result.status === 'conflict' && result.html === source
+        && !result.html.includes('part-and'),
+      `a token shift before an ambiguous boundary must preserve the source and conflict, got ${JSON.stringify(result)}`);
+      return { conflict: true, sourcePreserved: result.html === source };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: one leaf with suspended and lexical twins cannot cross-resolve',
+    run: () => {
+      const bullet = 'Compared full- scale options and built reliable full-scale systems.';
+      const source = resumeBulletWorkspace(bullet);
+      const blocks = [
+        { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+        { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+        { page: 1, x: 56, y: 640, text: '• Compared full-' },
+        { page: 1, x: 72, y: 625, text: 'scale options and built highly reliable full-' },
+        { page: 1, x: 72, y: 610, text: 'scale systems.' },
+        { page: 1, x: 56, y: 580, text: '• Kept the release process stable.' },
+      ];
+      const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(!result.success && result.status === 'conflict' && result.html === source
+        && result.html.includes('reliable full-scale systems.')
+        && !result.html.includes('reliable full- scale systems.'),
+      `an unrelated suspended pair must not resolve a shifted lexical compound, got ${JSON.stringify(result)}`);
+      return { conflict: true, lexicalCompoundPreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: lexical suspended-hyphen edits preserve spacing in resume and cover',
+    run: () => {
+      const resumeSource = resumeBulletWorkspace('Supported part- and full-time schedules.');
+      const resumeResult = reconcileApplicationHtmlFromPdfBlocks({
+        html: resumeSource,
+        documentKind: 'resume',
+        blocks: wrappedResumeBulletLines('Supported part-', 'or full-time schedules.'),
+      });
+      assert(resumeResult.success && resumeResult.status === 'updated'
+        && resumeResult.html.includes('Supported part- or full-time schedules.')
+        && !resumeResult.html.includes('part-or'),
+      `a one-for-one résumé edit must retain the trusted suspended form, got ${JSON.stringify(resumeResult)}`);
+
+      const coverSource = coverWorkspace('Maya supports part- and full-time schedules.');
+      const coverResult = reconcileApplicationHtmlFromPdfBlocks({
+        html: coverSource,
+        documentKind: 'cover',
+        blocks: wrappedCoverBodyLines('Maya supports part-', 'or full-time schedules.'),
+      });
+      assert(coverResult.success && coverResult.status === 'updated'
+        && coverResult.html.includes('Maya supports part- or full-time schedules.')
+        && !coverResult.html.includes('part-or'),
+      `a one-for-one cover edit must retain the trusted suspended form, got ${JSON.stringify(coverResult)}`);
+      return { resumeUpdated: true, coverUpdated: true, suspendedHyphenPreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: cover line wraps preserve known compounds during lexical edits',
+    run: () => {
+      const source = coverWorkspace('Maya builds reliable full-scale systems.');
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'cover',
+        blocks: wrappedCoverBodyLines('Maya ships reliable full-', 'scale systems.'),
+      });
+      assert(result.success && result.status === 'updated'
+        && result.html.includes('Maya ships reliable full-scale systems.')
+        && !result.html.includes('full- scale'),
+      `a cover edit elsewhere must preserve a known wrapped compound, got ${JSON.stringify(result)}`);
+      return { coverUpdated: true, compoundPreserved: true };
     },
   },
   {

@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-import { cancelNodeTasksRecursively, discardDeletedJobRuns } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../utils/canvasInteractions';
 
 /**
  * Recursively collects OS file/folder paths from a node tree, for the "also move
@@ -48,11 +48,12 @@ function extractPaths(nodes, pathsToDelete) {
   });
 }
 
-export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = null }) {
+export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = null, addToast = null }) {
   const onNodesDelete = useCallback((deletedNodes) => {
     const pathsToDelete = new Set();
     extractPaths(deletedNodes, pathsToDelete);
     const osPaths = Array.from(pathsToDelete);
+    let analysisCleanupWarningShown = false;
 
     // Commit all background lifecycle cleanup at the same boundary as the
     // canvas deletion. When the OS-file prompt is present its X/Escape/backdrop
@@ -67,8 +68,22 @@ export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = nul
       // will keep every surviving hub locked behind an owner that no longer
       // exists. Use the deleted node snapshot (not component unmount) so
       // navigating between nested canvases never discards legitimate work.
-      discardDeletedJobRuns(deletedNodes, canvasFilePath, (error, discard) => {
-        EventLogger.error(`[JobSearch][${discard.nodeId}] Failed to discard deleted hub run ${discard.runId}:`, error);
+      const showJobCleanupWarning = () => {
+        if (analysisCleanupWarningShown) return;
+        analysisCleanupWarningShown = true;
+        addToast?.({
+          title: 'Hub deleted with a warning',
+          description: 'An abandoned Job Search run or its saved recovery data could not be fully cleared.',
+          type: 'error',
+        });
+      };
+      discardDeletedJobRuns(deletedNodes, canvasFilePath, (error, discard, result) => {
+        EventLogger.error(`[JobSearch][${discard.nodeId}] Failed to discard deleted hub run ${discard.runId}:`, error, result);
+        showJobCleanupWarning();
+      });
+      discardDeletedJobAnalysisSnapshots(deletedNodes, canvasFilePath, (error, discard, result) => {
+        EventLogger.error(`[JobSearch][${discard.nodeId}] Failed to discard deleted hub analysis recovery:`, error, result);
+        showJobCleanupWarning();
       });
       // Job cards are disposable result-display nodes. Deleting a card, clearing
       // a Job Board, or replacing a board cascade must not cancel the independent
@@ -107,7 +122,7 @@ export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = nul
     } else {
       finalizeNodeDeletion();
     }
-  }, [requestConfirm, undo, canvasFilePath]);
+  }, [requestConfirm, undo, canvasFilePath, addToast]);
 
   return { onNodesDelete };
 }

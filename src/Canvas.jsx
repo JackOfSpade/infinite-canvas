@@ -507,7 +507,7 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
-  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile });
+  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast });
 
   const { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes } = useCanvasActions({
     takeSnapshot,
@@ -522,6 +522,7 @@ export function Canvas() {
     depth: navigation.depth,
     isAnimatingRef: isNavigationAnimatingRef,
     canvasFilePath: currentFile,
+    addToast,
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({

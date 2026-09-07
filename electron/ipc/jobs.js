@@ -319,8 +319,11 @@ async function computeFileSha256(filePath) {
   return hash.digest('hex');
 }
 
-function analysisPathsForCanvas(canvasFilePath) {
-  return getJobAnalysisPaths(canvasFilePath, path.join(app.getPath('userData'), JOB_ANALYSIS_DIR));
+function analysisPathsForCanvas(canvasFilePath, fallbackDir = null) {
+  return getJobAnalysisPaths(
+    canvasFilePath,
+    fallbackDir || path.join(app.getPath('userData'), JOB_ANALYSIS_DIR),
+  );
 }
 
 function descriptionRecoveryCheckpointPath(canvasFilePath, runId) {
@@ -397,6 +400,122 @@ async function writeJobAnalysisFileAtomically(filePath, content, { mode } = {}) 
 // complete bundle so the JSON from one run cannot be paired with the prompt
 // from another, or let an older save win after a newer one has finished.
 const _jobAnalysisSnapshotTails = new Map();
+// Clearing one career identity must win over an already-dispatched write. Keep
+// one boundary per canvas/hub rather than an unbounded set of run IDs: all
+// snapshots created before that boundary are stale, and its exact run ID also
+// fences an equal-millisecond or late same-run writer. A later clear advances
+// the boundary without making a new run on that hub unwritable.
+const _retiredJobAnalysisSnapshots = new Map();
+
+function normalizeJobAnalysisIdentifier(value, max = 200) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= max && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalized)
+    ? normalized
+    : null;
+}
+
+function jobAnalysisRetirementKey(canvasFilePath, nodeId) {
+  const canvas = typeof canvasFilePath === 'string' && canvasFilePath.trim()
+    ? path.resolve(canvasFilePath)
+    : '';
+  return `${canvas}\u0000${String(nodeId || '')}`;
+}
+
+function snapshotCreatedAtMs(snapshot) {
+  const createdAt = snapshot?.createdAt;
+  const value = typeof createdAt === 'number'
+    ? createdAt
+    : (typeof createdAt === 'string' ? Date.parse(createdAt) : NaN);
+  // A finite number can still be outside ECMAScript's Date range. Those
+  // values would compare as permanently newer than every real clear boundary
+  // and make stale recovery impossible to classify safely.
+  return Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+function normalizeJobAnalysisClearBoundary(value) {
+  if (value == null) return null;
+  // This is a renderer Date.now() contract, not a user-facing numeric parser.
+  // Coercion would let false, whitespace, or a string select a surprising
+  // boundary; a fractional/zero value cannot name a real clear instant either.
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && Number.isFinite(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+function jobAnalysisSnapshotOwner(snapshot) {
+  return typeof snapshot?.sourceHubId === 'string' && snapshot.sourceHubId.trim()
+    ? snapshot.sourceHubId.trim()
+    : (typeof snapshot?.nodeId === 'string' && snapshot.nodeId.trim()
+      ? snapshot.nodeId.trim()
+      : (typeof snapshot?.snapshotContext?.sourceHubId === 'string' && snapshot.snapshotContext.sourceHubId.trim()
+        ? snapshot.snapshotContext.sourceHubId.trim()
+        : (typeof snapshot?.snapshotContext?.nodeId === 'string' ? snapshot.snapshotContext.nodeId.trim() : '')));
+}
+
+function jobAnalysisSnapshotCanvas(snapshot) {
+  return typeof snapshot?.canvasFilePath === 'string' && snapshot.canvasFilePath.trim()
+    ? snapshot.canvasFilePath
+    : snapshot?.snapshotContext?.canvasFilePath;
+}
+
+function retireJobAnalysisSnapshot(canvasFilePath, snapshot, clearedAt = null) {
+  const runId = normalizeJobAnalysisIdentifier(snapshot?.runId) || '';
+  const nodeId = jobAnalysisSnapshotOwner(snapshot);
+  if (!nodeId) return;
+  const key = jobAnalysisRetirementKey(canvasFilePath, nodeId);
+  const prior = _retiredJobAnalysisSnapshots.get(key);
+  const nextBoundary = normalizeJobAnalysisClearBoundary(clearedAt);
+  const nextAfterPrior = prior?.clearedAt != null
+    ? normalizeJobAnalysisClearBoundary(prior.clearedAt + 1)
+    : null;
+  // The renderer supplies strictly increasing clear timestamps, but IPC can
+  // also be reached by a stale window. Serialize that caller behind the last
+  // boundary rather than letting an equal/non-monotonic timestamp retain the
+  // prior run's tombstone and revive the later cleared run.
+  const effectiveBoundary = nextBoundary != null
+    ? Math.max(nextBoundary, prior?.clearedAt ?? 0, nextAfterPrior ?? 0)
+    : null;
+  // An explicit clear boundary is monotonic. Direct internal callers without
+  // one retain the legacy exact-run tombstone behavior.
+  if (nextBoundary != null || runId) {
+    const advancesBoundary = effectiveBoundary != null && effectiveBoundary > (prior?.clearedAt ?? -1);
+    const retirement = {
+      clearedAt: effectiveBoundary == null
+        ? (prior?.clearedAt ?? null)
+        : effectiveBoundary,
+      // A clear establishes one exact-run tie-breaker. Older sidecars found
+      // during that same clear must not overwrite it with their own run ID.
+      runId: advancesBoundary ? (runId || null) : (prior?.runId || runId || null),
+    };
+    _retiredJobAnalysisSnapshots.set(key, retirement);
+    return retirement;
+  }
+  return prior || null;
+}
+
+function isRetiredJobAnalysisSnapshot(snapshot) {
+  const runId = normalizeJobAnalysisIdentifier(snapshot?.runId) || '';
+  const nodeId = jobAnalysisSnapshotOwner(snapshot);
+  if (!nodeId) return false;
+  const retirement = _retiredJobAnalysisSnapshots.get(jobAnalysisRetirementKey(jobAnalysisSnapshotCanvas(snapshot), nodeId));
+  if (!retirement) return false;
+  if (runId && retirement.runId === runId) return true;
+  if (retirement.clearedAt == null) return false;
+  const createdAt = snapshotCreatedAtMs(snapshot);
+  if (createdAt == null || createdAt > retirement.clearedAt) return false;
+  if (createdAt < retirement.clearedAt) return true;
+  // Date.now ties are only safe when both sides prove they are separate,
+  // well-formed run tokens. This is the persisted renderer rule as well:
+  // without a tie-breaker, favour the clear over possibly stale recovery.
+  return !runId || !retirement.runId || runId === retirement.runId;
+}
+
 function withJobAnalysisSnapshotLock(filePath, fn) {
   const key = path.resolve(filePath);
   const previous = _jobAnalysisSnapshotTails.get(key) || Promise.resolve();
@@ -412,6 +531,9 @@ function withJobAnalysisSnapshotLock(filePath, fn) {
 async function saveJobAnalysisSnapshot(snapshot) {
   const { dir, jsonPath, lastSuccessJsonPath, promptPath } = analysisPathsForCanvas(snapshot.canvasFilePath);
   return withJobAnalysisSnapshotLock(jsonPath, async () => {
+    if (isRetiredJobAnalysisSnapshot(snapshot)) {
+      return { retired: true, jsonPath, lastSuccessJsonPath, promptPath };
+    }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
     const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
@@ -425,6 +547,305 @@ async function saveJobAnalysisSnapshot(snapshot) {
     await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
     return { jsonPath, lastSuccessJsonPath, promptPath };
   });
+}
+
+function classifySnapshotExactOwnership(snapshot, canvasFilePath, nodeId) {
+  const owner = normalizeJobAnalysisIdentifier(nodeId);
+  if (!owner || !snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return 'ownership-invalid';
+  const savedCanvas = typeof canvasFilePath === 'string' && canvasFilePath.trim();
+  const rawOwners = [
+    snapshot?.sourceHubId,
+    snapshot?.nodeId,
+    snapshot?.snapshotContext?.sourceHubId,
+    snapshot?.snapshotContext?.nodeId,
+  ];
+  if (rawOwners.some(value => value != null && (typeof value !== 'string' || !normalizeJobAnalysisIdentifier(value)))) {
+    return 'ownership-invalid';
+  }
+  const owners = [...new Set(rawOwners.filter(value => typeof value === 'string').map(value => value.trim()))];
+  if (owners.length === 0 || owners.length > 1) return 'ownership-invalid';
+
+  const rawCanvases = [snapshot?.canvasFilePath, snapshot?.snapshotContext?.canvasFilePath];
+  if (rawCanvases.some(value => value != null && (typeof value !== 'string' || !value.trim()))) {
+    return 'ownership-invalid';
+  }
+  const canvases = [...new Set(rawCanvases.filter(value => typeof value === 'string').map(value => path.resolve(value)))];
+  if (canvases.length > 1) return 'ownership-invalid';
+  if (savedCanvas) {
+    // Saved-canvas records, including legacy ones, must embed the exact canvas.
+    if (canvases.length === 0) return 'ownership-invalid';
+    if (canvases[0] !== path.resolve(canvasFilePath)) return 'ownership-mismatch';
+  } else if (canvases.length > 0) {
+    return 'ownership-mismatch';
+  }
+  return owners[0] === owner ? 'owned' : 'ownership-mismatch';
+}
+
+async function readAnalysisArtifact(filePath) {
+  try {
+    return { state: 'present', snapshot: JSON.parse(await fs.promises.readFile(filePath, 'utf8')) };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { state: 'missing', snapshot: null };
+    return { state: 'invalid', snapshot: null, error };
+  }
+}
+
+async function removeAnalysisArtifact(filePath, trashItem = null, verifyRemoval = fs.promises.access) {
+  try {
+    if (trashItem) await trashItem(filePath);
+    else await fs.promises.unlink(filePath);
+  } catch (error) {
+    // An external cleaner can win the narrow read→trash/unlink race. ENOENT
+    // is a successful no-op only after a fresh absence check; if a new artifact
+    // appeared in that interval, keep the cleanup failure visible rather than
+    // claiming it was removed.
+    if (error?.code === 'ENOENT') {
+      try {
+        await verifyRemoval(filePath);
+        return { state: 'error', cleared: false, error: 'artifact-still-exists' };
+      } catch (verifyError) {
+        if (verifyError?.code === 'ENOENT') {
+          return { state: 'missing', cleared: false, method: 'already-missing' };
+        }
+        return { state: 'error', cleared: false, error: verifyError?.message || String(verifyError) };
+      }
+    }
+    return { state: 'error', cleared: false, error: error?.message || String(error) };
+  }
+  try {
+    await verifyRemoval(filePath);
+    return { state: 'error', cleared: false, error: 'artifact-still-exists' };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { state: 'cleared', cleared: true, method: trashItem ? 'trash' : 'delete' };
+    }
+    return { state: 'error', cleared: false, error: error?.message || String(error) };
+  }
+}
+
+/**
+ * Discard only the analysis bundle whose embedded canvas and hub ownership
+ * match. The filenames are canvas-scoped, not hub-scoped, so ownership must be
+ * proven from the JSON before deleting any artifact. This shares the writer
+ * lock with saveJobAnalysisSnapshot; matching run IDs are retired before their
+ * files are removed, preventing a delayed same-run save from resurrecting them.
+ */
+async function discardJobAnalysisSnapshot(canvasFilePath, nodeId, { trashItem = null, runId = null, clearedAt = null, fallbackDir = null, verifyRemoval = fs.promises.access } = {}) {
+  const owner = normalizeJobAnalysisIdentifier(nodeId);
+  const nodeProvided = nodeId != null && nodeId !== '';
+  const savedCanvas = typeof canvasFilePath === 'string' && canvasFilePath.trim()
+    ? canvasFilePath
+    : null;
+  // Null is the one intentional unsaved-canvas sentinel. In particular,
+  // undefined and blank strings must not select the private fallback bundle.
+  const unsavedCanvas = canvasFilePath === null;
+  const requestedRunId = runId == null || runId === '' ? null : normalizeJobAnalysisIdentifier(runId);
+  const requestedClearedAt = normalizeJobAnalysisClearBoundary(clearedAt);
+  const artifacts = {
+    current: { state: 'missing', cleared: false },
+    lastSuccess: { state: 'missing', cleared: false },
+    prompt: { state: 'missing', cleared: false },
+    legacyCurrent: { state: 'missing', cleared: false },
+    legacyLastSuccess: { state: 'missing', cleared: false },
+    legacyPrompt: { state: 'missing', cleared: false },
+  };
+  if (!owner) {
+    return { ok: false, cleared: false, reason: nodeProvided ? 'invalid-node-id' : 'missing-ownership', artifacts };
+  }
+  if (!savedCanvas && !unsavedCanvas) {
+    return { ok: false, cleared: false, reason: 'invalid-canvas-path', artifacts };
+  }
+  if (runId != null && runId !== '' && !requestedRunId) {
+    return { ok: false, cleared: false, reason: 'invalid-run-id', artifacts };
+  }
+  if (clearedAt != null && requestedClearedAt == null) {
+    return { ok: false, cleared: false, reason: 'invalid-clear-boundary', artifacts };
+  }
+  const paths = analysisPathsForCanvas(savedCanvas, fallbackDir);
+
+  return withJobAnalysisSnapshotLock(paths.jsonPath, async () => {
+    let effectiveRequestedClearedAt = requestedClearedAt;
+    if (requestedRunId || requestedClearedAt != null) {
+      const retirement = retireJobAnalysisSnapshot(savedCanvas, { sourceHubId: owner, runId: requestedRunId }, requestedClearedAt);
+      effectiveRequestedClearedAt = retirement?.clearedAt ?? requestedClearedAt;
+    }
+    const entries = [
+      ['current', paths.jsonPath, 'prompt', paths.promptPath],
+      ['lastSuccess', paths.lastSuccessJsonPath, 'prompt', paths.promptPath],
+      ['legacyCurrent', paths.legacyJsonPath, 'legacyPrompt', paths.legacyPromptPath],
+      ['legacyLastSuccess', paths.legacyLastSuccessJsonPath, 'legacyPrompt', paths.legacyPromptPath],
+    ];
+    let failure = false;
+    const removable = [];
+    const promptCandidates = new Map();
+    const preservedPromptCandidates = new Map();
+    const ambiguousPromptCandidates = new Map();
+    // Inspect every physical prompt path even when both of its JSON companions
+    // are absent. An orphan prompt can still hold the cleared hub's profile and
+    // scoring evidence; treating the initialized artifact state as "missing"
+    // without reading it would silently leave that material resumable.
+    const promptPaths = new Map([
+      ['prompt', paths.promptPath],
+      ['legacyPrompt', paths.legacyPromptPath],
+    ].filter(([, promptPath]) => !!promptPath));
+
+    const addPromptCandidate = (target, promptKey, promptPath, snapshot, state = null) => {
+      if (!promptPath || !promptKey) return;
+      const candidates = target.get(promptKey) || { promptPath, snapshots: [] };
+      candidates.snapshots.push({ snapshot, state });
+      target.set(promptKey, candidates);
+    };
+
+    for (const [key, filePath, promptKey, promptPath] of entries) {
+      if (!filePath) continue;
+      const read = await readAnalysisArtifact(filePath);
+      if (read.state !== 'present') {
+        artifacts[key] = { state: read.state, cleared: false };
+        if (read.state === 'invalid') {
+          failure = true;
+          if (promptPath && promptKey) ambiguousPromptCandidates.set(promptKey, { promptPath });
+        }
+        continue;
+      }
+      const ownership = classifySnapshotExactOwnership(read.snapshot, canvasFilePath, owner);
+      if (ownership !== 'owned') {
+        artifacts[key] = { state: ownership, cleared: false };
+        if (ownership === 'ownership-invalid') {
+          failure = true;
+          if (promptPath && promptKey) ambiguousPromptCandidates.set(promptKey, { promptPath });
+        }
+        if (ownership === 'ownership-mismatch') {
+          addPromptCandidate(preservedPromptCandidates, promptKey, promptPath, read.snapshot, 'foreign-paired');
+        }
+        continue;
+      }
+
+      const createdAt = snapshotCreatedAtMs(read.snapshot);
+      const snapshotRunId = normalizeJobAnalysisIdentifier(read.snapshot?.runId);
+      const exactRetiredRun = !!(requestedRunId && snapshotRunId === requestedRunId);
+      // A caller that predates the boundary contract keeps the historic
+      // clear-all-owned behavior. Modern renderer clears provide a boundary,
+      // so an already-written newer run is never mistaken for stale run A.
+      // The exact requested run is authoritative provenance in either
+      // direction: its own timestamp cannot make it survive its clear, while
+      // timestamp protection remains mandatory for every different/new run.
+      if (effectiveRequestedClearedAt != null && !exactRetiredRun) {
+        if (createdAt == null) {
+          artifacts[key] = { state: 'created-at-invalid', cleared: false };
+          failure = true;
+          if (promptPath && promptKey) ambiguousPromptCandidates.set(promptKey, { promptPath });
+          continue;
+        }
+        if (createdAt > effectiveRequestedClearedAt) {
+          artifacts[key] = { state: 'post-clear', cleared: false };
+          addPromptCandidate(preservedPromptCandidates, promptKey, promptPath, read.snapshot, 'post-clear-paired');
+          continue;
+        }
+        if (createdAt === effectiveRequestedClearedAt) {
+          if (snapshotRunId && requestedRunId) {
+            artifacts[key] = { state: 'post-clear', cleared: false };
+            addPromptCandidate(preservedPromptCandidates, promptKey, promptPath, read.snapshot, 'post-clear-paired');
+            continue;
+          }
+          artifacts[key] = { state: 'run-id-invalid', cleared: false };
+          failure = true;
+          if (promptPath && promptKey) ambiguousPromptCandidates.set(promptKey, { promptPath });
+          continue;
+        }
+      }
+      if (!requestedRunId && requestedClearedAt == null) retireJobAnalysisSnapshot(canvasFilePath, read.snapshot);
+      removable.push({ key, filePath });
+      addPromptCandidate(promptCandidates, promptKey, promptPath, read.snapshot);
+    }
+
+    // A prompt has no independent owner metadata. It may pair with either the
+    // current or last-success JSON; delete it only when its full contents bind
+    // it to one owned stale record, never merely because a sibling is absent.
+    const promptKeys = new Set([
+      ...promptPaths.keys(),
+      ...promptCandidates.keys(),
+      ...preservedPromptCandidates.keys(),
+      ...ambiguousPromptCandidates.keys(),
+    ]);
+    for (const promptKey of promptKeys) {
+      const { promptPath } = promptCandidates.get(promptKey)
+        || preservedPromptCandidates.get(promptKey)
+        || ambiguousPromptCandidates.get(promptKey)
+        || { promptPath: promptPaths.get(promptKey) };
+      // A malformed or internally contradictory JSON companion prevents us
+      // from proving which hub owns the shared prompt. Prompt text deliberately
+      // omits owner/run metadata and can be byte-identical across hubs, so even
+      // a matching owned stale sibling must not authorize deletion here.
+      if (ambiguousPromptCandidates.has(promptKey)) {
+        const promptRead = await readAnalysisArtifact(promptPath);
+        artifacts[promptKey] = {
+          state: promptRead.state === 'missing' ? 'missing' : 'ownership-ambiguous',
+          cleared: false,
+        };
+        if (promptRead.state !== 'missing') failure = true;
+        continue;
+      }
+      // The prompt format intentionally omits owner/run IDs, so snapshots with
+      // different owners can legitimately produce the same prompt bytes. A
+      // retained current/new snapshot therefore has first claim on a matching
+      // shared prompt even when an owned stale sibling matches it as well.
+      let preservedState = null;
+      for (const { snapshot, state } of (preservedPromptCandidates.get(promptKey)?.snapshots || [])) {
+        if (await verifiedPromptPathForSnapshot(promptPath, snapshot)) {
+          preservedState = state;
+          break;
+        }
+      }
+      if (preservedState) {
+        artifacts[promptKey] = { state: preservedState, cleared: false };
+        continue;
+      }
+
+      let paired = false;
+      for (const { snapshot } of (promptCandidates.get(promptKey)?.snapshots || [])) {
+        if (await verifiedPromptPathForSnapshot(promptPath, snapshot)) {
+          paired = true;
+          break;
+        }
+      }
+      if (paired) {
+        artifacts[promptKey] = await removeAnalysisArtifact(promptPath, trashItem, verifyRemoval);
+        if (artifacts[promptKey].state === 'error') failure = true;
+      } else {
+        const promptRead = await readAnalysisArtifact(promptPath);
+        artifacts[promptKey] = {
+          state: promptRead.state === 'missing' ? 'missing' : 'unpaired',
+          cleared: false,
+        };
+        if (promptRead.state !== 'missing') failure = true;
+      }
+    }
+    for (const { key, filePath } of removable) {
+      artifacts[key] = await removeAnalysisArtifact(filePath, trashItem, verifyRemoval);
+      if (artifacts[key].state === 'error') failure = true;
+    }
+
+    const cleared = Object.values(artifacts).some(artifact => artifact.cleared);
+    return {
+      ok: !failure,
+      cleared,
+      retiredRun: !!requestedRunId,
+      reason: failure ? 'cleanup-failed' : null,
+      artifacts,
+    };
+  });
+}
+
+export async function __discardJobAnalysisSnapshotForTests(canvasFilePath, nodeId, options = {}) {
+  return discardJobAnalysisSnapshot(canvasFilePath, nodeId, options);
+}
+
+export async function __saveJobAnalysisSnapshotForTests(snapshot) {
+  return saveJobAnalysisSnapshot(snapshot);
+}
+
+export function __getJobAnalysisRetirementStateForTests() {
+  return { ownerBoundaries: _retiredJobAnalysisSnapshots.size };
 }
 
 function hasExactDescriptionRecoveryOwnership(snapshot, nodeId, jobRunId) {
@@ -4846,6 +5267,14 @@ Return a JSON object with four arrays of search query strings:
     }
   });
 
+  handleSafe('discard-job-analysis-snapshot', async (_event, { canvasFilePath, nodeId, runId = null, clearedAt = null } = {}) => {
+    return discardJobAnalysisSnapshot(canvasFilePath, nodeId, {
+      runId,
+      clearedAt,
+      trashItem: (p) => shell.trashItem(p),
+    });
+  });
+
   handleSafe('get-job-description-recovery-checkpoints', async (_event, { canvasFilePath } = {}) => ({
     checkpoints: await listDescriptionRecoveryCheckpoints(canvasFilePath),
   }));
@@ -4853,6 +5282,14 @@ Return a JSON object with four arrays of search query strings:
   handleSafe('save-job-analysis-snapshot', async (event, { jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext, saveDescriptionRecoveryCheckpoint: requestRecoveryCheckpoint = false, descriptionRecoveryCheckpoint = false } = {}) => {
     const { snapshot } = buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext });
     const paths = await saveJobAnalysisSnapshot(snapshot);
+    if (paths.retired) {
+      return {
+        saved: false,
+        retired: true,
+        recoveryCheckpointSaved: false,
+        meta: { runId: snapshot.runId, jsonPath: paths.jsonPath },
+      };
+    }
     const checkpointRequested = requestRecoveryCheckpoint || descriptionRecoveryCheckpoint;
     const recoveryCheckpoint = checkpointRequested
       ? await saveDescriptionRecoveryCheckpoint(snapshot, { create: true })
@@ -7110,7 +7547,15 @@ Return a JSON object with four arrays of search query strings:
     const scoringFallbacks = [];
     try {
       const paths = await saveJobAnalysisSnapshot(snapshot);
-      logger.info(`[Jobs][${nodeId}] Saved AI prompt snapshot to ${paths.jsonPath}`);
+      if (paths.retired) {
+        // Clear career files may arrive after this IPC started but before its
+        // snapshot write acquired the lock. The renderer cancellation epoch
+        // owns stopping the corresponding UI work; do not claim this stale
+        // scorer durably saved career evidence in the meantime.
+        logger.info(`[Jobs][${nodeId}] Ignored AI prompt snapshot for retired run ${snapshot.runId || 'unknown'}`);
+      } else {
+        logger.info(`[Jobs][${nodeId}] Saved AI prompt snapshot to ${paths.jsonPath}`);
+      }
     } catch (err) {
       logger.warn(`[Jobs][${nodeId}] Failed to save AI prompt snapshot:`, err);
     }

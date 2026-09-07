@@ -15,6 +15,7 @@ import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { attachCompensationRemoteResidences, unionScoredJobs, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
+import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
 
 function createManualAiRunId(nodeId) {
   const entropy = globalThis.crypto?.randomUUID?.()
@@ -37,6 +38,10 @@ function isExplicitlyUnscoredModule(data) {
   return !!(data?.aiSkipped || data?.collectionOnly || data?.testMode);
 }
 
+// A combine signature identifies the input payload, but not the Job Search run
+// that produced it. Retain a compact exact-run index alongside the signature so
+// a later manual Clear cannot accidentally certify a newer run from the same
+// hub whose board state had not caught up yet.
 /**
  * Job Board Module — the display + merge half of the job pipeline. It owns no
  * scraping or scoring: you connect one or more Job Search Modules to it with the
@@ -104,7 +109,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // Include scoring provenance too. A collection-only completion has the
           // same empty array/state shape as a real zero-result search, but it is
           // not safe to use as a replacement input for an existing board.
-          parts.push(`${nid}:${moduleFingerprint(n.data?.scoredJobs)}:${n.data?.hubState || ''}:${n.data?.aiSkipped ? 1 : 0}:${n.data?.collectionOnly ? 1 : 0}:${n.data?.testMode ? 1 : 0}:${n.data?.resultDisposition || ''}`);
+          parts.push(`${nid}:${moduleFingerprint(n.data?.scoredJobs)}:${n.data?.hubState || ''}:${n.data?.jobRunId || ''}:${n.data?.aiSkipped ? 1 : 0}:${n.data?.collectionOnly ? 1 : 0}:${n.data?.testMode ? 1 : 0}:${n.data?.resultDisposition || ''}`);
         }
       });
       parts.sort();
@@ -123,6 +128,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       .filter((n) => nodeIds.has(n.id) && n.type === 'jobhub')
       .map((n) => ({
         id: n.id,
+        runId: n.data?.jobRunId || null,
         label: moduleLabel(n.data),
         count: Array.isArray(n.data?.scoredJobs) ? n.data.scoredJobs.length : 0,
         fingerprint: moduleFingerprint(n.data?.scoredJobs),
@@ -343,7 +349,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         totalIncoming: 0, unique: 0, duplicatesRemoved: 0,
         collisions: 0, collisionUpgrades: 0, collisionAssessmentUpgrades: 0, modules: completedModules.length, perModule,
       },
-      combineSignature: combineSignature(completedModules), stale: false, staleReason: null,
+      combineSignature: combineSignature(completedModules),
+      combineSourceRuns: boundedCombinedSourceRuns(completedModules),
+      stale: false, staleReason: null,
+      clearProvenance: null,
     });
     EventLogger.log(`[JobBoard] confirmed empty replacement id=${id} modules=${completedModules.length}`);
     addToast({ title: 'Board updated', description: 'The completed searches have no current jobs; old results were cleared. Undo restores them.', type: 'info' });
@@ -366,18 +375,36 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     window.electronAPI?.cancelNodeTask?.(id, 'board-cleared');
     setCombining(false);
     setCompensationProgress(null);
+    // Read the live store immediately before snapshotting. `data` can be one
+    // render behind a just-finished Combine, and this receipt is only useful if
+    // it names the exact cascade the user chose to remove.
+    const currentData = getNode(id)?.data || data;
+    const priorCombineSignature = typeof currentData.combineSignature === 'string'
+      ? currentData.combineSignature.slice(0, 4_000)
+      : null;
+    const priorResultCount = normalizeBoardResultCount(currentData.resultCount);
+    const priorSourceRuns = boundedCombinedSourceRuns(currentData.combineSourceRuns);
+    // Undo must restore the board exactly as it looked before the user cleared
+    // it, including the absence of this post-clear receipt.
     document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    const clearProvenance = {
+      clearedAt: Date.now(),
+      priorCombineSignature,
+      priorResultCount,
+      priorSourceRuns,
+    };
     clearBoardChildren();
     updateGlobal(id, {
       hubState: 'empty',
       resultCount: 0, moduleCount: 0,
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
-      combineSignature: null, stale: false, staleReason: null,
+      combineSignature: null, combineSourceRuns: null, stale: false, staleReason: null,
+      clearProvenance,
       manualAiResume: null,
     });
     EventLogger.log(`[JobBoard] cleared id=${id}`);
-  }, [id, clearBoardChildren, updateGlobal, epoch]);
+  }, [id, data, getNode, clearBoardChildren, updateGlobal, epoch]);
 
   const completeManualAiRun = useCallback((runId) => {
     if (!runId) return;
@@ -427,6 +454,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // Capture the input signature NOW so a connection change mid-combine is
       // correctly detected as stale afterwards (matches the live-signature math).
       const sigAtCombine = combineSignature(completedModules);
+      const sourceRunsAtCombine = boundedCombinedSourceRuns(completedModules);
       // Gather each positive-result module's scored jobs, tagging each with its ORIGIN
       // module id so a merged card's "Generate Résumé" reads career data from
       // the right search module (a string per card, not a deep résumé copy —
@@ -599,7 +627,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // Merge provenance for the bug report — the dedup is otherwise invisible.
         mergeStats: { ...mergeStats, modules: completedModules.length, perModule },
         // Baseline for staleness detection (connection/data drift vs. this combine).
-        combineSignature: sigAtCombine, stale: false, staleReason: null,
+        combineSignature: sigAtCombine,
+        combineSourceRuns: sourceRunsAtCombine,
+        stale: false, staleReason: null,
+        clearProvenance: null,
       });
 
       // A scored job becomes "seen" only after this Combine/Re-combine has

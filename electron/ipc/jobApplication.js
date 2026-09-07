@@ -62,6 +62,7 @@ export function normalizeApplicationAdditionalNotes(value) {
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
+const applicationWorkspacePruneClaims = new Set();
 export const GENERATION_AUDIT_VERSION = 1;
 const GENERATION_AUDIT_SCHEMA = 'infinite-canvas-generation-audit';
 const GENERATION_AUDIT_TOP_LEVEL_KEYS = new Set([
@@ -158,7 +159,8 @@ export function registerPendingApplicationWorkspace({
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
-  artifactData = {}, cleanupOnSaveFailure = true, onSuccessfulSave = null,
+  artifactData = {}, cleanupOnSaveFailure = true, onBeforeSave = null, onBeforeDiscard = null,
+  onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onSaveFailure = null,
 } = {}) {
   if (typeof workDir !== 'string' || !workDir.trim()
     || typeof resumeHtmlPath !== 'string' || !resumeHtmlPath.trim()
@@ -215,6 +217,21 @@ export function registerPendingApplicationWorkspace({
       },
     });
   }
+  // The same Local-AI directory can be offered again after the imported-save
+  // recovery window. Never let that recovery registration replace a save that
+  // is still actively consuming the existing capability: doing so would let
+  // both handlers promote the same bundle and race each other's callbacks.
+  const existing = pendingApplicationArtifacts.get(resolvedWorkDir);
+  if (existing?.saveInFlight) {
+    const error = new Error('This generated application workspace is already being saved.');
+    error.code = 'APPLICATION_SAVE_IN_FLIGHT';
+    throw error;
+  }
+  if (applicationWorkspacePruneClaims.has(resolvedWorkDir)) {
+    const error = new Error('This generated application workspace is being retired; retry the import from its current job state.');
+    error.code = 'APPLICATION_WORKSPACE_PRUNING';
+    throw error;
+  }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
@@ -223,7 +240,14 @@ export function registerPendingApplicationWorkspace({
     generationAuditRequired: optional[2] ? generationAuditRequired : null,
     jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
     cleanupOnSaveFailure: cleanupOnSaveFailure !== false,
+    onBeforeSave: typeof onBeforeSave === 'function' ? onBeforeSave : null,
+    onBeforeDiscard: typeof onBeforeDiscard === 'function' ? onBeforeDiscard : null,
     onSuccessfulSave: typeof onSuccessfulSave === 'function' ? onSuccessfulSave : null,
+    onBeforeSuccessfulCleanup: typeof onBeforeSuccessfulCleanup === 'function'
+      ? onBeforeSuccessfulCleanup
+      : null,
+    onSaveFailure: typeof onSaveFailure === 'function' ? onSaveFailure : null,
+    saveInFlight: false,
     workspaceIdentity,
     artifactSha256,
     // Only trusted main-process generation/import code can register this
@@ -248,26 +272,142 @@ export function resolvePendingApplicationWorkspaceForOwner(workDir, pendingArtif
   return { resolvedWorkDir, pending };
 }
 
+// Main-process lifecycle query only: Local AI uses this exact workspace flag
+// to distinguish a genuinely long save from a crashed renderer after the
+// manifest's ordinary recovery window expires. Never expose the capability
+// record or use filesystem existence as a substitute for this in-memory claim.
+export function isPendingApplicationWorkspaceSaveInFlight(workDir) {
+  if (typeof workDir !== 'string' || !workDir.trim()) return false;
+  return pendingApplicationArtifacts.get(path.resolve(workDir))?.saveInFlight === true;
+}
+
+/**
+ * Serialize retention deletion against synchronous capability registration.
+ * If registration wins first, pruning declines. If pruning wins first, a
+ * concurrent registration receives a typed retry instead of creating a save
+ * capability for a directory already being removed.
+ */
+export async function withUnregisteredApplicationWorkspacePruneClaim(workDir, operation) {
+  if (typeof workDir !== 'string' || !workDir.trim() || typeof operation !== 'function') return false;
+  const resolvedWorkDir = path.resolve(workDir);
+  if (pendingApplicationArtifacts.has(resolvedWorkDir)
+    || applicationWorkspacePruneClaims.has(resolvedWorkDir)) return false;
+  applicationWorkspacePruneClaims.add(resolvedWorkDir);
+  try {
+    // No await occurs between the first Map check and claiming the path, but
+    // keep the second check as the invariant if this helper is later refactored.
+    if (pendingApplicationArtifacts.has(resolvedWorkDir)) return false;
+    await operation(resolvedWorkDir);
+    return true;
+  } finally {
+    applicationWorkspacePruneClaims.delete(resolvedWorkDir);
+  }
+}
+
 // Remove only a workspace that this process previously registered.  The
 // renderer never gets arbitrary temp-directory deletion: callers must first
 // prove ownership with the exact Map entry (and, at the IPC boundary, sender
 // identity) before this helper is reached.
-async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
-  if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
-  pendingApplicationArtifacts.delete(resolvedWorkDir);
-  if (pending.cleanupOnDiscard === false) return true;
+function restoreRelocatedApplicationWorkspace(cleanupWorkDir, resolvedWorkDir, pending) {
+  if (cleanupWorkDir === resolvedWorkDir) return { restored: false, error: null };
   try {
-    const current = await fs.promises.lstat(resolvedWorkDir);
-    const currentRealPath = await fs.promises.realpath(resolvedWorkDir);
+    try {
+      fs.lstatSync(resolvedWorkDir);
+      throw new Error('The original application workspace path was recreated before cleanup recovery.');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    const current = fs.lstatSync(cleanupWorkDir);
+    const currentRealPath = fs.realpathSync(cleanupWorkDir);
     const expected = pending.workspaceIdentity;
     if (!current.isDirectory() || current.isSymbolicLink()
-      || (expected && (current.dev !== expected.dev || current.ino !== expected.ino || currentRealPath !== expected.realPath))) {
+      || currentRealPath !== cleanupWorkDir
+      || (expected && (current.dev !== expected.dev || current.ino !== expected.ino))) {
+      throw new Error('The relocated application workspace changed before cleanup recovery.');
+    }
+    // Both paths have the same parent, and the absence check immediately above
+    // keeps this recovery from intentionally replacing another workspace.
+    fs.renameSync(cleanupWorkDir, resolvedWorkDir);
+    const restored = fs.lstatSync(resolvedWorkDir);
+    if (!restored.isDirectory() || restored.isSymbolicLink()
+      || (expected && (restored.dev !== expected.dev || restored.ino !== expected.ino))) {
+      throw new Error('The restored application workspace did not retain its registered identity.');
+    }
+    return { restored: true, error: null };
+  } catch (error) {
+    return { restored: false, error };
+  }
+}
+
+async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
+  if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
+  let cleanupWorkDir = resolvedWorkDir;
+  const shouldDeleteWorkspace = pending.cleanupOnDiscard !== false;
+  const cleanupGuard = reason === 'successful save'
+    ? pending.onBeforeSuccessfulCleanup
+    : pending.onBeforeDiscard;
+  // Local-AI cleanup guards atomically move the job directory out of the
+  // writer-visible pathname and then verify its exact result hash. Accept a
+  // relocated workspace only when it is the same inode in the same parent;
+  // this preserves the renderer capability boundary while eliminating the
+  // check -> lstat/realpath -> rm window in which newer bytes could land.
+  if (shouldDeleteWorkspace && cleanupGuard) {
+    try {
+      const prepared = await cleanupGuard({ workDir: resolvedWorkDir, reason });
+      if (prepared?.workDir) {
+        const candidate = path.resolve(String(prepared.workDir));
+        if (path.dirname(candidate) !== path.dirname(resolvedWorkDir)) {
+          throw new Error('Prepared application cleanup workspace escaped its registered parent.');
+        }
+        const [candidateStat, candidateRealPath] = await Promise.all([
+          fs.promises.lstat(candidate),
+          fs.promises.realpath(candidate),
+        ]);
+        const expected = pending.workspaceIdentity;
+        if (!candidateStat.isDirectory() || candidateStat.isSymbolicLink()
+          || candidateRealPath !== candidate
+          || (expected && (candidateStat.dev !== expected.dev || candidateStat.ino !== expected.ino))) {
+          throw new Error('Prepared application cleanup workspace did not match its registered identity.');
+        }
+        cleanupWorkDir = candidate;
+      }
+      if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
+    } catch (error) {
+      if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
+        // The guard restored the newer writer-visible job. Revoke only the
+        // stale one-shot capability so that exact new bytes can import again.
+        pendingApplicationArtifacts.delete(resolvedWorkDir);
+      }
+      throw error;
+    }
+  }
+  pendingApplicationArtifacts.delete(resolvedWorkDir);
+  if (!shouldDeleteWorkspace) return true;
+  try {
+    const current = await fs.promises.lstat(cleanupWorkDir);
+    const currentRealPath = await fs.promises.realpath(cleanupWorkDir);
+    const expected = pending.workspaceIdentity;
+    if (!current.isDirectory() || current.isSymbolicLink()
+      || (expected && (current.dev !== expected.dev || current.ino !== expected.ino))
+      || currentRealPath !== cleanupWorkDir) {
       logger.warn(`[JobApplication] Refused to remove a replaced application workspace after ${reason}`);
       return false;
     }
-    await fs.promises.rm(resolvedWorkDir, { recursive: true, force: true });
+    await fs.promises.rm(cleanupWorkDir, { recursive: true, force: true });
   } catch (error) {
     if (error?.code === 'ENOENT') return true;
+    if (cleanupWorkDir !== resolvedWorkDir) {
+      const recovery = restoreRelocatedApplicationWorkspace(cleanupWorkDir, resolvedWorkDir, pending);
+      const cleanupError = new Error(recovery.restored
+        ? `Could not clean the relocated application workspace after ${reason}; its original path was restored for recovery.`
+        : `Could not clean or restore the relocated application workspace after ${reason}.`);
+      cleanupError.code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+      cleanupError.cause = error;
+      cleanupError.workspaceRestored = recovery.restored;
+      if (recovery.error) cleanupError.restoreError = recovery.error;
+      logger.warn(`[JobApplication] ${cleanupError.message}${recovery.error ? ` Restore error: ${recovery.error?.message || recovery.error}` : ''}`);
+      throw cleanupError;
+    }
     logger.warn(`[JobApplication] Could not clean temporary application workspace after ${reason}: ${error?.message || error}`);
     return false;
   }
@@ -430,6 +570,18 @@ export function applicationVariantAttrsForJob(job = {}) {
 // pruning that strands several supported bullets off the page.
 const MIN_RESUME_TYPE_AREA_UTILIZATION = 0.90;
 
+// Underfill is a strict inequality. Round at display precision, but cap a
+// sub-minimum measurement that would otherwise display at the minimum.
+export function formatUnderfilledTypeAreaUtilization(utilization) {
+  if (!Number.isFinite(utilization)) return null;
+  const roundedPercent = Math.round(utilization * 10_000) / 100;
+  const minimumPercent = MIN_RESUME_TYPE_AREA_UTILIZATION * 100;
+  const displayedPercent = utilization < MIN_RESUME_TYPE_AREA_UTILIZATION && roundedPercent >= minimumPercent
+    ? minimumPercent - 0.01
+    : roundedPercent;
+  return `${displayedPercent}%`;
+}
+
 // Deliberately UNBOUNDED above. A value over 1 is the overflow MAGNITUDE —
 // the text spans 1.37 type areas — and it is the only size signal the fit
 // feedback, the handoff trace, and the bug report have; `pdf-lib` reports a
@@ -470,7 +622,7 @@ export function decideFitStep({ pageCount, target, compactTried, revisionAttempt
   if (!(pageCount > target)) {
     const utilization = resumeTypeAreaUtilization(layout);
     if (resumeIsMateriallyUnderfilled({ pageCount, targetPageCount: target, layout })) {
-      return { action: 'enrich', reason: `one-page résumé uses ${Math.round(utilization * 100)}% of the measured type area (minimum ${Math.round(MIN_RESUME_TYPE_AREA_UTILIZATION * 100)}%) — revise with stronger supported evidence, not filler` };
+      return { action: 'enrich', reason: `one-page résumé uses ${formatUnderfilledTypeAreaUtilization(utilization)} of the measured type area, below the ${Math.round(MIN_RESUME_TYPE_AREA_UTILIZATION * 100)}% minimum — revise with stronger supported evidence, not filler` };
     }
     return { action: 'ship', reason: `page count ${pageCount} already fits target ${target}` };
   }
@@ -1387,13 +1539,13 @@ export function buildResumeUnderfillRevisionPrompt({
   // only 137%" of the page. Every reachable caller today is gated on the
   // < 0.90 underfill verdict, so this only closes a latent trap.
   const measuredPercent = Number.isFinite(contentUtilization) && contentUtilization < 1
-    ? Math.round(contentUtilization * 100)
+    ? formatUnderfilledTypeAreaUtilization(contentUtilization)
     : null;
   const retryContext = applicationConvergenceInstruction({
     revisionAttempt,
     unchangedSignal: 'return the CURRENT <main> block byte-for-byte unchanged',
   });
-  return `The résumé below already renders to the ${targetPageCount}-page maximum, but its text spans only ${measuredPercent == null ? 'an underfilled portion' : `${measuredPercent}%`} of the app-measured type area. This is a presentation-quality revision, not permission to add generic filler or make claims stronger.
+  return `The résumé below already renders to the ${targetPageCount}-page maximum, but its text spans only ${measuredPercent == null ? 'an underfilled portion' : measuredPercent} of the app-measured type area. This is a presentation-quality revision, not permission to add generic filler or make claims stronger.
 
 ${retryContext}
 
@@ -1829,6 +1981,11 @@ export function registerJobApplicationHandlers() {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
+    if (pending.saveInFlight) {
+      const error = new Error('This generated application workspace is currently being saved.');
+      error.code = 'APPLICATION_SAVE_IN_FLIGHT';
+      throw error;
+    }
     await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'renderer discard');
     logger.info('[JobApplication] Discarded generated application workspace before save');
     return { discarded: true };
@@ -1851,6 +2008,15 @@ export function registerJobApplicationHandlers() {
     if (!matchesPending) {
       throw new Error('Generated application paths did not match this generation session — please regenerate.');
     }
+    // Claim synchronously, before the first await below. Electron can dispatch
+    // two invokes in the same turn; without this flag both resolve the same
+    // one-shot Map entry and independently save/callback before cleanup runs.
+    if (pending.saveInFlight) {
+      const error = new Error('This generated application workspace is already being saved.');
+      error.code = 'APPLICATION_SAVE_IN_FLIGHT';
+      throw error;
+    }
+    pending.saveInFlight = true;
     resumeHtmlPath = pending.resumeHtmlPath;
     resumePdfPath = pending.resumePdfPath;
     coverLetterPdfPath = pending.coverLetterPdfPath;
@@ -1860,6 +2026,13 @@ export function registerJobApplicationHandlers() {
     let exportPhase = 'validating generated sources';
     let exportDir = null;
     try {
+    // Local-AI workspaces bind this one-shot save capability to the exact
+    // result bytes that were rendered. Recheck after the synchronous claim and
+    // before creating or changing anything in the destination bundle.
+    if (pending.onBeforeSave) {
+      exportPhase = 'verifying current generated result';
+      await pending.onBeforeSave({ workDir: resolvedWorkDir });
+    }
     // The destination is relative to the canvas JSON, so it must be saved first.
     if (!canvasFilePath || typeof canvasFilePath !== 'string' || !path.isAbsolute(canvasFilePath)) {
       throw new Error('Save your canvas to a file first — applications are written to an "Applied Jobs" folder next to your saved canvas.');
@@ -2043,15 +2216,18 @@ export function registerJobApplicationHandlers() {
     // but before intermediate cleanup can remove the Local-AI job folder.
     // The writer's helper checks the receipt before the folder, so this order
     // cannot briefly report a durable save as an unconfirmed vanished job.
-    // Receipt publication is diagnostic: failure must not roll back an already
-    // durable application.
+    // For Local AI this receipt is the only hash-bound terminal response the
+    // waiting writer can observe. If publication fails, enter the normal
+    // failure path before cleanup: the destination stays durable, while the
+    // retained source workspace can publish retry evidence and try again.
     if (pending.onSuccessfulSave) {
-      try { await pending.onSuccessfulSave({ dir, manifest }); }
-      catch (error) { logger.warn(`[JobApplication] Could not publish application save completion: ${error?.message || error}`); }
+      exportPhase = 'publishing terminal handoff receipt';
+      await pending.onSuccessfulSave({ dir, manifest });
     }
 
     // Clean up the temporary output dir only after the terminal callback had
     // its chance to publish durable handoff evidence.
+    exportPhase = 'cleaning generated source workspace';
     await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
 
     // A visible card save reveals its destination as a convenience.  An
@@ -2101,20 +2277,36 @@ export function registerJobApplicationHandlers() {
         },
       });
       logger.error(`[JobApplication] save-application failed during "${exportPhase}": ${error?.stack || error?.message || error}`);
+      // A Local-AI import has already consumed and measured one exact result
+      // hash before this follow-up save begins. Give that trusted producer a
+      // best-effort failure hook so it can publish hash-bound retry evidence;
+      // otherwise the same hash becomes importable again when the short save
+      // window lapses and silently repeats the full render/save cycle forever.
+      const localAiResultChanged = error?.code === 'LOCAL_AI_RESULT_CHANGED';
+      const sourceCleanupFailed = error?.code === 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+      if (!localAiResultChanged && !sourceCleanupFailed && pending.onSaveFailure) {
+        try { await pending.onSaveFailure({ phase: exportPhase, error }); }
+        catch (callbackError) {
+          logger.warn(`[JobApplication] Could not publish application save failure: ${callbackError?.message || callbackError}`);
+        }
+      }
       // Non-retryable trusted workspaces are removed after a terminal save
       // failure. Local-AI jobs opt out: their result/context remains on disk
-      // for a fresh import after the short imported-save window lapses.
+      // for the explicit app-side retry published by the callback (with the
+      // imported-window timeout still covering a failed callback/crash).
       // Validation failures above this try block deliberately discard nothing,
       // so a malformed IPC request can never erase a valid session it does not
       // own.
-      if (pending.cleanupOnSaveFailure) {
+      if (pending.cleanupOnSaveFailure && !localAiResultChanged && !sourceCleanupFailed) {
         await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure');
       } else {
         // Release the one-shot capability without deleting the Local-AI job.
-        // Its manifest/result remain available for a fresh measured import
-        // after the short imported-save window lapses.
+        // A retry revalidates and registers a new capability for these exact
+        // result bytes; automatic status polling remains parked.
         pendingApplicationArtifacts.delete(resolvedWorkDir);
-        logger.warn('[JobApplication] Preserved retryable Local AI workspace after save failure');
+        logger.warn(`[JobApplication] Preserved retryable Local AI workspace after ${
+          localAiResultChanged ? 'its result changed' : sourceCleanupFailed ? 'source cleanup failure' : 'save failure'
+        }`);
       }
       throw error;
     }

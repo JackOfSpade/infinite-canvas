@@ -9,6 +9,8 @@ import {
   selectOrphanedLocalAiJobs,
 } from '../utils/localAiFallback';
 
+const LOCAL_AI_RETRY_NOTICE_INTERVAL_MS = 30_000;
+
 /**
  * Canvas-level driver for pending Local AI application jobs whose JobCardNode
  * is NOT mounted. Mounted cards poll and import on their own; but hidden cards
@@ -49,6 +51,10 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
   // terminal 'failed'. driveJob re-asserts from this map until the write
   // sticks or the card is gone.
   const savedTerminalRef = useRef(new Map());
+  // Throttle re-offers after a user closes the persistent action or another
+  // toast evicts it. The notice remains recoverable this session without
+  // flashing back into view every 2.5-second status tick.
+  const retryOfferedAtRef = useRef(new Map());
   const tickBusyRef = useRef(false);
   // One measured import at a time across all jobs — each renders PDFs.
   const importBusyRef = useRef(false);
@@ -95,11 +101,42 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       return true;
     };
 
+    // A hidden card and an orphaned on-disk job both lack a visible retry
+    // button. Keep their recovery explicit (never poll-triggered), bind it to
+    // the exact result hash, and re-offer it if the user closes or a later
+    // toast evicts the durable notice.
+    const offerRenderRetry = ({
+      node, jobId, resultSha256, orphanJob = null, message = '', allowCurrentImport = false,
+    }) => {
+      const exactResultSha256 = String(resultSha256 || '');
+      if (!exactResultSha256 || (!allowCurrentImport && importBusyRef.current)) return;
+      const retryKey = `${jobId}:${exactResultSha256}`;
+      const now = Date.now();
+      const lastOfferedAt = retryOfferedAtRef.current.get(retryKey) || 0;
+      if (now - lastOfferedAt < LOCAL_AI_RETRY_NOTICE_INTERVAL_MS) return;
+      retryOfferedAtRef.current.set(retryKey, now);
+      ctxRef.current.addToast?.({
+        title: 'Local AI bundle needs a retry',
+        description: message || 'The app consumed this result but could not finish PDF verification or save. The draft does not need another rewrite.',
+        type: 'error',
+        duration: 0,
+        dedupeKey: `local-ai-retry:${jobId}:${exactResultSha256}`,
+        actionLabel: 'Retry layout check',
+        onAction: async () => {
+          // The toast is removed before its action runs. Re-arm the offer so a
+          // busy/no-op click or another retryable failure cannot leave this
+          // hidden job without recovery UI for the throttle interval.
+          retryOfferedAtRef.current.delete(retryKey);
+          await importJob(node, jobId, exactResultSha256, orphanJob);
+        },
+      });
+    };
+
     const importJob = async (node, jobId, resultSha256, orphanJob = null) => {
       const { addToast: toast, getCurrentFile: currentFile } = ctxRef.current;
       const nodeId = node.id;
       const isOrphan = Boolean(orphanJob);
-      if (importBusyRef.current) return;
+      if (disposed || importBusyRef.current) return;
       // Liveness: the card may have been dismissed/deleted since this tick's
       // enumeration — never import (and auto-save into Applied Jobs) a job the
       // user discarded.  A discovered on-disk job deliberately has no card:
@@ -152,15 +189,22 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (result.status === 'render-retry-required') {
+          const retryMessage = result.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.';
           if (!isOrphan) writeState(nodeId, jobId, {
             ...result.localJob, status: 'render-retry-required',
-            message: result.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.',
+            message: retryMessage,
           });
           EventLogger.log(`[LocalAI] fallback render-retry-required job=${jobId} card=${nodeId}`);
-          toast?.({
-            title: 'Local AI Layout Check Unavailable',
-            description: 'No bundle was saved and no AI revision was requested. Retry when PDF rendering and web fonts are available.',
-            type: 'error',
+          offerRenderRetry({
+            node,
+            jobId,
+            resultSha256: result.resultSha256 || result.localJob?.resultSha256 || resultSha256,
+            orphanJob,
+            message: retryMessage,
+            // This is the import currently producing the retry response. Its
+            // finally block releases the lock before a rendered action can be
+            // clicked, so the durable action can be offered immediately.
+            allowCurrentImport: true,
           });
           return;
         }
@@ -210,7 +254,11 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           // is doing merely because its deleted card's handoff completed.
           suppressReveal: isOrphan,
         });
-        if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
+        if (!saved?.success || !saved.saved) {
+          const saveError = new Error(saved?.error || 'Could not save the imported application.');
+          if (saved?.errorCode) saveError.code = saved.errorCode;
+          throw saveError;
+        }
         const savedPatch = {
           status: 'saved',
           message: missingArtifacts.length
@@ -290,6 +338,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           // 'importing' into data would misread as a resumable orphan.
           settlingRef.current.delete(jobId);
           writeState(nodeId, jobId, { status: 'completed', message: next.message || 'Another import of this result is finishing — waiting…' });
+          return;
+        }
+        if (next.status === 'render-retry-required') {
+          settlingRef.current.delete(jobId);
+          const resultSha256 = String(next.resultSha256 || '');
+          if (!isOrphan) writeState(nodeId, jobId, { ...next });
+          offerRenderRetry({
+            node, jobId, resultSha256, orphanJob, message: next.message,
+          });
           return;
         }
         if (next.status !== 'completed') {

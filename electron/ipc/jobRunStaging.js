@@ -130,6 +130,18 @@ function receiptNumber(value, fallback = 0) {
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
 }
 
+function receiptTimestamp(value, fallback = null) {
+  // Completion ordering is provenance, unlike display-only counters. Keep it
+  // a real Date.now()-style number so strings/booleans cannot become a
+  // plausible terminal instant before the board-clear report boundary sees it.
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && Number.isFinite(new Date(value).getTime())
+    ? value
+    : fallback;
+}
+
 function receiptToken(value, max = 80) {
   const text = String(value ?? '').trim();
   // Source IDs, stop reasons, and warning codes are controlled identifiers.
@@ -287,14 +299,18 @@ function sanitizeReceiptScoring(scoring) {
  * backdoor for jobs, queries, profile data, URLs, or provider error bodies.
  */
 export function sanitizeLastRunReceipt(receipt = {}) {
-  const runId = String(receipt.runId || '').slice(0, 180);
-  const nodeId = String(receipt.nodeId || '').slice(0, 180);
+  // These opaque IDs correlate durable terminal receipts with a live hub and
+  // board-clear provenance. Do not coerce `42`/`true` into plausible tokens:
+  // a malformed sidecar must become invalid evidence, never a different run.
+  const runId = typeof receipt.runId === 'string' ? receipt.runId.trim().slice(0, 180) : '';
+  const nodeId = typeof receipt.nodeId === 'string' ? receipt.nodeId.trim().slice(0, 180) : '';
   const terminalStatus = ['completed', 'failed', 'aborted'].includes(receipt?.terminal?.status)
     ? receipt.terminal.status
     : 'completed';
   const terminalOutcome = ['zero', 'populated', 'collection-only', 'preference-filtered', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
     ? receipt.terminal.outcome
     : 'unknown';
+  const completedAt = receiptTimestamp(receipt.completedAt);
   // The initial search funnel can legitimately be smaller than the terminal
   // score-ready set when a post-search source resume contributes additional
   // rows. Preserve the terminal count independently rather than implying that
@@ -320,9 +336,9 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     version: JOB_RUN_RECEIPT_VERSION,
     runId,
     nodeId,
-    startedAt: receiptNumber(receipt.startedAt, null),
-    completedAt: receiptNumber(receipt.completedAt, null),
-    updatedAt: receiptNumber(receipt.updatedAt ?? receipt.completedAt, null),
+    startedAt: receiptTimestamp(receipt.startedAt),
+    completedAt,
+    updatedAt: receiptTimestamp(receipt.updatedAt, completedAt),
     terminal: {
       status: terminalStatus,
       outcome: terminalOutcome,
@@ -734,7 +750,17 @@ async function clearRunFiles(files, trashItem = null) {
   for (const p of [files.staging, files.manifest]) {
     // Skip a sidecar that isn't there (a run may have only one, or it was
     // already cleared) so trashItem doesn't error on a missing path.
-    try { await fs.promises.access(p); } catch { continue; }
+    try {
+      await fs.promises.access(p);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      // An access failure does not prove absence. Keep the aggregate cleanup
+      // verdict false rather than issuing a terminal receipt that claims an
+      // unreadable or temporarily unavailable sidecar was removed.
+      cleared = false;
+      logger.warn(`[JobRunStaging] Could not inspect ${p} before cleanup: ${error?.message || error}`);
+      continue;
+    }
     if (trashItem) {
       try {
         await trashItem(p);
@@ -751,7 +777,14 @@ async function clearRunFiles(files, trashItem = null) {
     try {
       await fs.promises.access(p);
       cleared = false;
-    } catch { /* absent = cleared */ }
+    } catch (error) {
+      // Only a definite missing-path result verifies deletion. Permission,
+      // device, and other I/O failures leave cleanup unconfirmed.
+      if (error?.code !== 'ENOENT') {
+        cleared = false;
+        logger.warn(`[JobRunStaging] Could not verify cleanup of ${p}: ${error?.message || error}`);
+      }
+    }
   }
   return cleared;
 }

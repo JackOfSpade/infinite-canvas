@@ -5,7 +5,7 @@ import { EDGE_STYLE, getNodesBounds } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
-import { cancelNodeTasksRecursively, discardDeletedJobRuns } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { strokePoints } from '../utils/geometry';
 
@@ -26,6 +26,7 @@ export function useCanvasActions({
   depth,
   isAnimatingRef,
   canvasFilePath = null,
+  addToast = null,
 }) {
   const { getNodes, getEdges, setEdges: rfSetEdges, getViewport } = useReactFlow();
 
@@ -254,12 +255,39 @@ export function useCanvasActions({
     // onNodesDelete callback. Retire paused/checkpointing Job Search runs here
     // as the equivalent deletion boundary, using the file path captured before
     // root Clear Canvas turns the workspace into an untitled canvas.
+    const removedNodes = allNodes.filter(node => !lockedIds.has(node.id));
+    let analysisCleanupWarningShown = false;
+    const showJobCleanupWarning = () => {
+      if (analysisCleanupWarningShown) return;
+      analysisCleanupWarningShown = true;
+      addToast?.({
+        title: 'Canvas cleared with a warning',
+        description: 'An abandoned Job Search run or its saved recovery data for one or more removed hubs could not be fully cleared.',
+        type: 'error',
+      });
+    };
     discardDeletedJobRuns(
-      allNodes.filter(node => !lockedIds.has(node.id)),
+      removedNodes,
       canvasFilePath,
-      (error, discard) => EventLogger.error(
-        `[JobSearch][${discard.nodeId}] Failed to discard cleared hub run ${discard.runId}:`, error,
-      ),
+      (error, discard, result) => {
+        EventLogger.error(`[JobSearch][${discard.nodeId}] Failed to discard cleared hub run ${discard.runId}:`, error, result);
+        showJobCleanupWarning();
+      },
+    );
+    // A completed hub can retain career-derived analysis with no active run
+    // token. Capture exact ownership before visual removal; Undo restores only
+    // node content, never this intentionally retired recovery.
+    discardDeletedJobAnalysisSnapshots(
+      removedNodes,
+      canvasFilePath,
+      (error, discard, result) => {
+        EventLogger.error(
+          `[JobSearch][${discard.nodeId}] Failed to discard cleared hub analysis recovery:`,
+          error,
+          result,
+        );
+        showJobCleanupWarning();
+      },
     );
     // Local AI handoffs outlive their disposable result cards. Clearing the
     // canvas removes the display but does not erase a writer's in-progress
@@ -270,7 +298,7 @@ export function useCanvasActions({
       (e) => lockedIds.has(e.source) && lockedIds.has(e.target)
     ));
     setDrawings([]);
-  }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, canvasFilePath]);
+  }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, canvasFilePath, addToast]);
 
   const clearCanvas = useCallback(() => {
     if (requestClearConfirm) {

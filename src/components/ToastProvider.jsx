@@ -28,10 +28,26 @@ const ToastIcon = ({ type }) => {
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
-  const addToast = useCallback(({ title, description, type = 'info', duration = 4000 }) => {
+  const addToast = useCallback(({
+    title, description, type = 'info', duration = 4000, actionLabel = '', onAction = null, dedupeKey = '',
+  }) => {
     const id = generateId();
     setToasts((prev) => {
-      const next = [...prev, { id, title, description, type, duration }];
+      const normalizedDedupeKey = String(dedupeKey || '');
+      // Durable recovery notices are refreshed by a poller. Keep at most one
+      // visible copy, while allowing a dismissed/evicted notice to be offered
+      // again on a later poll.
+      if (normalizedDedupeKey && prev.some(toast => toast.dedupeKey === normalizedDedupeKey)) return prev;
+      const next = [...prev, {
+        id,
+        title,
+        description,
+        type,
+        duration,
+        actionLabel: String(actionLabel || ''),
+        onAction: typeof onAction === 'function' ? onAction : null,
+        dedupeKey: normalizedDedupeKey,
+      }];
       // Cap at 5 toasts — discard oldest if over limit
       return next.length > 5 ? next.slice(next.length - 5) : next;
     });
@@ -79,6 +95,18 @@ function ToastCard({ toast, onRemove }) {
         <div className="text-white text-sm font-semibold">{toast.title}</div>
         {toast.description && (
           <div className="text-white/60 text-xs mt-0.5">{toast.description}</div>
+        )}
+        {toast.actionLabel && toast.onAction && (
+          <button
+            type="button"
+            onClick={() => {
+              onRemove(toast.id);
+              void toast.onAction();
+            }}
+            className="mt-2 rounded-md border border-white/15 bg-white/10 px-2 py-1 text-xs font-medium text-white/80 transition-colors hover:bg-white/15 hover:text-white"
+          >
+            {toast.actionLabel}
+          </button>
         )}
       </div>
       <button 

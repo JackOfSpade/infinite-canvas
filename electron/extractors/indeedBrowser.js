@@ -18,6 +18,7 @@ import { normalizeJobCollectionLimits, resolvePageCeiling, isUnlimitedPages, des
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
+import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from '../ipc/browser/backgroundScrapeBrowser.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
 
@@ -78,7 +79,6 @@ const LAUNCH_ARGS = [
   '--disable-blink-features=AutomationControlled',
   '--disable-infobars',
   '--window-size=1400,900',
-  '--window-position=60,60',
   '--lang=en-US,en',
 ];
 
@@ -488,7 +488,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
 
   const userDataDir = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const executablePath = await findSystemChromePath() || await findChromePath();
-  const launchOpts = {
+  const launchOpts = prepareBackgroundScrapeLaunchOptions({
     headless: false,
     executablePath,
     userDataDir,
@@ -496,7 +496,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
     args: LAUNCH_ARGS,
     defaultViewport: { width: 1400, height: 900 },
     ignoreHTTPSErrors: true,
-  };
+  });
 
   let releaseProfileReservation;
   try {
@@ -513,7 +513,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
   try {
     browser = await launchWithProfileLockRetry(launchOpts, 'indeed-description-retry');
 
-    const page = await browser.newPage();
+    const page = await createBackgroundScrapePage(browser, { width: 1400, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
     logger.info(`[Indeed/Browser] Retrying ${targets.length} exact low-evidence description(s)`);
@@ -660,7 +660,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     };
   }
 
-  const launchOpts = {
+  const launchOpts = prepareBackgroundScrapeLaunchOptions({
     headless: false,
     executablePath,
     userDataDir,
@@ -668,7 +668,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     args: LAUNCH_ARGS,
     defaultViewport: { width: 1400, height: 900 },
     ignoreHTTPSErrors: true,
-  };
+  });
 
   let releaseProfileReservation;
   try {
@@ -714,7 +714,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       };
     }
 
-    let page = await browser.newPage();
+    let page = await createBackgroundScrapePage(browser, { width: 1400, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
 

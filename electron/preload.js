@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
   saveJobAnalysisSnapshot: (args) => ipcRenderer.invoke('save-job-analysis-snapshot', args),
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
+  discardJobAnalysisSnapshot: (args) => ipcRenderer.invoke('discard-job-analysis-snapshot', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   // Local AI is intentionally a manual, file-based handoff. These handlers
   // never invoke or automate a local coding agent; the user runs the documented

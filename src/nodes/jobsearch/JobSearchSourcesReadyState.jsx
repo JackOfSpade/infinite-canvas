@@ -20,6 +20,7 @@ export function JobSearchSourcesReadyState({
   resumeSummary,
   locked = false,
   onScoreCurrent,
+  onClearCareerFiles = null,
 }) {
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1.5">
@@ -49,6 +50,17 @@ export function JobSearchSourcesReadyState({
         >
           <FastForward size={11} />
           Score current results
+        </button>
+      )}
+      {!locked && onClearCareerFiles && (
+        <button
+          type="button"
+          onClick={onClearCareerFiles}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-1 w-full px-2 py-1.5 rounded-full bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/70 text-[11px] font-medium transition-colors border border-white/10"
+          title="Abandon this paused search and remove its career files."
+        >
+          Clear career files
         </button>
       )}
     </div>

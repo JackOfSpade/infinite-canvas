@@ -5,6 +5,7 @@ import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
 import { JobPlatformSelectionControl } from '../../components/JobPlatformSelectionControl';
 import { JobSearchLocationFields } from '../../components/JobSearchLocationFields';
+import { formatCompletionTimestamp } from '../../utils/completionTimestamp';
 
 // e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
@@ -74,12 +75,7 @@ export function JobSearchDoneState({
   const { addToast } = useToast();
   const targetRoleHelpId = useId();
   const preferencesHelpId = useId();
-  const lastCompletedRunAtText = Number.isFinite(Number(lastCompletedRunAt))
-    ? new Date(Number(lastCompletedRunAt)).toLocaleString(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    })
-    : null;
+  const lastCompletedRunAtText = formatCompletionTimestamp(lastCompletedRunAt);
   // `testMode` is retained only for old persisted hubs. New runs record the
   // actual scoring behavior through `aiSkipped` / `collectionOnly`.
   const skippedAi = aiSkipped || collectionOnly || testMode;

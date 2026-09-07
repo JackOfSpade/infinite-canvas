@@ -734,6 +734,56 @@ export default [
     },
   },
   {
+    name: 'job run staging: terminal cleanup treats only ENOENT as confirmed absence',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-cleanup-access-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const stagingPath = path.join(root, 'workspace.jobs-staging.jsonl');
+      const manifestPath = path.join(root, 'workspace.jobs-run.json');
+      const originalAccess = fs.promises.access;
+      try {
+        await startRun(canvasPath, {
+          runId: 'cleanup-access-fault', startedAt: 100, nodeId: 'hub-1', sourceIds: ['remoteok'],
+        });
+        let manifestChecks = 0;
+        let completed;
+        try {
+          fs.promises.access = async (filePath, ...args) => {
+            if (path.resolve(filePath) === path.resolve(stagingPath)) {
+              throw Object.assign(new Error('injected pre-cleanup access denial'), { code: 'EACCES' });
+            }
+            if (path.resolve(filePath) === path.resolve(manifestPath)) {
+              manifestChecks += 1;
+              if (manifestChecks > 1) {
+                throw Object.assign(new Error('injected post-cleanup I/O failure'), { code: 'EIO' });
+              }
+            }
+            return originalAccess(filePath, ...args);
+          };
+          completed = await completeRunWithReceipt(canvasPath, {
+            runId: 'cleanup-access-fault', nodeId: 'hub-1', startedAt: 100, completedAt: 200,
+            terminal: { status: 'completed', outcome: 'zero' },
+          });
+        } finally {
+          fs.promises.access = originalAccess;
+        }
+
+        const receipt = await readLastRunReceipt(canvasPath);
+        const remaining = await fs.promises.readdir(root);
+        assert(completed?.ok && completed.cleared === false
+          && receipt?.cleanup?.attempted === true && receipt.cleanup.cleared === false,
+        `access errors must leave terminal cleanup explicitly unconfirmed, got ${JSON.stringify({ completed, receipt })}`);
+        assert(remaining.includes(path.basename(stagingPath))
+          && !remaining.includes(path.basename(manifestPath)) && manifestChecks === 2,
+        `the fixture must exercise both pre-cleanup EACCES and post-cleanup EIO without certifying absence, got ${JSON.stringify({ remaining, manifestChecks })}`);
+        return { cleared: receipt.cleanup.cleared, stagingPreserved: true, verificationFaultObserved: true };
+      } finally {
+        fs.promises.access = originalAccess;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job run staging: terminal receipt completion is token-scoped',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-receipt-token-'));
@@ -776,6 +826,14 @@ export default [
         'an unknown terminal result count must stay absent rather than being coerced from null to zero');
       assert(sanitized.terminal.status === 'completed' && sanitized.terminal.outcome === 'collection-only',
         `collection-only completion must remain distinct from a genuine zero, got ${JSON.stringify(sanitized.terminal)}`);
+      const nonStringIdentity = sanitizeLastRunReceipt({ runId: 42, nodeId: true });
+      assert(nonStringIdentity.runId === '' && nonStringIdentity.nodeId === '',
+        'receipt identity fields reject non-string values instead of coercing them into provenance-like tokens');
+      const nonNumericCompletionTime = sanitizeLastRunReceipt({
+        runId: 'strict-receipt', nodeId: 'strict-hub', completedAt: '1760000000000', updatedAt: false,
+      });
+      assert(nonNumericCompletionTime.completedAt == null && nonNumericCompletionTime.updatedAt == null,
+        'receipt timestamps reject numeric strings and booleans instead of manufacturing terminal ordering evidence');
       const preferenceFiltered = sanitizeLastRunReceipt({
         runId: 'preferences-filtered',
         terminal: { status: 'completed', outcome: 'preference-filtered' },

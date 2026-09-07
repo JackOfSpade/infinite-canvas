@@ -1,9 +1,81 @@
-import { __createDescriptionRecoveryCheckpointForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
+import { __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
+import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __recordResumeAttemptForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'cleared job hubs reject stale analysis snapshots and honestly classify sidecar cleanup',
+    run: () => {
+      const clearedAt = Date.parse('2026-09-07T12:00:00.000Z');
+      assert(isJobAnalysisSnapshotAfterClear({}, { createdAt: '2026-09-07T12:00:00.001Z' }, clearedAt),
+        'a snapshot written after the persisted clear watermark remains recoverable for a new run');
+      for (const meta of [null, {}, { createdAt: 'not-a-date' }, { createdAt: Number.MAX_SAFE_INTEGER }, { createdAt: clearedAt }, { createdAt: clearedAt - 1 }]) {
+        assert(!isJobAnalysisSnapshotAfterClear({}, meta, clearedAt),
+          'after a clear, missing, invalid, out-of-Date-range, equal-time, and older snapshot timestamps must not re-offer stale recovery');
+      }
+      assert(isJobAnalysisSnapshotAfterClear({}, {}, null),
+        'legacy hubs without a clear watermark retain their existing recovery behavior');
+      const clearedRunId = 'run-cleared-at-boundary';
+      assert(isJobAnalysisSnapshotAfterClear({ runId: 'run-new-at-boundary' }, { createdAt: clearedAt }, clearedAt, clearedRunId)
+        && !isJobAnalysisSnapshotAfterClear({ runId: clearedRunId }, { createdAt: clearedAt }, clearedAt, clearedRunId)
+        && !isJobAnalysisSnapshotAfterClear({ runId: clearedRunId }, { createdAt: clearedAt + 1 }, clearedAt, clearedRunId)
+        && !isJobAnalysisSnapshotAfterClear({ runId: 'run-new-at-boundary' }, { createdAt: clearedAt }, clearedAt)
+        && !isJobAnalysisSnapshotAfterClear({ runId: 'invalid run id' }, { createdAt: clearedAt }, clearedAt, clearedRunId),
+      'the persisted cleared run token admits only a separately identified equal-millisecond run and still rejects the cleared run, delayed stale writes, legacy ties, and malformed tie provenance');
+      assert(normalizeJobAnalysisClearRunId(' run-a:1 ') === 'run-a:1'
+        && [null, false, 1, '', '  ', 'invalid run id', 'x'.repeat(201)].every(value => normalizeJobAnalysisClearRunId(value) == null),
+      'clear run provenance is strict and cannot be coerced into a tie-breaker');
+      assert(nextJobAnalysisClearWatermark(clearedAt, clearedAt) === clearedAt + 1
+        && nextJobAnalysisClearWatermark(8_640_000_000_000_000, clearedAt) === 8_640_000_000_000_000,
+      'a repeated clear advances its valid normal timestamp but never overflows the maximum JavaScript Date into a watermark that recovery would discard');
+      assert(collectDeletedJobAnalysisDiscards([{
+        id: 'hub-a', type: 'jobhub', data: { jobRunId: true },
+      }], '/tmp/canvas.json', clearedAt)[0]?.runId === null,
+      'canvas deletion clears an invalid persisted run token to the safe null boundary instead of rejecting its owned recovery cleanup');
+      assert(normalizeJobAnalysisClearWatermark('1760000000000') === 1760000000000
+        && [false, '', '  ', '1760000000000.5', 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, String(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER + 1].every(value => normalizeJobAnalysisClearWatermark(value) == null),
+      'persisted clear watermarks accept only positive safe Date.now integers in the JavaScript Date range (or a legacy decimal string), never coercible or permanently-future values');
+      assert(receiptTime('1760000000000') === '2025-10-09T08:53:20.000Z'
+        && receiptTime(Number.MAX_SAFE_INTEGER) === 'not recorded',
+      'receipt diagnostics format valid legacy numeric timestamps and reject an out-of-JavaScript-Date-range value without throwing');
+
+      assert(!careerFilesCleanupNeedsWarning([
+        { kind: 'analysis', status: 'fulfilled', value: { success: true, ok: true, cleared: false } },
+        { kind: 'analysis', status: 'fulfilled', value: {
+          success: true, ok: false, reason: 'ownership-mismatch',
+          artifacts: { current: { state: 'ownership-mismatch' }, lastSuccess: { state: 'cleared' }, prompt: { state: 'foreign-paired' } },
+        } },
+      ]), 'already-absent and wholly foreign analysis bundles are safe clear no-ops');
+      assert(careerFilesCleanupNeedsWarning([
+        { kind: 'analysis', status: 'fulfilled', value: { success: true, ok: false, reason: 'cleanup-failed' } },
+      ]) && careerFilesCleanupNeedsWarning([
+        { kind: 'run', status: 'rejected', reason: new Error('disk unavailable') },
+      ]) && careerFilesCleanupNeedsWarning([
+        { kind: 'batch', status: 'fulfilled', value: { success: false, error: 'Window closed' } },
+      ]) && careerFilesCleanupNeedsWarning([
+        { kind: 'analysis', status: 'fulfilled', value: { success: true, ok: false, reason: 'cleanup-failed', artifacts: { current: { state: 'ownership-invalid' } } } },
+      ]) && careerFilesCleanupNeedsWarning([
+        { kind: 'analysis', status: 'fulfilled', value: { success: true, ok: false, reason: 'ownership-mismatch', artifacts: {} } },
+      ]), 'failed IPC responses, cleanup failures, and rejected sidecar cleanup all require an honest warning');
+      assert(isSafeJobAnalysisCleanupNoop({
+        ok: false, reason: 'ownership-mismatch', artifacts: {
+          current: { state: 'ownership-mismatch' }, lastSuccess: { state: 'cleared' },
+          prompt: { state: 'foreign-paired' }, legacyCurrent: { state: 'missing' }, legacyLastSuccess: { state: 'post-clear-paired' },
+        },
+      }) && !isSafeJobAnalysisCleanupNoop({
+        ok: false, reason: 'ownership-mismatch', artifacts: { current: { state: 'unpaired' } },
+      }) && !isSafeJobAnalysisCleanupNoop({
+        ok: false, reason: 'ownership-mismatch', artifacts: { current: { state: 'created-at-invalid' } },
+      }) && !isSafeJobAnalysisCleanupNoop({
+        ok: false, reason: 'cleanup-failed', artifacts: { current: { state: 'cleared' } },
+      }), 'mixed cleanup is quiet only when every retained artifact is proven foreign, missing, or post-clear and every target artifact was actually cleared; an unpaired prompt still warns');
+      return { watermarkGate: true, cleanupWarning: true };
+    },
+  },
   {
     name: 'gathered job-run recovery bypasses scrape prerequisites only for a complete matching manifest',
     run: async () => {
@@ -138,6 +210,426 @@ export default [
     },
   },
   {
+    name: 'career clear discards only the exact hub-owned analysis bundle and retires its run',
+    run: async () => {
+      const root = path.join('/tmp', `ic-analysis-clear-${process.pid}-${Date.now()}`);
+      const canvas = path.join(root, 'canvas.json');
+      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'));
+      const exists = async (filePath) => {
+        try { await fs.promises.access(filePath); return true; } catch { return false; }
+      };
+      const snapshot = (nodeId, runId, marker, canvasFilePath = canvas) => ({
+        version: 2,
+        canvasFilePath,
+        sourceHubId: nodeId,
+        nodeId,
+        runId,
+        createdAt: '2026-09-07T12:00:00.000Z',
+        gatheredJobCount: 1,
+        selectedJobCount: 1,
+        cachedPrefix: `career evidence ${marker}`,
+        previewBatches: [],
+        jobs: [{ title: marker }],
+      });
+      try {
+        await fs.promises.mkdir(root, { recursive: true });
+        const beforeFirstCanvas = path.join(root, 'before-first.json');
+        const beforeFirstPaths = getJobAnalysisPaths(beforeFirstCanvas, path.join(root, 'unused'));
+        const beforeFirstClear = await __discardJobAnalysisSnapshotForTests(beforeFirstCanvas, 'hub-a', {
+          runId: 'run-before-first-snapshot',
+        });
+        const invalidRun = await __discardJobAnalysisSnapshotForTests(beforeFirstCanvas, 'hub-a', {
+          runId: 'invalid run id',
+        });
+        const invalidNode = await __discardJobAnalysisSnapshotForTests(beforeFirstCanvas, 'invalid node id', {
+          runId: 'run-valid-but-node-is-not',
+        });
+        const retirementBeforeInvalidBoundary = __getJobAnalysisRetirementStateForTests().ownerBoundaries;
+        for (const invalidBoundary of [false, '', '1234', 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
+          const invalidClearBoundary = await __discardJobAnalysisSnapshotForTests(beforeFirstCanvas, 'hub-a', {
+            runId: 'must-not-retire-invalid-boundary', clearedAt: invalidBoundary,
+          });
+          assert(!invalidClearBoundary.ok && invalidClearBoundary.reason === 'invalid-clear-boundary',
+            'the discard timestamp is a strict positive safe-integer Date.now boundary, never a coercible input');
+        }
+        const lateBeforeFirst = await __saveJobAnalysisSnapshotForTests(
+          snapshot('hub-a', 'run-before-first-snapshot', 'late-before-first', beforeFirstCanvas),
+        );
+        const nextBeforeFirst = await __saveJobAnalysisSnapshotForTests(
+          snapshot('hub-a', 'run-after-first-snapshot', 'next-before-first', beforeFirstCanvas),
+        );
+        assert(beforeFirstClear.ok && !beforeFirstClear.cleared && beforeFirstClear.retiredRun
+          && !invalidRun.ok && invalidRun.reason === 'invalid-run-id'
+          && !invalidNode.ok && invalidNode.reason === 'invalid-node-id'
+          && __getJobAnalysisRetirementStateForTests().ownerBoundaries === retirementBeforeInvalidBoundary
+          && lateBeforeFirst.retired === true && nextBeforeFirst.retired !== true
+          && JSON.parse(await fs.promises.readFile(beforeFirstPaths.jsonPath, 'utf8')).runId === 'run-after-first-snapshot',
+        'a clear captured before the first snapshot tombstones its exact valid run without blocking a future run on the same hub');
+
+        const invalidCreatedAtCanvas = path.join(root, 'invalid-created-at.json');
+        const invalidCreatedAtPaths = getJobAnalysisPaths(invalidCreatedAtCanvas, path.join(root, 'unused-invalid-created-at'));
+        const invalidCreatedAtSnapshot = {
+          ...snapshot('hub-a', 'run-invalid-created-at', 'invalid-created-at', invalidCreatedAtCanvas),
+          createdAt: Number.MAX_SAFE_INTEGER,
+        };
+        await fs.promises.writeFile(invalidCreatedAtPaths.jsonPath, JSON.stringify(invalidCreatedAtSnapshot));
+        await fs.promises.writeFile(invalidCreatedAtPaths.promptPath, __formatJobAnalysisPromptForTests(invalidCreatedAtSnapshot));
+        const invalidCreatedAtClear = await __discardJobAnalysisSnapshotForTests(invalidCreatedAtCanvas, 'hub-a', {
+          runId: invalidCreatedAtSnapshot.runId,
+          clearedAt: Date.now(),
+        });
+        assert(invalidCreatedAtClear.ok
+          && invalidCreatedAtClear.artifacts.current.cleared
+          && invalidCreatedAtClear.artifacts.prompt.cleared
+          && !(await exists(invalidCreatedAtPaths.jsonPath)),
+        'the exact requested run is cleared even when its embedded timestamp is invalid and cannot classify its age');
+
+        const differentInvalidCreatedAtCanvas = path.join(root, 'different-invalid-created-at.json');
+        const differentInvalidCreatedAtPaths = getJobAnalysisPaths(differentInvalidCreatedAtCanvas, path.join(root, 'unused-different-invalid-created-at'));
+        const differentInvalidCreatedAtSnapshot = {
+          ...snapshot('hub-a', 'run-new-invalid-created-at', 'different-invalid-created-at', differentInvalidCreatedAtCanvas),
+          createdAt: Number.MAX_SAFE_INTEGER,
+        };
+        await fs.promises.writeFile(differentInvalidCreatedAtPaths.jsonPath, JSON.stringify(differentInvalidCreatedAtSnapshot));
+        const differentInvalidCreatedAtClear = await __discardJobAnalysisSnapshotForTests(differentInvalidCreatedAtCanvas, 'hub-a', {
+          runId: 'run-cleared-before-invalid-created-at',
+          clearedAt: Date.now(),
+        });
+        assert(!differentInvalidCreatedAtClear.ok && differentInvalidCreatedAtClear.reason === 'cleanup-failed'
+          && differentInvalidCreatedAtClear.artifacts.current.state === 'created-at-invalid'
+          && await exists(differentInvalidCreatedAtPaths.jsonPath),
+        'an invalid timestamp still blocks cleanup for a different run because its newness cannot be proven safely');
+
+        const clearedRun = snapshot('hub-a', 'run-a', 'A');
+        await __saveJobAnalysisSnapshotForTests(clearedRun);
+        const trashed = [];
+        const clear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a', {
+          trashItem: async (filePath) => {
+            await fs.promises.rename(filePath, `${filePath}.trashed`);
+            trashed.push(filePath);
+          },
+        });
+        assert(clear.ok && clear.cleared
+          && clear.artifacts.current.method === 'trash'
+          && clear.artifacts.lastSuccess.method === 'trash'
+          && clear.artifacts.prompt.method === 'trash'
+          && trashed.length === 3
+          && !(await exists(paths.jsonPath))
+          && !(await exists(paths.lastSuccessJsonPath))
+          && !(await exists(paths.promptPath)),
+        'clearing a hub removes its owned current/last-success/prompt bundle through the injectable recoverable-trash seam');
+
+        const lateSameRun = await __saveJobAnalysisSnapshotForTests(clearedRun);
+        const nextRun = snapshot('hub-a', 'run-b', 'B');
+        const freshRun = await __saveJobAnalysisSnapshotForTests(nextRun);
+        assert(lateSameRun.retired === true && freshRun.retired !== true
+          && JSON.parse(await fs.promises.readFile(paths.jsonPath, 'utf8')).runId === 'run-b',
+        'the cleared run is tombstoned against a late write while a new run on the same hub remains writable');
+
+        const boundaryCanvas = path.join(root, 'clear-boundary.json');
+        const boundaryPaths = getJobAnalysisPaths(boundaryCanvas, path.join(root, 'unused-boundary'));
+        const boundaryAt = 2_000;
+        const staleBoundary = { ...snapshot('hub-a', 'run-a-boundary', 'old-boundary', boundaryCanvas), createdAt: new Date(1_999).toISOString() };
+        const postBoundary = { ...snapshot('hub-a', 'run-b-boundary', 'new-boundary', boundaryCanvas), createdAt: new Date(2_001).toISOString() };
+        await fs.promises.writeFile(boundaryPaths.jsonPath, JSON.stringify(postBoundary));
+        await fs.promises.writeFile(boundaryPaths.lastSuccessJsonPath, JSON.stringify(staleBoundary));
+        await fs.promises.writeFile(boundaryPaths.promptPath, __formatJobAnalysisPromptForTests(postBoundary));
+        const boundaryClear = await __discardJobAnalysisSnapshotForTests(boundaryCanvas, 'hub-a', {
+          runId: staleBoundary.runId,
+          clearedAt: boundaryAt,
+        });
+        const equalOtherRun = await __saveJobAnalysisSnapshotForTests({
+          ...postBoundary, runId: 'run-b-equal-boundary', createdAt: new Date(boundaryAt).toISOString(),
+        });
+        const equalClearedRun = await __saveJobAnalysisSnapshotForTests({
+          ...staleBoundary, createdAt: new Date(boundaryAt).toISOString(),
+        });
+        const lateBoundaryRun = await __saveJobAnalysisSnapshotForTests({
+          ...staleBoundary, createdAt: new Date(boundaryAt + 500).toISOString(),
+        });
+        const equalMalformedRun = await __saveJobAnalysisSnapshotForTests({
+          ...postBoundary, runId: 'malformed run id', createdAt: new Date(boundaryAt).toISOString(),
+        });
+        assert(boundaryClear.ok && boundaryClear.artifacts.current.state === 'post-clear'
+          && boundaryClear.artifacts.lastSuccess.cleared && boundaryClear.artifacts.prompt.state === 'post-clear-paired'
+          && await exists(boundaryPaths.jsonPath)
+          && equalOtherRun.retired !== true && equalClearedRun.retired === true && lateBoundaryRun.retired === true
+          && equalMalformedRun.retired === true,
+        'a stale clear removes every owned pre-boundary artifact while preserving a newer or exactly-tied separately identified run; its exact run tombstone and conservative malformed-tie rule still defeat late writes');
+
+        const repeatedClearCanvas = path.join(root, 'repeated-clear-boundary.json');
+        const repeatedBoundary = 3_000;
+        const firstRepeatedClear = await __discardJobAnalysisSnapshotForTests(repeatedClearCanvas, 'hub-a', {
+          runId: 'run-first-same-ms', clearedAt: repeatedBoundary,
+        });
+        const secondRepeatedClear = await __discardJobAnalysisSnapshotForTests(repeatedClearCanvas, 'hub-a', {
+          runId: 'run-second-same-ms', clearedAt: repeatedBoundary,
+        });
+        const lateFirstSameMs = await __saveJobAnalysisSnapshotForTests({
+          ...snapshot('hub-a', 'run-first-same-ms', 'late-first-same-ms', repeatedClearCanvas),
+          createdAt: new Date(repeatedBoundary).toISOString(),
+        });
+        const lateSecondSameMs = await __saveJobAnalysisSnapshotForTests({
+          ...snapshot('hub-a', 'run-second-same-ms', 'late-second-same-ms', repeatedClearCanvas),
+          createdAt: new Date(repeatedBoundary).toISOString(),
+        });
+        const newAfterRepeatedClear = await __saveJobAnalysisSnapshotForTests({
+          ...snapshot('hub-a', 'run-after-repeated-clear', 'after-repeated-clear', repeatedClearCanvas),
+          createdAt: new Date(repeatedBoundary + 2).toISOString(),
+        });
+        assert(firstRepeatedClear.ok && secondRepeatedClear.ok
+          && lateFirstSameMs.retired === true && lateSecondSameMs.retired === true
+          && newAfterRepeatedClear.retired !== true,
+        'sequential clears with an equal or non-monotonic IPC timestamp advance the retired boundary, tombstone both cleared runs, and still admit a later run');
+
+        const presentSecondRunCanvas = path.join(root, 'present-second-run-boundary.json');
+        const presentSecondRunPaths = getJobAnalysisPaths(presentSecondRunCanvas, path.join(root, 'unused-present-second-run'));
+        const presentBoundary = 4_000;
+        await __discardJobAnalysisSnapshotForTests(presentSecondRunCanvas, 'hub-a', {
+          runId: 'run-first-present-boundary', clearedAt: presentBoundary,
+        });
+        const presentSecondRun = {
+          ...snapshot('hub-a', 'run-second-present-boundary', 'second-present-boundary', presentSecondRunCanvas),
+          // Greater than both the stale caller's raw boundary and the effective
+          // monotonic boundary. Its exact run token must still make this clear
+          // authoritative for the requested run.
+          createdAt: new Date(presentBoundary + 2).toISOString(),
+        };
+        await fs.promises.writeFile(presentSecondRunPaths.jsonPath, JSON.stringify(presentSecondRun));
+        await fs.promises.writeFile(presentSecondRunPaths.promptPath, __formatJobAnalysisPromptForTests(presentSecondRun));
+        const presentSecondRunClear = await __discardJobAnalysisSnapshotForTests(presentSecondRunCanvas, 'hub-a', {
+          runId: presentSecondRun.runId, clearedAt: presentBoundary,
+        });
+        assert(presentSecondRunClear.ok && presentSecondRunClear.artifacts.current.cleared
+          && presentSecondRunClear.artifacts.prompt.cleared
+          && !(await exists(presentSecondRunPaths.jsonPath)),
+        'an exact requested run cannot survive its clear merely because its artifact timestamp is newer than both the raw and effective clear boundaries');
+
+        const currentLastOnlyCanvas = path.join(root, 'last-success-only.json');
+        const currentLastOnlyPaths = getJobAnalysisPaths(currentLastOnlyCanvas, path.join(root, 'unused-last-only'));
+        const currentLastOnly = snapshot('hub-a', 'run-last-success-only', 'last-success-only', currentLastOnlyCanvas);
+        await fs.promises.writeFile(currentLastOnlyPaths.lastSuccessJsonPath, JSON.stringify(currentLastOnly));
+        await fs.promises.writeFile(currentLastOnlyPaths.promptPath, __formatJobAnalysisPromptForTests(currentLastOnly));
+        const currentLastOnlyClear = await __discardJobAnalysisSnapshotForTests(currentLastOnlyCanvas, 'hub-a');
+        const legacyLastOnlyCanvas = path.join(root, 'legacy-last-success-only.json');
+        const legacyLastOnlyPaths = getJobAnalysisPaths(legacyLastOnlyCanvas, path.join(root, 'unused-legacy-last-only'));
+        const legacyLastOnly = snapshot('hub-a', 'run-legacy-last-success-only', 'legacy-last-success-only', legacyLastOnlyCanvas);
+        await fs.promises.writeFile(legacyLastOnlyPaths.legacyLastSuccessJsonPath, JSON.stringify(legacyLastOnly));
+        await fs.promises.writeFile(legacyLastOnlyPaths.legacyPromptPath, __formatJobAnalysisPromptForTests(legacyLastOnly));
+        const legacyLastOnlyClear = await __discardJobAnalysisSnapshotForTests(legacyLastOnlyCanvas, 'hub-a');
+        assert(currentLastOnlyClear.artifacts.lastSuccess.cleared && currentLastOnlyClear.artifacts.prompt.cleared
+          && legacyLastOnlyClear.artifacts.legacyLastSuccess.cleared && legacyLastOnlyClear.artifacts.legacyPrompt.cleared,
+        'a verified current or legacy prompt is removable when it pairs with an owned last-success record even if the current record is absent');
+
+        const accessFailureCanvas = path.join(root, 'remove-access-failure.json');
+        const accessFailure = snapshot('hub-a', 'run-access-failure', 'access-failure', accessFailureCanvas);
+        await __saveJobAnalysisSnapshotForTests(accessFailure);
+        const eacces = new Error('permission denied while confirming removal');
+        eacces.code = 'EACCES';
+        const accessFailureClear = await __discardJobAnalysisSnapshotForTests(accessFailureCanvas, 'hub-a', {
+          trashItem: async (filePath) => fs.promises.rename(filePath, `${filePath}.moved`),
+          verifyRemoval: async () => { throw eacces; },
+        });
+        assert(!accessFailureClear.ok && accessFailureClear.reason === 'cleanup-failed'
+          && accessFailureClear.artifacts.current.state === 'error'
+          && accessFailureClear.artifacts.current.cleared === false,
+        'a non-ENOENT access failure after deletion is reported as uncertain cleanup, never falsely claimed as removed');
+
+        const alreadyMissingCanvas = path.join(root, 'already-missing.json');
+        const alreadyMissing = snapshot('hub-a', 'run-already-missing', 'already-missing', alreadyMissingCanvas);
+        await __saveJobAnalysisSnapshotForTests(alreadyMissing);
+        const alreadyMissingClear = await __discardJobAnalysisSnapshotForTests(alreadyMissingCanvas, 'hub-a', {
+          // Model a second cleanup process deleting each artifact between our
+          // ownership read and the OS-trash request, then surfacing ENOENT.
+          trashItem: async (filePath) => {
+            await fs.promises.unlink(filePath);
+            const error = new Error('artifact already removed');
+            error.code = 'ENOENT';
+            throw error;
+          },
+        });
+        assert(alreadyMissingClear.ok && !alreadyMissingClear.cleared
+          && alreadyMissingClear.artifacts.current.state === 'missing'
+          && alreadyMissingClear.artifacts.lastSuccess.state === 'missing'
+          && alreadyMissingClear.artifacts.prompt.state === 'missing',
+        'an ENOENT after an ownership read is a verified already-removed no-op, while non-ENOENT verification failures remain warnings');
+
+        const invalidFallbackDir = path.join(root, 'invalid-unsaved-fallback');
+        const invalidFallbackPaths = getJobAnalysisPaths(null, invalidFallbackDir);
+        const invalidFallback = snapshot('hub-a', 'run-invalid-fallback', 'invalid-fallback', null);
+        await fs.promises.mkdir(invalidFallbackDir, { recursive: true });
+        await fs.promises.writeFile(invalidFallbackPaths.jsonPath, JSON.stringify(invalidFallback));
+        const retirementBeforeInvalidCanvas = __getJobAnalysisRetirementStateForTests().ownerBoundaries;
+        for (const invalidCanvasFilePath of [undefined, '', '   ', 42]) {
+          const invalidCanvas = await __discardJobAnalysisSnapshotForTests(invalidCanvasFilePath, 'hub-a', {
+            runId: 'must-not-retire', fallbackDir: invalidFallbackDir,
+          });
+          assert(!invalidCanvas.ok && invalidCanvas.reason === 'invalid-canvas-path',
+            'only explicit null may select the private unsaved-canvas fallback');
+        }
+        assert(await exists(invalidFallbackPaths.jsonPath)
+          && __getJobAnalysisRetirementStateForTests().ownerBoundaries === retirementBeforeInvalidCanvas,
+        'invalid canvas values leave both the private fallback artifact and retirement state untouched');
+
+        const retirementCanvas = path.join(root, 'bounded-retirement.json');
+        const retirementStateBefore = __getJobAnalysisRetirementStateForTests().ownerBoundaries;
+        for (let index = 0; index < 48; index += 1) {
+          await __discardJobAnalysisSnapshotForTests(retirementCanvas, 'hub-retirement', {
+            runId: `run-retirement-${index}`,
+            clearedAt: 10_000 + index,
+          });
+        }
+        const staleRetirementWrite = await __saveJobAnalysisSnapshotForTests({
+          ...snapshot('hub-retirement', 'run-retirement-0', 'late-retirement', retirementCanvas),
+          createdAt: new Date(9_999).toISOString(),
+        });
+        const nextRetirementWrite = await __saveJobAnalysisSnapshotForTests({
+          ...snapshot('hub-retirement', 'run-retirement-next', 'next-retirement', retirementCanvas),
+          createdAt: new Date(10_100).toISOString(),
+        });
+        assert(__getJobAnalysisRetirementStateForTests().ownerBoundaries === retirementStateBefore + 1
+          && staleRetirementWrite.retired === true && nextRetirementWrite.retired !== true,
+        'retirement storage stays bounded to one advancing boundary per canvas/hub while old delayed snapshots remain fenced and a future run writes');
+
+        const foreign = snapshot('hub-b', 'run-foreign', 'foreign');
+        await __saveJobAnalysisSnapshotForTests(foreign);
+        const foreignClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(foreignClear.ok && foreignClear.reason == null
+          && foreignClear.artifacts.current.state === 'ownership-mismatch'
+          && foreignClear.artifacts.lastSuccess.state === 'ownership-mismatch'
+          && await exists(paths.jsonPath) && await exists(paths.lastSuccessJsonPath) && await exists(paths.promptPath),
+        'a same-canvas snapshot consistently owned by another hub is left intact as an expected preserved no-op');
+
+        const mixedTarget = snapshot('hub-a', 'run-mixed-target', 'mixed-target');
+        await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify(mixedTarget));
+        await fs.promises.writeFile(paths.promptPath, __formatJobAnalysisPromptForTests(mixedTarget));
+        const mixedClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(mixedClear.ok && mixedClear.artifacts.current.state === 'ownership-mismatch'
+          && mixedClear.artifacts.lastSuccess.cleared && mixedClear.artifacts.prompt.cleared
+          && await exists(paths.jsonPath) && !(await exists(paths.lastSuccessJsonPath)),
+        'a mixed bundle clears target-owned old recovery while consistently preserving a foreign current artifact without a false warning');
+
+        const sharedPromptOwned = snapshot('hub-a', 'run-shared-prompt-owned', 'shared-prompt');
+        const sharedPromptForeign = {
+          ...sharedPromptOwned,
+          sourceHubId: 'hub-b',
+          nodeId: 'hub-b',
+          runId: 'run-shared-prompt-foreign',
+        };
+        const sharedPrompt = __formatJobAnalysisPromptForTests(sharedPromptOwned);
+        assert(sharedPrompt === __formatJobAnalysisPromptForTests(sharedPromptForeign),
+          'analysis prompts can be byte-identical across snapshots whose owner and run provenance differ');
+        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(sharedPromptForeign));
+        await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify(sharedPromptOwned));
+        await fs.promises.writeFile(paths.promptPath, sharedPrompt);
+        const sharedPromptClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(sharedPromptClear.ok
+          && sharedPromptClear.artifacts.current.state === 'ownership-mismatch'
+          && sharedPromptClear.artifacts.lastSuccess.cleared
+          && sharedPromptClear.artifacts.prompt.state === 'foreign-paired'
+          && await exists(paths.jsonPath)
+          && !(await exists(paths.lastSuccessJsonPath))
+          && await fs.promises.readFile(paths.promptPath, 'utf8') === sharedPrompt,
+        'an identical shared prompt remains with its preserved foreign/current snapshot when the stale owned sibling is cleared');
+
+        await fs.promises.writeFile(paths.jsonPath, '{not json', 'utf8');
+        await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify(sharedPromptOwned));
+        await fs.promises.writeFile(paths.promptPath, sharedPrompt);
+        const ambiguousSharedPromptClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(!ambiguousSharedPromptClear.ok
+          && ambiguousSharedPromptClear.reason === 'cleanup-failed'
+          && ambiguousSharedPromptClear.artifacts.current.state === 'invalid'
+          && ambiguousSharedPromptClear.artifacts.lastSuccess.cleared
+          && ambiguousSharedPromptClear.artifacts.prompt.state === 'ownership-ambiguous'
+          && await exists(paths.jsonPath)
+          && !(await exists(paths.lastSuccessJsonPath))
+          && await fs.promises.readFile(paths.promptPath, 'utf8') === sharedPrompt,
+        'a malformed current companion vetoes deletion of an ownerless shared prompt even when an owned stale sibling has byte-identical prompt content');
+
+        const inconsistentOwner = { ...snapshot('hub-a', 'run-inconsistent-owner', 'inconsistent-owner'), nodeId: 'hub-b' };
+        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(inconsistentOwner));
+        await fs.promises.writeFile(paths.promptPath, __formatJobAnalysisPromptForTests(inconsistentOwner));
+        const inconsistentClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(!inconsistentClear.ok && inconsistentClear.reason === 'cleanup-failed'
+          && inconsistentClear.artifacts.current.state === 'ownership-invalid'
+          && inconsistentClear.artifacts.prompt.state === 'ownership-ambiguous'
+          && await exists(paths.promptPath)
+          && careerFilesCleanupNeedsWarning([{ kind: 'analysis', status: 'fulfilled', value: { success: true, ...inconsistentClear } }]),
+        'contradictory owner fields are not treated as an ordinary foreign no-op and surface a cleanup warning');
+
+        await fs.promises.rm(paths.jsonPath, { force: true });
+        await fs.promises.rm(paths.lastSuccessJsonPath, { force: true });
+        await fs.promises.rm(paths.promptPath, { force: true });
+        const unpaired = snapshot('hub-a', 'run-unpaired', 'unpaired');
+        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(unpaired));
+        await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify(unpaired));
+        await fs.promises.writeFile(paths.promptPath, 'unpaired prompt from another run');
+        const unpairedClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(!unpairedClear.ok && unpairedClear.reason === 'cleanup-failed' && unpairedClear.artifacts.current.cleared
+          && unpairedClear.artifacts.lastSuccess.cleared
+          && unpairedClear.artifacts.prompt.state === 'unpaired'
+          && await exists(paths.promptPath),
+        'an owned current snapshot does not authorize deletion of an unpaired prompt and reports the ambiguous retained career material honestly');
+        await fs.promises.rm(paths.promptPath);
+
+        // JSON artifacts can be removed by a prior incomplete cleanup while a
+        // prompt survives. No JSON owner remains to authorize deletion, so the
+        // prompt must be reported as an unsafe orphan rather than hidden by the
+        // default "missing" artifact state.
+        await fs.promises.writeFile(paths.promptPath, 'orphan prompt with cleared career material');
+        const orphanPromptClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(!orphanPromptClear.ok && orphanPromptClear.reason === 'cleanup-failed'
+          && orphanPromptClear.artifacts.current.state === 'missing'
+          && orphanPromptClear.artifacts.lastSuccess.state === 'missing'
+          && orphanPromptClear.artifacts.prompt.state === 'unpaired'
+          && await exists(paths.promptPath),
+        'a present prompt with no JSON companion is an unsafe orphan, not a successful missing-artifact no-op');
+        await fs.promises.rm(paths.promptPath);
+
+        const legacy = snapshot('hub-a', 'legacy-run', 'legacy');
+        await fs.promises.writeFile(paths.legacyJsonPath, JSON.stringify(legacy));
+        await fs.promises.writeFile(paths.legacyLastSuccessJsonPath, JSON.stringify(legacy));
+        await fs.promises.writeFile(paths.legacyPromptPath, __formatJobAnalysisPromptForTests(legacy));
+        const legacyClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
+        assert(legacyClear.ok && legacyClear.artifacts.legacyCurrent.cleared
+          && legacyClear.artifacts.legacyLastSuccess.cleared
+          && legacyClear.artifacts.legacyPrompt.cleared
+          && !(await exists(paths.legacyJsonPath))
+          && !(await exists(paths.legacyLastSuccessJsonPath))
+          && !(await exists(paths.legacyPromptPath)),
+        'legacy artifacts are cleared only after their embedded canvas and hub ownership both match, including a verified paired prompt');
+
+        const unsavedDir = path.join(root, 'unsaved-analysis');
+        const unsavedPaths = getJobAnalysisPaths(null, unsavedDir);
+        const unsaved = snapshot('hub-a', 'unsaved-run', 'unsaved', null);
+        await fs.promises.mkdir(unsavedDir, { recursive: true });
+        await fs.promises.writeFile(unsavedPaths.jsonPath, JSON.stringify(unsaved));
+        await fs.promises.writeFile(unsavedPaths.lastSuccessJsonPath, JSON.stringify(unsaved));
+        await fs.promises.writeFile(unsavedPaths.promptPath, __formatJobAnalysisPromptForTests(unsaved));
+        const unsavedClear = await __discardJobAnalysisSnapshotForTests(null, 'hub-a', { fallbackDir: unsavedDir });
+        assert(unsavedClear.ok && unsavedClear.artifacts.current.cleared
+          && unsavedClear.artifacts.lastSuccess.cleared && unsavedClear.artifacts.prompt.cleared
+          && !(await exists(unsavedPaths.jsonPath)) && !(await exists(unsavedPaths.lastSuccessJsonPath)),
+        'an untitled canvas clears its exact hub-owned private fallback bundle instead of leaving old career data resumable');
+
+        const unsavedForeign = snapshot('hub-b', 'unsaved-foreign', 'unsaved-foreign', null);
+        await fs.promises.writeFile(unsavedPaths.jsonPath, JSON.stringify(unsavedForeign));
+        await fs.promises.writeFile(unsavedPaths.lastSuccessJsonPath, JSON.stringify(unsavedForeign));
+        await fs.promises.writeFile(unsavedPaths.promptPath, __formatJobAnalysisPromptForTests(unsavedForeign));
+        const unsavedForeignClear = await __discardJobAnalysisSnapshotForTests(null, 'hub-a', { fallbackDir: unsavedDir });
+        assert(unsavedForeignClear.ok && unsavedForeignClear.reason == null
+          && unsavedForeignClear.artifacts.current.state === 'ownership-mismatch'
+          && unsavedForeignClear.artifacts.lastSuccess.state === 'ownership-mismatch'
+          && unsavedForeignClear.artifacts.prompt.state === 'foreign-paired'
+          && await exists(unsavedPaths.jsonPath) && await exists(unsavedPaths.lastSuccessJsonPath) && await exists(unsavedPaths.promptPath),
+        'an untitled canvas preserves a verified-foreign fallback bundle as an expected no-op');
+        return { trashed: trashed.length, retiredRun: clearedRun.runId, newRun: nextRun.runId };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'description recovery serializes same-run source writes and cannot overwrite a reset run',
     run: async () => {
       const mutex = createDescriptionRecoveryMutex();
@@ -258,24 +750,77 @@ export default [
           && pausedDiscards[0].nodeId === 'paused-hub'
           && pausedDiscards[0].runId === 'paused-run',
         'the centralized canvas-deletion path captures the exact paused hub/run instead of relying on component unmount');
+        const analysisDiscards = collectDeletedJobAnalysisDiscards([
+          { id: 'removed-hub', type: 'jobhub', data: { hubState: 'done', jobRunId: 'completed-run' } },
+          {
+            id: 'removed-container', type: 'group', data: {
+              canvasData: { nodes: [{ id: 'nested-hub', type: 'jobhub', data: { locked: true, hubState: 'done', jobRunId: 'nested-run' } }] },
+            },
+          },
+          { id: 'completed-no-run', type: 'jobhub', data: { hubState: 'done' } },
+        ], pausedCanvas, 12345);
+        assert(analysisDiscards.length === 3
+          && analysisDiscards[0].nodeId === 'removed-hub'
+          && analysisDiscards[0].runId === 'completed-run'
+          && analysisDiscards[0].clearedAt === 12345
+          && analysisDiscards[1].nodeId === 'nested-hub'
+          && analysisDiscards[1].runId === 'nested-run'
+          && analysisDiscards[2].nodeId === 'completed-no-run'
+          && analysisDiscards[2].runId == null,
+        'committed canvas deletion captures every actually removed Job Search hub, including a locked descendant of an unlocked deleted container and a completed hub with no live run');
+        const topLevelLocked = { id: 'locked-hub', type: 'jobhub', data: { locked: true, hubState: 'done', jobRunId: 'locked-run' } };
+        const removedRoots = [topLevelLocked, { id: 'unlocked-hub', type: 'jobhub', data: { hubState: 'done', jobRunId: 'unlocked-run' } }]
+          .filter(node => !node.data?.locked);
+        const clearCanvasDiscards = collectDeletedJobAnalysisDiscards(removedRoots, pausedCanvas, 12346);
+        assert(clearCanvasDiscards.length === 1 && clearCanvasDiscards[0].nodeId === 'unlocked-hub'
+          && !clearCanvasDiscards.some(discard => discard.nodeId === 'locked-hub'),
+        'Clear Canvas excludes its top-level locked root before handing the actually removed roots to shared analysis cleanup');
         const deletionHook = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
         const canvas = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
         const canvasActions = fs.readFileSync(path.resolve('src/hooks/useCanvasActions.js'), 'utf8');
         const finalizeStart = deletionHook.indexOf('const finalizeNodeDeletion = () => {');
         const promptStart = deletionHook.indexOf('if (osPaths.length > 0 && window.electronAPI)', finalizeStart);
-        const promptEnd = deletionHook.indexOf('}, [requestConfirm, undo, canvasFilePath]);', promptStart);
+        const promptEnd = deletionHook.indexOf('}, [requestConfirm, undo, canvasFilePath, addToast]);', promptStart);
         const deletionPrompt = deletionHook.slice(promptStart, promptEnd);
         assert(deletionHook.includes('discardDeletedJobRuns(deletedNodes, canvasFilePath')
-          && canvas.includes('useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile })')
+          && canvas.includes('useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast })')
           && canvas.includes('canvasFilePath: currentFile,')
           && canvasActions.includes("allNodes.filter(node => !lockedIds.has(node.id))")
           && canvasActions.includes('discardDeletedJobRuns(')
+          && canvasActions.includes('discardDeletedJobAnalysisSnapshots(')
+          && canvasActions.includes('Canvas cleared with a warning')
+          && canvasActions.includes('let analysisCleanupWarningShown = false;')
+          && canvasActions.includes('const showJobCleanupWarning = () =>')
+          && deletionHook.includes('discardDeletedJobAnalysisSnapshots(deletedNodes, canvasFilePath')
+          && deletionHook.includes('Hub deleted with a warning')
+          && deletionHook.includes('let analysisCleanupWarningShown = false;')
+          && canvas.includes('useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast })')
+          && canvas.includes('canvasFilePath: currentFile,\n    addToast,')
           && finalizeStart >= 0 && promptStart > finalizeStart
           && deletionPrompt.includes('onConfirm: async () => {\n          finalizeNodeDeletion();')
           && deletionPrompt.includes('onCancel: finalizeNodeDeletion')
           && deletionPrompt.includes('onAbort: undo ? () => undo() : undefined')
           && deletionPrompt.includes('} else {\n      finalizeNodeDeletion();'),
         'interactive deletion and programmatic Clear Canvas both dispatch exact cleanup with the captured canvas path, while an OS-dialog Abort restores the hub without first discarding its run');
+        const priorWindow = globalThis.window;
+        const cleanupFailures = [];
+        try {
+          globalThis.window = {
+            electronAPI: {
+              discardJobRun: async () => undefined,
+              discardJobAnalysisSnapshot: async () => ({ success: true, ok: false, reason: 'unknown' }),
+            },
+          };
+          const deletedHub = [{ id: 'failed-cleanup-hub', type: 'jobhub', data: { jobRunId: 'failed-cleanup-run' } }];
+          discardDeletedJobRuns(deletedHub, pausedCanvas, (...args) => cleanupFailures.push(['run', ...args]));
+          discardDeletedJobAnalysisSnapshots(deletedHub, pausedCanvas, (...args) => cleanupFailures.push(['analysis', ...args]), 12347);
+          await new Promise(resolve => setImmediate(resolve));
+          assert(cleanupFailures.some(([kind, error]) => kind === 'run' && /cleanup failed/i.test(error.message))
+            && cleanupFailures.some(([kind, error]) => kind === 'analysis' && /cleanup failed/i.test(error.message)),
+          'committed deletion treats missing or malformed fulfilled cleanup IPC replies as failures instead of silently claiming recovery was retired');
+        } finally {
+          globalThis.window = priorWindow;
+        }
         const foreignCleanup = await __discardOwnedJobRunForTests(pausedCanvas, 'different-hub', 'paused-run');
         const afterForeignCleanup = await readRunState(pausedCanvas, Date.now());
         const checkpointAfterForeignCleanup = await __loadDescriptionRecoveryCheckpointForTests(

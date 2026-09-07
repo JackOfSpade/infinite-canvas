@@ -23,6 +23,7 @@ import {
 import { logger } from '../../logger.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay as paintOverlay } from './scraperOverlay.js';
+import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
@@ -2728,7 +2729,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     // individual job pages. Falls back to the main page if newPage() fails.
     let detailPage = null;
     const createDetailPage = async () => {
-      const nextPage = await page.browser().newPage();
+      const nextPage = await createBackgroundScrapePage(page.browser(), { width: 1280, height: 900 });
       await nextPage.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, 'webdriver',           { get: () => false });
         Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
@@ -5773,7 +5774,7 @@ async function applyStealthMask(page) {
  * @returns {{ browser:object, page:object, navStatusRef:{last:number|null}, isClosed:()=>boolean, teardown:()=>Promise<void> }}
  */
 async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash }) {
-  const browser = await puppeteer.launch({
+  const browser = await puppeteer.launch(prepareBackgroundScrapeLaunchOptions({
     headless: false,
     executablePath,
     userDataDir,
@@ -5789,17 +5790,18 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     ],
     defaultViewport: null,
     ignoreHTTPSErrors: true,
-  });
+  }));
 
-  const page = await browser.newPage();
   // Everything below, up to the overlay injection, runs against the browser we
   // just launched. The caller's `platform` bundle isn't assigned until this
   // function returns, so a throw here (protocol error, hung renderer right
   // after launch) would otherwise leave nothing holding a reference to close
   // it — the just-spawned Chrome leaks and keeps the shared userDataDir's
   // SingletonLock held for every source after this one.
+  let page;
   const navStatusRef = { last: null };
   try {
+    page = await createBackgroundScrapePage(browser, { width: 1280, height: 900 });
     await applyStealthMask(page);
 
     // Capture browser-side console errors/warnings for the bug report. Fires for all

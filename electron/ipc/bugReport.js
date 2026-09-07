@@ -39,6 +39,7 @@ import {
   TRANSIENT_PROCESSING_HUB_STATES,
 } from '../../src/utils/persistenceTransientState.js';
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
+import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -944,6 +945,16 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const dropLock = getHubDropLockReason({ type: 'jobhub', data: d });
         previewParts.push(`careerIdentity: ${hubHasAcceptedInitialDrop({ type: 'jobhub', data: d }) ? 'present' : 'none'}`);
         previewParts.push(`dropLock: ${dropLock || 'none'}`);
+        // Completion history is intentionally retained when career files are
+        // cleared. Surface its ISO value here so a report can distinguish that
+        // historical state from a hub which has never completed a run, without
+        // exposing any career-file or job payload.
+        if (d.lastCompletedRunAt != null) {
+          const completionIso = completionTimestampIso(d.lastCompletedRunAt);
+          previewParts.push(completionIso
+            ? `lastCompletedRunAt: ${completionIso}`
+            : 'lastCompletedRunAt: invalid');
+        }
         // A locked hub refuses its own Cancel/Reset. Without this field a
         // report cannot separate "the user pressed Cancel and the hub declined"
         // from "the user never pressed it" — the two look identical from the
@@ -1574,6 +1585,23 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
   return jobSessionsMarkdown;
 }
 
+// A captcha window proves only that its challenge was cleared; it does not
+// observe an authenticated session. Keep that distinction at the report
+// boundary so a successful Solve never renders as a failed login.
+export function formatAuthAttemptStatus(attempt) {
+  const isChallenge = attempt?.mode === 'captcha-resolve'
+    || (attempt?.mode === 'native-chrome'
+      && String(attempt?.platformId || '').endsWith('-native-challenge'));
+  if (isChallenge) {
+    return attempt?.result === 'cleared'
+      ? '✅ challenge cleared'
+      : `challenge result=${attempt?.result || '—'}`;
+  }
+  return attempt?.loginDetected
+    ? `✅ detected${attempt.loginSignal ? ` (${attempt.loginSignal})` : ''}`
+    : '❌ NOT detected';
+}
+
 function buildAuthWindowMarkdown() {
   let authWindowMarkdown = '';
     const diag = getAuthWindowDiagnostics?.();
@@ -1637,11 +1665,7 @@ function buildAuthWindowMarkdown() {
         .reverse()
         .map(h => {
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
-          const isNativeChallenge = h.mode === 'native-chrome'
-            && String(h.platformId || '').endsWith('-native-challenge');
-          const detected = isNativeChallenge
-            ? (h.result === 'cleared' ? '✅ challenge cleared' : `challenge result=${h.result || '—'}`)
-            : h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
+          const detected = formatAuthAttemptStatus(h);
           const title = h.title ? `, title="${truncateDiagnosticText(String(h.title).replace(/\s+/g, ' '), 100)}"` : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
           const close = h.closeDisposition
@@ -1650,11 +1674,13 @@ function buildAuthWindowMarkdown() {
           const cookieMeta = Array.isArray(h.authCookiesBeforeClose) && h.authCookiesBeforeClose.length > 0
             ? ` · auth cookies before close=${h.authCookiesBeforeClose.map(c => `${c.name}:${c.persistent ? 'persistent' : 'session'}`).join(',')}`
             : '';
+          const isNativeChallenge = h.mode === 'native-chrome'
+            && String(h.platformId || '').endsWith('-native-challenge');
           const nativeEvidence = isNativeChallenge ? buildNativeChallengeHistoryEvidence(h) : '';
           return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${nativeEvidence}${title}${h.url ? ` — \`${redactReportUrl(h.url)}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
-        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
+        ? `\n### Recent login and captcha attempts (this session)\n> Every completed login/captcha window. Login rows state whether the window CONFIRMED login: **detected** ⇒ a later logged-out state means the session did not persist or re-verification rejected it; **NOT detected** ⇒ login did not complete in that window. Captcha rows state challenge clearance only — clearing a challenge is not a login assertion. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
         : '';
       // Scrape/stealth browser liveness — a captcha/login window launches a
       // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here
@@ -2283,15 +2309,45 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
     const jobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
       ? payload.filterStats.jobBoardStates
-      : (nodes || []).filter(node => node?.type === 'jobboard').map(node => ({
-          id: node.id,
-          hubState: node.data?.hubState,
-          resultCount: node.data?.resultCount,
-          stale: node.data?.stale,
-          staleReason: node.data?.staleReason,
-          combineSignature: node.data?.combineSignature,
-          mergeUnique: node.data?.mergeStats?.unique,
-        }));
+      : (nodes || []).filter(node => node?.type === 'jobboard').map(node => {
+          const rawClear = node.data?.clearProvenance;
+          const clearProvenance = rawClear && typeof rawClear === 'object' && !Array.isArray(rawClear)
+            ? {
+                clearedAt: typeof rawClear.clearedAt === 'number'
+                  && Number.isSafeInteger(rawClear.clearedAt)
+                  && rawClear.clearedAt > 0
+                  && Number.isFinite(new Date(rawClear.clearedAt).getTime())
+                  ? rawClear.clearedAt
+                  : null,
+                priorCombineSignature: typeof rawClear.priorCombineSignature === 'string'
+                  ? rawClear.priorCombineSignature.slice(0, 4_000)
+                  : null,
+                priorResultCount: typeof rawClear.priorResultCount === 'number' && Number.isFinite(rawClear.priorResultCount) && rawClear.priorResultCount >= 0
+                  ? Math.floor(rawClear.priorResultCount)
+                  : null,
+                priorSourceRuns: [...new Map((Array.isArray(rawClear.priorSourceRuns) ? rawClear.priorSourceRuns : [])
+                  .map((entry) => {
+                    const sourceHubId = typeof entry?.sourceHubId === 'string' ? entry.sourceHubId.trim() : '';
+                    const runId = typeof entry?.runId === 'string' ? entry.runId.trim() : '';
+                    return /^[A-Za-z0-9_.:-]{1,180}$/.test(sourceHubId) && /^[A-Za-z0-9_.:-]{1,180}$/.test(runId)
+                      ? [`${sourceHubId}\u0000${runId}`, { sourceHubId, runId }]
+                      : null;
+                  })
+                  .filter(Boolean)).values()].slice(0, 25),
+              }
+            : null;
+          return {
+            id: node.id,
+            hubState: node.data?.hubState,
+            resultCount: node.data?.resultCount,
+            renderedCardCount: (nodes || []).filter(candidate => candidate?.type === 'jobcard' && candidate?.data?.hubId === node.id).length,
+            stale: node.data?.stale,
+            staleReason: node.data?.staleReason,
+            combineSignature: node.data?.combineSignature,
+            mergeUnique: node.data?.mergeStats?.unique,
+            clearProvenance,
+          };
+        });
     try {
       jobCompletionAssessmentMarkdown = buildJobCompletionAssessment(
         canvasFilePath,

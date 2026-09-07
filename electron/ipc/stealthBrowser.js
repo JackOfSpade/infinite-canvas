@@ -21,6 +21,7 @@ import os from 'os';
 import { logger } from '../logger.js';
 
 import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
+import { createBackgroundScrapePage, prepareBackgroundScrapeLaunchOptions } from './browser/backgroundScrapeBrowser.js';
 import { saveDiceApiKey } from './settings.js';
 import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
 
@@ -1210,7 +1211,7 @@ async function _browserRefreshDiceApiKey() {
 
     logger.info('[Dice API] Launching key-refresh browser (bundle fetch yielded nothing)');
 
-    browser = await puppeteer.launch({
+    browser = await puppeteer.launch(prepareBackgroundScrapeLaunchOptions({
       headless: false,
       executablePath,
       userDataDir: tmpDir,
@@ -1224,9 +1225,9 @@ async function _browserRefreshDiceApiKey() {
       ],
       defaultViewport: { width: 1280, height: 800 },
       ignoreHTTPSErrors: true,
-    });
+    }));
 
-    const page = await browser.newPage();
+    const page = await createBackgroundScrapePage(browser, { width: 1280, height: 900 });
 
     const profile = getSessionProfile();
     await page.setUserAgent(profile.ua, profile.clientHints);

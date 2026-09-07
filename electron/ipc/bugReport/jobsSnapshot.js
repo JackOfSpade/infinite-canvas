@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { getJobsTelemetry, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycle } from '../nonApiAi.js';
-import { getApplicationTelemetry } from '../jobApplication.js';
+import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
@@ -214,17 +214,20 @@ function readLastRunReceiptSnapshot(canvasFilePath) {
 }
 
 function receiptIdentifier(value, fallback = 'not recorded') {
-  const text = String(value || '').trim();
+  const text = typeof value === 'string' ? value.trim() : '';
   // IDs in app-created receipts are UUID-like. Do not render arbitrary strings
   // from a file beside the canvas even though the persistence sanitizer kept
   // them for ownership checks.
   return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : fallback;
 }
 
-function receiptTime(value) {
+export function receiptTime(value) {
   if (value == null || value === '' || typeof value === 'boolean') return 'not recorded';
   const ts = Number(value);
-  return Number.isFinite(ts) && ts > 0 ? new Date(ts).toISOString() : 'not recorded';
+  const date = new Date(ts);
+  return Number.isFinite(ts) && ts > 0 && Number.isFinite(date.getTime())
+    ? date.toISOString()
+    : 'not recorded';
 }
 
 function compactElapsedDuration(ms, { decimalSeconds = false } = {}) {
@@ -564,6 +567,24 @@ function nonnegativeCount(value) {
   return Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
 }
 
+// Board-clear provenance is an evidentiary boundary, not a legacy display
+// field. Never coerce false, an empty array, or a numeric-looking string into
+// a zero-card/zero-result fact that could certify a cleared board.
+function boardNonnegativeCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function receiptCompletionTimestamp(value) {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && Number.isFinite(new Date(value).getTime())
+    ? value
+    : null;
+}
+
 function signedCount(value) {
   if (value == null || value === '') return null;
   const count = Number(value);
@@ -571,7 +592,7 @@ function signedCount(value) {
 }
 
 function recordedRunToken(value) {
-  const text = String(value || '').trim();
+  const text = typeof value === 'string' ? value.trim() : '';
   return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
 }
 
@@ -581,13 +602,32 @@ function recordedRunToken(value) {
 // index is needed to establish whether a board actually consumed this run.
 function sourceHubIdsFromCombineSignature(value) {
   const ids = new Set();
-  for (const part of String(value || '').split('|')) {
+  if (typeof value !== 'string') return [];
+  for (const part of value.split('|')) {
     const separator = part.lastIndexOf('=');
     if (separator <= 0) continue;
     const id = part.slice(0, separator).trim();
     if (/^[A-Za-z0-9_.:-]{1,180}$/.test(id)) ids.add(id);
   }
   return [...ids].slice(0, 25);
+}
+
+function sourceRunsFromClearProvenance(value) {
+  const sourceRuns = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(value) ? value : []) {
+    const sourceHubId = typeof entry?.sourceHubId === 'string'
+      ? receiptIdentifier(entry.sourceHubId, '')
+      : '';
+    const runId = recordedRunToken(entry?.runId);
+    if (!sourceHubId || !runId) continue;
+    const key = `${sourceHubId}\u0000${runId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    sourceRuns.push({ sourceHubId, runId });
+    if (sourceRuns.length === 25) break;
+  }
+  return sourceRuns;
 }
 
 function configuredSourceCap(cap, stopReason) {
@@ -873,18 +913,39 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const boards = (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25).map(board => {
     const combinedSourceHubIds = sourceHubIdsFromCombineSignature(board?.combineSignature);
     const connectedSourceHubIds = [...new Set((Array.isArray(board?.connectedSourceHubIds) ? board.connectedSourceHubIds : [])
-      .map(id => String(id || '').trim())
+      .map(id => typeof id === 'string' ? id.trim() : '')
       .filter(id => /^[A-Za-z0-9_.:-]{1,180}$/.test(id)))].slice(0, 25);
+    const rawClear = board?.clearProvenance;
+    const clearedAt = typeof rawClear?.clearedAt === 'number'
+      && Number.isSafeInteger(rawClear.clearedAt)
+      && rawClear.clearedAt > 0
+      && Number.isFinite(new Date(rawClear.clearedAt).getTime())
+      ? rawClear.clearedAt
+      : null;
+    const priorCombineSignature = typeof rawClear?.priorCombineSignature === 'string'
+      ? rawClear.priorCombineSignature.slice(0, 4_000)
+      : null;
     return {
       id: receiptIdentifier(board?.id, 'unknown'),
       hubState: receiptIdentifier(board?.hubState, 'empty'),
-      resultCount: nonnegativeCount(board?.resultCount),
-      mergeUnique: nonnegativeCount(board?.mergeUnique),
-      renderedCardCount: nonnegativeCount(board?.renderedCardCount),
+      resultCount: boardNonnegativeCount(board?.resultCount),
+      mergeUnique: boardNonnegativeCount(board?.mergeUnique),
+      renderedCardCount: boardNonnegativeCount(board?.renderedCardCount),
       stale: board?.stale === true,
       staleReason: String(board?.staleReason || '').replace(/[\r\n`]/g, ' ').slice(0, 120),
       combinedSourceHubIds,
       connectedSourceHubIds,
+      clearProvenance: rawClear && typeof rawClear === 'object' && !Array.isArray(rawClear)
+        ? {
+            clearedAt,
+            priorResultCount: typeof rawClear.priorResultCount === 'number'
+              && Number.isFinite(rawClear.priorResultCount) && rawClear.priorResultCount >= 0
+              ? Math.floor(rawClear.priorResultCount)
+              : null,
+            priorCombinedSourceHubIds: sourceHubIdsFromCombineSignature(priorCombineSignature),
+            priorSourceRuns: sourceRunsFromClearProvenance(rawClear.priorSourceRuns),
+          }
+        : null,
     };
   });
   const totalBoards = nonnegativeCount(jobBoardStateCount) ?? boards.length;
@@ -893,10 +954,33 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   // board — reporting an unrelated, never-combined board as this run's gap
   // while the board that actually consumed the run went uninspected.
   const activeSourceHubId = (foreignLiveRun ? receiptNodeId : telemetry?.nodeId || receipt?.nodeId) || null;
+  const activeReceiptRunId = recordedRunToken(receipt?.runId);
+  const receiptCompletedAt = receiptCompletionTimestamp(receipt?.completedAt);
+  // A clear receipt proves this board DID consume the active source, then the
+  // user deliberately removed that cascade. Never infer this from an empty
+  // board alone: a virgin board, old-run receipt, stale board, or a clear that
+  // predates this terminal receipt remains a real consumer-stage gap.
+  const isDeliberatelyClearedForActiveRun = (board) => (
+    !!activeSourceHubId
+    && !!activeReceiptRunId
+    && !board.stale
+    && board.hubState === 'empty'
+    && board.resultCount === 0
+    && board.renderedCardCount === 0
+    && Number.isFinite(board.clearProvenance?.clearedAt)
+    && Number.isFinite(receiptCompletedAt)
+    && board.clearProvenance.clearedAt >= receiptCompletedAt
+    && board.clearProvenance.priorCombinedSourceHubIds.includes(activeSourceHubId)
+    && board.clearProvenance.priorSourceRuns.some((sourceRun) => sourceRun.sourceHubId === activeSourceHubId
+      && sourceRun.runId === activeReceiptRunId)
+  );
   const relevantBoards = activeSourceHubId
     ? boards.filter(board => board.combinedSourceHubIds.includes(activeSourceHubId)
-      || board.connectedSourceHubIds.includes(activeSourceHubId))
+      || board.connectedSourceHubIds.includes(activeSourceHubId)
+      || board.clearProvenance?.priorCombinedSourceHubIds.includes(activeSourceHubId)
+      || board.clearProvenance?.priorSourceRuns.some((sourceRun) => sourceRun.sourceHubId === activeSourceHubId))
     : [];
+  const deliberatelyClearedBoards = relevantBoards.filter(isDeliberatelyClearedForActiveRun);
   // Retain the pre-existing global stale-board warning even when an older
   // compact report lacks provenance fields. A stale cascade is explicitly
   // hidden and always deserves its refresh verdict; only a *non-stale* board
@@ -1160,6 +1244,7 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     : (postCompletionAppend ? scored : (snapshot.jobs ?? receiptScoreReady ?? scored));
   for (const board of relevantBoards) {
     if (board.stale) continue;
+    if (isDeliberatelyClearedForActiveRun(board)) continue;
     // A terminal run with zero board-ready rows has nothing for a
     // never-combined board to consume. An edge alone establishes that the board
     // is connected, not that it has already run Combine. Requiring this very
@@ -1239,9 +1324,14 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   // nothing about whether a board ever rendered it. Without this, a completed
   // run whose board was cleared or whose Combine was cancelled read as a clean
   // finish, and "Job Board consumers: n/m correlate" implied the rows landed.
-  const unconsumedBoards = relevantBoards.filter(board => !board.stale && board.hubState !== 'done');
+  const unconsumedBoards = relevantBoards.filter(board => !board.stale
+    && board.hubState !== 'done'
+    && !isDeliberatelyClearedForActiveRun(board));
   const boardConsumptionQualifier = unconsumedBoards.length > 0
     ? ` ${unconsumedBoards.length} connected Job Board${unconsumedBoards.length === 1 ? '' : 's'} (${unconsumedBoards.map(board => `\`${board.id}\` is \`${board.hubState}\``).join(', ')}) ${unconsumedBoards.length === 1 ? 'has' : 'have'} not consumed this run; the score-ready rows remain on the hub and in the saved snapshot, so Combine can still render them without re-scraping.`
+    : '';
+  const boardClearQualifier = deliberatelyClearedBoards.length > 0
+    ? ` ${deliberatelyClearedBoards.map(board => `Job Board \`${board.id}\` was deliberately cleared after this run${board.clearProvenance.priorResultCount != null ? ` (prior results ${board.clearProvenance.priorResultCount})` : ''}; its result cards are no longer present`).join('; ')}.`
     : '';
   const coverageQualifier = configuredCapSources.length > 0
     ? `${configuredCapQualifier}${unprovenUncappedSources.length > 0
@@ -1249,13 +1339,13 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
       : ''}`
     : ordinaryCoverageQualifier;
   const verdict = searchVerified && staleBoards.length > 0
-    ? `⚠️ **SEARCH COMPLETE${hasCollectionQualifications ? ' WITH COLLECTION QUALIFICATIONS' : ''}; BOARD REFRESH REQUIRED** — search stages agree, but ${staleBoards.length} Job Board${staleBoards.length === 1 ? ' has' : 's have'} stale inputs.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}`
+      ? `⚠️ **SEARCH COMPLETE${hasCollectionQualifications ? ' WITH COLLECTION QUALIFICATIONS' : ''}; BOARD REFRESH REQUIRED** — search stages agree, but ${staleBoards.length} Job Board${staleBoards.length === 1 ? ' has' : 's have'} stale inputs.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}${boardClearQualifier}`
     : searchVerified
     ? hasCollectionQualifications
-      ? `✅ **COMPLETED WITH COLLECTION QUALIFICATIONS** — every reconciled stage agrees.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}`
-      : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}`
+      ? `✅ **COMPLETED WITH COLLECTION QUALIFICATIONS** — every reconciled stage agrees.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}${boardClearQualifier}`
+      : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}${boardClearQualifier}`
     : durableOutputOnly
-      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
+      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
@@ -1321,10 +1411,10 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const boardLine = totalBoards === 0
     ? '- Job Board consumers: none recorded.'
     : staleBoards.length > 0
-      ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${board.id}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
+      ? `- Job Board consumers: ⚠️ ${staleBoards.length}/${totalBoards} stale — ${staleBoards.map(board => `\`${board.id}\` has ${board.resultCount ?? '?'} cached result(s) hidden pending board action${board.staleReason ? ` (${board.staleReason})` : ''}`).join('; ')}${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${board.id}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${totalBoards > boards.length ? ` · ${totalBoards - boards.length} additional board(s) omitted from this bounded summary` : ''}.`
       : relevantBoards.length === 0
         ? `- Job Board consumers: ${totalBoards} recorded · none correlate to this source run.`
-        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`;
+        : `- Job Board consumers: ${relevantBoards.length}/${totalBoards} correlate to this source run · no stale board state${deliberatelyClearedBoards.length ? ` · deliberately cleared: ${deliberatelyClearedBoards.map(board => `\`${board.id}\` (prior ${board.clearProvenance.priorResultCount ?? '?'}; result cards no longer present)`).join('; ')}` : ''}${renderedCardFacts.length ? ` · rendered cards: ${renderedCardFacts.join('; ')}` : ''}.`;
   const googleSource = telemetry?.search?.bySource?.google || receipt?.sources?.google || null;
   const googleReveal = googleSource ? revealCoverageFact(googleSource) : null;
   const googleCoverage = !googleSource
@@ -4705,8 +4795,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const round = Number.isFinite(event?.revisionRound) ? ` · revision ${event.revisionRound}` : '';
           const resultHash = event?.resultSha256 ? ` · result ${String(event.resultSha256).slice(0, 16)}` : '';
           const resumePages = resume.pageCount != null ? ` · résumé ${resume.pageCount}/${resume.targetPageCount ?? '?'}p` : '';
-          const resumeUtilization = Number.isFinite(resume?.layout?.utilization)
-            ? ` · résumé type area ${Math.round(resume.layout.utilization * 100)}%`
+          const utilization = resume?.layout?.utilization;
+          const resumeUnderfilled = resume.pageCount === 1
+            && resume.targetPageCount === 1
+            && Number.isFinite(utilization)
+            && utilization < 0.90;
+          const resumeUtilization = Number.isFinite(utilization)
+            ? (resumeUnderfilled
+              ? ` · résumé type area ${formatUnderfilledTypeAreaUtilization(utilization)} (below 90% minimum)`
+              : ` · résumé type area ${Math.round(utilization * 100)}%`)
             : '';
           const coverPages = cover.pageCount != null ? ` · cover ${cover.pageCount}/${cover.targetPageCount ?? '?'}p` : '';
           const detail = event?.detail ? ` — ${historyReportValue(event.detail, '', 320)}` : '';

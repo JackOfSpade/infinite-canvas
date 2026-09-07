@@ -1,4 +1,5 @@
 import { PLATFORM_AUTH_COOKIES, _resetLaunchCollisions, assert, clearAllSessionStatusCache, fs, generateMarkdown, getLaunchCollisions, getStatusCacheSync, path, recordLaunchCollision, reserveSharedProfile, writeStatusCache } from '../test-dependencies.js';
+import { formatAuthAttemptStatus } from '../../electron/ipc/bugReport.js';
 
 // These tests pin the fix for: "Chrome launch blocked by the shared browser
 // profile lock after 6 attempts" firing right after a successful native Indeed
@@ -370,6 +371,24 @@ export default [
       assert(!report.includes('activity: idle — 0 live pages'),
         'must never render the "idle, 0 live pages" text for a browser that was never inspected — that asserts a live observation which was never taken');
       return { ok: true };
+    },
+  },
+  {
+    name: 'captcha-resolve history reports challenge clearance rather than a failed login',
+    run: () => {
+      assert(formatAuthAttemptStatus({
+        mode: 'captcha-resolve', platformId: 'captcha:www.google.com', result: 'cleared', loginDetected: false,
+      }) === '✅ challenge cleared',
+      'a cleared captcha-resolve window must not fall through to the login-only "NOT detected" status');
+      assert(formatAuthAttemptStatus({
+        mode: 'captcha-resolve', platformId: 'captcha:www.google.com', result: 'timeout', loginDetected: false,
+      }) === 'challenge result=timeout',
+      'an unresolved captcha must report its challenge outcome without asserting anything about login');
+      assert(formatAuthAttemptStatus({
+        mode: 'puppeteer-visible', platformId: 'glassdoor', result: 'auto-detected', loginDetected: true, loginSignal: 'auth-cookie',
+      }) === '✅ detected (auth-cookie)',
+      'ordinary login attempts retain their authentication status rendering');
+      return { captchaStatus: 'cleared' };
     },
   },
 ];

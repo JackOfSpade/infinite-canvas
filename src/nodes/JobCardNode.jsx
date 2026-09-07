@@ -511,7 +511,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         location: data.location,
         canvasFilePath,
       });
-      if (!saved?.success || !saved.saved) throw new Error(saved?.error || 'Could not save the imported application.');
+      if (!saved?.success || !saved.saved) {
+        const saveError = new Error(saved?.error || 'Could not save the imported application.');
+        if (saved?.errorCode) saveError.code = saved.errorCode;
+        throw saveError;
+      }
       if (isMountedRef.current) {
         setLocalApplication((current) => current?.id === jobId ? {
           ...current,
@@ -1148,7 +1152,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               Open Local AI Job Folder
             </button>
           )}
-          {localApplication.status === 'saved' && !localApplication.intermediateCleaned && (
+          {localApplication.status === 'saved' && !localApplication.intermediateCleaned
+            && Array.isArray(localApplication.missingArtifacts) && localApplication.missingArtifacts.length > 0 && (
             <button
               onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
               className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
@@ -1159,7 +1164,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           )}
           {localApplication.status === 'render-retry-required' && (
             <button
-              onClick={(e) => { e.stopPropagation(); importCompletedLocalApplication(localApplication.id); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                importCompletedLocalApplication(localApplication.id, localApplication.resultSha256);
+              }}
               className="mt-2 ml-1.5 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
               title="Render and measure both PDFs again without asking the AI to rewrite them."
             >

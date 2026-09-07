@@ -18,8 +18,8 @@ export function useConfirmDialog() {
     EventLogger.log(`ConfirmDialog requested: title="Clear Canvas"`);
     setConfirmDialogData({
       title: "Clear Canvas",
-      message: `This will remove all nodes, edges, and drawings. This action can be undone with ${IS_MAC ? '⌘' : 'Ctrl+'}Z.`,
-      confirmLabel: "Clear Everything",
+      message: `This removes unlocked content from the current canvas. Undo with ${IS_MAC ? '⌘' : 'Ctrl+'}Z restores the visual content, but it cannot restart background work or recovery data discarded for removed modules. At the root canvas, the workspace file association is also reset.`,
+      confirmLabel: "Clear Unlocked Content",
       cancelLabel: "Keep Canvas",
       variant: "danger",
       onConfirm

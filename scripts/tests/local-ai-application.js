@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, JSDOM, os, path, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerMountedJobCard, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, boundedRejectionError, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -150,6 +150,14 @@ const TRUSTED_QUEUE_CAREER_DATA = 'Built supported systems with clear outcomes, 
 
 const sha256 = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 
+async function atomicReplaceJson(file, value) {
+  const raw = `${JSON.stringify(value, null, 2)}\n`;
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${crypto.randomUUID()}.tmp`);
+  await fs.promises.writeFile(temporary, raw, 'utf8');
+  await fs.promises.rename(temporary, file);
+  return { raw, sha256: sha256(raw) };
+}
+
 const LOCAL_AI_TEST_JOB_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 export default [
@@ -271,6 +279,8 @@ export default [
       const apiSource = fs.readFileSync(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
       const convergenceSource = fs.readFileSync(path.resolve('electron/ipc/applicationConvergence.js'), 'utf8');
       const cardSource = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const fallbackSource = fs.readFileSync(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+      const toastSource = fs.readFileSync(path.resolve('src/components/ToastProvider.jsx'), 'utf8');
       const routineSource = fs.readFileSync(path.resolve('local_ai/LOCAL_AI_APPLICATION_ROUTINE.md'), 'utf8');
       const styleSource = fs.readFileSync(path.resolve('Job Application Design System/STYLE.md'), 'utf8');
       const skillSource = fs.readFileSync(path.resolve('Job Application Design System/SKILL.md'), 'utf8');
@@ -345,7 +355,7 @@ export default [
         && !compactReviewSource.includes('evidence: cleanText')
         && localSource.includes('LOCAL_AI_RESULT_CHANGED')
         && localSource.includes('resumeIsMateriallyUnderfilled')
-        && localSource.includes('minimum 90%')
+        && localSource.includes('below the 90% minimum')
         && localSource.includes('For a cover letter that already fits, improve it')
         && localSource.includes('COVER_LETTER_COHESION_REVISION_RULE')
         && localSource.includes('one controlling throughline')
@@ -455,8 +465,17 @@ export default [
         && !localSource.includes("let density = /\\bdata-density\\s*=\\s*[\"']compact[\"']/i.test(resumeMainHtml)"),
       'Local AI ignores model-supplied compact density and measures default density before the app applies its compact retry');
       assert(cardSource.includes('Repair bundle') && cardSource.includes('missingArtifacts') && cardSource.includes('revision-required') && cardSource.includes('Retry layout check') && cardSource.includes('Retry import')
-        && cardSource.includes('LOCAL_AI_RESULT_SETTLE_MS') && cardSource.includes('expectedResultSha256') && cardSource.includes('imported?.errorCode') && cardSource.includes('LOCAL_AI_RESULT_CHANGED') && cardSource.includes('waiting briefly for the final save'),
+        && cardSource.includes('LOCAL_AI_RESULT_SETTLE_MS') && cardSource.includes('expectedResultSha256') && cardSource.includes('localApplication.id, localApplication.resultSha256')
+        && cardSource.includes('imported?.errorCode') && cardSource.includes('LOCAL_AI_RESULT_CHANGED') && cardSource.includes('waiting briefly for the final save'),
       'the card exposes repair for historical partial bundles, waits for a stable Local AI result before auto-importing, and retains fit, render, and validation recovery paths');
+      assert(fallbackSource.includes("next.status === 'render-retry-required'")
+        && fallbackSource.includes("actionLabel: 'Retry layout check'")
+        && fallbackSource.includes('await importJob(node, jobId, exactResultSha256, orphanJob)')
+        && fallbackSource.includes('dedupeKey: `local-ai-retry:${jobId}:${exactResultSha256}`')
+        && fallbackSource.includes('LOCAL_AI_RETRY_NOTICE_INTERVAL_MS')
+        && toastSource.includes('normalizedDedupeKey')
+        && toastSource.includes('toast.actionLabel') && toastSource.includes('toast.onAction'),
+      'a hidden-card or orphaned hash-bound save failure exposes one explicit retry action instead of automatically repeating render/save or parking forever without UI');
       assert(routineSource.includes('resultSha256') && routineSource.includes('Preserve a verified one-page cover letter')
         && routineSource.includes('candidate location/contact')
         && routineSource.includes('page fit as a constraint')
@@ -859,6 +878,17 @@ export default [
         await fs.promises.writeFile(importedManifestPath, `${JSON.stringify({
           ...importedManifest, status: 'imported', createdAt: '2000-01-01T00:00:00.000Z',
         })}\n`, 'utf8');
+        const settlingImported = await queueLocalApplicationJob({
+          job: { title: 'Settling Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        const settlingManifestPath = path.join(settlingImported.folder, 'manifest.json');
+        const settlingManifest = JSON.parse(await fs.promises.readFile(settlingManifestPath, 'utf8'));
+        await fs.promises.writeFile(settlingManifestPath, `${JSON.stringify({
+          ...settlingManifest,
+          status: 'imported',
+          createdAt: '2000-01-01T00:00:00.000Z',
+          importedAt: new Date().toISOString(),
+        })}\n`, 'utf8');
         await queueLocalApplicationJob({
           job: { title: 'New Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
@@ -866,7 +896,9 @@ export default [
           'an old queued job remains available because an active authoring or revision session has no retention-based regeneration cap');
         assert(!fs.existsSync(staleImported.folder),
           'an old imported remnant with no active writer session is pruned before another job is accepted');
-        return { activePreserved: true, staleImportedPruned: true };
+        assert(fs.existsSync(settlingImported.folder),
+          'an old job with a fresh importedAt settling window is never pruned while its follow-up save may still consume staged artifacts');
+        return { activePreserved: true, staleImportedPruned: true, settlingImportedPreserved: true };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -1609,6 +1641,30 @@ export default [
       const resultRaw = '{"undeclared":"RAW_RESULT_TEXT_SENTINEL"}';
       const resumePdf = Buffer.from('resume-pdf-bytes');
       const coverPdf = Buffer.from('cover-pdf-bytes');
+      const handoffEvent = localAiHandoffEvent({
+        type: 'result-imported', resultRaw,
+        resumeFit: {
+          targetPageCount: 1, pageCount: 1, compactApplied: true, fontsLoaded: true, contentUtilization: 0.925641,
+          layout: { contentHeightPx: 925.641, typeAreaHeightPx: 1000 },
+          attempts: [{
+            attempt: 1, density: 'default', pageCount: 2, fontsLoaded: true, contentUtilization: 1.08,
+            layout: { contentHeightPx: 1080, typeAreaHeightPx: 1000 },
+          }, {
+            attempt: 2, density: 'compact', pageCount: 1, fontsLoaded: true, contentUtilization: 0.925641,
+            layout: { contentHeightPx: 925.641, typeAreaHeightPx: 1000 },
+          }],
+        },
+        coverLetterFit: { targetPageCount: 1, pageCount: 1, fontsLoaded: true, contentUtilization: 0.48 },
+      });
+      assert(handoffEvent.resume?.compactApplied === true
+        && handoffEvent.resume?.fontsLoaded === true
+        && handoffEvent.resume?.contentUtilization === 0.925641
+        && handoffEvent.resume?.attempts?.[0]?.contentUtilization === 1.08
+        && handoffEvent.resume?.attempts?.[0]?.layout?.utilization === 1.08
+        && handoffEvent.resume?.attempts?.[1]?.contentUtilization === 0.925641
+        && handoffEvent.resume?.attempts?.[1]?.layout?.utilization === 0.925641
+        && handoffEvent.coverLetter?.contentUtilization === 0.48,
+      'handoff events retain verification and utilization fields consumed by the audit for both documents and every résumé attempt');
       const artifactText = buildLocalGenerationAuditArtifact({
         jobId: LOCAL_AI_TEST_JOB_ID,
         input: {
@@ -1649,15 +1705,17 @@ export default [
         importedManifest: {
           handoffEventCount: 40,
           handoffHistory: [{
+            ...handoffEvent,
             at: '2026-09-05T12:05:00.000Z',
-            type: 'result-imported',
             resultSha256: 'a'.repeat(64),
             detail: 'sync_token: EVENT_SECRET_SENTINEL_abcdefghijklmnopqrstuvwxyz',
             privateReasoning: 'HANDOFF_PRIVATE_REASONING_SENTINEL',
             toolTranscript: 'HANDOFF_TOOL_TRANSCRIPT_SENTINEL',
             resume: {
-              pageCount: 1,
-              attempts: [{ attempt: 1, error: '/private/tmp/SECRET_EVENT_RENDER_PATH_SENTINEL.log' }],
+              ...handoffEvent.resume,
+              attempts: handoffEvent.resume.attempts.map((attempt, index) => (
+                index === 0 ? { ...attempt, error: '/private/tmp/SECRET_EVENT_RENDER_PATH_SENTINEL.log' } : attempt
+              )),
               internalPath: '/Users/jack/SECRET_EVENT_INTERNAL_PATH_SENTINEL',
             },
           }],
@@ -1680,6 +1738,14 @@ export default [
       assert(artifact.measuredFit.resume.pageCount === 1
         && artifact.measuredFit.resume.attempts.length === 2
         && artifact.measuredFit.coverLetter.pageCount === 1
+        && artifact.handoff.events[0]?.resume?.compactApplied === true
+        && artifact.handoff.events[0]?.resume?.fontsLoaded === true
+        && artifact.handoff.events[0]?.resume?.contentUtilization === 0.925641
+        && artifact.handoff.events[0]?.resume?.attempts[0]?.contentUtilization === 1.08
+        && artifact.handoff.events[0]?.resume?.attempts[0]?.layout?.utilization === 1.08
+        && artifact.handoff.events[0]?.resume?.attempts[1]?.contentUtilization === 0.925641
+        && artifact.handoff.events[0]?.resume?.attempts[1]?.layout?.utilization === 0.925641
+        && artifact.handoff.events[0]?.coverLetter?.contentUtilization === 0.48
         && artifact.handoff.eventCount === 40
         && artifact.handoff.retainedEventCount === 1
         && artifact.handoff.historyTruncated === true,
@@ -1968,6 +2034,1359 @@ export default [
     },
   },
   {
+    name: 'Local AI handoff: invalid, measured, invalid, atomic correction receives one hash-bound response',
+    run: async () => {
+      const project = await createCanvasProject();
+      let releaseDRender = () => {};
+      let admittedImportPromiseD = null;
+      const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
+      const initialBullet = 'Built supported systems.';
+      const revisedBullet = 'More relevant evidence.';
+      const careerData = `${overlongBullet} ${initialBullet} ${revisedBullet} A concise factual letter.`;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' }, careerData,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const receiptFile = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
+        const resumeMain = bullet => `<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>${bullet}</li></ul></article></section></main>`;
+        const resultFor = (bullet, qualityReview) => ({
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: resumeMain(bullet),
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence(bullet, 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview,
+        });
+
+        // A: validation consumes the exact bytes and responds without rendering.
+        const resultA = await atomicReplaceJson(resultPath, resultFor(
+          overlongBullet,
+          groundedQualityReview(sourceGroundingFor({ resumeBullets: [overlongBullet] })),
+        ));
+        const statusA = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const feedbackA = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        assert(statusA.status === 'invalid' && feedbackA.status === 'invalid'
+          && feedbackA.measured === false && feedbackA.resultSha256 === resultA.sha256
+          && /resume-bullet-length/i.test(`${statusA.message} ${feedbackA.error}`),
+        `hash A must receive exact non-measured invalid feedback for the overlong résumé bullet, got ${JSON.stringify({ statusA, feedbackA })}`);
+
+        // B: inject the measured renderer verdict at the unit boundary. Status
+        // owns detection/validation here; the Electron render mechanics have
+        // their own fixtures below and in application-pdf-reconcile.js.
+        const resultBValue = resultFor(
+          initialBullet,
+          groundedQualityReview(sourceGroundingFor({ resumeBullets: [initialBullet] })),
+        );
+        const resultB = await atomicReplaceJson(resultPath, resultBValue);
+        const statusB = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(statusB.status === 'completed' && statusB.resultSha256 === resultB.sha256,
+          'corrected hash B must be detected after invalid feedback');
+        const canonicalB = validateLocalApplicationResult(
+          resultBValue, queued.id, project.root, { title: 'Developer', company: 'Acme' }, { careerData },
+        );
+        const documentSha256B = {
+          resume: sha256(canonicalB.resumeMainHtml),
+          coverLetter: sha256(JSON.stringify(canonicalB.coverLetter)),
+        };
+        await atomicReplaceJson(feedbackPath, {
+          version: 1,
+          jobId: queued.id,
+          status: 'revision-required',
+          measured: true,
+          revisionRound: 1,
+          resultSha256: resultB.sha256,
+          documentSha256: documentSha256B,
+          targetPageCount: 1,
+          resume: { targetPageCount: 1, pageCount: 2 },
+          coverLetter: { targetPageCount: 1, pageCount: 1 },
+          message: 'The résumé is 2 pages (target: 1). Continue with measured revision 1.',
+        });
+        const measuredB = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(measuredB.status === 'revision-required',
+          'hash B must remain bound to its measured revision-required response');
+
+        // C: a material revision with an invalid attestation must preserve B's
+        // measured snapshot, but its response is bound only to C.
+        const revisedGrounding = groundedQualityReview(sourceGroundingFor({ resumeBullets: [revisedBullet] }));
+        const resultCValue = resultFor(revisedBullet, {
+          ...revisedGrounding,
+          resume: {
+            decision: 'changed_materially',
+            rationale: 'Replaced weaker material with more relevant and specifically supported résumé evidence.',
+          },
+          coverLetter: {
+            decision: 'kept_diminishing_returns',
+            rationale: 'The unchanged cover letter remains factually supported and relevant to the role.',
+          },
+        });
+        const resultC = await atomicReplaceJson(resultPath, resultCValue);
+        const statusC = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const feedbackC = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        assert(statusC.status === 'invalid' && feedbackC.status === 'invalid'
+          && feedbackC.resultSha256 === resultC.sha256
+          && feedbackC.priorMeasured?.status === 'revision-required'
+          && feedbackC.priorMeasured?.revisionRound === 1
+          && feedbackC.priorMeasured?.documentSha256?.resume === documentSha256B.resume
+          && /controlling argument|minimum-sufficient/i.test(`${statusC.message} ${feedbackC.error}`),
+        'hash C must receive invalid feedback while retaining B\'s trusted measured revision state');
+
+        // D: atomically replace C, then prove C's stale feedback cannot satisfy
+        // either hash while the corrected bytes settle.
+        const resultDValue = resultFor(revisedBullet, {
+          ...revisedGrounding,
+          resume: resultCValue.qualityReview.resume,
+          coverLetter: {
+            decision: 'kept_diminishing_returns',
+            rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.',
+          },
+        });
+        const resultD = await atomicReplaceJson(resultPath, resultDValue);
+        const staleCBeforeConsume = await inspectLocalAiHandoff({
+          jobFolder: queued.folder, receiptFile, jobId: queued.id, resultSha256: resultC.sha256,
+        });
+        const waitingD = await inspectLocalAiHandoff({
+          jobFolder: queued.folder, receiptFile, jobId: queued.id, resultSha256: resultD.sha256,
+        });
+        assert(staleCBeforeConsume.outcome === 'waiting' && waitingD.outcome === 'waiting',
+          'stale feedback for C cannot satisfy the helper for C after D replaces the file, or for D before its own response exists');
+        const statusD = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(statusD.status === 'completed' && statusD.resultSha256 === resultD.sha256,
+          'atomically replaced hash D must be detected after the invalid → measured → invalid sequence');
+
+        // Drive D through the real main-process import. The plain-Node unit
+        // runner has no Chromium BrowserWindow, so substitute only that leaf
+        // dependency; hash admission, the per-job mutex, both fit loops,
+        // staging, manifest persistence, and capability registration remain
+        // production code. Hold the first document render to make the second
+        // driver's overlap deterministic.
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        const renderedDocumentsD = [];
+        let firstRenderStartedResolve;
+        let releaseFirstRenderResolve;
+        const firstRenderStarted = new Promise(resolve => { firstRenderStartedResolve = resolve; });
+        const holdFirstRender = new Promise(resolve => { releaseFirstRenderResolve = resolve; });
+        releaseDRender = () => releaseFirstRenderResolve?.();
+        __setLocalAiRenderPdfForTests(async (html, { signal } = {}) => {
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+          renderedDocumentsD.push(String(html));
+          if (renderedDocumentsD.length === 1) {
+            firstRenderStartedResolve();
+            await holdFirstRender;
+          }
+          return {
+            bytes: Buffer.from(fixturePdfBytes),
+            pageCount: 1,
+            fontsLoaded: true,
+            missingFontFaces: [],
+            layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+          };
+        });
+
+        const senderId = 9107;
+        const sender = {
+          id: senderId,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+
+        const staleImportError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId,
+          expectedResultSha256: resultC.sha256,
+        }).then(() => null, error => error);
+        assert(staleImportError?.code === 'LOCAL_AI_RESULT_CHANGED' && renderedDocumentsD.length === 0,
+          'a driver holding stale hash C must be rejected before any render after atomic D appears');
+
+        admittedImportPromiseD = importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId,
+          expectedResultSha256: resultD.sha256,
+        });
+        await Promise.race([
+          firstRenderStarted,
+          admittedImportPromiseD.then(
+            () => { throw new Error('D import completed without entering its renderer.'); },
+            error => { throw error; },
+          ),
+        ]);
+        const duplicateImportError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId,
+          expectedResultSha256: resultD.sha256,
+        }).then(() => null, error => error);
+        assert(duplicateImportError?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'a concurrent second production driver for D must lose the per-job import claim');
+        releaseDRender();
+        const importedD = await admittedImportPromiseD;
+        assert(importedD.status === 'imported' && importedD.workDir === queued.folder
+          && renderedDocumentsD.length === 2,
+        `the admitted D import must stage one résumé and one cover-letter render, got ${renderedDocumentsD.length} render calls`);
+
+        const settledDuplicateError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId,
+          expectedResultSha256: resultD.sha256,
+        }).then(() => null, error => error);
+        assert(settledDuplicateError?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT'
+          && renderedDocumentsD.length === 2,
+        'the imported-manifest save window must reject a later duplicate D driver without another render');
+
+        // Replace the already-materialized registered output root with a file.
+        // The real save handler then fails deterministically before destination
+        // mutation and publishes D's registered hash-bound failure callback.
+        const blockedOutputRoot = path.join(project.root, 'Applied Jobs');
+        await fs.promises.rm(blockedOutputRoot, { recursive: true, force: true });
+        await fs.promises.writeFile(blockedOutputRoot, 'not a directory', 'utf8');
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saveArgs = {
+          resumeHtmlPath: importedD.resumeHtmlPath,
+          resumePdfPath: importedD.resumePdfPath,
+          coverLetterPdfPath: importedD.coverLetterPdfPath,
+          jobListingPath: importedD.jobListingPath,
+          generationAuditPath: importedD.generationAuditPath,
+          workDir: importedD.workDir,
+          jobTitle: 'Developer',
+          location: '',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        };
+        const admittedSavePromise = saveApplication({ sender }, saveArgs);
+        const duplicateSavePromise = saveApplication({ sender }, saveArgs);
+        const [failedSave, duplicateSave] = await Promise.all([admittedSavePromise, duplicateSavePromise]);
+        assert(failedSave?.success === false
+          && duplicateSave?.success === false
+          && duplicateSave.errorCode === 'APPLICATION_SAVE_IN_FLIGHT',
+        'only one concurrent D save may enter the production destination path');
+
+        const afterFailure = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const feedbackD = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        const manifestD = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        const importEventsD = (manifestD.handoffHistory || []).filter(event =>
+          event?.type === 'result-imported' && event?.resultSha256 === resultD.sha256);
+        const failureEventsD = (manifestD.handoffHistory || []).filter(event =>
+          event?.type === 'bundle-save-retry-required' && event?.resultSha256 === resultD.sha256);
+        const handoffD = await inspectLocalAiHandoff({
+          jobFolder: queued.folder, receiptFile, jobId: queued.id, resultSha256: resultD.sha256,
+        });
+        const staleCAfterResponse = await inspectLocalAiHandoff({
+          jobFolder: queued.folder, receiptFile, jobId: queued.id, resultSha256: resultC.sha256,
+        });
+        assert(afterFailure.status === 'render-retry-required'
+          && afterFailure.resultSha256 === resultD.sha256
+          && feedbackD.status === 'render-retry-required' && feedbackD.measured === false
+          && feedbackD.resultSha256 === resultD.sha256
+          && feedbackD.resume === undefined && feedbackD.coverLetter === undefined
+          && feedbackD.priorMeasured?.revisionRound === 1
+          && manifestD.status === 'render-retry-required'
+          && manifestD.handoffHistory?.at(-1)?.type === 'bundle-save-retry-required'
+          && manifestD.handoffHistory?.at(-1)?.resultSha256 === resultD.sha256
+          && importEventsD.length === 1
+          && failureEventsD.length === 1
+          && !fs.existsSync(receiptFile)
+          && handoffD.outcome === 'render-retry-required'
+          && staleCAfterResponse.outcome === 'waiting'
+          && LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(afterFailure.status)
+          && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(afterFailure.status),
+        'a consumed D must receive exact non-measured retry feedback that parks automatic import while keeping the fallback manager alive to expose explicit recovery; stale C remains nonterminal');
+        assert(renderedDocumentsD.length === 2
+          && await fs.promises.lstat(importedD.workDir).then(stat => stat.isDirectory()),
+        'D must have exactly one admitted import (one render per document) and one admitted save; its retryable workspace remains recoverable');
+        return {
+          transitions: [statusA.status, measuredB.status, statusC.status, statusD.status, afterFailure.status],
+          atomicHash: resultD.sha256,
+          admittedImportsD: 1,
+          renderedDocumentsD: renderedDocumentsD.length,
+          admittedSavesD: 1,
+          helperOutcome: handoffD.outcome,
+        };
+      } finally {
+        releaseDRender();
+        await admittedImportPromiseD?.catch(() => {});
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: a held stale rejection cannot roll back a newer imported manifest',
+    run: async () => {
+      const project = await createCanvasProject();
+      const originalLstat = fs.promises.lstat;
+      let releaseFeedbackRead = () => {};
+      let statusPromise = null;
+      let importPromise = null;
+      let renderCalls = 0;
+      try {
+        const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
+        const careerData = `${overlongBullet} Built supported systems. A concise factual letter.`;
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const resultFor = (bullet) => ({
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: `<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>${bullet}</li></ul></article></section></main>`,
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence(bullet, 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor({ resumeBullets: [bullet] })),
+        });
+        await atomicReplaceJson(resultPath, resultFor(overlongBullet));
+
+        let feedbackReadStartedResolve;
+        let releaseFeedbackReadResolve;
+        const feedbackReadStarted = new Promise(resolve => { feedbackReadStartedResolve = resolve; });
+        const heldFeedbackRead = new Promise(resolve => { releaseFeedbackReadResolve = resolve; });
+        releaseFeedbackRead = () => releaseFeedbackReadResolve?.();
+        let held = false;
+        fs.promises.lstat = async function heldFeedbackLstat(target, ...args) {
+          if (!held && path.resolve(String(target)) === path.resolve(feedbackPath)) {
+            held = true;
+            feedbackReadStartedResolve();
+            await heldFeedbackRead;
+          }
+          return originalLstat.call(this, target, ...args);
+        };
+
+        statusPromise = localApplicationStatus(queued.id, project.canvasFilePath);
+        await feedbackReadStarted;
+        const currentResult = await atomicReplaceJson(resultPath, resultFor('Built supported systems.'));
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => {
+          renderCalls += 1;
+          return {
+            bytes: Buffer.from(fixturePdfBytes),
+            pageCount: 1,
+            fontsLoaded: true,
+            missingFontFaces: [],
+            layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+          };
+        });
+        importPromise = importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9115,
+          expectedResultSha256: currentResult.sha256,
+        });
+        releaseFeedbackRead();
+        const [staleStatus, imported] = await Promise.all([statusPromise, importPromise]);
+        statusPromise = null;
+        importPromise = null;
+        fs.promises.lstat = originalLstat;
+
+        const manifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        const settled = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const duplicateError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9115,
+          expectedResultSha256: currentResult.sha256,
+        }).then(() => null, error => error);
+        assert(staleStatus.status === 'invalid'
+          && imported.status === 'imported'
+          && manifest.status === 'imported'
+          && manifest.importedResultSha256 === currentResult.sha256
+          && settled.status === 'importing'
+          && duplicateError?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT'
+          && renderCalls === 2
+          && !fs.existsSync(feedbackPath),
+        `a stale rejection must yield to the serialized newer import without feedback or manifest rollback, got ${JSON.stringify({ staleStatus: staleStatus.status, imported: imported.status, manifest: manifest.status, settled: settled.status, duplicateCode: duplicateError?.code, renderCalls })}`);
+
+        registerJobApplicationHandlers();
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const sender = {
+          id: 9115,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+        const discarded = await discardApplication({ sender }, { workDir: imported.workDir });
+        assert(discarded?.success && discarded.discarded,
+          'the exact imported fixture capability remains cleanly disposable after the race regression');
+        return { manifestStatus: manifest.status, duplicateCode: duplicateError.code, renderCalls };
+      } finally {
+        releaseFeedbackRead();
+        fs.promises.lstat = originalLstat;
+        await Promise.allSettled([statusPromise, importPromise].filter(Boolean));
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: post-render workspace failures publish one exact retry response',
+    run: async () => {
+      const project = await createCanvasProject();
+      let renderCalls = 0;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData: 'Built supported systems. A concise factual letter.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        const blockedOutputRoot = path.join(project.root, 'Blocked');
+        await fs.promises.writeFile(blockedOutputRoot, 'not a directory', 'utf8');
+        const resultPath = path.join(queued.folder, 'result.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const receiptFile = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
+        const result = await atomicReplaceJson(resultPath, {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Blocked',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        });
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => {
+          renderCalls += 1;
+          return {
+            bytes: Buffer.from(fixturePdfBytes),
+            pageCount: 1,
+            fontsLoaded: true,
+            missingFontFaces: [],
+            layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+          };
+        });
+
+        const ready = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const importError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9112,
+          expectedResultSha256: result.sha256,
+        }).then(() => null, error => error);
+        const feedback = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        const afterFailure = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const afterAnotherPoll = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const handoff = await inspectLocalAiHandoff({
+          jobFolder: queued.folder,
+          receiptFile,
+          jobId: queued.id,
+          resultSha256: result.sha256,
+        });
+        assert(ready.status === 'completed'
+          && importError
+          && feedback.status === 'render-retry-required'
+          && feedback.measured === false
+          && feedback.resultSha256 === result.sha256
+          && feedback.failurePhase === 'preparing application output'
+          && afterFailure.status === 'render-retry-required'
+          && afterFailure.resultSha256 === result.sha256
+          && afterAnotherPoll.status === 'render-retry-required'
+          && renderCalls === 2
+          && handoff.outcome === 'render-retry-required'
+          && !fs.existsSync(receiptFile)
+          && LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(afterFailure.status)
+          && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(afterFailure.status),
+        `a failure after one render per document must park automatic import for the exact hash while leaving fallback polling active solely to offer explicit recovery, got ${JSON.stringify({ ready: ready.status, error: importError?.message, feedback, afterFailure: afterFailure.status, afterAnotherPoll: afterAnotherPoll.status, renderCalls, helper: handoff.outcome })}`);
+        return { response: feedback.status, renderCalls, helperOutcome: handoff.outcome };
+      } finally {
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: a failed final manifest commit leaves no unreachable save capability',
+    run: async () => {
+      const project = await createCanvasProject();
+      const originalRename = fs.promises.rename;
+      let blockedImportedManifestWrites = 0;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData: 'Built supported systems. A concise factual letter.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const result = await atomicReplaceJson(resultPath, {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        });
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => ({
+          bytes: Buffer.from(fixturePdfBytes),
+          pageCount: 1,
+          fontsLoaded: true,
+          missingFontFaces: [],
+          layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+        }));
+
+        fs.promises.rename = async (from, to) => {
+          if (path.resolve(String(to)) === path.resolve(manifestPath)) {
+            const candidate = JSON.parse(await fs.promises.readFile(from, 'utf8'));
+            if (candidate?.status === 'imported') {
+              blockedImportedManifestWrites += 1;
+              const error = new Error('simulated final imported-manifest write failure');
+              error.code = 'EIO';
+              throw error;
+            }
+          }
+          return originalRename(from, to);
+        };
+        const importError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9116,
+          expectedResultSha256: result.sha256,
+        }).then(() => null, error => error);
+        fs.promises.rename = originalRename;
+
+        const feedback = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        const discarded = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
+        assert(importError?.code === 'EIO'
+          && blockedImportedManifestWrites === 1
+          && feedback.status === 'render-retry-required'
+          && feedback.resultSha256 === result.sha256
+          && feedback.failurePhase === 'recording pending bundle save'
+          && discarded?.discarded === true
+          && discarded.removedJob === true
+          && !fs.existsSync(queued.folder),
+        `a manifest failure before capability registration must remain hash-parked and explicitly discardable, got ${JSON.stringify({ importCode: importError?.code, blockedImportedManifestWrites, feedback, discarded })}`);
+        return { importCode: importError.code, response: feedback.status, discardable: true };
+      } finally {
+        fs.promises.rename = originalRename;
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: a result replaced during rendering cannot stage or register the stale hash',
+    run: async () => {
+      const project = await createCanvasProject();
+      let releaseRender = () => {};
+      let importPromise = null;
+      let renderCalls = 0;
+      try {
+        const careerData = 'Built supported systems. A concise factual letter.';
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const resultValue = {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        };
+        const firstResult = await atomicReplaceJson(resultPath, resultValue);
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        let firstRenderStartedResolve;
+        let releaseRenderResolve;
+        const firstRenderStarted = new Promise(resolve => { firstRenderStartedResolve = resolve; });
+        const heldRender = new Promise(resolve => { releaseRenderResolve = resolve; });
+        releaseRender = () => releaseRenderResolve?.();
+        __setLocalAiRenderPdfForTests(async () => {
+          renderCalls += 1;
+          if (renderCalls === 1) {
+            firstRenderStartedResolve();
+            await heldRender;
+          }
+          return {
+            bytes: Buffer.from(fixturePdfBytes),
+            pageCount: 1,
+            fontsLoaded: true,
+            missingFontFaces: [],
+            layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+          };
+        });
+
+        importPromise = importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9113,
+          expectedResultSha256: firstResult.sha256,
+        });
+        await firstRenderStarted;
+        const newerResult = await atomicReplaceJson(resultPath, {
+          ...resultValue,
+          outputBundleRoot: 'Applied Jobs/New Result',
+        });
+        releaseRender();
+        const importError = await importPromise.then(() => null, error => error);
+        importPromise = null;
+        const current = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(importError?.code === 'LOCAL_AI_RESULT_CHANGED'
+          && renderCalls === 2
+          && current.status === 'completed'
+          && current.resultSha256 === newerResult.sha256
+          && fs.existsSync(queued.folder)
+          && !fs.existsSync(path.join(queued.folder, 'imported-workspace'))
+          && !fs.existsSync(feedbackPath),
+        `a render-held replacement must reject the stale hash without staging, feedback, or cleanup, got ${JSON.stringify({ code: importError?.code, renderCalls, status: current.status, hash: current.resultSha256 })}`);
+        return { rejectedHash: firstResult.sha256, currentHash: newerResult.sha256, renderCalls };
+      } finally {
+        releaseRender();
+        await importPromise?.catch?.(() => {});
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI save: a newer result revokes the stale save capability before destination mutation',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const careerData = 'Built supported systems. A concise factual letter.';
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const resultValue = {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        };
+        const firstResult = await atomicReplaceJson(resultPath, resultValue);
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => ({
+          bytes: Buffer.from(fixturePdfBytes),
+          pageCount: 1,
+          fontsLoaded: true,
+          missingFontFaces: [],
+          layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+        }));
+        const imported = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9114,
+          expectedResultSha256: firstResult.sha256,
+        });
+        const newerResult = await atomicReplaceJson(resultPath, {
+          ...resultValue,
+          outputBundleRoot: 'Applied Jobs/New Result',
+        });
+
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const sender = {
+          id: 9114,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath: imported.resumeHtmlPath,
+          resumePdfPath: imported.resumePdfPath,
+          coverLetterPdfPath: imported.coverLetterPdfPath,
+          jobListingPath: imported.jobListingPath,
+          generationAuditPath: imported.generationAuditPath,
+          workDir: imported.workDir,
+          jobTitle: 'Developer',
+          location: '',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        const current = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const receiptPath = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
+        assert(saved?.success === false
+          && saved.errorCode === 'LOCAL_AI_RESULT_CHANGED'
+          && current.status === 'completed'
+          && current.resultSha256 === newerResult.sha256
+          && fs.existsSync(queued.folder)
+          && !fs.existsSync(receiptPath)
+          && !fs.existsSync(path.join(project.root, 'Applied Jobs', 'Acme'))
+          && !fs.existsSync(path.join(queued.folder, 'fit-feedback.json')),
+        `a newer result must revoke the stale save before destination writes, receipt, feedback, or cleanup, got ${JSON.stringify({ saved, current })}`);
+
+        const reimported = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9114,
+          expectedResultSha256: newerResult.sha256,
+        });
+        const latestResult = await atomicReplaceJson(resultPath, {
+          ...resultValue,
+          outputBundleRoot: 'Applied Jobs/Latest Result',
+        });
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const discarded = await discardApplication({ sender }, { workDir: reimported.workDir });
+        const afterDiscard = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(discarded?.success === false
+          && discarded.errorCode === 'LOCAL_AI_RESULT_CHANGED'
+          && afterDiscard.status === 'completed'
+          && afterDiscard.resultSha256 === latestResult.sha256
+          && fs.existsSync(queued.folder),
+        `a renderer discard must atomically restore a newer result and revoke only its stale capability, got ${JSON.stringify({ discarded, afterDiscard })}`);
+
+        // Failure to establish the same-parent retirement must be normalized to
+        // the same retain-and-retry outcome. In particular, it must not leave a
+        // stale pending capability that blocks the job's trusted discard path.
+        const latestImport = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9114,
+          expectedResultSha256: latestResult.sha256,
+        });
+        const originalRenameSync = fs.renameSync;
+        let retirementRenameAttempts = 0;
+        fs.renameSync = (from, to) => {
+          if (path.resolve(String(from)) === path.resolve(queued.folder)
+            && path.dirname(path.resolve(String(to))) === path.dirname(path.resolve(queued.folder))) {
+            retirementRenameAttempts += 1;
+            const error = new Error('simulated retirement rename failure');
+            error.code = 'EACCES';
+            throw error;
+          }
+          return originalRenameSync(from, to);
+        };
+        let failedRetirement;
+        try {
+          failedRetirement = await discardApplication({ sender }, { workDir: latestImport.workDir });
+        } finally {
+          fs.renameSync = originalRenameSync;
+        }
+        const retainedAfterRenameFailure = fs.existsSync(queued.folder);
+        const releasedDiscard = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
+        assert(failedRetirement?.success === false
+          && failedRetirement.errorCode === 'LOCAL_AI_RESULT_CHANGED'
+          && retirementRenameAttempts === 1
+          && retainedAfterRenameFailure
+          && releasedDiscard?.discarded === true
+          && releasedDiscard.removedJob === true,
+        `a failed atomic retirement must retain the job and release its stale capability, got ${JSON.stringify({ failedRetirement, retirementRenameAttempts, retainedAfterRenameFailure, releasedDiscard })}`);
+        return {
+          saveErrorCode: saved.errorCode,
+          discardErrorCode: discarded.errorCode,
+          retirementErrorCode: failedRetirement.errorCode,
+          currentHash: latestResult.sha256,
+          retained: true,
+        };
+      } finally {
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application cleanup: a relocated workspace is restored and released when removal fails',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'cleanup-recovery-workspace');
+      const retiredDir = path.join(project.root, 'cleanup-recovery-workspace.retired');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9115;
+      const sender = {
+        id: senderId,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+      };
+      const originalRm = fs.promises.rm;
+      let successCallbacks = 0;
+      let failureCallbacks = 0;
+      let blockedRemovals = 0;
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId,
+          company: 'Acme',
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => { successCallbacks += 1; },
+          onBeforeSuccessfulCleanup: () => {
+            fs.renameSync(workDir, retiredDir);
+            return { workDir: retiredDir };
+          },
+          onSaveFailure: async () => { failureCallbacks += 1; },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        fs.promises.rm = async (target, options) => {
+          if (path.resolve(String(target)) === path.resolve(retiredDir)) {
+            blockedRemovals += 1;
+            const error = new Error('simulated relocated cleanup failure');
+            error.code = 'EBUSY';
+            throw error;
+          }
+          return originalRm(target, options);
+        };
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath,
+          generationAuditPath: null,
+          workDir,
+          jobTitle: 'Developer',
+          location: 'Toronto',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        fs.promises.rm = originalRm;
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        let pruneOperationRan = false;
+        const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
+          pruneOperationRan = true;
+        });
+        assert(saved?.success === false
+          && saved.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
+          && successCallbacks === 1
+          && failureCallbacks === 0
+          && blockedRemovals === 1
+          && fs.existsSync(destinationHtml)
+          && fs.existsSync(workDir)
+          && !fs.existsSync(retiredDir)
+          && released === true
+          && pruneOperationRan,
+        `a failed relocated cleanup must restore its exact source path, surface the failure, and release the capability, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, blockedRemovals, released, pruneOperationRan })}`);
+        return { cleanupErrorCode: saved.errorCode, restored: true, capabilityReleased: true };
+      } finally {
+        fs.promises.rm = originalRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application save: terminal receipt callback failure retains retryable source state',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'terminal-receipt-failure-workspace');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9111;
+      const sender = {
+        id: senderId,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+      };
+      let successCallbacks = 0;
+      let failureCallbacks = 0;
+      let failurePhase = '';
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId,
+          company: 'Acme',
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => {
+            successCallbacks += 1;
+            throw new Error('receipt write failed');
+          },
+          onSaveFailure: async ({ phase }) => {
+            failureCallbacks += 1;
+            failurePhase = phase;
+          },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath,
+          generationAuditPath: null,
+          workDir,
+          jobTitle: 'Developer',
+          location: 'Toronto',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        assert(saved?.success === false
+          && successCallbacks === 1
+          && failureCallbacks === 1
+          && failurePhase === 'publishing terminal handoff receipt'
+          && fs.existsSync(destinationHtml)
+          && fs.existsSync(workDir),
+        `a failed terminal receipt must not return success or delete its only retryable source after the destination became durable, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, failurePhase })}`);
+
+        // The failed one-shot capability must be released so the exact
+        // retained workspace can be registered for an explicit retry.
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId,
+          company: 'Acme',
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          artifactData: { resumeHtml, jobListing },
+        });
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const discarded = await discardApplication({ sender }, { workDir });
+        assert(discarded?.success && discarded.discarded && fs.existsSync(workDir),
+          'terminal-callback failure releases the consumed capability for a later explicit retry');
+        return { durableDestination: true, receiptFailureSurfaced: true, retryRegistration: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application save: concurrent invokes atomically claim one pending workspace',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'concurrent-save-workspace');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const blockedOutputRoot = path.join(project.root, 'blocked-concurrent-output');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Fixture</p></main></section></body></html>';
+      const jobListing = '# Fixture listing\n';
+      const senderId = 9108;
+      const sender = {
+        id: senderId,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+      };
+      let failureCallbacks = 0;
+      let successCallbacks = 0;
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+          // The admitted request fails deterministically at destination-root
+          // validation, leaving enough asynchronous distance for the second
+          // invoke to encounter the synchronous claim.
+          fs.promises.writeFile(blockedOutputRoot, 'not a directory', 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId,
+          company: 'Acme',
+          applicationRoot: blockedOutputRoot,
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => { successCallbacks += 1; },
+          onSaveFailure: async () => { failureCallbacks += 1; },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saveArgs = {
+          resumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath,
+          generationAuditPath: null,
+          workDir,
+          jobTitle: 'Developer',
+          location: '',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        };
+        const results = await Promise.all([
+          saveApplication({ sender }, saveArgs),
+          saveApplication({ sender }, saveArgs),
+        ]);
+        const busy = results.filter(result => result?.errorCode === 'APPLICATION_SAVE_IN_FLIGHT');
+        const admittedFailure = results.filter(result => result?.success === false
+          && /regular directory/i.test(result?.error || ''));
+        assert(busy.length === 1 && admittedFailure.length === 1
+          && failureCallbacks === 1 && successCallbacks === 0,
+        `exactly one concurrent save may consume the capability and publish a callback, got ${JSON.stringify({ results, failureCallbacks, successCallbacks })}`);
+
+        // The admitted failure still releases the one-shot capability. A later
+        // explicit retry may register the retained workspace normally.
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId,
+          company: 'Acme',
+          applicationRoot: blockedOutputRoot,
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+        });
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const discarded = await discardApplication({ sender }, { workDir });
+        assert(discarded?.success && discarded.discarded
+          && await fs.promises.lstat(workDir).then(stat => stat.isDirectory()),
+        'the failed claim is released for an explicit retry while its retained workspace remains recoverable');
+        return { admitted: 1, duplicateRejected: 1, failureCallbacks };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI retention: prune claims serialize against workspace registration',
+    run: async () => {
+      const project = await createCanvasProject();
+      let releasePrune = () => {};
+      try {
+        const workDir = path.join(project.root, 'prune-claim-workspace');
+        const resumeHtmlPath = path.join(workDir, 'Application.html');
+        const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+        const resumeHtml = '<!doctype html><html><body><main>Fixture</main></body></html>';
+        const jobListing = '# Fixture listing\n';
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+
+        let pruneEnteredResolve;
+        let releasePruneResolve;
+        const pruneEntered = new Promise(resolve => { pruneEnteredResolve = resolve; });
+        const holdPrune = new Promise(resolve => { releasePruneResolve = resolve; });
+        releasePrune = () => releasePruneResolve?.();
+        const prunePromise = withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
+          pruneEnteredResolve();
+          await holdPrune;
+        });
+        await pruneEntered;
+
+        let registrationCode = '';
+        try {
+          registerPendingApplicationWorkspace({
+            workDir,
+            senderId: 9110,
+            resumeHtmlPath,
+            jobListingPath,
+            cleanupOnDiscard: false,
+            artifactData: { resumeHtml, jobListing },
+          });
+        } catch (error) {
+          registrationCode = error?.code || '';
+        }
+        releasePrune();
+        assert(await prunePromise && registrationCode === 'APPLICATION_WORKSPACE_PRUNING',
+          'a prune claim that wins first must reject concurrent registration with a typed retry before deletion can race it');
+
+        registerPendingApplicationWorkspace({
+          workDir,
+          senderId: 9110,
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          artifactData: { resumeHtml, jobListing },
+        });
+        let pruneRan = false;
+        const declined = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => { pruneRan = true; });
+        assert(declined === false && pruneRan === false,
+          'a registered capability that wins first must make retention pruning decline without touching the workspace');
+
+        registerJobApplicationHandlers();
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const sender = { id: 9110, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+        const discarded = await discardApplication({ sender }, { workDir });
+        assert(discarded?.success && discarded.discarded && fs.existsSync(workDir),
+          'the registration remains usable and can release its capability after the declined prune');
+        return { registrationCode, pruneDeclinedForCapability: true };
+      } finally {
+        releasePrune();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI retention: import and per-job pruning claims are mutually exclusive',
+    run: async () => {
+      const project = await createCanvasProject();
+      let releasePrune = () => {};
+      let heldPrunePromise = null;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+
+        // Import admission establishes its claim before its first await. Even
+        // though this fixture eventually fails for lack of result.json, a
+        // retention pass started in that interval must not touch the folder.
+        const activeImport = importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+        });
+        let pruneRanDuringImport = false;
+        const declinedPrune = await withLocalAiJobPruneClaim(queued.id, queued.folder, async () => {
+          pruneRanDuringImport = true;
+        });
+        const activeImportError = await activeImport.then(() => null, error => error);
+        assert(declinedPrune === false && pruneRanDuringImport === false
+          && activeImportError && activeImportError.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        'an import that wins admission must make per-job retention pruning decline until the import settles');
+
+        // Exercise the inverse order with a held operation. The import must be
+        // rejected before it reads from a directory the retention owner may be
+        // deleting, and the shared retry code keeps the caller poll-safe.
+        let pruneEnteredResolve;
+        let releasePruneResolve;
+        const pruneEntered = new Promise(resolve => { pruneEnteredResolve = resolve; });
+        const holdPrune = new Promise(resolve => { releasePruneResolve = resolve; });
+        releasePrune = () => releasePruneResolve?.();
+        heldPrunePromise = withLocalAiJobPruneClaim(queued.id, queued.folder, async () => {
+          pruneEnteredResolve();
+          await holdPrune;
+        });
+        await pruneEntered;
+        const blockedImportError = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+        }).then(() => null, error => error);
+        assert(blockedImportError?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'a per-job retention claim that wins admission rejects import with the typed retriable code');
+
+        releasePrune();
+        assert(await heldPrunePromise === true,
+          'the admitted retention operation completes after the held prune claim is released');
+        heldPrunePromise = null;
+        const importAfterPrune = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+        }).then(() => null, error => error);
+        assert(importAfterPrune && importAfterPrune.code !== 'LOCAL_AI_IMPORT_IN_FLIGHT',
+          'the per-job prune claim is released after completion so later imports can run normally');
+        return {
+          pruneDeclinedDuringImport: true,
+          blockedImportCode: blockedImportError.code,
+          importRecoveredAfterPrune: true,
+        };
+      } finally {
+        releasePrune();
+        await heldPrunePromise?.catch?.(() => {});
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: an active save extends a lapsed manifest settling window',
+    run: async () => {
+      const project = await createCanvasProject();
+      let releaseFailureCallback = () => {};
+      let admittedSavePromise = null;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resumeHtmlPath = path.join(queued.folder, 'save-in-flight-Application.html');
+        const jobListingPath = path.join(queued.folder, 'save-in-flight-Listing.md');
+        const blockedOutputRoot = path.join(project.root, 'blocked-active-save-output');
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Fixture</p></main></section></body></html>';
+        const jobListing = '# Fixture listing\n';
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+          fs.promises.writeFile(blockedOutputRoot, 'not a directory', 'utf8'),
+        ]);
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        await atomicReplaceJson(manifestPath, {
+          ...manifest,
+          status: 'imported',
+          importedAt: '2000-01-01T00:00:00.000Z',
+        });
+
+        let failureStartedResolve;
+        let releaseFailureResolve;
+        const failureStarted = new Promise(resolve => { failureStartedResolve = resolve; });
+        const holdFailureCallback = new Promise(resolve => { releaseFailureResolve = resolve; });
+        releaseFailureCallback = () => releaseFailureResolve?.();
+        registerPendingApplicationWorkspace({
+          workDir: queued.folder,
+          senderId: 9109,
+          company: 'Acme',
+          applicationRoot: blockedOutputRoot,
+          resumeHtmlPath,
+          jobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+          onSaveFailure: async () => {
+            failureStartedResolve();
+            await holdFailureCallback;
+          },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const sender = {
+          id: 9109,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+        admittedSavePromise = saveApplication({ sender }, {
+          resumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath,
+          generationAuditPath: null,
+          workDir: queued.folder,
+          jobTitle: 'Developer',
+          location: '',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        await failureStarted;
+        assert(isPendingApplicationWorkspaceSaveInFlight(queued.folder),
+          'the exact registered workspace reports its active save claim while its failure callback is settling');
+
+        const receiptPath = path.join(project.root, '.local-ai', 'handoff-receipts', `${queued.id}.json`);
+        await fs.promises.writeFile(receiptPath, '{}\n', 'utf8');
+        const expiredReceiptTime = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
+        await fs.promises.utimes(receiptPath, expiredReceiptTime, expiredReceiptTime);
+
+        const queuedDuringSave = await queueLocalApplicationJob({
+          job: { title: 'Parallel Developer', company: 'Acme' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+        assert(fs.existsSync(queued.folder) && fs.existsSync(queuedDuringSave.folder)
+          && fs.existsSync(receiptPath),
+        'retention pruning for a new queue must not delete a lapsed imported job or even an expired receipt while its exact workspace is actively saving');
+
+        const discardDuringSave = await discardLocalApplicationJob(queued.id, project.canvasFilePath)
+          .then(() => null, error => error);
+        assert(discardDuringSave?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT'
+          && fs.existsSync(queued.folder),
+        'direct Local AI discard must join the workspace claim and retain the source directory during an admitted save');
+
+        let replacementRegistrationCode = '';
+        try {
+          registerPendingApplicationWorkspace({
+            workDir: queued.folder,
+            senderId: 9109,
+            company: 'Acme',
+            applicationRoot: blockedOutputRoot,
+            resumeHtmlPath,
+            jobListingPath,
+            cleanupOnDiscard: false,
+            cleanupOnSaveFailure: false,
+            artifactData: { resumeHtml, jobListing },
+          });
+        } catch (error) {
+          replacementRegistrationCode = error?.code || '';
+        }
+
+        const statusDuringSave = await localApplicationStatus(queued.id, project.canvasFilePath);
+        let overlappingImportCode = '';
+        try {
+          await importLocalApplicationJob({
+            jobId: queued.id,
+            canvasFilePath: project.canvasFilePath,
+            senderId: 9109,
+          });
+        } catch (error) {
+          overlappingImportCode = error?.code || '';
+        }
+        assert(replacementRegistrationCode === 'APPLICATION_SAVE_IN_FLIGHT'
+          && statusDuringSave.status === 'importing'
+          && overlappingImportCode === 'LOCAL_AI_IMPORT_IN_FLIGHT',
+        `a proven-active save must retain its capability and hold status/import past the timestamp window, got ${JSON.stringify({ replacementRegistrationCode, status: statusDuringSave.status, overlappingImportCode })}`);
+
+        releaseFailureCallback();
+        const admittedSave = await admittedSavePromise;
+        admittedSavePromise = null;
+        const afterFailure = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(admittedSave?.success === false
+          && !isPendingApplicationWorkspaceSaveInFlight(queued.folder)
+          && afterFailure.status === 'queued',
+        'once the active save ends, its claim is released and the lapsed crash-recovery window resumes normal polling');
+        return {
+          replacementRegistrationCode,
+          heldStatus: statusDuringSave.status,
+          overlappingImportCode,
+          discardDuringSaveCode: discardDuringSave.code,
+          recoveredStatus: afterFailure.status,
+          retainedDuringConcurrentQueue: true,
+        };
+      } finally {
+        releaseFailureCallback();
+        await admittedSavePromise?.catch?.(() => {});
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     // The canvas-level fallback manager and a just-remounted card can both
     // reach for the same completed result. The per-job lock makes the loser's
     // request a typed, retriable rejection instead of a double render racing
@@ -2035,8 +3454,8 @@ export default [
         { id: 'c-mounted', type: 'jobcard', data: { localApplication: { id: 'j10', status: 'queued' } } },
       ];
       const selected = selectFallbackLocalAiJobs(cards, (id) => id === 'c-mounted').map((n) => n.id);
-      assert(JSON.stringify(selected) === JSON.stringify(['c-queued', 'c-completed', 'c-importing', 'c-revision', 'c-exhausted']),
-        `the manager drives pending jobs on unmounted cards only — including an orphaned 'importing' (dead driver) and legacy exhausted job that must migrate — never terminal, manual-retry, mounted, or non-card nodes (got: ${selected.join(', ')})`);
+      assert(JSON.stringify(selected) === JSON.stringify(['c-queued', 'c-completed', 'c-importing', 'c-revision', 'c-render-retry', 'c-exhausted']),
+        `the manager drives pending jobs on unmounted cards only — including an orphaned 'importing' (dead driver), manual render retry that needs persistent UI, and legacy exhausted job that must migrate — never terminal, mounted, or non-card nodes (got: ${selected.join(', ')})`);
 
       registerMountedJobCard('reg-1');
       assert(isJobCardMounted('reg-1'), 'a mounted card registers as the owner of its job');
@@ -2044,6 +3463,8 @@ export default [
       assert(!isJobCardMounted('reg-1'), 'unmounting releases ownership to the fallback manager');
       assert(LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('importing') && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('importing'),
         "the card's own poll ignores 'importing' (it holds it mid-import) while the manager resumes an orphaned one");
+      assert(LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('render-retry-required') && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('render-retry-required'),
+        'the mounted card owns its visible render retry while the fallback manager keeps a hidden card pollable so it can surface a persistent retry action');
       assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('revision-exhausted') && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('revision-exhausted'),
         'legacy revision-exhausted cards remain pollable so app status can migrate them to revision-required');
       return { selected };
@@ -2167,9 +3588,10 @@ export default [
   {
     // The measured import finishes before the renderer promotes its registered
     // workspace. A receipt is terminal evidence for the waiting local coding agent
-    // session, so it must be emitted by save-application only after that
-    // promotion and the private-workspace cleanup both succeed. Conversely, a
-    // failed promotion must retain the Local AI job/result for retry.
+    // session, so save-application emits it only after durable promotion and
+    // before best-effort private-workspace cleanup. A retained folder must not
+    // hide that receipt; conversely, a failed promotion retains the job/result
+    // for retry and emits no terminal receipt.
     name: 'Local AI handoff: terminal receipt follows durable save and failed save retains the job',
     run: async () => {
       const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
@@ -2180,12 +3602,13 @@ export default [
       const receiptCalls = [...localSource.matchAll(/await writeLocalAiTerminalReceipt\(/g)].map(match => match.index);
       assert(registrationAt >= 0
         && /cleanupOnSaveFailure\s*:\s*false/.test(localSource.slice(registrationAt))
-        && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt)),
-      'a Local AI import registers failure-retention plus a post-save receipt callback');
+        && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt))
+        && /onSaveFailure\s*:\s*async\s*\(\{\s*phase,\s*error\s*\}\)\s*=>[\s\S]{0,800}recordLocalAiSaveFailure\(/.test(localSource.slice(registrationAt)),
+      'a Local AI import registers failure-retention plus hash-bound success and failure callbacks');
       assert(receiptCalls.length === 1 && receiptCalls[0] > registrationAt,
         'the terminal receipt is not emitted during measured import before save-application owns the workspace');
       assert(auditBuildAt >= 0 && artifactStageAt > auditBuildAt && registrationAt > artifactStageAt
-        && /generationAuditPath[\s\S]{0,1600}generationAudit:\s*generationAuditArtifact/.test(localSource.slice(registrationAt, registrationAt + 4_000)),
+        && /generationAuditPath[\s\S]{0,5000}generationAudit:\s*generationAuditArtifact/.test(localSource.slice(registrationAt, registrationAt + 7_000)),
       'the app composes and atomically stages the durable generation audit before registering its exact path and bytes for final-save promotion');
 
       const cleanupAt = applicationSource.indexOf("await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save')");
@@ -2194,9 +3617,11 @@ export default [
       assert(finalizerAt >= 0 && cleanupAt > finalizerAt && saveReturnAt > cleanupAt,
         'save-application publishes the registered terminal receipt after atomic promotion but before deleting the private Local AI job folder');
       const saveFailureAt = applicationSource.indexOf("discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure')");
+      const failureCallbackAt = applicationSource.indexOf('await pending.onSaveFailure({ phase: exportPhase, error })');
       const failureWindow = applicationSource.slice(Math.max(0, saveFailureAt - 700), saveFailureAt + 250);
-      assert(saveFailureAt >= 0 && /pending\.cleanupOnSaveFailure/.test(failureWindow),
-        'the failed-save cleanup path honors a workspace-specific retention policy instead of unconditionally removing a Local AI job');
+      assert(saveFailureAt >= 0 && failureCallbackAt >= 0 && failureCallbackAt < saveFailureAt
+        && /pending\.cleanupOnSaveFailure/.test(failureWindow),
+      'the failed-save path publishes retry evidence before honoring the workspace-specific retention policy');
 
       const project = await createCanvasProject();
       try {
@@ -2208,6 +3633,7 @@ export default [
         await fs.promises.writeFile(path.join(receiptsRoot, `${queued.id}.json`), `${JSON.stringify({
           version: 1,
           jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
           status: 'imported',
           resultSha256: 'a'.repeat(64),
           importedAt: new Date().toISOString(),
@@ -2216,10 +3642,70 @@ export default [
           message: 'Both documents met their measured targets.',
         })}\n`, 'utf8');
         await fs.promises.rm(queued.folder, { recursive: true, force: true });
+        const siblingCanvasFilePath = path.join(project.root, 'sibling-canvas.json');
+        await fs.promises.writeFile(siblingCanvasFilePath, '{}\n', 'utf8');
+        const siblingStatus = await localApplicationStatus(queued.id, siblingCanvasFilePath);
+        const siblingDiscard = await discardLocalApplicationJob(queued.id, siblingCanvasFilePath);
+        assert(siblingStatus.status !== 'saved'
+          && siblingDiscard.removedReceipt === false
+          && fs.existsSync(path.join(receiptsRoot, `${queued.id}.json`)),
+        'a sibling canvas in the same directory can neither inherit saved status nor discard another canvas\'s terminal receipt');
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(status.status === 'saved' && status.receipt?.jobId === queued.id,
           `a valid terminal receipt must distinguish a completed-save cleanup from a failed/missing job, got ${JSON.stringify(status)}`);
-        return { status: status.status, receipt: true };
+
+        const retained = await queueLocalApplicationJob({
+          job: { title: 'Retained Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        const retainedResultRaw = '{"fixture":"durably saved"}\n';
+        await fs.promises.writeFile(path.join(retained.folder, 'result.json'), retainedResultRaw, 'utf8');
+        const retainedManifestPath = path.join(retained.folder, 'manifest.json');
+        const retainedManifest = JSON.parse(await fs.promises.readFile(retainedManifestPath, 'utf8'));
+        await fs.promises.writeFile(retainedManifestPath, `${JSON.stringify({
+          ...retainedManifest,
+          status: 'imported',
+          importedAt: '2000-01-01T00:00:00.000Z',
+        })}\n`, 'utf8');
+        await fs.promises.writeFile(path.join(receiptsRoot, `${retained.id}.json`), `${JSON.stringify({
+          version: 1,
+          jobId: retained.id,
+          canvasFilePath: project.canvasFilePath,
+          status: 'imported',
+          resultSha256: sha256(retainedResultRaw),
+          importedAt: new Date().toISOString(),
+          resume: { pageCount: 1, targetPageCount: 1, attempts: [{ density: 'default', pageCount: 1 }] },
+          coverLetter: { pageCount: 1, targetPageCount: 1 },
+          message: 'Both documents met their measured targets.',
+        })}\n`, 'utf8');
+        const retainedStatus = await localApplicationStatus(retained.id, project.canvasFilePath);
+        assert(retainedStatus.status === 'saved' && retainedStatus.cleanupPending === true
+          && retainedStatus.folder === retained.folder && retainedStatus.receipt?.resultSha256 === sha256(retainedResultRaw),
+        `a matching terminal receipt must win when cleanup leaves the private folder behind, got ${JSON.stringify(retainedStatus)}`);
+
+        await fs.promises.writeFile(path.join(retained.folder, 'result.json'), '{"fixture":"new bytes"}\n', 'utf8');
+        const changedStatus = await localApplicationStatus(retained.id, project.canvasFilePath);
+        assert(changedStatus.status !== 'saved',
+          'a retained-folder receipt cannot terminate a different current result hash');
+
+        // Recursive cleanup is not atomic: it may delete manifest/input/context
+        // before failing on another entry. The durable receipt must remain
+        // sufficient when the matching result survives that partial cleanup.
+        await fs.promises.writeFile(path.join(retained.folder, 'result.json'), retainedResultRaw, 'utf8');
+        await Promise.all([
+          fs.promises.rm(path.join(retained.folder, 'manifest.json'), { force: true }),
+          fs.promises.rm(path.join(retained.folder, 'input.json'), { force: true }),
+          fs.promises.rm(path.join(retained.folder, 'context'), { recursive: true, force: true }),
+        ]);
+        const partialCleanupStatus = await localApplicationStatus(retained.id, project.canvasFilePath);
+        assert(partialCleanupStatus.status === 'saved' && partialCleanupStatus.cleanupPending === true,
+          `terminal receipt lookup must precede files that partial cleanup may already have removed, got ${JSON.stringify(partialCleanupStatus)}`);
+        return {
+          status: status.status,
+          receipt: true,
+          siblingReceiptIsolated: true,
+          retainedFolderStatus: retainedStatus.status,
+          partialCleanupStatus: partialCleanupStatus.status,
+        };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }

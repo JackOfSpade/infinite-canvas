@@ -21,7 +21,7 @@ import { sanitizeLastRunReceipt } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
-import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
+import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, formatUnderfilledTypeAreaUtilization, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
@@ -35,6 +35,7 @@ import { isTerminalSourceStatus } from '../test-dependencies.js';
 import { clipReportText } from '../test-dependencies.js';
 import { composeDetailBlockReprobeResult, didDetailBlockReprobeRecover } from '../test-dependencies.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../../src/utils/jobBoardProvenance.js';
 
 export default [
   {
@@ -593,9 +594,8 @@ export default [
           && !boardSourceAssessment.includes('✅ **VERIFIED COMPLETE**'),
         'a connected non-stale board whose saved combine source omits this run cannot be certified as current');
 
-        // Clearing a connected board intentionally removes its combine receipt
-        // and visible cascade. The completion report must not treat that empty
-        // consumer as evidence that the finished source still reached a board.
+        // An empty connected board without a durable clear receipt must not be
+        // treated as evidence that the finished source reached a board.
         const clearedBoard = generateMarkdown({
           description: 'A connected Job Board was explicitly cleared after this run completed.', filterCode: 'FULL',
           filterStats: {
@@ -613,7 +613,160 @@ export default [
         assert(clearedBoardAssessment.includes('⚠️ **INDETERMINATE**')
           && clearedBoardAssessment.includes('Job Board `cleared-board` is `empty`, not done')
           && !clearedBoardAssessment.includes('✅ **VERIFIED COMPLETE**'),
-        'an explicitly cleared connected board cannot certify that the completed source remains consumed');
+        'an empty connected board without clear provenance cannot certify that the completed source remains consumed');
+
+        const clearedAfterCompletion = generateMarkdown({
+          description: 'A board that consumed this run was deliberately cleared afterwards.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'cleared-after-completion'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'cleared-after-completion', hubState: 'empty', resultCount: 0, renderedCardCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], stale: false,
+              clearProvenance: {
+                clearedAt: Date.now() + 60_000,
+                priorCombineSignature: `${nodeId}=before-user-clear`,
+                priorResultCount: 16,
+                priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+              },
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'cleared-after-completion', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const clearedAfterCompletionAssessment = clearedAfterCompletion.slice(clearedAfterCompletion.indexOf('## Job Completion Assessment'), clearedAfterCompletion.indexOf('## Job Search Pipeline'));
+        assert(clearedAfterCompletionAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && clearedAfterCompletionAssessment.includes('Job Board `cleared-after-completion` was deliberately cleared after this run (prior results 16); its result cards are no longer present.')
+          && clearedAfterCompletionAssessment.includes('deliberately cleared: `cleared-after-completion` (prior 16; result cards no longer present)')
+          && !clearedAfterCompletionAssessment.includes('Job Board `cleared-after-completion` is `empty`, not done'),
+        'a non-stale empty board with post-receipt, same-hub clear provenance proves a deliberate removal instead of downgrading the completed search');
+
+        const fallbackClearedAfterCompletion = generateMarkdown({
+          description: 'A direct FULL payload keeps the bounded board-clear receipt.', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'fallback-cleared-board'], omittedSections: [] },
+          nodes: [
+            { id: nodeId, type: 'jobhub', data: {} },
+            {
+              id: 'fallback-cleared-board', type: 'jobboard', data: {
+                hubState: 'empty', resultCount: 0, stale: false,
+                clearProvenance: {
+                  clearedAt: Date.now() + 60_000,
+                  priorCombineSignature: `${nodeId}=before-user-clear`, priorResultCount: 16,
+                  priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+                },
+              },
+            },
+          ],
+          edges: [], drawings: [], frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const fallbackClearAssessment = fallbackClearedAfterCompletion.slice(fallbackClearedAfterCompletion.indexOf('## Job Completion Assessment'), fallbackClearedAfterCompletion.indexOf('## Job Search Pipeline'));
+        assert(fallbackClearAssessment.includes('✅ **VERIFIED COMPLETE**')
+          && fallbackClearAssessment.includes('Job Board `fallback-cleared-board` was deliberately cleared after this run'),
+        'the bug-report fallback board mapping retains sanitized clear provenance and a zero rendered-card count');
+
+        const rejectedClearProvenance = (clearProvenance) => generateMarkdown({
+          description: 'Only a correlated post-completion clear receipt changes the board verdict.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'rejected-clear-receipt'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'rejected-clear-receipt', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], stale: false, clearProvenance,
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'rejected-clear-receipt', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const tooEarlyClear = rejectedClearProvenance({
+          clearedAt: 0, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+          priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+        });
+        const outOfRangeClear = rejectedClearProvenance({
+          clearedAt: Number.MAX_SAFE_INTEGER, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+          priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+        });
+        const uncorrelatedClear = rejectedClearProvenance({
+          clearedAt: Date.now() + 60_000, priorCombineSignature: 'other-hub=old-run', priorResultCount: 16,
+          priorSourceRuns: [{ sourceHubId: 'other-hub', runId }],
+        });
+        const legacySameHubClear = rejectedClearProvenance({
+          clearedAt: Date.now() + 60_000, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+        });
+        // A board can have displayed a prior run from this same hub while a
+        // newer terminal receipt arrives before the stale marker renders.
+        // Exact run provenance is required; a hub-only signature must not turn
+        // that race into a false green completion verdict.
+        const priorRunSameHubClear = rejectedClearProvenance({
+          clearedAt: Date.now() + 60_000, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+          priorSourceRuns: [{ sourceHubId: nodeId, runId: 'completion-run-previous' }],
+        });
+        const coerciveBoardCounts = generateMarkdown({
+          description: 'Boolean board counts must not become a zero-card clear receipt.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'rejected-clear-receipt'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'rejected-clear-receipt', hubState: 'empty', resultCount: false, renderedCardCount: false, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], stale: false,
+              clearProvenance: {
+                clearedAt: Date.now() + 60_000, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+                priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+              },
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'rejected-clear-receipt', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        for (const rejected of [tooEarlyClear, outOfRangeClear, uncorrelatedClear, legacySameHubClear, priorRunSameHubClear, coerciveBoardCounts]) {
+          const assessment = rejected.slice(rejected.indexOf('## Job Completion Assessment'), rejected.indexOf('## Job Search Pipeline'));
+          assert(assessment.includes('⚠️ **INDETERMINATE**')
+            && assessment.includes('Job Board `rejected-clear-receipt` is `empty`, not done')
+            && !assessment.includes('deliberately cleared'),
+          'a too-early/out-of-Date-range, unrelated, legacy, or prior-run clear receipt must not certify this run\'s board consumption');
+        }
+
+        const completionReceiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+        const validReceipt = fs.readFileSync(completionReceiptPath, 'utf8');
+        try {
+          fs.writeFileSync(completionReceiptPath, JSON.stringify({
+            ...JSON.parse(validReceipt),
+            completedAt: Number.MAX_SAFE_INTEGER,
+          }), 'utf8');
+          const invalidReceiptTimestamp = rejectedClearProvenance({
+            clearedAt: Date.now() + 60_000, priorCombineSignature: `${nodeId}=old-run`, priorResultCount: 16,
+            priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+          });
+          const assessment = invalidReceiptTimestamp.slice(invalidReceiptTimestamp.indexOf('## Job Completion Assessment'), invalidReceiptTimestamp.indexOf('## Job Search Pipeline'));
+          assert(assessment.includes('⚠️ **INDETERMINATE**')
+            && assessment.includes('Job Board `rejected-clear-receipt` is `empty`, not done')
+            && !assessment.includes('deliberately cleared'),
+          'an out-of-JavaScript-Date-range receipt completion timestamp cannot certify a board clear');
+        } finally {
+          fs.writeFileSync(completionReceiptPath, validReceipt, 'utf8');
+        }
+
+        const staleClear = generateMarkdown({
+          description: 'A stale board must still require refresh even if it has a clear receipt.', filterCode: 'FULL',
+          filterStats: {
+            hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId, 'stale-clear-receipt'], omittedSections: [],
+            jobBoardStates: [{
+              id: 'stale-clear-receipt', hubState: 'empty', resultCount: 0, mergeUnique: null,
+              combineSignature: null, connectedSourceHubIds: [nodeId], stale: true, staleReason: 'inputs changed',
+              clearProvenance: {
+                clearedAt: Date.now() + 60_000,
+                priorCombineSignature: `${nodeId}=before-user-clear`, priorResultCount: 16,
+                priorSourceRuns: [{ sourceHubId: nodeId, runId }],
+              },
+            }],
+            jobBoardStateCount: 1,
+          },
+          nodes: [{ id: nodeId, type: 'jobhub', data: {} }, { id: 'stale-clear-receipt', type: 'jobboard', data: {} }], edges: [], drawings: [],
+          frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        const staleClearAssessment = staleClear.slice(staleClear.indexOf('## Job Completion Assessment'), staleClear.indexOf('## Job Search Pipeline'));
+        assert(staleClearAssessment.includes('BOARD REFRESH REQUIRED')
+          && !staleClearAssessment.includes('deliberately cleared'),
+        'a stale board cannot be certified from clear provenance, even when it names the source and postdates completion');
 
         telemetry.pipeline = { ...telemetry.pipeline, runId: 'pipeline-token-mismatch' };
         const mixedRun = generateMarkdown({
@@ -766,7 +919,7 @@ export default [
         assert(issueReporterSource.includes('jobBoardStates: allJobBoardStates.slice(0, 25)')
           && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length')
           && issueReporterSource.includes('combineSignature: typeof node.data?.combineSignature')
-          && issueReporterSource.includes('mergeUnique: Number.isFinite(Number(node.data?.mergeStats?.unique))')
+          && issueReporterSource.includes('mergeUnique: reportBoardCount(node.data?.mergeStats?.unique)')
           && issueReporterSource.includes('connectedSourceHubIds:'),
         'the renderer stamps bounded board count, merge, and source-correlation facts before JOBS/RECOVERY filters remove the node payload');
 
@@ -1706,7 +1859,11 @@ export default [
         description: 'Counter wording regression fixture.',
         nodes: [{
           id: 'job-hub-counter-fixture', type: 'jobhub',
-          data: { hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3, scoredJobs: [{}, {}, {}], enabledSourceIds: ['indeed', 'linkedin'] },
+          data: {
+            hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3,
+            scoredJobs: [{}, {}, {}], enabledSourceIds: ['indeed', 'linkedin'],
+            lastCompletedRunAt: Date.UTC(2026, 8, 7, 14, 30, 0),
+          },
         }],
         edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
         nodeInternals: [{
@@ -1716,8 +1873,9 @@ export default [
       }).markdown;
       assert(report.includes('scraped: 31 → kept: 3')
         && report.includes('enabledSourceIds: indeed,linkedin')
+        && report.includes('lastCompletedRunAt: 2026-09-07T14:30:00.000Z')
         && !report.includes('hubState: done, scraped: 3, results: 3'),
-      'Node Diagnostics must keep both the post-filter count and the saved source selection visible');
+      'Node Diagnostics must keep post-filter counts, source selection, and a safe ISO completion date visible');
       const legacyDefaultReport = generateMarkdown({
         description: 'Legacy source-selection default fixture.',
         nodes: [{ id: 'legacy-job-hub', type: 'jobhub', data: { hubState: 'done', scoredJobs: [] } }],
@@ -2280,6 +2438,11 @@ export default [
                 coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material argument improvement remained after comparison.' },
               },
               detail: 'résumé is 2 pages (target: 1).',
+            }, {
+              at: '2026-08-18T05:17:00.000Z', type: 'fit-revision-requested', resultSha256: 'fedcba9876543210', revisionRound: 3,
+              resume: { pageCount: 1, targetPageCount: 1, layout: { utilization: 0.895641 }, attempts: [{ attempt: 1, density: 'default', pageCount: 1 }] },
+              coverLetter: { pageCount: 1, targetPageCount: 1 },
+              detail: 'résumé content spans 89.56% of the measured type area, below the 90% minimum.',
             }],
           },
         });
@@ -2292,6 +2455,7 @@ export default [
           && report.includes('fit-revision-requested · revision 2 · result 0123456789abcdef')
           && report.includes('résumé type area 86%')
           && report.includes('résumé attempts #1=2p, #2[compact]=2p')
+          && report.includes('résumé type area 89.56% (below 90% minimum)')
           && report.includes('AI-authored quality review: résumé changed_materially')
           && report.includes('cover letter kept_diminishing_returns'),
       'FULL reports retain the exact app-measured Local AI result/version/page sequence and AI-authored quality disposition needed to audit a claimed revision loop');
@@ -5543,8 +5707,9 @@ export default [
         && search.includes('jobs: jobsToEvaluate,'),
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
       assert(search.includes('function isSavedAnalysisForCurrentHub')
-        && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath)')
-        && search.includes('isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath)')
+        && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
+        && search.includes('isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
+        && search.includes('isJobAnalysisSnapshotAfterClear(snapshot, meta, jobAnalysisClearedAt, jobAnalysisClearedRunId)')
         && !search.includes('if (!SKIP_AI_FOR_TESTING) return;'),
       'saved-scrape recovery is available for production manual-AI runs only when both the source hub and canvas match');
       assert(search.includes('jobRunId: snapshot.runId || null')
@@ -5582,7 +5747,7 @@ export default [
         && /sourceGatheredCount:\s*sourceRecoverySnapshot\.sourceGatheredCount\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.relevanceKept\s*\?\?\s*sourceRecoverySnapshot\.searchFunnel\?\.raw\s*\?\?\s*sourceRecoverySnapshot\.gatheredJobCount/.test(googleRebuild),
       'LinkedIn and Google description-recovery snapshot rebuilds preserve the original source-found count rather than replacing it with the current score-ready subset');
       assert(search.includes("|| !hasReusableCareerProfile")
-        && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id]"),
+        && search.includes("[hubState, canvasFilePath, hasReusableCareerProfile, id, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId]"),
       'saved-scrape recovery never reintroduces a profile deliberately cleared from this hub');
       assert(tree.includes('requirementAssessments: job.requirementAssessments')
         && tree.includes('fitAssessment: job.fitAssessment')
@@ -8400,6 +8565,8 @@ export default [
       const boardSource = fs.readFileSync(path.resolve('src/nodes/JobBoardNode.jsx'), 'utf8');
       const doneStateSource = fs.readFileSync(path.resolve('src/nodes/jobboard/JobBoardDoneState.jsx'), 'utf8');
       const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
+      const jobsSnapshotSource = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const jobsBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       assert(boardSource.includes('const completedModules = useMemo')
@@ -8426,6 +8593,53 @@ export default [
         && boardSource.includes('cancelNodeTask?.(id,')
         && boardSource.includes('combine cancelled before spawn'),
       'board tracks scored terminal zero-result modules, excludes explicitly unscored completions, and confirms an undoable empty replacement before deleting stale children');
+      const clearStart = boardSource.indexOf('const handleClear = useCallback');
+      const clearEnd = boardSource.indexOf('const completeManualAiRun = useCallback', clearStart);
+      const handleClearSource = boardSource.slice(clearStart, clearEnd);
+      const emptyReplacementStart = boardSource.indexOf('const confirmEmptyReplacement = useCallback');
+      const emptyReplacementEnd = boardSource.indexOf('const cleanupBoard = useCallback', emptyReplacementStart);
+      const successfulCombineStart = boardSource.indexOf('updateGlobal(id, {', boardSource.indexOf('const handleCombine = useCallback'));
+      const successfulCombineEnd = boardSource.indexOf('// A scored job becomes', successfulCombineStart);
+      assert(clearStart >= 0 && clearEnd > clearStart
+        && handleClearSource.includes('const currentData = getNode(id)?.data || data')
+        && handleClearSource.includes('priorCombineSignature')
+        && handleClearSource.includes('priorResultCount')
+        && handleClearSource.includes('normalizeBoardResultCount(currentData.resultCount)')
+        && handleClearSource.includes('priorSourceRuns')
+        && boardSource.includes("boundedCombinedSourceRuns(currentData.combineSourceRuns)")
+        && handleClearSource.includes('combineSourceRuns: null')
+        && handleClearSource.includes('clearProvenance')
+        && handleClearSource.indexOf("new CustomEvent('canvas-take-snapshot')") < handleClearSource.indexOf('const clearProvenance =')
+        && boardSource.slice(emptyReplacementStart, emptyReplacementEnd).includes('combineSourceRuns: boundedCombinedSourceRuns(completedModules)')
+        && boardSource.slice(emptyReplacementStart, emptyReplacementEnd).includes('clearProvenance: null')
+        && boardSource.slice(successfulCombineStart, successfulCombineEnd).includes('combineSourceRuns: sourceRunsAtCombine')
+        && boardSource.slice(successfulCombineStart, successfulCombineEnd).includes('clearProvenance: null'),
+      'manual Clear stores bounded exact source-run provenance only after its undo snapshot, while confirmed empty replacement and a successful Combine refresh it and retire the clear receipt');
+      const persistedRun = { sourceHubId: 'jobhub-1', runId: 'run-1' };
+      assert(JSON.stringify(boundedCombinedSourceRuns([persistedRun])) === JSON.stringify([persistedRun])
+        && JSON.stringify(boundedCombinedSourceRuns([{ id: 'jobhub-1', runId: 'run-1' }])) === JSON.stringify([persistedRun])
+        && boundedCombinedSourceRuns([{ sourceHubId: true, runId: 'run-1' }]).length === 0
+        && boundedCombinedSourceRuns([{ sourceHubId: '', id: 'jobhub-1', runId: 'run-1' }]).length === 0
+        && boundedCombinedSourceRuns([{ sourceHubId: 'jobhub-1', id: 'other-hub', runId: 'run-1' }]).length === 0,
+      'manual Clear retains the exact persisted sourceHubId/runId pair while combines accept only strict live module identifiers');
+      assert(normalizeBoardResultCount(0) === 0
+        && normalizeBoardResultCount(16) === 16
+        && [false, true, '', '0', '16', null, undefined, -1, 1.5, Infinity, Number.MAX_VALUE]
+          .every(value => normalizeBoardResultCount(value) === null),
+      'manual Clear preserves only exact safe nonnegative integer result counts; false and empty strings cannot become provenance-like zeroes');
+      assert(issueReporterSource.includes("typeof entry?.sourceHubId === 'string'")
+        && issueReporterSource.includes("typeof entry?.runId === 'string'")
+        && issueReporterSource.includes('Number.isSafeInteger(rawClear.clearedAt)')
+        && issueReporterSource.includes('new Date(rawClear.clearedAt).getTime()')
+        && bugReportSource.includes("typeof entry?.sourceHubId === 'string'")
+        && bugReportSource.includes("typeof entry?.runId === 'string'")
+        && bugReportSource.includes('Number.isSafeInteger(rawClear.clearedAt)')
+        && bugReportSource.includes('new Date(rawClear.clearedAt).getTime()')
+        && jobsSnapshotSource.includes("typeof entry?.sourceHubId === 'string'")
+        && jobsSnapshotSource.includes("typeof value === 'string' ? value.trim() : ''")
+        && jobsSnapshotSource.includes('Number.isSafeInteger(rawClear.clearedAt)')
+        && jobsSnapshotSource.includes('new Date(rawClear.clearedAt).getTime()'),
+      'exact-run clear provenance rejects coerced ID/token types and zero/out-of-Date-range timestamps at the renderer, direct report fallback, and final report boundaries');
       assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
         'stale zero-result boards expose a truthful action rather than a dead Re-combine button');
       assert(jobSearchSource.includes("resultDisposition = 'scored'")
@@ -8778,6 +8992,16 @@ export default [
       assert(underfilled.action === 'enrich' && resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: underfilledLayout })
         && Math.round(resumeTypeAreaUtilization(underfilledLayout) * 100) === 86,
       'a materially underfilled one-page résumé requests evidence-led enrichment instead of shipping unused space');
+      const justUnderfilledLayout = { contentHeightPx: 895.641, typeAreaHeightPx: 1000 };
+      const justUnderfilled = decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: justUnderfilledLayout });
+      assert(justUnderfilled.action === 'enrich'
+        && formatUnderfilledTypeAreaUtilization(0.57) === '57%'
+        && formatUnderfilledTypeAreaUtilization(resumeTypeAreaUtilization(justUnderfilledLayout)) === '89.56%'
+        && formatUnderfilledTypeAreaUtilization(0.899999) === '89.99%'
+        && justUnderfilled.reason.includes('89.56%')
+        && justUnderfilled.reason.includes('below the 90% minimum')
+        && !justUnderfilled.reason.includes('uses 90%'),
+      'a raw utilization below the 90% minimum is displayed below that threshold rather than rounded up to equality');
       const twoPageLayout = decideFitStep({ pageCount: 1, target: 2, compactTried: false, layout: underfilledLayout });
       assert(twoPageLayout.action === 'ship', 'the utilization check never pads a multi-page target');
 
@@ -8866,6 +9090,11 @@ export default [
       assert(underfillPrompt.includes('86%') && underfillPrompt.includes('strongest omitted evidence')
         && underfillPrompt.includes('not permission to add generic filler') && underfillPrompt.includes('byte-for-byte unchanged'),
       'underfill revision guidance prioritizes supported evidence and permits a truthful diminishing-returns stop');
+      const boundaryUnderfillPrompt = buildResumeUnderfillRevisionPrompt({
+        mainHtml: '<main class="page">Evidence</main>', contentUtilization: 0.895641, targetPageCount: 1,
+      });
+      assert(boundaryUnderfillPrompt.includes('89.56%') && !boundaryUnderfillPrompt.includes('90% of the app-measured type area'),
+        'underfill prompts retain a below-threshold measurement instead of rounding it to the acceptance boundary');
       return { ok: true, underfill: underfilled.action };
     },
   },

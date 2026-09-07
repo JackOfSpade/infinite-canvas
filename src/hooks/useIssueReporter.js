@@ -7,6 +7,12 @@ import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
 import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
 import { useIsMountedRef } from './useIsMountedRef';
 
+function reportBoardCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
 export function useIssueReporter({
   nodes,
   edges,
@@ -239,17 +245,49 @@ export function useIssueReporter({
       }
       const allJobBoardStates = (allNodesDeep || [])
         .filter(node => node?.type === 'jobboard')
-        .map(node => ({
-          renderedCardCount: renderedCardsByBoard.get(node.id) ?? 0,
-          id: typeof node.id === 'string' ? node.id : '',
-          hubState: typeof node.data?.hubState === 'string' ? node.data.hubState : 'empty',
-          resultCount: Number.isFinite(Number(node.data?.resultCount)) ? Math.max(0, Math.floor(Number(node.data.resultCount))) : null,
-          stale: node.data?.stale === true,
-          staleReason: typeof node.data?.staleReason === 'string' ? node.data.staleReason.slice(0, 120) : null,
-          combineSignature: typeof node.data?.combineSignature === 'string' ? node.data.combineSignature.slice(0, 4_000) : null,
-          mergeUnique: Number.isFinite(Number(node.data?.mergeStats?.unique)) ? Math.max(0, Math.floor(Number(node.data.mergeStats.unique))) : null,
-          connectedSourceHubIds: [...(connectedSourceHubIdsByBoard.get(node.id) || [])].slice(0, 25),
-        }));
+        .map(node => {
+          const rawClear = node.data?.clearProvenance;
+          // Keep only the compact provenance needed to distinguish an explicit
+          // user clear from a board that was never combined. The old signature
+          // is bounded and re-validated by the main-process report renderer.
+          const clearProvenance = rawClear && typeof rawClear === 'object' && !Array.isArray(rawClear)
+            ? {
+                clearedAt: typeof rawClear.clearedAt === 'number'
+                  && Number.isSafeInteger(rawClear.clearedAt)
+                  && rawClear.clearedAt > 0
+                  && Number.isFinite(new Date(rawClear.clearedAt).getTime())
+                  ? rawClear.clearedAt
+                  : null,
+                priorCombineSignature: typeof rawClear.priorCombineSignature === 'string'
+                  ? rawClear.priorCombineSignature.slice(0, 4_000)
+                  : null,
+                priorResultCount: typeof rawClear.priorResultCount === 'number' && Number.isFinite(rawClear.priorResultCount) && rawClear.priorResultCount >= 0
+                  ? Math.floor(rawClear.priorResultCount)
+                  : null,
+                priorSourceRuns: [...new Map((Array.isArray(rawClear.priorSourceRuns) ? rawClear.priorSourceRuns : [])
+                  .map((entry) => {
+                    const sourceHubId = typeof entry?.sourceHubId === 'string' ? entry.sourceHubId.trim() : '';
+                    const runId = typeof entry?.runId === 'string' ? entry.runId.trim() : '';
+                    return /^[A-Za-z0-9_.:-]{1,180}$/.test(sourceHubId) && /^[A-Za-z0-9_.:-]{1,180}$/.test(runId)
+                      ? [`${sourceHubId}\u0000${runId}`, { sourceHubId, runId }]
+                      : null;
+                  })
+                  .filter(Boolean)).values()].slice(0, 25),
+              }
+            : null;
+          return {
+            renderedCardCount: renderedCardsByBoard.get(node.id) ?? 0,
+            id: typeof node.id === 'string' ? node.id : '',
+            hubState: typeof node.data?.hubState === 'string' ? node.data.hubState : 'empty',
+            resultCount: reportBoardCount(node.data?.resultCount),
+            stale: node.data?.stale === true,
+            staleReason: typeof node.data?.staleReason === 'string' ? node.data.staleReason.slice(0, 120) : null,
+            combineSignature: typeof node.data?.combineSignature === 'string' ? node.data.combineSignature.slice(0, 4_000) : null,
+            mergeUnique: reportBoardCount(node.data?.mergeStats?.unique),
+            connectedSourceHubIds: [...(connectedSourceHubIdsByBoard.get(node.id) || [])].slice(0, 25),
+            clearProvenance,
+          };
+        });
       const localApplications = (allNodesDeep || []).flatMap((n) => {
         const localApplication = n?.type === 'jobcard' ? n?.data?.localApplication : null;
         return localApplication?.id ? [{

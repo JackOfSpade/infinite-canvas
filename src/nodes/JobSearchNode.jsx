@@ -20,6 +20,8 @@ import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
 import { buildJobHubCareerClearPatch, getHubDropLockReason, hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
+import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../utils/jobAnalysisRecovery';
+import { formatCompletionTimestamp, normalizeCompletionTimestamp } from '../utils/completionTimestamp';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isJobSourceWarningGating, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
@@ -254,10 +256,12 @@ function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
   return '';
 }
 
-function isSavedAnalysisForCurrentHub(snapshot, meta, currentHubId, currentCanvasFilePath) {
+function isSavedAnalysisForCurrentHub(snapshot, meta, currentHubId, currentCanvasFilePath, jobAnalysisClearedAt = null, jobAnalysisClearedRunId = null) {
   const sourceHubId = meta?.sourceHubId ?? snapshot?.sourceHubId ?? snapshot?.nodeId ?? null;
   const snapshotCanvasFilePath = meta?.canvasFilePath ?? snapshot?.canvasFilePath ?? null;
-  return sourceHubId === currentHubId && snapshotCanvasFilePath === currentCanvasFilePath;
+  return sourceHubId === currentHubId
+    && snapshotCanvasFilePath === currentCanvasFilePath
+    && isJobAnalysisSnapshotAfterClear(snapshot, meta, jobAnalysisClearedAt, jobAnalysisClearedRunId);
 }
 
 // A saved canvas has a durable run manifest until `complete-job-run` records a
@@ -357,8 +361,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           + ` run=${runId} cleared=${result?.cleared === true ? 'yes' : 'no'}`,
         );
       } else if (terminalStatus === 'completed') {
-        const completedAt = Number(result?.receipt?.completedAt);
-        if (Number.isFinite(completedAt)) {
+        const completedAt = normalizeCompletionTimestamp(result?.receipt?.completedAt);
+        if (completedAt != null) {
           updateGlobal(id, { lastCompletedRunAt: completedAt });
         }
       }
@@ -444,12 +448,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
   const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(enabledBrowserLoginSourceIds);
-  const lastCompletedRunAtText = Number.isFinite(Number(data.lastCompletedRunAt))
-    ? new Date(Number(data.lastCompletedRunAt)).toLocaleString(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    })
-    : null;
+  const lastCompletedRunAtText = formatCompletionTimestamp(data.lastCompletedRunAt);
 
   useEffect(() => {
     if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
@@ -3484,7 +3483,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // The shared clear patch wipes a superset (the career-derived caches too),
     // which is strictly more correct here: those caches can only be non-null if
     // an earlier career life existed on this hub, in which case they are stale.
-    const retainedCareerData = hasReusableCareerProfile ? {} : buildJobHubCareerClearPatch();
+    const retainedCareerData = hasReusableCareerProfile ? {} : buildJobHubCareerClearPatch({
+      // Reset does not discard analysis sidecars, so it must never lower a
+      // watermark set by an earlier explicit Career Files clear.
+      jobAnalysisClearedAt: data.jobAnalysisClearedAt ?? null,
+      jobAnalysisClearedRunId: data.jobAnalysisClearedRunId ?? null,
+    });
     initialDropAcceptedRef.current = hasReusableCareerProfile;
     pendingJobsRef.current = null;
     gatheredCountRef.current = 0;
@@ -3515,7 +3519,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     resetSourceProgress();
     cleanupAllJobChildren();
     processingRunsRef.current.cancel();
-  }, [addToast, data.locked, hasReusableCareerProfile, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.jobRunId, data.pendingBatch, canvasFilePath, moduleRunQueue]);
+  }, [addToast, data.locked, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId, hasReusableCareerProfile, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.jobRunId, data.pendingBatch, canvasFilePath, moduleRunQueue]);
 
   // Non-API scoring is controlled by an app-level dialog, outside this node.
   // Its Cancel action aborts the backend operation, then broadcasts the owning
@@ -3902,11 +3906,40 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Capture sidecar tokens BEFORE the updateGlobal below nulls them.
     const batchId = data.pendingBatch?.batchId || null;
     const runId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null;
+    const priorClearAt = normalizeJobAnalysisClearWatermark(data.jobAnalysisClearedAt);
+    // Date.now() is millisecond-granular. Advance beyond a prior clear even
+    // when two explicit clears land in one millisecond, so each persisted run
+    // token has an unambiguous boundary after a restart.
+    const jobAnalysisClearedAt = nextJobAnalysisClearWatermark(priorClearAt);
+    const jobAnalysisClearedRunId = normalizeJobAnalysisClearRunId(runId);
+    const cleanupPromises = [];
     if (batchId) {
-      window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id, batchId }).catch(() => {});
+      if (window.electronAPI?.discardJobBatch) {
+        cleanupPromises.push({
+          kind: 'batch',
+          promise: Promise.resolve().then(() => window.electronAPI.discardJobBatch({ canvasFilePath, nodeId: id, batchId })),
+        });
+      } else {
+        cleanupPromises.push({ kind: 'batch', promise: Promise.reject(new Error('Job batch cleanup is unavailable')) });
+      }
     }
     if (runId) {
-      window.electronAPI?.discardJobRun?.({ canvasFilePath, nodeId: id, runId }).catch(() => {});
+      if (window.electronAPI?.discardJobRun) {
+        cleanupPromises.push({
+          kind: 'run',
+          promise: Promise.resolve().then(() => window.electronAPI.discardJobRun({ canvasFilePath, nodeId: id, runId })),
+        });
+      } else {
+        cleanupPromises.push({ kind: 'run', promise: Promise.reject(new Error('Job run cleanup is unavailable')) });
+      }
+    }
+    if (window.electronAPI?.discardJobAnalysisSnapshot) {
+      cleanupPromises.push({
+        kind: 'analysis',
+        promise: Promise.resolve().then(() => window.electronAPI.discardJobAnalysisSnapshot({ canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId, clearedAt: jobAnalysisClearedAt })),
+      });
+    } else {
+      cleanupPromises.push({ kind: 'analysis', promise: Promise.reject(new Error('Saved job analysis cleanup is unavailable')) });
     }
     // The resume offer is CANVAS-scoped, not hub-scoped: peekJobRun/discardJobRun
     // are keyed by canvasFilePath alone (one staged run per canvas), so the offer
@@ -3929,6 +3962,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     jobRunIdRef.current = null;
     hubStateRef.current = 'empty';
     batchCompletingRef.current = false;
+    // Hide recovery affordances synchronously, before any async sidecar delete
+    // settles or a stale metadata fetch gets a chance to paint one.
+    setSavedAnalysisMeta(null);
     updateGlobal(id, {
       hubState: 'empty', queuedModuleRun: null, errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, testModeNote: null, pendingBatch: null,
       scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
@@ -3937,15 +3973,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       resultDisposition: null,
       activeTargetRole: null,
       pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
-      ...buildJobHubCareerClearPatch(),
+      ...buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
       manualAiResume: null,
     });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();
     processingRunsRef.current.cancel();
-    addToast({ title: 'Career Files Cleared', description: 'Search settings kept — drop fresh career files to run again.', type: 'info' });
-  }, [data.locked, data.pendingBatch, data.jobRunId, id, canvasFilePath, resumeOffer, epoch, moduleRunQueue, updateGlobal, cancelCleanSourceCardDismiss, resetSourceProgress, cleanupAllJobChildren, addToast]);
+    void Promise.allSettled(cleanupPromises.map(entry => entry.promise)).then(settled => {
+      const cleanup = settled.map((entry, index) => ({ kind: cleanupPromises[index].kind, ...entry }));
+      if (careerFilesCleanupNeedsWarning(cleanup)) {
+        EventLogger.error(`[JobSearch][${id}] Career file cleanup could not fully remove recovery data`, cleanup);
+        addToast({
+          title: 'Career Files Cleared with a Warning',
+          description: 'The hub was cleared, but old recovery data could not be fully removed.',
+          type: 'error',
+        });
+      } else {
+        addToast({ title: 'Career Files Cleared', description: 'Search settings kept — drop fresh career files to run again.', type: 'info' });
+      }
+    });
+  }, [data.locked, data.pendingBatch, data.jobRunId, data.jobAnalysisClearedAt, id, canvasFilePath, resumeOffer, epoch, moduleRunQueue, updateGlobal, cancelCleanSourceCardDismiss, resetSourceProgress, cleanupAllJobChildren, addToast]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -3976,7 +4024,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           Array.isArray(res.snapshot?.jobs) &&
           res.snapshot.jobs.length > 0 &&
           res.snapshot?.profile &&
-          isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath)
+          isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)
         ) {
           setSavedAnalysisMeta(res.meta);
         } else {
@@ -3989,7 +4037,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     return () => {
       cancelled = true;
     };
-  }, [hubState, canvasFilePath, hasReusableCareerProfile, id]);
+  }, [hubState, canvasFilePath, hasReusableCareerProfile, id, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId]);
 
   const handleOpenSavedPrompt = useCallback(async () => {
     if (!savedAnalysisMeta?.promptPath) return;
@@ -4022,7 +4070,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // hub can supply it for a legacy snapshot created before this field.
       const careerData = snapshot?.careerData || data.careerData || '';
       if (!snapshot || !profile || savedJobs.length === 0
-        || !isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath)) {
+        || !isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)) {
         addToast({
           title: 'No Saved Scrape',
           description: 'No saved scrape data is available to resume.',
@@ -4186,7 +4234,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.gatheredCount, data.jobPreferences, data.locked, data.preferenceCandidatePool, data.preferenceEvaluation, data.preferenceFilteredCount, data.preferenceMatchedCount, data.scoredJobs, data.scrapeWarnings, epoch, getNode, hasReusableCareerProfile, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.careerData, data.gatheredCount, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId, data.jobPreferences, data.locked, data.preferenceCandidatePool, data.preferenceEvaluation, data.preferenceFilteredCount, data.preferenceMatchedCount, data.scoredJobs, data.scrapeWarnings, epoch, getNode, hasReusableCareerProfile, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun]);
 
   const autoResumedManualAiRunRef = useRef(null);
   useEffect(() => {
@@ -4421,7 +4469,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     : 'Résumé, portfolio, project notes — any number of files'}</p>
                 </>
               )}
-              {!!lastCompletedRunAtText && hasCareerIdentity && (
+              {/* Completion history belongs to this module, not its current career
+                  files. Keep it visible after Clear career files so the user can
+                  distinguish an intentionally cleared hub from one that never ran. */}
+              {!!lastCompletedRunAtText && (
                 <p className="text-white/35 text-[9px] mt-1">Last completed: {lastCompletedRunAtText}</p>
               )}
               {!platformsVerifying && <div
@@ -4557,6 +4608,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}
               onScoreCurrent={handleScoreCurrentResults}
+              onClearCareerFiles={handleClearCareerFiles}
             />
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>

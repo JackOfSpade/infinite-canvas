@@ -44,7 +44,7 @@ const COVER_LEAF_SELECTOR = [
   '.letter-close .signature-title',
 ].join(', ');
 
-export function normalizePdfText(value) {
+function normalizeReconcileText(value) {
   return String(value || '')
     .split('')
     .filter((char) => {
@@ -54,18 +54,22 @@ export function normalizePdfText(value) {
     .join('')
     .replace(/[\u00A0\u2007\u202F]/g, ' ')
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function normalizePdfText(value) {
+  return normalizeReconcileText(value)
     // pdf.js separates visual lines, so a normally hyphenated word that wraps
     // can arrive as `full- scale`. The DOM still contains `full-scale`; join
     // only an attached ASCII hyphen followed by an alphanumeric continuation.
     // A true spaced dash (`word - next`) keeps its leading space and therefore
     // does not match this repair.
-    .replace(/([\p{L}\p{N}])- +(?=[\p{L}\p{N}])/gu, '$1-')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/([\p{L}\p{N}])- +(?=[\p{L}\p{N}])/gu, '$1-');
 }
 
 function textTokens(value) {
-  return normalizePdfText(value).match(PDF_TEXT_TOKEN) || [];
+  return normalizeReconcileText(value).match(PDF_TEXT_TOKEN) || [];
 }
 
 function number(value, fallback = 0) {
@@ -105,7 +109,7 @@ function needsSpace(previous, next) {
 function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
   const ordered = (Array.isArray(items) ? items : [])
     .map(item => itemGeometry(item, page))
-    .filter(item => normalizePdfText(item.text))
+    .filter(item => normalizeReconcileText(item.text))
     .sort((left, right) => right.y - left.y || left.x - right.x);
   const lines = [];
   for (const item of ordered) {
@@ -123,7 +127,10 @@ function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
     line.height = Math.max(line.height, item.height);
   }
   return lines
-    .map(line => ({ ...line, text: normalizePdfText(line.text) }))
+    // Keep whitespace after an attached hyphen until the trusted DOM can tell
+    // us whether it is a wrapped compound (`full- scale`) or a genuine
+    // suspended form (`part- and`).
+    .map(line => ({ ...line, text: normalizeReconcileText(line.text) }))
     .filter(line => line.text)
     .sort((left, right) => left.page - right.page || right.y - left.y || left.x - right.x);
 }
@@ -168,8 +175,8 @@ function median(values) {
  */
 function groupGeometrySeparatedBlocks(lines) {
   const ordered = (Array.isArray(lines) ? lines : [])
-    .filter(line => normalizePdfText(line?.text))
-    .map(line => ({ ...line, text: normalizePdfText(line.text) }))
+    .filter(line => normalizeReconcileText(line?.text))
+    .map(line => ({ ...line, text: normalizeReconcileText(line.text) }))
     .sort((left, right) => left.page - right.page || right.y - left.y || left.x - right.x);
   const pageGaps = new Map();
   for (let index = 1; index < ordered.length; index += 1) {
@@ -197,7 +204,7 @@ function groupGeometrySeparatedBlocks(lines) {
     if (separated) {
       blocks.push({ page: line.page, x: line.x, y: line.y, width: line.width, height: line.height, text: line.text, lines: [line], lastY: line.y });
     } else {
-      previous.text = normalizePdfText(`${previous.text} ${line.text}`);
+      previous.text = normalizeReconcileText(`${previous.text} ${line.text}`);
       previous.x = Math.min(previous.x, line.x);
       previous.width = Math.max(previous.width, line.x + line.width - previous.x);
       previous.height = Math.max(previous.height, line.height);
@@ -226,7 +233,7 @@ function coverLeafElements(main) {
     // Nested selectors such as `.letter-body .salutation` are leafs, while a
     // child span inside a leaf must never become a second independently mapped
     // record.
-    return normalizePdfText(element.textContent);
+    return normalizeReconcileText(element.textContent);
   });
 }
 
@@ -242,12 +249,8 @@ function leafTextNodes(element) {
 
 function replaceTokenSequence(nodes, replacementTokens) {
   // The length gate must count matches the same way the substitution below
-  // does. textTokens() runs normalizePdfText() first (e.g. it rejoins a
-  // hyphen-then-space into one word), so a raw nodeValue containing such an
-  // artifact tokenizes to a different count here than PDF_TEXT_TOKEN finds
-  // when matched directly against that same raw nodeValue in the loop.
-  // Matching the raw string here keeps both counts in sync, so any mismatch
-  // is caught below instead of desyncing tokenIndex mid-substitution.
+  // does. Matching the raw string keeps both counts in sync and preserves the
+  // DOM's trusted separators while replacing only lexical tokens.
   const originals = nodes.flatMap(node => String(node.nodeValue || '').match(PDF_TEXT_TOKEN) || []);
   if (originals.length !== replacementTokens.length) return false;
   let tokenIndex = 0;
@@ -257,20 +260,92 @@ function replaceTokenSequence(nodes, replacementTokens) {
   return true;
 }
 
+function attachedHyphenToken(token) {
+  return /^[\p{L}\p{N}][\p{L}\p{N}\p{M}'’.-]*-$/u.test(token || '');
+}
+
+function alphanumericToken(token) {
+  return /^[\p{L}\p{N}]/u.test(token || '');
+}
+
+/**
+ * Resolve PDF whitespace after an attached hyphen only when the trusted DOM
+ * establishes the token shape at that position. A matching compound token is
+ * rejoined; a DOM pair such as `part-`, `and` keeps its separator. If neither
+ * shape is established, callers must refuse to serialize the ambiguous text.
+ */
+function reconcileExtractedText(value, currentTokens) {
+  const text = normalizeReconcileText(value);
+  const matches = [...text.matchAll(PDF_TEXT_TOKEN)];
+  const rawTokens = matches.map(match => match[0]);
+  const signature = tokens => tokens.join('\u0000');
+  if (signature(rawTokens) === signature(currentTokens)) {
+    return { tokens: rawTokens, text, ambiguousHyphen: false };
+  }
+
+  const tokens = [];
+  const separatorRemovals = [];
+  let ambiguousHyphen = false;
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const token = match[0];
+    const previousMatch = matches[index - 1];
+    const previousToken = tokens.at(-1);
+    const separatorStart = previousMatch ? previousMatch.index + previousMatch[0].length : -1;
+    const separator = previousMatch ? text.slice(separatorStart, match.index) : '';
+    if (previousMatch && /\s/u.test(separator)
+      && attachedHyphenToken(previousToken) && alphanumericToken(token)) {
+      const currentIndex = tokens.length - 1;
+      const joined = `${previousToken}${token}`;
+      if (joined === currentTokens[currentIndex]) {
+        tokens[currentIndex] = joined;
+        separatorRemovals.push([separatorStart, match.index]);
+        continue;
+      }
+      // The existing DOM separately tokenizes an attached-hyphen word at this
+      // position, so retain the PDF separator even if either lexical token was
+      // edited. This preserves `part- and` / `part- or` as suspended forms.
+      // Do not borrow a matching pair from elsewhere in the document. A leaf
+      // can legitimately contain both `full- scale` and `full-scale`; after an
+      // insertion shifts token positions, a global match would preserve the
+      // separator at the lexical occurrence and silently corrupt it. Only the
+      // trusted pair at this exact aligned position resolves the ambiguity.
+      if (!(attachedHyphenToken(currentTokens[currentIndex])
+        && alphanumericToken(currentTokens[currentIndex + 1]))) {
+        ambiguousHyphen = true;
+      }
+    }
+    tokens.push(token);
+  }
+
+  let safeText = text;
+  for (const [start, end] of separatorRemovals.reverse()) {
+    safeText = `${safeText.slice(0, start)}${safeText.slice(end)}`;
+  }
+  return { tokens, text: safeText, ambiguousHyphen };
+}
+
 function replaceCoverLeafText(element, replacement) {
   const currentTokens = textTokens(element.textContent);
-  const replacementTokens = textTokens(replacement);
+  const reconciled = reconcileExtractedText(replacement, currentTokens);
+  if (reconciled.ambiguousHyphen) {
+    return { conflict: `The PDF has an ambiguous line-ending hyphen in ${element.className || element.localName} text.` };
+  }
+  const replacementTokens = reconciled.tokens;
   // PDF layout commonly inserts visual whitespace around separators whose DOM
   // spans are intentionally flush ("Engineer·B.S." -> "Engineer · B.S.").
   // Token equality is the semantic equality used by the résumé path too; do
   // not report or serialize a fake edit for spacing the PDF text layer cannot
   // faithfully round-trip.
   if (currentTokens.join('\u0000') === replacementTokens.join('\u0000')) return { changed: false };
-  const children = [...element.children];
-  if (children.length === 0) {
-    element.textContent = replacement;
+  // Unstructured paragraphs can safely accept insertions/removals after the
+  // DOM-guided hyphen pass has produced serialization-safe text.
+  if (element.children.length === 0) {
+    element.textContent = reconciled.text;
     return { changed: true };
   }
+  // Structured leaves retain their exact markup and separators; only their
+  // lexical tokens may change one-for-one.
   const nodes = leafTextNodes(element);
   if (!replaceTokenSequence(nodes, replacementTokens)) {
     return { conflict: `The PDF changed structured ${element.className || element.localName} text in a way that cannot preserve its markup.` };
@@ -326,11 +401,11 @@ function visibleResumeTextNodes(main) {
 }
 
 function foldedText(value) {
-  return normalizePdfText(value).toLocaleLowerCase();
+  return normalizeReconcileText(value).toLocaleLowerCase();
 }
 
 function collapsedTrackedHeading(text, knownHeadings) {
-  const normalized = normalizePdfText(text);
+  const normalized = normalizeReconcileText(text);
   // PDF text extraction represents the design-system's tracked section labels
   // as `E X P E R I E N C E`.  Only collapse a form that matches a heading we
   // already trust in the DOM; arbitrary all-caps résumé content is untouched.
@@ -345,9 +420,9 @@ function skillRows(main) {
   const rows = [];
   let label = null;
   for (const element of list.children) {
-    if (element.localName === 'dt') label = normalizePdfText(element.textContent);
+    if (element.localName === 'dt') label = normalizeReconcileText(element.textContent);
     else if (element.localName === 'dd' && label) {
-      rows.push({ label, value: normalizePdfText(element.textContent) });
+      rows.push({ label, value: normalizeReconcileText(element.textContent) });
       label = null;
     }
   }
@@ -355,13 +430,13 @@ function skillRows(main) {
 }
 
 function semanticSkillLines(lines, rows) {
-  const source = normalizePdfText(lines.map(line => line.text).join(' '));
+  const source = normalizeReconcileText(lines.map(line => line.text).join(' '));
   let offset = 0;
   const reordered = [];
   for (const row of rows) {
     const labelOffset = foldedText(source).indexOf(foldedText(row.label), offset);
     if (labelOffset < offset) return null;
-    const value = normalizePdfText(source.slice(offset, labelOffset));
+    const value = normalizeReconcileText(source.slice(offset, labelOffset));
     if (!value) return null;
     // The print layout puts the `dd` value before its `dt` label, and can put
     // them flush together (`BashLanguages`).  Reconstruct DOM order without
@@ -379,11 +454,11 @@ function semanticSkillLines(lines, rows) {
  * or damaged PDF.
  */
 function canonicalizeResumePdfLines(lines, main) {
-  const knownHeadings = [...main.querySelectorAll('.section-head h2')].map(element => normalizePdfText(element.textContent));
+  const knownHeadings = [...main.querySelectorAll('.section-head h2')].map(element => normalizeReconcileText(element.textContent));
   const normalized = (Array.isArray(lines) ? lines : []).map(line => ({
     ...line,
     // `•` is a visual list marker, never a text node in the generated HTML.
-    text: collapsedTrackedHeading(normalizePdfText(line.text).replace(/^•\s*/, ''), knownHeadings),
+    text: collapsedTrackedHeading(normalizeReconcileText(line.text).replace(/^•\s*/, ''), knownHeadings),
   }));
   const skillsHeading = knownHeadings.find(heading => foldedText(heading) === 'skills');
   const skillsIndex = normalized.findIndex(line => skillsHeading && foldedText(line.text) === foldedText(skillsHeading));
@@ -403,6 +478,12 @@ function restoreDomPresentationTokens(current, incoming) {
   if (semanticCurrent.length !== semanticIncoming.length) return null;
   let semanticIndex = 0;
   return current.map((token) => (isPresentationalToken(token) ? token : semanticIncoming[semanticIndex++]));
+}
+
+function resumePdfTextTokens(lines, current) {
+  // Join visual lines losslessly first. reconcileExtractedText removes only a
+  // separator whose compound identity is established by the current DOM.
+  return reconcileExtractedText(lines.map(line => line.text).join(' '), current);
 }
 
 function lcsPairs(left, right) {
@@ -443,13 +524,13 @@ function plainTextListLeaves(main, nodes) {
     const textNode = [...element.childNodes].find(node => node.nodeType === element.ownerDocument.defaultView.Node.TEXT_NODE && textTokens(node.nodeValue).length);
     const start = starts.get(textNode);
     const length = textTokens(textNode?.nodeValue).length;
-    return Number.isInteger(start) && length ? [{ element, start, end: start + length }] : [];
+    return Number.isInteger(start) && length ? [{ element, textNode, start, end: start + length }] : [];
   });
 }
 
 function visualBulletBlocks(lines) {
   const ordered = (Array.isArray(lines) ? lines : [])
-    .filter(line => normalizePdfText(line?.text))
+    .filter(line => normalizeReconcileText(line?.text))
     .sort((left, right) => left.page - right.page || right.y - left.y || left.x - right.x);
   const gaps = [];
   for (let index = 1; index < ordered.length; index += 1) {
@@ -465,10 +546,10 @@ function visualBulletBlocks(lines) {
     const startsBullet = /^\s*•\s+/.test(line.text);
     const gap = current && current.page === line.page ? current.lastY - line.y : Infinity;
     if (startsBullet) {
-      current = { page: line.page, x: line.x, y: line.y, lastY: line.y, text: normalizePdfText(line.text.replace(/^\s*•\s+/, '')) };
+      current = { page: line.page, x: line.x, y: line.y, lastY: line.y, text: normalizeReconcileText(line.text.replace(/^\s*•\s+/, '')) };
       result.push(current);
     } else if (current && current.page === line.page && gap <= Math.max(leading * 1.5, leading + 2)) {
-      current.text = normalizePdfText(`${current.text} ${line.text}`);
+      current.text = normalizeReconcileText(`${current.text} ${line.text}`);
       current.lastY = line.y;
     } else {
       current = null;
@@ -504,15 +585,26 @@ function reconcilePlainTextBulletInsertions(main, nodes, current, incoming, anch
     changedLeaves.add(leaf);
   }
   if (!changedLeaves.size) return null;
+  const reconciledBullets = [];
   for (let index = 0; index < leaves.length; index += 1) {
     const leaf = leaves[index];
     const expected = textTokens(leaf.element.textContent);
-    const observed = textTokens(bullets[index].text);
-    if (!changedLeaves.has(leaf) && expected.join('\u0000') !== observed.join('\u0000')) return null;
+    const observed = reconcileExtractedText(bullets[index].text, expected);
+    if (observed.ambiguousHyphen) return null;
+    reconciledBullets.push(observed);
+    if (!changedLeaves.has(leaf) && expected.join('\u0000') !== observed.tokens.join('\u0000')) return null;
   }
   for (const leaf of changedLeaves) {
     const index = leaves.indexOf(leaf);
-    leaf.element.textContent = bullets[index].text;
+    const observed = reconciledBullets[index];
+    const expected = textTokens(leaf.element.textContent);
+    if (expected.length === observed.tokens.length) {
+      if (!replaceTokenSequence([leaf.textNode], observed.tokens)) return null;
+    } else {
+      // Longer/shorter geometry-bound bullets remain importable, but only
+      // after every attached-hyphen separator was resolved against this leaf.
+      leaf.element.textContent = observed.text;
+    }
   }
   return { changed: true, mappedLeaves: changedLeaves.size, mappedTokens: current.length };
 }
@@ -526,10 +618,13 @@ function reconcileResumeTextBlocks(main, lines) {
   const nodes = visibleResumeTextNodes(main);
   const current = nodes.flatMap(node => textTokens(node.nodeValue));
   const canonicalLines = canonicalizeResumePdfLines(lines, main);
-  const extracted = canonicalLines.flatMap(line => textTokens(line.text));
+  const extracted = resumePdfTextTokens(canonicalLines, current);
+  if (extracted.ambiguousHyphen) {
+    return { conflict: 'The résumé PDF has an ambiguous line-ending hyphen; automatic replacement is unsafe.' };
+  }
   // Dots are visual separators in several generated runs.  Preserve their
   // trusted DOM placement while comparing/importing the meaningful tokens.
-  const incoming = restoreDomPresentationTokens(current, extracted) || extracted;
+  const incoming = restoreDomPresentationTokens(current, extracted.tokens) || extracted.tokens;
   if (!current.length || !incoming.length) return { conflict: 'The résumé or PDF has no extractable text.' };
   if (current.join('\u0000') === incoming.join('\u0000')) return { changed: false, mappedTokens: current.length };
   const anchors = lcsPairs(current, incoming);
