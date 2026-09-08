@@ -3,7 +3,14 @@ import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
 import { generateMarkdown } from '../test-dependencies.js';
+import {
+  createTextDocumentSessionRegistry,
+  textDocumentFromTextarea,
+  textDocumentNewlineStyle,
+  textDocumentToTextarea,
+} from '../test-dependencies.js';
 import { completionTimestampIso, formatCompletionTimestamp, normalizeCompletionTimestamp } from '../../src/utils/completionTimestamp.js';
+import { QUIT_COMMIT_SETTLE_FALLBACK_MS, settlePreFenceCanvasBatches } from '../../src/utils/quitCommitSettle.js';
 
 import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
 import { getManualScraperTelemetry, recordManualScraperTelemetry, resetManualScraperTelemetry, scrapeManualSources } from '../test-dependencies.js';
@@ -1070,97 +1077,6 @@ export default [
     },
   },
 {
-    name: 'Document text reload waits for in-flight writes before reading disk',
-    run: () => {
-      // DocumentNode is JSX and is not imported by this Node-only runner, so
-      // keep a focused source contract around the ordering that prevents the
-      // reload/read -> late-write race.
-      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
-      const start = source.indexOf('const handleReloadFromDisk');
-      const end = source.indexOf('const handleKeepEdits', start);
-      const handler = start >= 0 && end > start ? source.slice(start, end) : '';
-      const barrierIndex = handler.indexOf('await writeBarrier');
-      const fetchIndex = handler.indexOf('await fetch(');
-      assert(
-        barrierIndex >= 0 && fetchIndex > barrierIndex,
-        'Document text reload: the existing write chain must settle before disk is fetched'
-      );
-      assert(
-        handler.includes('gen !== loadGenerationRef.current')
-          && handler.includes('filePathRef.current !== reloadPath')
-          && handler.includes('!isMountedRef.current'),
-        'Document text reload: stale generation, relink, and unmount guards must protect the re-read'
-      );
-      return { writeBarrierBeforeFetch: true };
-    },
-  },
-{
-    name: 'Document watcher reconciles own and external writes after the write chain',
-    run: () => {
-      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
-      const start = source.indexOf('// When the file watcher fires');
-      const end = source.indexOf('// Collapsing an expanded text node', start);
-      const watcher = start >= 0 && end > start ? source.slice(start, end) : '';
-      const barrierIndex = watcher.indexOf('await writeBarrier');
-      const fetchIndex = watcher.indexOf('await fetch(');
-      assert(
-        barrierIndex >= 0 && fetchIndex > barrierIndex,
-        'Document watcher: disk reconciliation must wait for the current write chain'
-      );
-      assert(
-        !watcher.includes('activeWritePathRef.current === filePath) return')
-          && watcher.includes('lastSettledWriteRef.current')
-          && watcher.includes('reflectsOwnWrite')
-          && watcher.includes('setExternalChange(true)'),
-        'Document watcher: own writes should be classified without dropping genuine external changes'
-      );
-      assert(
-        watcher.includes('draftRevision !== latestDraftRevisionRef.current')
-          && watcher.includes('filePathRef.current === watchedPath')
-          && watcher.includes('isMountedRef.current')
-          && watcher.includes('gen === loadGenerationRef.current'),
-        'Document watcher: reconciliation must guard draft, path, mount, and generation changes'
-      );
-      return { deferredReconciliation: true };
-    },
-  },
-{
-    name: 'Document watcher suspends pending and queued writes until classification',
-    run: () => {
-      const source = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
-      const watcherStart = source.indexOf('// When the file watcher fires');
-      const watcherEnd = source.indexOf('// Collapsing an expanded text node', watcherStart);
-      const watcher = watcherStart >= 0 && watcherEnd > watcherStart
-        ? source.slice(watcherStart, watcherEnd)
-        : '';
-      const writeStart = source.indexOf('const writeToDisk');
-      const writeEnd = source.indexOf('// When the file watcher fires', writeStart);
-      const writeToDiskSource = writeStart >= 0 && writeEnd > writeStart
-        ? source.slice(writeStart, writeEnd)
-        : '';
-      const cancelIndex = watcher.indexOf('clearTimeout(saveTimerRef.current)');
-      const barrierIndex = watcher.indexOf('await writeBarrier');
-      assert(
-        cancelIndex >= 0 && barrierIndex > cancelIndex
-          && watcher.includes('pendingWriteRef.current = null')
-          && watcher.includes('discardedThroughRevisionRef.current = Math.max'),
-        'Document watcher suspension: debounce and queued revisions must be stopped before the write barrier'
-      );
-      assert(
-        writeToDiskSource.includes("watcherWriteSuspensionRef.current?.filePath === filePath")
-          && writeToDiskSource.includes('do not arm a timer'),
-        'Document watcher suspension: edits during reconciliation must remain timer-free'
-      );
-      assert(
-        watcher.includes('if (reflectsOwnWrite || convergedWithDraft)')
-          && watcher.includes('writeToDisk(currentDraft)')
-          && watcher.includes('Reload and Keep Mine'),
-        'Document watcher suspension: only own/converged classification may resume the draft'
-      );
-      return { pendingWritesSuspended: true };
-    },
-  },
-{
     name: 'Module run queue serializes Marketplace and Job Search modules FIFO',
     run: async () => {
       const starts = [];
@@ -2048,6 +1964,1858 @@ export default [
     },
   },
 {
+    name: 'Shared text document session drains a watcher notification queued during its initial read',
+    run: async () => {
+      let disk = 'before watcher';
+      let resolveInitial;
+      let reads = 0;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          reads += 1;
+          if (reads === 1) return new Promise(resolve => { resolveInitial = resolve; });
+          return disk;
+        },
+        write: async () => ({ success: true }),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/queued-watch.md', state => states.push(state));
+      await Promise.resolve();
+      const queued = registry.notifyFileChanged('/documents/queued-watch.md');
+      disk = 'after watcher';
+      resolveInitial('before watcher');
+      await queued;
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reads === 2 && states.at(-1).content === 'after watcher',
+        'a watcher event during a delayed initial read must be drained into a fresh read, not dropped as stale');
+      stop();
+      return { reads };
+    },
+  },
+  {
+    name: 'Shared text document session mirrors duplicates and serializes the latest edit',
+    run: async () => {
+      let disk = 'base';
+      const writes = [];
+      const queuedTimers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = queuedTimers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const settle = async () => { await Promise.resolve(); await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)); };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          writes.push({ content, expectedContent });
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: (callback) => { queuedTimers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: (timer) => activeTimers.delete(timer),
+      });
+      const firstStates = [];
+      const secondStates = [];
+      const stopFirst = registry.attach('/documents/shared.md', state => firstStates.push(state));
+      const stopSecond = registry.attach('/documents/shared.md', state => secondStates.push(state));
+      await settle();
+      registry.edit('/documents/shared.md', 'first');
+      registry.edit('/documents/shared.md', 'second');
+      assert(firstStates.at(-1).content === 'second' && secondStates.at(-1).content === 'second',
+        'every expanded duplicate must mirror the shared draft immediately');
+      stopFirst();
+      runTimers();
+      await settle();
+      assert(writes.length === 1 && writes[0].content === 'second' && writes[0].expectedContent === 'base' && disk === 'second',
+        'rapid alternating edits must coalesce into one latest write using the common disk baseline');
+      stopSecond();
+
+      // With no views attached, an outside edit is discovered by the next
+      // zero→one attachment rather than showing stale retained session data.
+      disk = 'external while collapsed';
+      const reattached = [];
+      const stopReattached = registry.attach('/documents/shared.md', state => reattached.push(state));
+      await settle();
+      assert(reattached.at(-1).content === disk && reattached.at(-1).diskContent === disk,
+        'first reattach after all duplicates close must force a fresh disk read');
+      stopReattached();
+      return { writes: writes.length, reattached: true };
+  },
+},
+  {
+    name: 'Shared text document sessions unify validated direct case and Unicode aliases before either becomes editable',
+    run: async () => {
+      const aliasA = '/Documents/NÓTES.md';
+      const aliasB = '/Documents/NO\u0301TES.md';
+      const canonicalTarget = '/documents/nótes.md';
+      const resolvers = new Map();
+      const timers = [];
+      const liveTimers = new Set();
+      const writes = [];
+      let disk = 'baseline';
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (liveTimers.delete(timer)) timer();
+      };
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: (filePath) => new Promise(resolve => resolvers.set(filePath, resolve)),
+        write: async (filePath, content, expectedContent, expectedTargetToken) => {
+          writes.push({ filePath, content, expectedContent, expectedTargetToken });
+          if (expectedContent !== disk || expectedTargetToken !== canonicalTarget) {
+            return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          }
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: callback => { timers.push(callback); liveTimers.add(callback); return callback; },
+        clearTimer: timer => liveTimers.delete(timer),
+      });
+      const firstStates = [];
+      const secondStates = [];
+      const stopFirst = registry.attach(aliasA, state => firstStates.push(state));
+      const stopSecond = registry.attach(aliasB, state => secondStates.push(state));
+      await settle();
+      resolvers.get(aliasA)({
+        content: disk,
+        targetToken: canonicalTarget,
+        sessionIdentityToken: canonicalTarget,
+      });
+      resolvers.get(aliasB)({
+        content: disk,
+        targetToken: canonicalTarget,
+        sessionIdentityToken: canonicalTarget,
+      });
+      await settle();
+
+      assert(registry.size() === 1
+        && firstStates.at(-1).content === disk
+        && secondStates.at(-1).content === disk,
+      'direct aliases resolving to one validated realpath must become one shared session before done state is published');
+
+      registry.edit(aliasB, 'draft through Unicode/case alias');
+      assert(firstStates.at(-1).content === 'draft through Unicode/case alias'
+        && secondStates.at(-1).content === 'draft through Unicode/case alias',
+      'an edit through the alias must fan out through the canonical session immediately');
+      runTimers();
+      await settle();
+      assert(writes.length === 1
+        && writes[0].filePath === aliasA
+        && writes[0].expectedTargetToken === canonicalTarget
+        && disk === 'draft through Unicode/case alias',
+      'aliases must retain one write lane using the owning session’s validated target token');
+
+      stopSecond();
+      const secondDeliveryCount = secondStates.length;
+      registry.edit(aliasA, 'after alias unsubscribe');
+      assert(secondStates.length === secondDeliveryCount
+        && firstStates.at(-1).content === 'after alias unsubscribe',
+      'an unsubscribe closure captured before alias promotion must detach only its transferred view');
+      stopFirst();
+      return { canonicalSessionCount: registry.size(), writes: writes.length, aliases: 2 };
+    },
+  },
+  {
+    name: 'Symlink text sessions never merge with a direct target or follow its retarget',
+    run: async () => {
+      const directPath = '/documents/actual.md';
+      const symlinkPath = '/links/notes.md';
+      const targetA = '/documents/actual.md';
+      const targetB = '/documents/replacement.md';
+      let symlinkTarget = targetA;
+      const disk = new Map([[targetA, 'A bytes'], [targetB, 'B bytes']]);
+      const registry = createTextDocumentSessionRegistry({
+        read: async (filePath) => {
+          const targetToken = filePath === symlinkPath ? symlinkTarget : targetA;
+          return {
+            content: disk.get(targetToken),
+            targetToken,
+            // Main omits this token whenever any lexical component is a
+            // symlink, even though targetToken currently names target A.
+            sessionIdentityToken: filePath === directPath ? targetA : undefined,
+          };
+        },
+        write: async () => ({ success: true }),
+      });
+      const directStates = [];
+      const symlinkStates = [];
+      const stopDirect = registry.attach(directPath, state => directStates.push(state));
+      const stopLink = registry.attach(symlinkPath, state => symlinkStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 2 && directStates.at(-1).content === 'A bytes'
+        && symlinkStates.at(-1).content === 'A bytes',
+      'a symlink and its direct target may share bytes but must retain independent sessions');
+
+      symlinkTarget = targetB;
+      await registry.notifyFileChanged(symlinkPath);
+      assert(symlinkStates.at(-1).content === 'B bytes'
+        && directStates.at(-1).content === 'A bytes'
+        && registry.getSnapshot(directPath).content === 'A bytes',
+      'retargeting a symlink must update only its lexical session, never redirect a direct target view');
+      stopDirect();
+      stopLink();
+      return { merged: false, retargetIsolated: true };
+    },
+  },
+  {
+    name: 'Direct alias identity merge reconciles a newer losing initial read',
+    run: async () => {
+      const firstAlias = '/documents/NOTES.md';
+      const secondAlias = '/documents/no\u0301tes.md';
+      const identity = '/documents/nótes.md';
+      const resolvers = new Map();
+      const initialReads = new Set();
+      let disk = 'fresh disk bytes';
+      const registry = createTextDocumentSessionRegistry({
+        read: (filePath) => {
+          if (!initialReads.has(filePath)) {
+            initialReads.add(filePath);
+            return new Promise(resolve => resolvers.set(filePath, resolve));
+          }
+          return Promise.resolve({ content: disk, targetToken: identity, sessionIdentityToken: identity });
+        },
+        write: async () => ({ success: true }),
+      });
+      const firstStates = [];
+      const secondStates = [];
+      const stopFirst = registry.attach(firstAlias, state => firstStates.push(state));
+      const stopSecond = registry.attach(secondAlias, state => secondStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      resolvers.get(firstAlias)({ content: 'stale disk bytes', targetToken: identity, sessionIdentityToken: identity });
+      await new Promise(resolve => setImmediate(resolve));
+      resolvers.get(secondAlias)({ content: disk, targetToken: identity, sessionIdentityToken: identity });
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 1 && firstStates.at(-1).content === disk && secondStates.at(-1).content === disk,
+        'a losing initial read that observed newer bytes must trigger winner reconciliation instead of being silently discarded');
+      stopFirst();
+      stopSecond();
+      return { reconciledNewerInitialRead: true };
+    },
+  },
+  {
+    name: 'Text session identity indexes rekey clean canonical changes and deindex symlink transitions',
+    run: async () => {
+      const firstPath = '/documents/Notes.md';
+      const renamedAlias = '/documents/notes-renamed.md';
+      const laterDirectPath = '/documents/notes-reopened.md';
+      let firstRead = { content: 'first', targetToken: '/documents/Notes.md', sessionIdentityToken: '/documents/Notes.md' };
+      const registry = createTextDocumentSessionRegistry({
+        read: async (filePath) => {
+          if (filePath === renamedAlias) {
+            return { content: 'renamed', targetToken: '/documents/Renamed.md', sessionIdentityToken: '/documents/Renamed.md' };
+          }
+          if (filePath === laterDirectPath) {
+            return { content: 'reopened', targetToken: '/documents/Renamed.md', sessionIdentityToken: '/documents/Renamed.md' };
+          }
+          return firstRead;
+        },
+        write: async () => ({ success: true }),
+      });
+      const stopFirst = registry.attach(firstPath, () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      firstRead = { content: 'renamed', targetToken: '/documents/Renamed.md', sessionIdentityToken: '/documents/Renamed.md' };
+      await registry.reloadFromDisk(firstPath);
+      const stopRenamed = registry.attach(renamedAlias, () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 1,
+        'a clean canonical rename/case normalization must rekey the identity index for later direct aliases');
+
+      // The same lexical view later becomes a symlink. Its absent identity
+      // token must remove the old index, so reopening that direct target cannot
+      // join a session whose writer now traverses a mutable alias.
+      firstRead = { content: 'linked target', targetToken: '/documents/Elsewhere.md', sessionIdentityToken: undefined };
+      await registry.reloadFromDisk(firstPath);
+      const stopReopened = registry.attach(laterDirectPath, () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 2,
+        'a path becoming a symlink must deindex its previous direct-session identity before another direct open claims it');
+      stopFirst();
+      stopRenamed();
+      stopReopened();
+      return { cleanRekeyed: true, symlinkDeindexed: true };
+    },
+  },
+  {
+    name: 'Text document hard-link path identities remain separate sessions',
+    run: async () => {
+      const firstLink = '/documents/notes.md';
+      const secondLink = '/documents/notes-hardlink.md';
+      const firstToken = '/documents/notes.md';
+      const secondToken = '/documents/notes-hardlink.md';
+      const writes = [];
+      const registry = createTextDocumentSessionRegistry({
+        // fs.realpath is pathname-based: hard links intentionally return two
+        // different tokens even while they currently share an inode.
+        read: async (filePath) => ({
+          content: 'same inode bytes',
+          targetToken: filePath === firstLink ? firstToken : secondToken,
+        }),
+        write: async (filePath, content) => {
+          writes.push({ filePath, content });
+          return { success: true };
+        },
+        debounceMs: () => 0,
+      });
+      const firstStates = [];
+      const secondStates = [];
+      const stopFirst = registry.attach(firstLink, state => firstStates.push(state));
+      const stopSecond = registry.attach(secondLink, state => secondStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 2,
+        'hard-link spellings must not merge merely because their initial contents match');
+      registry.edit(firstLink, 'only this directory entry may be replaced atomically');
+      await registry.flushAndSettleAll();
+      assert(writes.length === 1 && writes[0].filePath === firstLink
+        && secondStates.at(-1).content === 'same inode bytes',
+      'a hard-link sibling must not receive a draft whose atomic rename cannot preserve its link semantics');
+      stopFirst();
+      stopSecond();
+      return { sessionCount: registry.size(), hardLinksAreDistinct: true };
+    },
+  },
+  {
+    name: 'Path-scoped document settlement follows validated aliases without creating collapsed sessions',
+    run: async () => {
+      const aliasA = '/links/notes.md';
+      const aliasB = '/documents/NOTES.md';
+      const unrelated = '/documents/unrelated.md';
+      const identity = 'file:notes-identity';
+      const writes = [];
+      const registry = createTextDocumentSessionRegistry({
+        read: async (filePath) => ({
+          content: filePath === unrelated ? 'unrelated disk' : 'notes disk',
+          targetToken: filePath,
+          sessionIdentityToken: filePath === unrelated ? 'file:unrelated' : identity,
+        }),
+        write: async (filePath, content) => {
+          writes.push({ filePath, content });
+          return { success: true };
+        },
+        debounceMs: () => 0,
+      });
+      const stopA = registry.attach(aliasA, () => {});
+      const stopB = registry.attach(aliasB, () => {});
+      const stopUnrelated = registry.attach(unrelated, () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      assert(registry.size() === 2,
+        'validated aliases must share exactly one session while an unrelated path remains separate');
+      const sizeBeforeInspection = registry.size();
+      const inspection = registry.inspectPaths(['/never-opened.md', aliasA]);
+      assert(registry.size() === sizeBeforeInspection
+        && inspection.trackedFilePaths.join(',') === aliasA
+        && inspection.unresolvedFilePaths.length === 0,
+      'path inspection must use existing aliases only and never create a session for a collapsed node');
+      assert(registry.filterPathsWithoutLiveAliases([aliasA], [aliasB]).length === 0,
+        'deleting one validated alias must skip last-reference settlement while its live sibling owns the same session');
+      registry.edit(aliasB, 'settled through alias');
+      const scoped = await registry.flushAndSettlePaths([aliasA]);
+      assert(scoped.success && writes.length === 1 && writes[0].filePath === aliasA
+        && writes[0].content === 'settled through alias',
+      'path-scoped settlement must flush the shared alias lane without touching unrelated sessions');
+      assert(registry.getSnapshot(unrelated).content === 'unrelated disk',
+        'path-scoped settlement must leave an unrelated document unchanged');
+      stopA();
+      stopB();
+      stopUnrelated();
+      return { aliasScoped: true, noImplicitSessions: true };
+    },
+  },
+  {
+    name: 'Abandon all text drafts cancels debounced writes but cannot recall an already dispatched write',
+    run: async () => {
+      const timers = [];
+      const activeTimers = new Set();
+      const deferredWrites = [];
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: (_filePath, content) => new Promise(resolve => deferredWrites.push({ content, resolve })),
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stop = registry.attach('/documents/abandon.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/abandon.md', 'debounced draft');
+      registry.abandonAll();
+      for (const timer of timers.splice(0)) if (activeTimers.delete(timer)) timer();
+      assert(deferredWrites.length === 0 && !registry.hasUnresolvedChanges() && registry.size() === 0,
+        'the explicit destructive escape must cancel future debounced work and remove it from close blocking');
+
+      const retry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: (_filePath, content) => new Promise(resolve => deferredWrites.push({ content, resolve })),
+        debounceMs: () => 0,
+      });
+      const stopRetry = retry.attach('/documents/already-sent.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      retry.edit('/documents/already-sent.md', 'already sent');
+      const settlingRetry = retry.flushAndSettlePaths(['/documents/already-sent.md']);
+      await new Promise(resolve => setImmediate(resolve));
+      assert(deferredWrites.length === 1 && deferredWrites[0].content === 'already sent',
+        'the regression must start one IPC write before abandonment');
+      retry.abandonAll();
+      deferredWrites[0].resolve({ success: true });
+      await settlingRetry;
+      assert(!retry.hasUnresolvedChanges() && retry.size() === 0,
+        'abandonment may forget an in-flight write, but must not schedule a compensating retry after it settles');
+      stop();
+      stopRetry();
+      return { debouncedCancelled: true, sentWriteNotRecalled: true };
+    },
+  },
+  {
+    name: 'Path-scoped settlement preserves a conflicted last-reference draft for deletion undo',
+    run: async () => {
+      let disk = 'baseline';
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async () => {
+          disk = 'external version';
+          return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+        },
+        debounceMs: () => 0,
+      });
+      const states = [];
+      const stop = registry.attach('/documents/conflicted-last-reference.md', state => states.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/conflicted-last-reference.md', 'local draft');
+      const result = await registry.flushAndSettlePaths(['/documents/conflicted-last-reference.md']);
+      const snapshot = registry.getSnapshot('/documents/conflicted-last-reference.md');
+      assert(!result.success
+        && result.unresolvedFilePaths.join(',') === '/documents/conflicted-last-reference.md'
+        && snapshot.content === 'local draft'
+        && snapshot.diskContent === 'external version'
+        && snapshot.externalChange
+        && states.at(-1).content === 'local draft',
+      'a failed last-reference preflight must report unresolved without discarding the only Reload/Keep mine draft');
+      stop();
+      return { conflictPreserved: true };
+    },
+  },
+  {
+    name: 'A throwing text-session listener reporter cannot interrupt other views',
+    run: async () => {
+      let reporterCalls = 0;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: async () => ({ success: true }),
+        onListenerError: () => {
+          reporterCalls += 1;
+          throw new Error('telemetry unavailable');
+        },
+      });
+      const healthyStates = [];
+      const stopBroken = registry.attach('/documents/reporter-isolation.md', () => {
+        throw new Error('stale view failure');
+      });
+      const stopHealthy = registry.attach('/documents/reporter-isolation.md', state => healthyStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reporterCalls >= 1 && healthyStates.at(-1).status === 'done'
+        && healthyStates.at(-1).content === 'baseline',
+      'a failing reporter is telemetry only and cannot prevent healthy listener delivery or loading');
+      stopBroken();
+      stopHealthy();
+      return { reporterCalls, healthyDelivery: true };
+    },
+  },
+  {
+    name: 'Text document sessions expose a safe retry after an ordinary write failure',
+    run: async () => {
+      let disk = 'baseline';
+      let attempts = 0;
+      const timers = [];
+      const liveTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (liveTimers.delete(timer)) timer();
+      };
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          attempts += 1;
+          if (attempts === 1) return { success: false, error: 'Atomic replacement is temporarily unavailable.' };
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); liveTimers.add(callback); return callback; },
+        clearTimer: timer => liveTimers.delete(timer),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/retry.md', state => states.push(state));
+      await settle();
+      registry.edit('/documents/retry.md', 'draft');
+      runTimers();
+      await settle();
+      assert(states.at(-1).saveStatus === 'error'
+        && states.at(-1).error === 'Atomic replacement is temporarily unavailable.'
+        && states.at(-1).externalChange === false,
+      'an ordinary IPC failure must retain its draft and expose its actionable message without becoming a conflict');
+      registry.retrySave('/documents/retry.md');
+      runTimers();
+      await settle();
+      assert(disk === 'draft' && attempts === 2 && states.at(-1).saveStatus !== 'error',
+        'Retry must reuse the session CAS baseline and settle the retained draft without Reload/Keep mine');
+      stop();
+      return { attempts, retried: true };
+    },
+  },
+  {
+    name: 'Shared text document session preserves textarea newline and BOM presentation',
+    run: async () => {
+      const crlfBom = '\uFEFF# Notes\r\n\r\nFirst line\r\n';
+      const textareaValue = textDocumentToTextarea(crlfBom);
+      const edited = textDocumentFromTextarea(`${textareaValue}Second line`, crlfBom);
+      assert(textareaValue === '\uFEFF# Notes\n\nFirst line\n'
+        && edited === '\uFEFF# Notes\r\n\r\nFirst line\r\nSecond line',
+      'a controlled textarea must display LF while restoring the shared CRLF+BOM draft before it reaches disk');
+      assert(textDocumentFromTextarea('a\r\nb\r\n', crlfBom) === 'a\r\nb\r\n',
+        'pasted CRLF must normalize first and never become double-CRLF');
+      assert(textDocumentNewlineStyle('a\rb\r') === 'cr'
+        && textDocumentFromTextarea('a\nb\n', 'a\rb\r') === 'a\rb\r',
+      'CR-only files must retain their historical newline convention');
+      assert(textDocumentNewlineStyle('a\r\nb\nc\r') === 'lf'
+        && textDocumentFromTextarea('a\nb\nc\n', 'a\r\nb\nc\r') === 'a\nb\nc\n',
+      'mixed newline files must use the documented safe LF policy on their next edit');
+
+      let disk = crlfBom;
+      const timers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          assert(expectedContent === disk,
+            'the canonical CRLF baseline must remain exact for compare-and-swap');
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.add(callback); return callback; },
+        clearTimer: timer => timers.delete(timer),
+      });
+      const first = [];
+      const second = [];
+      const stopFirst = registry.attach('/documents/crlf-shared.md', state => first.push(state));
+      const stopSecond = registry.attach('/documents/crlf-shared.md', state => second.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/crlf-shared.md', edited);
+      await registry.flushAndSettleAll();
+      assert(disk === edited && first.at(-1).content === edited && second.at(-1).content === edited,
+        'both duplicate views must share the same restored canonical CRLF+BOM draft and write it unchanged');
+      registry.editFromTextarea('/documents/crlf-shared.md', 'single line');
+      await registry.flushAndSettleAll();
+      await registry.notifyFileChanged('/documents/crlf-shared.md');
+      stopFirst();
+      stopSecond();
+      const reattached = [];
+      const stopReattached = registry.attach('/documents/crlf-shared.md', state => reattached.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.editFromTextarea('/documents/crlf-shared.md', 'single line\nsecond line');
+      await registry.flushAndSettleAll();
+      assert(disk === 'single line\r\nsecond line',
+        'the shared CRLF convention must survive a self-watch plus detach/reattach after a single-line save before a later newline is inserted');
+      stopReattached();
+      return { crlfBomPreserved: disk === edited, mixedPolicy: 'lf' };
+    },
+  },
+{
+    name: 'Shared text document session binds a dirty CAS draft to its loaded target token',
+    run: async () => {
+      let disk = 'identical baseline';
+      let targetToken = '/canonical/target-a.md';
+      const writes = [];
+      const timers = [];
+      const liveTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (liveTimers.delete(timer)) timer();
+      };
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => ({ content: disk, targetToken }),
+        write: async (_path, content, expectedContent, expectedTargetToken) => {
+          writes.push({ content, expectedContent, expectedTargetToken });
+          if (expectedTargetToken !== targetToken || expectedContent !== disk) {
+            return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          }
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: callback => { timers.push(callback); liveTimers.add(callback); return callback; },
+        clearTimer: timer => liveTimers.delete(timer),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/retargeted-alias.md', state => states.push(state));
+      await settle();
+      registry.edit('/documents/retargeted-alias.md', 'local draft');
+      // Model L→A changing to L→B with equal bytes while its watcher event is
+      // missed: only the read token can stop this pending draft entering B.
+      targetToken = '/canonical/target-b.md';
+      runTimers();
+      await settle();
+      assert(writes.length === 1
+        && writes[0].expectedTargetToken === '/canonical/target-a.md'
+        && disk === 'identical baseline'
+        && states.at(-1).content === 'local draft'
+        && states.at(-1).externalChange === true,
+      'a delayed/missed symlink-retarget watch must become one explicit conflict, not a same-content write to the new target');
+
+      registry.keepMine('/documents/retargeted-alias.md');
+      runTimers();
+      await settle();
+      assert(writes.length === 2
+        && writes[1].expectedTargetToken === '/canonical/target-b.md'
+        && disk === 'local draft'
+        && states.at(-1).externalChange === false,
+      'an explicit Keep mine decision may use the re-read target token and save the retained draft');
+      stop();
+      return { tokenConflict: true, explicitKeepMine: true };
+    },
+  },
+{
+    name: 'Shared text document session resumes a dirty draft after a no-op watcher event',
+    run: async () => {
+      let disk = 'baseline';
+      const writes = [];
+      const timers = [];
+      const liveTimers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          writes.push({ content, expectedContent });
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); liveTimers.add(callback); return callback; },
+        clearTimer: timer => liveTimers.delete(timer),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/no-op-watch.md', state => states.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/no-op-watch.md', 'dirty shared draft');
+      await registry.notifyFileChanged('/documents/no-op-watch.md');
+      for (const timer of timers.splice(0)) if (liveTimers.delete(timer)) timer();
+      await new Promise(resolve => setImmediate(resolve));
+      assert(writes.length === 1 && writes[0].expectedContent === 'baseline' && disk === 'dirty shared draft'
+        && states.at(-1).externalChange === false,
+      'a spurious watcher event whose disk content still equals the baseline must resume, not conflict with, the dirty shared draft');
+      stop();
+      return { writes: writes.length };
+  },
+},
+  {
+    name: 'Shared text document session evicts only clean detached snapshots',
+    run: async () => {
+      let disk = 'clean';
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async () => ({ success: true }),
+        debounceMs: () => 1,
+        evictionMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stopClean = registry.attach('/documents/clean-evict.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      stopClean();
+      runTimers();
+      assert(registry.size() === 0,
+        'a clean, settled session with no views should release its retained document text after the grace timer');
+
+      const conflictStates = [];
+      const stopConflict = registry.attach('/documents/retain-conflict.md', state => conflictStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/retain-conflict.md', 'dirty draft');
+      disk = 'external version';
+      await registry.notifyFileChanged('/documents/retain-conflict.md');
+      stopConflict();
+      runTimers();
+      assert(registry.size() === 1 && conflictStates.at(-1).externalChange,
+        'an unresolved dirty external conflict must remain retained for Reload/Keep mine rather than being evicted');
+      return { retainedConflict: true };
+    },
+  },
+  {
+    name: 'Shared text document session evicts detached errors with no retained draft',
+    run: async () => {
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      let failRead = true;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          if (failRead) throw new Error('disk temporarily unavailable');
+          return 'baseline';
+        },
+        write: async () => ({ success: true }),
+        evictionMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+
+      const stopUnreadable = registry.attach('/documents/unreadable-detached.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      stopUnreadable();
+      runTimers();
+      assert(registry.size() === 0,
+        'an initial read failure has no local draft and must release its detached session after the grace timer');
+
+      failRead = false;
+      const stopClean = registry.attach('/documents/clean-reread-detached.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      failRead = true;
+      await registry.notifyFileChanged('/documents/clean-reread-detached.md');
+      stopClean();
+      runTimers();
+      assert(registry.size() === 0,
+        'a clean watcher reread failure has no divergent draft and must not retain a detached session forever');
+      return { unreadableEvicted: true, cleanRereadErrorEvicted: true };
+    },
+  },
+  {
+    name: 'Shared text document session isolates stale duplicate listener failures',
+    run: async () => {
+      let disk = 'baseline';
+      const timers = [];
+      const activeTimers = new Set();
+      const listenerErrors = [];
+      const healthyStates = [];
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_filePath, content, expectedContent) => {
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+        onListenerError: (error, filePath) => listenerErrors.push({ message: error.message, filePath }),
+      });
+      const filePath = '/documents/listener-isolation.md';
+      const stopBroken = registry.attach(filePath, () => { throw new Error('stale view'); });
+      const stopHealthy = registry.attach(filePath, state => healthyStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit(filePath, 'shared update');
+      for (const timer of timers.splice(0)) if (activeTimers.delete(timer)) timer();
+      await new Promise(resolve => setImmediate(resolve));
+      assert(disk === 'shared update'
+        && healthyStates.at(-1).diskContent === 'shared update'
+        && listenerErrors.length >= 3
+        && listenerErrors.every(({ filePath: failedPath }) => failedPath === filePath),
+      'a throwing duplicate subscriber must not block the healthy view, shared write lane, or later notifications');
+      stopBroken();
+      stopHealthy();
+      return { isolatedListenerErrors: listenerErrors.length };
+    },
+  },
+  {
+    name: 'Preload file-change fanout snapshots and isolates duplicate callbacks',
+    run: () => {
+      const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+      assert(preload.includes('for (const listener of [...fileChangedSubscribers])')
+        && preload.includes("console.error('file-changed subscriber failed:', error);"),
+      'one file-change subscriber must not abort delivery to later duplicate nodes, and cleanup during delivery must not mutate the current fanout');
+      return { isolatedFanout: true };
+    },
+  },
+  {
+    name: 'Shared text session retains a post-rename durability failure across its own watcher until retry',
+    run: async () => {
+      let disk = 'baseline';
+      let failDirectorySync = true;
+      let writes = 0;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          writes += 1;
+          if (expectedContent !== disk && content !== disk) {
+            return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          }
+          // Model the main process after rename but before its parent-directory
+          // fsync. The retry is necessarily idempotent: disk already has the
+          // requested content when it reaches the writer again.
+          disk = content;
+          if (failDirectorySync) {
+            return {
+              success: false,
+              errorCode: 'TEXT_FILE_DURABILITY_UNVERIFIED',
+              error: 'directory sync failed after rename',
+            };
+          }
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/durability-retry.md', state => states.push(state));
+      await settle();
+      registry.edit('/documents/durability-retry.md', 'renamed content');
+      runTimers();
+      await settle();
+      assert(disk === 'renamed content' && states.at(-1).durabilityUnverified
+        && states.at(-1).saveStatus === 'error',
+      'a post-rename directory-sync error must retain an explicit unresolved durability state');
+
+      await registry.notifyFileChanged('/documents/durability-retry.md');
+      const afterSelfWatch = states.at(-1);
+      assert(afterSelfWatch.content === 'renamed content'
+        && afterSelfWatch.diskContent === 'renamed content'
+        && afterSelfWatch.durabilityUnverified
+        && afterSelfWatch.saveStatus === 'error'
+        && registry.hasUnresolvedChanges(),
+      `the writer's own rename watcher must not falsely attest durability (${JSON.stringify(afterSelfWatch)})`);
+
+      failDirectorySync = false;
+      const closeResult = await registry.flushAndSettleAll();
+      const settled = states.at(-1);
+      assert(closeResult.success && writes === 2 && disk === 'renamed content'
+        && !settled.durabilityUnverified && settled.saveStatus === 'saved'
+        && !registry.hasUnresolvedChanges(),
+      `close must issue the idempotent write/fsync retry before clearing durability state (${JSON.stringify(settled)})`);
+      stop();
+      return { writes, watcherDidNotClearFailure: true, retriedOnClose: true };
+    },
+  },
+  {
+    name: 'Shared text durability failure preserves an external conflict until Keep Mine or Reload resolves it',
+    run: async () => {
+      let disk = 'baseline';
+      let failDirectorySync = true;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          if (expectedContent !== disk && content !== disk) {
+            return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          }
+          disk = content; // atomic rename already completed
+          if (failDirectorySync) {
+            return {
+              success: false,
+              errorCode: 'TEXT_FILE_DURABILITY_UNVERIFIED',
+              error: 'directory sync failed after rename',
+            };
+          }
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const states = [];
+      const filePath = '/documents/durability-external-resolution.md';
+      const stop = registry.attach(filePath, state => states.push(state));
+      await settle();
+
+      registry.edit(filePath, 'local durable draft');
+      runTimers();
+      await settle();
+      disk = 'external replacement';
+      await registry.notifyFileChanged(filePath);
+      let conflict = states.at(-1);
+      assert(conflict.content === 'local durable draft'
+        && conflict.diskContent === 'external replacement'
+        && conflict.externalChange && conflict.durabilityUnverified
+        && registry.hasUnresolvedChanges(),
+      `an external change after an unverified rename must remain an actionable conflict (${JSON.stringify(conflict)})`);
+
+      failDirectorySync = false;
+      registry.keepMine(filePath);
+      runTimers();
+      await settle();
+      let kept = states.at(-1);
+      assert(disk === 'local durable draft' && !kept.externalChange
+        && !kept.durabilityUnverified && !registry.hasUnresolvedChanges(),
+      `Keep Mine must clear the durability marker only after its successful retry (${JSON.stringify(kept)})`);
+
+      failDirectorySync = true;
+      registry.edit(filePath, 'second local durable draft');
+      runTimers();
+      await settle();
+      disk = 'external accepted replacement';
+      await registry.notifyFileChanged(filePath);
+      conflict = states.at(-1);
+      assert(conflict.externalChange && conflict.durabilityUnverified,
+        'the second post-rename failure must also expose its external replacement as a conflict');
+
+      await registry.reloadFromDisk(filePath);
+      const reloaded = states.at(-1);
+      assert(reloaded.content === 'external accepted replacement'
+        && reloaded.diskContent === 'external accepted replacement'
+        && !reloaded.externalChange && !reloaded.durabilityUnverified
+        && !registry.hasUnresolvedChanges(),
+      `a successful explicit Reload must accept disk and clear the durability marker (${JSON.stringify(reloaded)})`);
+      stop();
+      return { keepMineResolved: kept.content, reloadResolved: reloaded.content };
+    },
+  },
+  {
+    name: 'Shared text document session reconciles own watches and exposes one conflict decision',
+    run: async () => {
+      let disk = 'base';
+      const writes = [];
+      const queuedTimers = [];
+      const activeTimers = new Set();
+      let releaseFirstWrite;
+      const firstWrite = new Promise(resolve => { releaseFirstWrite = resolve; });
+      const runTimers = () => {
+        const pending = queuedTimers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const settle = async () => { await Promise.resolve(); await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)); };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          writes.push({ content, expectedContent });
+          if (writes.length === 1) {
+            await firstWrite;
+            if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+            disk = content;
+            return { success: true };
+          }
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        feedbackMs: 1,
+        setTimer: (callback) => { queuedTimers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: (timer) => activeTimers.delete(timer),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/race.md', state => states.push(state));
+      await settle();
+      registry.edit('/documents/race.md', 'one');
+      runTimers();
+      await settle();
+      const ownWatch = registry.notifyFileChanged('/documents/race.md');
+      registry.edit('/documents/race.md', 'two');
+      releaseFirstWrite();
+      await ownWatch;
+      runTimers();
+      await settle();
+      assert(writes.map(write => write.content).join('|') === 'one|two'
+        && writes.map(write => write.expectedContent).join('|') === 'base|one'
+        && disk === 'two' && states.at(-1).externalChange === false,
+      'an own atomic-save watch plus newer peer typing must reschedule a newer shared revision without a false conflict');
+
+      registry.edit('/documents/race.md', 'local draft');
+      disk = 'external edit';
+      await Promise.all([
+        registry.notifyFileChanged('/documents/race.md'),
+        registry.notifyFileChanged('/documents/race.md'),
+      ]);
+      await settle(); // includes the intentionally queued follow-up watch pass
+      assert(states.at(-1).content === 'local draft' && states.at(-1).diskContent === 'external edit' && states.at(-1).externalChange,
+        `repeated watcher broadcasts must coalesce and preserve one shared dirty draft behind Reload/Keep mine (${JSON.stringify(states.at(-1))})`);
+      registry.keepMine('/documents/race.md');
+      runTimers();
+      await settle();
+      assert(disk === 'local draft' && states.at(-1).externalChange === false,
+        'Keep mine must compare against the external baseline then converge every duplicate');
+      stop();
+      return { writes: writes.length, conflictResolved: true };
+    },
+  },
+  {
+    name: 'Shared text document session deduplicates duplicate view callbacks by notification ID',
+    run: async () => {
+      let reads = 0;
+      let releaseFirstReconcile;
+      let releaseDistinctReconcile;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          reads += 1;
+          if (reads === 2) return new Promise(resolve => { releaseFirstReconcile = resolve; });
+          if (reads === 3) return new Promise(resolve => { releaseDistinctReconcile = resolve; });
+          return 'baseline';
+        },
+        write: async () => ({ success: true }),
+      });
+      const stop = registry.attach('/documents/notification-id.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+
+      const first = registry.notifyFileChanged('/documents/notification-id.md', 41);
+      const duplicate = registry.notifyFileChanged('/documents/notification-id.md', 41);
+      assert(first === duplicate,
+        'duplicate callbacks for one preload notification should share the active reconciliation promise');
+      await Promise.resolve();
+      assert(reads === 2, 'duplicate node callbacks for one notification ID must start one disk read');
+      releaseFirstReconcile('baseline');
+      await first;
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reads === 2, 'a duplicate notification ID must not queue a redundant follow-up read');
+
+      const distinct = registry.notifyFileChanged('/documents/notification-id.md', 42);
+      await Promise.resolve();
+      const queuedDistinct = registry.notifyFileChanged('/documents/notification-id.md', 43);
+      const duplicateQueuedDistinct = registry.notifyFileChanged('/documents/notification-id.md', 43);
+      assert(queuedDistinct === duplicateQueuedDistinct,
+        'duplicate callbacks for a later notification must still coalesce while a prior event is reconciling');
+      releaseDistinctReconcile('baseline');
+      await distinct;
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reads === 4,
+        'one distinct notification arriving during reconciliation must queue exactly one fresh pass');
+      stop();
+      return { reads, duplicateIdDeduped: true, distinctIdQueued: true };
+    },
+  },
+  {
+    name: 'Shared text document session preserves a detached conflict when rereading fails',
+    run: async () => {
+      let disk = 'baseline';
+      let failRead = false;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          if (failRead) throw new Error('disk temporarily unavailable');
+          return disk;
+        },
+        write: async () => ({ success: true }),
+      });
+      const initialStates = [];
+      const stopInitial = registry.attach('/documents/retained-read-failure.md', state => initialStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/retained-read-failure.md', 'local draft');
+      disk = 'external version';
+      await registry.notifyFileChanged('/documents/retained-read-failure.md');
+      assert(initialStates.at(-1).externalChange && initialStates.at(-1).content === 'local draft',
+        'the setup must retain a dirty shared draft behind an external conflict');
+      stopInitial();
+
+      failRead = true;
+      const reattachedStates = [];
+      const stopReattached = registry.attach('/documents/retained-read-failure.md', state => reattachedStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      const retained = reattachedStates.at(-1);
+      assert(retained.status === 'done' && retained.content === 'local draft'
+        && retained.diskContent === 'external version' && retained.externalChange
+        && retained.error === 'disk temporarily unavailable',
+      `a failed detached re-read must retain the exact draft, baseline, and conflict (${JSON.stringify(retained)})`);
+      stopReattached();
+      return { retainedDraft: retained.content };
+    },
+  },
+  {
+    name: 'Shared text document session keeps a conflict draft when Reload cannot read disk',
+    run: async () => {
+      let disk = 'baseline';
+      let failRead = false;
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          if (failRead) throw new Error('disk temporarily unavailable');
+          return disk;
+        },
+        write: async () => ({ success: true }),
+      });
+      const states = [];
+      const stop = registry.attach('/documents/reload-read-failure.md', state => states.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/reload-read-failure.md', 'local draft');
+      disk = 'external version';
+      await registry.notifyFileChanged('/documents/reload-read-failure.md');
+      failRead = true;
+      await registry.reloadFromDisk('/documents/reload-read-failure.md');
+      const retained = states.at(-1);
+      assert(retained.status === 'done' && retained.content === 'local draft'
+        && retained.diskContent === 'external version' && retained.externalChange
+        && retained.error === 'disk temporarily unavailable',
+      `Reload must not discard a draft until it reads a replacement (${JSON.stringify(retained)})`);
+      stop();
+      return { retainedDraft: retained.content };
+    },
+  },
+  {
+    name: 'Shared text document session exposes a clean detached reread failure and pauses writes',
+    run: async () => {
+      let disk = 'baseline';
+      let failRead = false;
+      const writes = [];
+      const activeTimers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          if (failRead) throw new Error('disk temporarily unavailable');
+          return disk;
+        },
+        write: async (_path, content) => {
+          writes.push(content);
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 0,
+        setTimer: callback => { activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stopInitial = registry.attach('/documents/clean-reread-failure.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      stopInitial();
+
+      failRead = true;
+      const states = [];
+      const stopReattached = registry.attach('/documents/clean-reread-failure.md', state => states.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      const retained = states.at(-1);
+      assert(retained.status === 'done' && retained.content === 'baseline'
+        && retained.diskContent === 'baseline' && retained.externalChange
+        && retained.error === 'disk temporarily unavailable',
+      `a clean cached draft must visibly await a disk decision after a failed re-read (${JSON.stringify(retained)})`);
+      const cleanClose = await registry.flushAndSettleAll();
+      assert(cleanClose.success && !registry.hasUnresolvedChanges(),
+        'a clean failed reread has no local draft to lose and must not trap a close/reload forever');
+      registry.edit('/documents/clean-reread-failure.md', 'must remain paused');
+      assert(activeTimers.size === 0 && writes.length === 0,
+        'a failed re-read must suspend writes until Reload or Keep mine verifies the baseline');
+      stopReattached();
+      return { writesWhileUnverified: writes.length };
+    },
+  },
+  {
+    name: 'Shared text document session reattaches a failed save without a false external conflict',
+    run: async () => {
+      let disk = 'baseline';
+      let failWrite = true;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const settle = async () => { await Promise.resolve(); await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)); };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          if (failWrite) return { success: false, error: 'IPC write temporarily unavailable' };
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const firstStates = [];
+      const stopFirst = registry.attach('/documents/write-failure-reattach.md', state => firstStates.push(state));
+      await settle();
+      registry.edit('/documents/write-failure-reattach.md', 'local draft');
+      runTimers();
+      await settle();
+      assert(firstStates.at(-1).saveStatus === 'error' && disk === 'baseline',
+        'the setup must leave a dirty draft after the generic write failure');
+      stopFirst();
+
+      const reattachedStates = [];
+      const stopReattached = registry.attach('/documents/write-failure-reattach.md', state => reattachedStates.push(state));
+      await settle();
+      const retained = reattachedStates.at(-1);
+      assert(retained.content === 'local draft' && retained.diskContent === 'baseline'
+        && !retained.externalChange && retained.saveStatus === 'error'
+        && retained.error === 'IPC write temporarily unavailable',
+      `an unchanged baseline after a failed save is retryable, not an external conflict (${JSON.stringify(retained)})`);
+
+      failWrite = false;
+      registry.edit('/documents/write-failure-reattach.md', 'local draft retry');
+      runTimers();
+      await settle();
+      assert(disk === 'local draft retry' && reattachedStates.at(-1).externalChange === false,
+        'the next edit must safely retry against the retained baseline');
+      stopReattached();
+      return { retried: disk };
+    },
+  },
+  {
+    name: 'Shared text document session preserves a late write failure across detach and reattach',
+    run: async () => {
+      let disk = 'baseline';
+      let releaseWrite;
+      const pendingWrite = new Promise(resolve => { releaseWrite = resolve; });
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async () => {
+          await pendingWrite;
+          return { success: false, error: 'late IPC write failure' };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const firstStates = [];
+      const stopFirst = registry.attach('/documents/late-write-failure.md', state => firstStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/late-write-failure.md', 'local draft');
+      runTimers();
+      await Promise.resolve();
+      assert(firstStates.at(-1).saveStatus === 'saving',
+        'the setup must detach while the shared write lane is still saving');
+      stopFirst();
+
+      const reattachedStates = [];
+      const stopReattached = registry.attach('/documents/late-write-failure.md', state => reattachedStates.push(state));
+      releaseWrite();
+      await new Promise(resolve => setImmediate(resolve));
+      const retained = reattachedStates.at(-1);
+      assert(retained.content === 'local draft' && retained.diskContent === 'baseline'
+        && retained.saveStatus === 'error' && retained.error === 'late IPC write failure'
+        && !retained.externalChange,
+      `a write failure that settles during reattach must not restore stale saving state (${JSON.stringify(retained)})`);
+      stopReattached();
+      return { saveStatus: retained.saveStatus };
+    },
+  },
+  {
+    name: 'Shared text document refresh does not overwrite a concurrent close-time retry',
+    run: async () => {
+      let disk = 'baseline';
+      let reads = 0;
+      let releaseStaleRefreshRead;
+      let writeAttempts = 0;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          reads += 1;
+          if (reads === 2) return new Promise(resolve => { releaseStaleRefreshRead = () => resolve('baseline'); });
+          return disk;
+        },
+        write: async (_path, content, expectedContent) => {
+          writeAttempts += 1;
+          if (writeAttempts === 1) return { success: false, error: 'temporary write failure' };
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const firstStates = [];
+      const stopFirst = registry.attach('/documents/refresh-close-race.md', state => firstStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/refresh-close-race.md', 'local draft');
+      runTimers();
+      await new Promise(resolve => setImmediate(resolve));
+      assert(firstStates.at(-1).saveStatus === 'error',
+        'the setup must retain the generic failed draft before the close retry');
+      stopFirst();
+
+      const reattachedStates = [];
+      const stopReattached = registry.attach('/documents/refresh-close-race.md', state => reattachedStates.push(state));
+      await new Promise(resolve => setImmediate(resolve));
+      assert(typeof releaseStaleRefreshRead === 'function',
+        'reattachment must have an in-flight disk read holding the old baseline');
+
+      const closeSettlement = await registry.flushAndSettleAll();
+      assert(closeSettlement.success && disk === 'local draft' && writeAttempts === 2,
+        'close preparation must retry and durably settle the failed draft while refresh is reading');
+      releaseStaleRefreshRead();
+      await new Promise(resolve => setImmediate(resolve));
+      const settled = reattachedStates.at(-1);
+      assert(settled.content === 'local draft' && settled.diskContent === 'local draft'
+        && settled.saveStatus === 'saved' && settled.error === null && !settled.externalChange,
+      `a stale detached refresh must re-read after the retry instead of restoring its old error (${JSON.stringify(settled)})`);
+      stopReattached();
+      return { writeAttempts, rereadAfterRetry: reads >= 3 };
+    },
+  },
+  {
+    name: 'Shared text document session releases a skipped queued write before clean eviction',
+    run: async () => {
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: async () => { throw new Error('a discarded request must not write'); },
+        debounceMs: () => 1,
+        evictionMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stop = registry.attach('/documents/skipped-write-eviction.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/skipped-write-eviction.md', 'discard this queued edit');
+      runTimers(); // move the debounce request into the serialized write lane
+      const reloaded = registry.reloadFromDisk('/documents/skipped-write-eviction.md');
+      await reloaded; // invalidates the queued request before it can enter write()
+      stop();
+      runTimers();
+      assert(registry.size() === 0,
+        'a skipped queued request must decrement its lane count so a clean detached session can evict');
+      return { evictedAfterSkippedWrite: true };
+    },
+  },
+  {
+    name: 'Shared text document session evicts after detaching during a clean reattach refresh',
+    run: async () => {
+      let reads = 0;
+      let resolveRefresh;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          reads += 1;
+          if (reads === 2) return new Promise(resolve => { resolveRefresh = resolve; });
+          return 'baseline';
+        },
+        write: async () => ({ success: true }),
+        evictionMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stopInitial = registry.attach('/documents/detach-refresh-eviction.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      stopInitial();
+      const stopReattached = registry.attach('/documents/detach-refresh-eviction.md', () => {});
+      await Promise.resolve();
+      stopReattached();
+      resolveRefresh('baseline');
+      await new Promise(resolve => setImmediate(resolve));
+      runTimers();
+      assert(registry.size() === 0,
+        'a clean refresh that settles after its last listener detaches must schedule eviction');
+      return { evictedAfterRefresh: true };
+    },
+  },
+  {
+    name: 'Shared text document session evicts after detaching during a clean Reload',
+    run: async () => {
+      let reads = 0;
+      let resolveReload;
+      const timers = [];
+      const activeTimers = new Set();
+      const runTimers = () => {
+        const pending = timers.splice(0);
+        for (const timer of pending) if (activeTimers.delete(timer)) timer();
+      };
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => {
+          reads += 1;
+          if (reads === 2) return new Promise(resolve => { resolveReload = resolve; });
+          return 'baseline';
+        },
+        write: async () => ({ success: true }),
+        evictionMs: 1,
+        setTimer: callback => { timers.push(callback); activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stop = registry.attach('/documents/detach-reload-eviction.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      const reloading = registry.reloadFromDisk('/documents/detach-reload-eviction.md');
+      await Promise.resolve();
+      stop();
+      resolveReload('baseline');
+      await reloading;
+      runTimers();
+      assert(registry.size() === 0,
+        'a clean Reload that settles after its last listener detaches must schedule eviction');
+      return { evictedAfterReload: true };
+    },
+  },
+  {
+    name: 'Shared text document session flushes the final debounced edit before close',
+    run: async () => {
+      let disk = 'baseline';
+      const writes = [];
+      const activeTimers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          writes.push({ content, expectedContent });
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { activeTimers.add(callback); return callback; },
+        clearTimer: timer => activeTimers.delete(timer),
+      });
+      const stop = registry.attach('/documents/final-close-edit.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/final-close-edit.md', 'last edit before close');
+      assert(registry.hasUnresolvedChanges() && activeTimers.size === 1,
+        'a pending debounce must synchronously report unresolved document work');
+      const settled = await registry.flushAndSettleAll();
+      assert(settled.success && !registry.hasUnresolvedChanges()
+        && disk === 'last edit before close' && writes.length === 1,
+      'close settling must flush exactly the final debounced draft without requiring canvas Save As');
+      stop();
+      return { writes: writes.length };
+    },
+  },
+  {
+    name: 'Shared text document session close settlement includes drafts attached mid-flush',
+    run: async () => {
+      let releaseFirstWrite;
+      let firstWriteStarted;
+      const timers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: async (filePath) => {
+          if (filePath !== '/documents/first-during-close.md') return { success: true };
+          firstWriteStarted?.();
+          return new Promise(resolve => { releaseFirstWrite = () => resolve({ success: true }); });
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.add(callback); return callback; },
+        clearTimer: timer => timers.delete(timer),
+      });
+      const stopFirst = registry.attach('/documents/first-during-close.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/first-during-close.md', 'first draft');
+      const writeStarted = new Promise(resolve => { firstWriteStarted = resolve; });
+      const settling = registry.flushAndSettleAll();
+      await writeStarted;
+
+      const stopSecond = registry.attach('/documents/second-during-close.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/second-during-close.md', 'second draft');
+      releaseFirstWrite();
+      const result = await settling;
+      assert(!result.success && result.unresolvedFilePaths.includes('/documents/second-during-close.md'),
+        'a draft attached while another session settles must keep the close request open');
+      stopFirst();
+      stopSecond();
+      return { omittedPathPrevented: result.unresolvedFilePaths.includes('/documents/second-during-close.md') };
+    },
+  },
+  {
+    name: 'Shared text document session refuses close settlement for failed and conflicting writes',
+    run: async () => {
+      const makeTimers = () => {
+        const active = new Set();
+        return {
+          setTimer: callback => { active.add(callback); return callback; },
+          clearTimer: timer => active.delete(timer),
+        };
+      };
+
+      const failedTimers = makeTimers();
+      const failedRegistry = createTextDocumentSessionRegistry({
+        read: async () => 'baseline',
+        write: async () => ({ success: false, error: 'IPC write unavailable' }),
+        debounceMs: () => 1,
+        ...failedTimers,
+      });
+      const stopFailed = failedRegistry.attach('/documents/failed-close-edit.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      failedRegistry.edit('/documents/failed-close-edit.md', 'unsaved draft');
+      const failed = await failedRegistry.flushAndSettleAll();
+      assert(!failed.success && failed.unresolvedFilePaths.includes('/documents/failed-close-edit.md')
+        && failedRegistry.getSnapshot('/documents/failed-close-edit.md').saveStatus === 'error',
+      'a generic document write failure must keep the close handshake open with its draft retained');
+      stopFailed();
+
+      let disk = 'baseline';
+      const conflictTimers = makeTimers();
+      const conflictRegistry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async () => ({ success: false, errorCode: 'TEXT_FILE_CONFLICT' }),
+        debounceMs: () => 1,
+        ...conflictTimers,
+      });
+      const stopConflict = conflictRegistry.attach('/documents/conflict-close-edit.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      conflictRegistry.edit('/documents/conflict-close-edit.md', 'local draft');
+      disk = 'external version';
+      const conflicted = await conflictRegistry.flushAndSettleAll();
+      assert(!conflicted.success && conflicted.unresolvedFilePaths.includes('/documents/conflict-close-edit.md')
+        && conflictRegistry.getSnapshot('/documents/conflict-close-edit.md').externalChange,
+      'a compare-and-swap conflict must refuse close settlement and preserve Reload/Keep mine');
+      stopConflict();
+      return { genericFailureBlocked: !failed.success, conflictBlocked: !conflicted.success };
+    },
+  },
+  {
+    name: 'Shared text document session retries one unsuspended failed draft during close preparation',
+    run: async () => {
+      let disk = 'baseline';
+      let attempts = 0;
+      const timers = new Set();
+      const registry = createTextDocumentSessionRegistry({
+        read: async () => disk,
+        write: async (_path, content, expectedContent) => {
+          attempts += 1;
+          if (attempts === 1) return { success: false, error: 'temporary IPC failure' };
+          if (expectedContent !== disk) return { success: false, errorCode: 'TEXT_FILE_CONFLICT' };
+          disk = content;
+          return { success: true };
+        },
+        debounceMs: () => 1,
+        setTimer: callback => { timers.add(callback); return callback; },
+        clearTimer: timer => timers.delete(timer),
+      });
+      const stop = registry.attach('/documents/close-retry.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      registry.edit('/documents/close-retry.md', 'retry this draft');
+      const settled = await registry.flushAndSettleAll();
+      assert(settled.success && attempts === 2 && disk === 'retry this draft'
+        && !registry.hasUnresolvedChanges(),
+      'close preparation must retry one generic failed draft without auto-writing conflicts');
+      stop();
+
+      const unreadable = createTextDocumentSessionRegistry({
+        read: async () => { throw new Error('missing file'); },
+        write: async () => ({ success: true }),
+      });
+      const stopUnreadable = unreadable.attach('/documents/missing-on-open.md', () => {});
+      await new Promise(resolve => setImmediate(resolve));
+      const unreadableResult = await unreadable.flushAndSettleAll();
+      assert(unreadableResult.success && !unreadable.hasUnresolvedChanges(),
+        'an initial read failure with no retained draft must not be treated as unsaved close work');
+      stopUnreadable();
+      return { attempts, initialLoadDoesNotBlock: unreadableResult.success };
+    },
+  },
+  {
+    name: 'Text document session singleton reads through validated IPC rather than fetch decoding',
+    run: () => {
+      const sessions = fs.readFileSync(path.resolve('src/utils/textDocumentSessions.js'), 'utf8');
+      const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+      const filesystem = fs.readFileSync(path.resolve('electron/ipc/filesystem.js'), 'utf8');
+      const documentNode = fs.readFileSync(path.resolve('src/nodes/DocumentNode.jsx'), 'utf8');
+      assert(sessions.includes('window.electronAPI?.readTextFile?.(filePath)')
+        && !sessions.includes('fetch(`${toLocalFileUrl(filePath)}'),
+      'text sessions must obtain their CAS baseline through the validated IPC reader, not browser Response.text decoding');
+      assert(preload.includes("readTextFile: (filePath) => ipcRenderer.invoke('read-text-file', filePath)")
+        && filesystem.includes("handleSafe('read-text-file'")
+        && filesystem.includes('export async function readValidatedTextFile'),
+      'the validated text-read IPC must remain wired through preload and the main filesystem handler');
+      assert(sessions.includes('retrySave: (filePath) => get(filePath).retrySave()')
+        && documentNode.includes('const saveErrorBanner = saveStatus === \'error\' && !externalChange && error')
+        && documentNode.includes('textDocumentSessions.retrySave(filePath)'),
+      'ordinary write failures must expose their message and a retry action instead of only a status dot');
+      return { validatedReadBridge: true, retrySurface: true };
+    },
+  },
+  {
+    name: 'Quit commit settling acknowledges minimized renderers without abandoning visible React Flow batches',
+    run: async () => {
+      const createScheduler = () => {
+        let nextId = 1;
+        const frames = new Map();
+        const timers = new Map();
+        const cancelledFrames = [];
+        const clearedTimers = [];
+        return {
+          frames,
+          timers,
+          cancelledFrames,
+          clearedTimers,
+          requestFrame: callback => {
+            const id = nextId++;
+            frames.set(id, callback);
+            return id;
+          },
+          cancelFrame: id => {
+            cancelledFrames.push(id);
+            frames.delete(id);
+          },
+          setTimer: (callback, delay) => {
+            const id = nextId++;
+            timers.set(id, { callback, delay });
+            return id;
+          },
+          clearTimer: id => {
+            clearedTimers.push(id);
+            timers.delete(id);
+          },
+        };
+      };
+
+      const paused = createScheduler();
+      const pausedPromise = settlePreFenceCanvasBatches({
+        ...paused,
+        timeoutMs: QUIT_COMMIT_SETTLE_FALLBACK_MS,
+      });
+      assert(paused.frames.size === 1 && paused.timers.size === 1,
+        'a paused renderer must schedule one frame path and one shared fallback, not a chained per-frame timeout');
+      const [[pausedTimerId, pausedTimer]] = paused.timers;
+      assert(pausedTimer.delay === QUIT_COMMIT_SETTLE_FALLBACK_MS,
+        'the minimized-window fallback must use the documented bounded deadline');
+      pausedTimer.callback();
+      await pausedPromise;
+      assert(paused.frames.size === 0 && paused.cancelledFrames.length === 1
+        && paused.clearedTimers.includes(pausedTimerId),
+      'when rAF never runs, the single fallback must resolve and cancel the stranded frame');
+
+      const visible = createScheduler();
+      const visiblePromise = settlePreFenceCanvasBatches({
+        ...visible,
+        timeoutMs: QUIT_COMMIT_SETTLE_FALLBACK_MS,
+      });
+      const [[firstFrameId, firstFrame]] = visible.frames;
+      visible.frames.delete(firstFrameId);
+      firstFrame();
+      assert(visible.frames.size === 1 && visible.timers.size === 1,
+        'a visible renderer must preserve the ordinary two-frame controlled-batch settle path');
+      const [[secondFrameId, secondFrame]] = visible.frames;
+      visible.frames.delete(secondFrameId);
+      secondFrame();
+      await visiblePromise;
+      assert(visible.timers.size === 0,
+        'a fast visible settle must clear the fallback instead of leaving a late commit callback behind');
+      return { pausedRafFallsBack: true, visibleTwoFrameSettle: true };
+    },
+  },
+  {
+    name: 'Document-session close plumbing flushes files without invoking canvas Save As',
+    run: () => {
+      const persistence = fs.readFileSync(path.resolve('src/hooks/useCanvasPersistence.js'), 'utf8');
+      const main = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
+      const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+      const boundary = fs.readFileSync(path.resolve('src/components/ErrorBoundary.jsx'), 'utf8');
+      const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
+      const deletion = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
+      const actions = fs.readFileSync(path.resolve('src/hooks/useCanvasActions.js'), 'utf8');
+      assert(persistence.includes('textDocumentSessions.flushAndSettleAll()')
+        && persistence.includes('documentSaveFailed: !documents.success')
+        && persistence.includes('textDocumentSessions.hasUnresolvedChanges()'),
+      'quit and synchronous beforeunload must consult the shared text-session durability API');
+      assert(main.includes('showDocumentSaveFailureDialog(win, actionType)')
+        && main.includes('Keep Editing')
+        && main.includes('showUnverifiedSaveStateDialog(win, actionType)')
+        && main.includes('Could Not Verify Unsaved Changes')
+        && main.includes('finish({ timeout: true });'),
+      'main must require an explicit document-discard choice after a text-file failure instead of opening canvas Save As');
+      assert(persistence.includes('if (!hasUnsavedChangesRef.current && !forceCanvasSave)')
+        && persistence.includes('success = true;')
+        && persistence.includes('sendSaveResponse(success, requestId);'),
+      'a settled document-only save must not invoke canvas Save As when the canvas itself is clean and a checkpoint was not explicitly required');
+      assert(boundary.includes('await textDocumentSessions.flushAndSettleAll()')
+        && boundary.includes('Reload paused: resolve the unsaved text file')
+        && boundary.includes('textDocumentSessions.abandonAll()')
+        && boundary.includes('Reload Without Saving Text Drafts')
+        && boundary.includes('A write already sent to the app cannot be recalled.')
+        && boundary.includes('window.location.reload();'),
+      'the error fallback must settle document drafts when possible and provide an explicit destructive escape when the normal conflict UI is unavailable');
+      assert(canvasSource.includes('const resolveConfirmDialog = useCallback(async (actionName, eventName) =>')
+        && canvasSource.includes('await action?.();')
+        && deletion.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
+        && deletion.includes('undo?.();')
+        && actions.includes('const preflightClear = useCallback(async () =>')
+        && actions.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)'),
+      'last-reference deletion and Clear Canvas must settle only their orphan text paths while the confirmation remains resolving, then restore rather than discard a failed draft');
+      assert(main.includes('let rendererHandshakeRequestId = 0;')
+        && main.includes("safeMenuSend(win, 'quit-request', { requestId })")
+        && main.includes('responseRequestId !== requestId')
+        && preload.includes('sendQuitResponse: (state, requestId)')
+        && persistence.includes('sendQuitResponse(response, requestId);'),
+      'quit responses must echo a monotonic request ID so a late timed-out response cannot satisfy a later close');
+      assert(persistence.includes('let response = { hasUnsavedChanges: true, documentSaveFailed: true };')
+        && persistence.includes("console.error('Could not prepare quit response:'")
+        && persistence.includes('sendQuitResponse(response, requestId);')
+        && persistence.includes('let success = false;')
+        && persistence.includes("console.error('Could not prepare save response:'")
+        && persistence.includes('sendSaveResponse(success, requestId);'),
+      'unexpected async renderer callback failures must return correlated fail-closed quit/save responses instead of leaving main waiting');
+      assert((main.match(/responseRequestId !== requestId/g) || []).length === 2
+        && main.includes("safeMenuSend(win, 'request-save-and-respond', {")
+        && main.includes('forceCanvasSave,')
+        && main.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true };")
+        && persistence.includes('skipDocumentSessions = false')
+        && persistence.includes('if (!skipDocumentSessions)')
+        && persistence.includes('forceCanvasSave = false'),
+      'both quit and save handlers must reject stale/mismatched response IDs; a document discard bypasses only its correlated save while a pending manual handoff still forces the canvas checkpoint');
+      assert(main.includes('function safeMenuSend(win, channel, payload)')
+        && main.includes('try {\n    if (payload === undefined) win.webContents.send(channel);')
+        && main.includes('if (!safeMenuSend(win, \'quit-request\', { requestId }))')
+        && main.includes('if (!safeMenuSend(win, \'request-save-and-respond\', {')
+        && main.includes("expectedSender.removeListener('did-start-navigation', onMainFrameNavigation);")
+        && (main.match(/expectedSender\.on\('did-start-navigation', onMainFrameNavigation\);/g) || []).length >= 2
+        && (main.match(/if \(isMainFrame && !isInPlace\) finish/g) || []).length >= 2
+        && main.includes("expectedSender.removeListener('render-process-gone', onRenderProcessGone);")
+        && main.includes('if ([...canvasWindows].some(win => win.__closeHandshakeInFlight)) {\n    pendingGlobalQuit.defer();')
+        && main.includes('if (quitHandshakeInFlight) return;')
+        && main.includes('if (isQuitting) {\n    event.preventDefault();\n    return;\n  }'),
+      'send races, renderer navigation/crashes, and overlapping close/quit events must release handshake listeners and retain fail-closed lifecycle ownership');
+      const quitLifecycle = main.slice(main.indexOf('app.on(\'before-quit\''));
+      assert(quitLifecycle.indexOf('isQuitting = true;') >= 0
+        && quitLifecycle.indexOf('isQuitting = true;') < quitLifecycle.indexOf('for (const win of [...canvasWindows]) {')
+        && quitLifecycle.indexOf('for (const win of [...canvasWindows]) {') < quitLifecycle.indexOf('// Cleanup with safety timeout')
+        && quitLifecycle.includes('if (!win.isDestroyed()) win.destroy();')
+        && quitLifecycle.includes('Could not destroy canvas window during quit'),
+      'after every quit handshake commits, canvas windows must be destroyed before long cleanup can leave an editable renderer behind, and a raced destroy must not strand shutdown');
+      assert(main.includes('Could not destroy canvas window after close'),
+        'a per-window destroy race must be caught inside its async close handler rather than becoming an unhandled rejection');
+      assert(main.includes('function requestQuitCommitAndWait(win)')
+        && main.includes("safeMenuSend(win, 'quit-commit-request', { requestId })")
+        && main.includes('function releaseQuitCommit(windows)')
+        && main.includes('const commitWindows = [...canvasWindows].filter(win => !win.isDestroyed());')
+        && main.includes('if (!await requestQuitCommitAndWait(win))')
+        && main.includes('for (const win of commitWindows) {\n      if (!await settleWindowForQuit(win))')
+        && main.includes('if (quitHandshakeInFlight || isQuitting) return null;')
+        && preload.includes("onQuitCommitRequest: createListener('quit-commit-request')")
+        && persistence.includes('document.body.inert = true')
+        && persistence.includes('document.body.inert = false'),
+      'global quit must freeze every acknowledged stable renderer, revalidate while inert, and reject new canvases before final destruction');
+      const globalQuit = main.slice(main.indexOf("app.on('before-quit'"));
+      const windowClose = main.slice(main.indexOf("win.on('close'"), main.indexOf("win.on('closed'"));
+      assert(globalQuit.indexOf('if (!await requestQuitCommitAndWait(win))')
+          < globalQuit.indexOf('for (const win of commitWindows) {\n      if (!await settleWindowForQuit(win))')
+        && (globalQuit.match(/const result = await checkUnsavedChanges\(win, 'quit'\);/g) || []).length === 1
+        && windowClose.indexOf('if (!await requestQuitCommitAndWait(win)) return;')
+          < windowClose.indexOf("const result = await checkUnsavedChanges(win, 'close');")
+        && windowClose.includes('if (commitRequested && !win.isDestroyed()) releaseQuitCommit([win]);')
+        && windowClose.includes('pendingGlobalQuit.consumeAfterClose(closeSucceeded)')
+        && windowClose.includes('setImmediate(() => {'),
+      'both global quit and one-window close must acknowledge the renderer state fence before one-and-only-one unsaved-work validation, release an aborted close, and resume a deferred Cmd+Q only after its close succeeds');
+      const canvas = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
+      const navigation = fs.readFileSync(path.resolve('src/hooks/useCanvasNavigation.js'), 'utf8');
+      const initialization = fs.readFileSync(path.resolve('src/hooks/useCanvasInitialization.js'), 'utf8');
+      const drop = fs.readFileSync(path.resolve('src/hooks/useCanvasDragAndDrop.js'), 'utf8');
+      const localAiFallback = fs.readFileSync(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+      const nodeChangeFence = canvas.slice(canvas.indexOf('const onNodesChange = useCallback'));
+      const edgeChangeFence = canvas.slice(canvas.indexOf('const onEdgesChange = useCallback'));
+      assert(canvas.includes('const [nodes, setNodesBase, onNodesChangeBase] = useNodesState([]);')
+        && canvas.includes('const guardCanvasSetter = useCallback((setState, update) => {')
+        && canvas.includes('if (quitGateRef.current.frozen) return false;')
+        && canvas.includes('const setNodes = useCallback((update) => guardCanvasSetter(setNodesBase, update)')
+        && canvas.includes('const setEdges = useCallback((update) => guardCanvasSetter(setEdgesBase, update)')
+        && canvas.includes('const setDrawings = useCallback((update) => guardCanvasSetter(setDrawingsBase, update)')
+        && nodeChangeFence.startsWith('const onNodesChange = useCallback((changes) => {\n    // React Flow')
+        && nodeChangeFence.includes('if (quitGateRef.current.frozen) return;')
+        && edgeChangeFence.includes('if (quitGateRef.current.frozen) return;'),
+      'the quit fence must own every Canvas state setter and reject controlled React Flow batches before their base callbacks mutate state');
+      const freezeCanvasForQuit = canvas.slice(canvas.indexOf('const freezeCanvasForQuit = useCallback'));
+      assert(canvas.includes('await settlePreFenceCanvasBatches();')
+        && canvas.includes('quitGateRef.current.frozen = true;')
+        && freezeCanvasForQuit.indexOf('quitGateRef.current.frozen = true;')
+          < freezeCanvasForQuit.indexOf('await settlePreFenceCanvasBatches();')
+        && canvas.includes('quitGateRef.current.generation += 1;')
+        && canvas.includes('quitGateRef.current.commitEpoch !== commitEpoch')
+        && canvas.includes('quitGateRef.current.commitEpoch += 1;')
+        && canvas.includes('freezeNavigationForQuit();')
+        && canvas.includes('const releaseCanvasQuitFence = useCallback(() => {')
+        && canvas.includes('quitGateRef.current.frozen = false;')
+        && navigation.includes('const setStackGuarded = useCallback((update) => {')
+        && navigation.includes('const freezeForQuit = useCallback(() => {')
+        && navigation.includes('navTimersRef.current.forEach(id => clearTimeout(id));')
+        && navigation.includes('navFramesRef.current.forEach(id => cancelAnimationFrame(id));')
+        && navigation.includes('if (!canMutateCanvas()) return false;')
+        && navigation.includes('setStackGuarded(prevStack => {'),
+      'the commit ACK must follow a synchronous fence and a pre-fence batch drain, protecting both active Canvas state and the durable hidden navigation stack while cancelling pending navigation work; a timed-out release must invalidate a late throttled ACK');
+      assert(persistence.includes('const prepareQuitCommit = useEffectEvent(async () => {')
+        && persistence.includes('loadRequestRef.current += 1;')
+        && persistence.includes('const frozen = await prepareQuitCommit();')
+        && persistence.includes('if (frozen !== false) window.electronAPI?.sendQuitCommitAck?.(requestId);')
+        && persistence.includes('const gateGeneration = quitGateRef?.current?.generation;')
+        && persistence.includes('const isCurrentLoad = () => isMountedRef.current')
+        && persistence.includes('&& !quitGateRef?.current?.frozen')
+        && persistence.includes('&& quitGateRef?.current?.generation === gateGeneration;')
+        && initialization.includes('const isCurrentGeneration = () => !quitGateRef?.current?.frozen')
+        && canvas.includes('setQuitFenceReleaseVersion(version => version + 1);')
+        && canvas.includes('quitFenceReleaseVersion,')
+        && initialization.includes('quitFenceReleaseVersion = 0,')
+        && initialization.includes('quitGateRef, quitFenceReleaseVersion]);')
+        && drop.includes('const isCurrentDrop = () => !quitGateRef?.current?.frozen')
+        && localAiFallback.includes('const isCurrentQuitGeneration = (generation) => {')
+        && localAiFallback.includes('generation = currentQuitGeneration()')
+        && localAiFallback.includes('!isCurrentQuitGeneration(generation)'),
+      'a cancelled quit must invalidate pre-fence workspace loads, autosaves, asynchronous file drops, and Local AI completion writes instead of replaying them after release, then explicitly re-arm the dirty canvas autosave timer');
+      assert(persistence.includes('const saveOperationRef = useRef(null);')
+        && persistence.includes('const activeOperation = saveOperationRef.current;')
+        && persistence.includes('activeSucceeded = Boolean(await activeOperation);')
+        && persistence.indexOf('activeSucceeded = Boolean(await activeOperation);')
+          < persistence.indexOf('const operation = performCanvasSave();')
+        && initialization.includes('if (saveOperationRef) saveOperationRef.current = operation;')
+        && initialization.includes('if (saveOperationRef?.current === operation) saveOperationRef.current = null;')
+        && canvas.includes('saveStateRef, saveOperationRef, loadState,')
+        && canvas.includes('saveOperationRef,\n  });'),
+      'a close-time Save must wait for an in-flight autosave lane and then save the still-dirty frozen snapshot instead of returning false on the transient autosaving status');
+      const releaseFinally = main.slice(main.indexOf("app.on('before-quit'"));
+      assert(main.includes('const attemptedCommitWindows = new Set();')
+        && main.includes('attemptedCommitWindows.add(win);')
+        && releaseFinally.includes('if (!isQuitting) {\n      // `document.body.inert` survives')
+        && releaseFinally.includes('releaseQuitCommit(attemptedCommitWindows);')
+        && releaseFinally.includes('quitHandshakeInFlight = false;'),
+      'any commit request that was sent must be released from inert in the outer quit finalizer, including a rejected final persistence barrier');
+      return {
+        closePlumbingProtected: true,
+        reloadGuarded: true,
+        handshakeCorrelated: true,
+        staleResponsesRejected: true,
+        quitStateGateProtected: true,
+      };
+    },
+  },
+{
     name: 'Node factory clone safety',
     run: () => {
       const source = {
@@ -2063,6 +3831,17 @@ export default [
       assert(clone.position.x === 15 && clone.position.y === 26, 'Node factory clone safety: clone should be offset');
       assert(clone.data.locked === false && clone.draggable === undefined && clone.deletable === undefined, 'Node factory clone safety: clone should unlock');
       assert(clone.data.hubState === 'empty' && clone.data.isNew === false && !clone.data.queuedModuleRun, 'Node factory clone safety: active state/new flag should be sanitized');
+
+      const documentSource = {
+        id: 'document-original', type: 'document', position: { x: 3, y: 7 },
+        data: { filePath: '/documents/Work Experience.md', filename: 'Work Experience.md', editorFontSize: 14 },
+      };
+      const documentClone = cloneNode(documentSource);
+      assert(documentClone.id !== documentSource.id
+        && documentClone.data.filePath === documentSource.data.filePath
+        && documentClone.data.filename === documentSource.data.filename
+        && documentClone.data !== documentSource.data,
+      'Node factory clone safety: duplicate document nodes retain one local-file identity while keeping independent node data');
 
       const preferenceRunClone = cloneNode({
         id: 'preferences-running', type: 'jobhub', position: { x: 0, y: 0 },
@@ -3056,11 +4835,14 @@ export default [
         'a concrete block still outranks the challenge-recovery give-up');
       assert(resolveManualSourceStopReason({ hitProviderResultWindow: true }) === 'provider-result-window',
         'a direct continuation redirected or clamped by the provider must not report a clean completion');
+      assert(resolveManualSourceStopReason({ hitProviderTotalShortfall: true, hitEmptyPage: true }) === 'provider-total-shortfall',
+        'an empty ZipRecruiter page below its verified advertised total must not report lossless exhaustion');
       const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(manualScraperSource.includes("ziprecruiter: 'a[title=\"Next Page\"]'")
         && manualScraperSource.includes("const SCROLL_SOURCES = new Set(['google']);")
         && manualScraperSource.includes("phase: 'direct-page-probe'")
-        && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({'),
+        && manualScraperSource.includes('shouldTryZipRecruiterDirectContinuation({')
+        && manualScraperSource.includes("phase: 'provider-total-shortfall'"),
       'ZipRecruiter uses its verified Next Page anchor, then a bounded direct-page probe when the board hides that anchor early');
       assert(manualScraperSource.includes("description-card-unavailable")
         && manualScraperSource.includes("googlePanelRateLimit")

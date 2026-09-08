@@ -1746,10 +1746,14 @@ export function reconcileSearchFunnel(search) {
   const roleDropped = Math.max(0, Number(search.roleDropped) || 0);
   const historyDropped = Math.max(0, Number(search.historyDropped) || 0);
   const descriptionEvidenceDropped = Math.max(0, Number(search.descriptionEvidenceDropped?.total) || 0);
+  // Some cross-board identity evidence exists only after final description
+  // enrichment/markup cleanup. Keep that last-mile dedup as its own explicit
+  // stage rather than making the scored input look smaller than the funnel.
+  const finalDedupDropped = Math.max(0, Number(search.finalDedupDropped) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
   const dedupDropped = Math.max(0, relevanceKept - deduped);
-  const expectedKept = Math.max(0, deduped - ageDropped - roleDropped - historyDropped - descriptionEvidenceDropped);
+  const expectedKept = Math.max(0, deduped - ageDropped - roleDropped - historyDropped - descriptionEvidenceDropped - finalDedupDropped);
   return {
     raw,
     relevanceDropped,
@@ -1760,6 +1764,7 @@ export function reconcileSearchFunnel(search) {
     roleDropped,
     historyDropped,
     descriptionEvidenceDropped,
+    finalDedupDropped,
     kept,
     expectedKept,
     unexplainedDelta: kept - expectedKept,
@@ -2296,6 +2301,19 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
   const search = jobsTelemetry.search?.runId === runId ? jobsTelemetry.search : null;
   const pipeline = jobsTelemetry.pipeline?.runId === runId ? jobsTelemetry.pipeline : null;
   const scoring = jobsTelemetry.scoring?.runId === runId ? jobsTelemetry.scoring : null;
+  // Resolve rows are process-global too.  Keep only their signed, cumulative
+  // queue delta, and only when the row carries this exact run token.  This
+  // reconciles an initial funnel with a post-search recovery after restart
+  // without putting any listing/source-card content in the durable receipt.
+  let recoveryMergeNet = 0;
+  let hasRunScopedRecovery = false;
+  for (const resolve of Object.values(jobsTelemetry.resolves || {})) {
+    if (resolve?.runId !== runId || resolve?.hasMergeTelemetry !== true) continue;
+    const net = Number(resolve.cumulativeMergeNet);
+    if (!Number.isFinite(net)) continue;
+    recoveryMergeNet += Math.trunc(net);
+    hasRunScopedRecovery = true;
+  }
   const sources = {};
   if (search?.bySource && typeof search.bySource === 'object') {
     for (const [sourceId, source] of Object.entries(search.bySource)) {
@@ -2353,6 +2371,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         roleDropped: search.roleDropped,
         historyDropped: search.historyDropped,
         descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
+        finalDedupDropped: search.finalDedupDropped,
         kept: search.kept,
       },
     } : {}),
@@ -2371,6 +2390,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         providerCalls: scoring.providerCalls,
       },
     } : {}),
+    ...(hasRunScopedRecovery ? { recovery: { mergeNet: recoveryMergeNet } } : {}),
     sources,
     stagingStarted: pipeline?.stagingStarted === true,
   };
@@ -2517,6 +2537,10 @@ export function recordLinkedinResolveAttempt(sourceId, extra = {}, ownership = n
     hasMergeTelemetry: previous?.hasMergeTelemetry === true,
     passTimestamps: nextResolvePassTrail(previous),
     ...extra,
+    // A resolve row can survive several attempts, but it cannot be allowed to
+    // cross a fresh-search reset into another receipt.  This token is internal
+    // provenance, never persisted verbatim in the receipt's recovery aggregate.
+    runId: ownership?.jobRunId || previous?.runId || null,
   };
   jobsTelemetry.resolves[sourceId] = snapshot;
   return snapshot;
@@ -2527,6 +2551,11 @@ export function recordResolveMergeOutcome(sourceId, merge = {}, ownership = null
   if (!canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return null;
   const resolve = jobsTelemetry.resolves[sourceId];
   if (!sourceId || !resolve) return null;
+  // Older in-memory rows did not retain their run token.  Bind one only while
+  // the current ownership fence authorizes this event; never let a stale row
+  // contribute a renderer delta to a different run's terminal receipt.
+  if (!resolve.runId && ownership?.jobRunId) resolve.runId = ownership.jobRunId;
+  if (ownership?.jobRunId && resolve.runId !== ownership.jobRunId) return null;
   const normalized = {
     replacedExisting: Number(merge.replacedExisting) || 0,
     fresh: Number(merge.fresh) || 0,
@@ -3865,7 +3894,12 @@ function boundedDedupProvenance(entries) {
       url: String(job?.url || '').slice(0, 240),
       nativeId: String(job?.jobkey || job?.jobKey || job?.jobId || job?.id || '').slice(0, 120),
     });
-    out.push({ reason, kept: brief(entry.kept), dropped: brief(entry.dropped) });
+    out.push({
+      reason,
+      ...(entry?.stage ? { stage: String(entry.stage).slice(0, 60) } : {}),
+      kept: brief(entry.kept),
+      dropped: brief(entry.dropped),
+    });
   }
   return { total: entries.length, counts, entries: out, omitted: Math.max(0, entries.length - out.length) };
 }
@@ -6172,6 +6206,7 @@ Return a JSON object with four arrays of search query strings:
           sourceResults[sourceId].revealOutcomes = result.revealOutcomes.slice(0, 20);
         }
         if (result.providerGathered != null) sourceResults[sourceId].providerGathered = result.providerGathered;
+        if (result.truncated === true) sourceResults[sourceId].truncated = true;
         if (result.relevanceDropped != null) {
           sourceResults[sourceId].relevanceDropped = result.relevanceDropped;
           sourceResults[sourceId].admissionRelevanceDropped = result.relevanceDropped;
@@ -6404,7 +6439,6 @@ Return a JSON object with four arrays of search query strings:
     const deduped = dedupByTitleCompany(finalAdmission, {
       onDuplicate: (entry) => { dedupDrops.push(entry); },
     });
-    const dedupProvenance = boundedDedupProvenance(dedupDrops);
     // Per-source unique survivors of the dedup — lets the funnel tell a genuine
     // page-ceiling ("50 gathered, 50 unique → may be more") apart from a CLAMPING
     // source that re-served the same page across the walk ("50 gathered, 5 unique
@@ -6783,6 +6817,30 @@ Return a JSON object with four arrays of search query strings:
       logger.info(`[Jobs] Deferred ${descriptionEvidence.dropped.length} description-incomplete listing(s) (explicit=${descriptionEvidence.quality.deferred}, empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not scored or marked seen`);
     }
 
+    // Descriptions obtained during enrichment can turn two formerly
+    // incomparable board cards into an exact cross-source match. Run the same
+    // conservative identity rule one final time on score-safe rows so the
+    // scorer, staging checkpoint, cards, and seen-history writer share one
+    // duplicate-free universe. This is deliberately AFTER the evidence gate:
+    // an incomplete listing remains recoverable instead of being hidden merely
+    // because a better-described board copy happened to arrive first.
+    const finalDedupDrops = [];
+    const finalDeduped = dedupByTitleCompany(kept, {
+      onDuplicate: (entry) => { finalDedupDrops.push(entry); },
+    });
+    const finalDedupDropped = finalDedupDrops.length;
+    if (finalDedupDropped > 0) {
+      logger.info(`[Jobs] Final enrichment-ready dedup removed ${finalDedupDropped} duplicate score-safe listing(s)`);
+    }
+    kept = finalDeduped;
+    // Keep bounded provenance for BOTH passes. The final-pass count is also a
+    // first-class funnel stage below, so it cannot silently look like an AI or
+    // renderer loss.
+    const dedupProvenance = boundedDedupProvenance([
+      ...dedupDrops.map(entry => ({ ...entry, stage: 'admission' })),
+      ...finalDedupDrops.map(entry => ({ ...entry, stage: 'final-enrichment' })),
+    ]);
+
     // Do NOT write even the eligible rows to seen-history yet. The Job Board is
     // the single authoritative writer after it displays cards; leaving the
     // low-evidence rows out of this telemetry confirms they cannot be hidden by
@@ -6801,7 +6859,7 @@ Return a JSON object with four arrays of search query strings:
     tagJobLanguages(kept);
 
     logger.info(
-      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, finalAdmission.length - deduped.length)}, ageDropped=${ageDropped}, roleDropped=${roleGate.dropped}, historyDropped=${historyDropped})`
+      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, finalAdmission.length - deduped.length)}, ageDropped=${ageDropped}, roleDropped=${roleGate.dropped}, historyDropped=${historyDropped}, finalDedupDropped=${finalDedupDropped})`
     );
     // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
@@ -7082,6 +7140,7 @@ Return a JSON object with four arrays of search query strings:
       historyDropped,
       historyDropSamples,
       kept: kept.length,
+      finalDedupDropped,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
         deferred: descriptionEvidence.quality.deferred,
@@ -9082,6 +9141,7 @@ Return a JSON object with four arrays of search query strings:
       const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
       jobsTelemetry.resolves[sourceId] = {
       ts: Date.now(),
+      runId: jobRunId || null,
       resolved: !!result.resolved,
       cumulativeMergeNet: priorResolveMergeNet,
       hasMergeTelemetry: jobsTelemetry.resolves[sourceId]?.hasMergeTelemetry === true,
@@ -9268,6 +9328,7 @@ Return a JSON object with four arrays of search query strings:
         const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
         jobsTelemetry.resolves.indeed = {
         ts: Date.now(),
+        runId: jobRunId || null,
         kind: 'description-retry',
         cumulativeMergeNet: priorResolveMergeNet,
         hasMergeTelemetry: jobsTelemetry.resolves.indeed?.hasMergeTelemetry === true,
@@ -9555,6 +9616,7 @@ Return a JSON object with four arrays of search query strings:
       const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
       jobsTelemetry.resolves[sourceId] = {
       ts: Date.now(),
+      runId: jobRunId || null,
       kind: 'source-resume',
       resolved,
       cumulativeMergeNet: priorResolveMergeNet,

@@ -5,6 +5,7 @@ import { persistenceContentFingerprint, runNodeMigrations, CURRENT_SCHEMA_VERSIO
 import { TIMINGS } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
+import { textDocumentSessions } from '../utils/textDocumentSessions';
 
 
 /**
@@ -26,6 +27,9 @@ export function useCanvasPersistence({
   nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
   flushStack,
   resetStack,
+  quitGateRef,
+  freezeCanvasForQuit,
+  releaseCanvasQuitFence,
   clearHistory,
   isAnimatingRef,
   updateSetting,
@@ -42,6 +46,11 @@ export function useCanvasPersistence({
   const loadHideTimerRef = useRef(null);
   const contentRevisionRef = useRef(0);
   const loadRequestRef = useRef(0);
+  // Shared with the autosave hook. A close-time/manual save waits for the
+  // operation which already owns the workspace writer, then re-checks whether
+  // a fresh frozen snapshot is still needed instead of failing merely because
+  // `saveStateRef` happened to read "autosaving".
+  const saveOperationRef = useRef(null);
 
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -78,7 +87,7 @@ export function useCanvasPersistence({
     setSaveState(nextStatus);
   }, []);
 
-  const saveCanvas = useCallback(async () => {
+  const performCanvasSave = useCallback(async () => {
     const saveStatus = saveStateRef.current;
     if (!window.electronAPI
         || saveStatus === 'saving'
@@ -134,6 +143,7 @@ export function useCanvasPersistence({
           return false;
         }
 
+        hasUnsavedChangesRef.current = false;
         setHasUnsavedChanges(false);
         setSaveStatus('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
@@ -166,33 +176,175 @@ export function useCanvasPersistence({
     }
   }, [addToast, flushStack, isAnimatingRef, updateSetting, isMountedRef, setSaveStatus]); // currentFile read via ref — omitted intentionally
 
+  const saveCanvas = useCallback(async () => {
+    // Serialize every explicit/close-time save behind an in-flight manual or
+    // autosave operation. In particular, quit invalidates the autosave's UI
+    // generation, so that older write intentionally leaves the dirty flag set;
+    // after it settles this loop starts one fresh save of the frozen canvas.
+    for (;;) {
+      const activeOperation = saveOperationRef.current;
+      if (!activeOperation) break;
+      let activeSucceeded = false;
+      try {
+        activeSucceeded = Boolean(await activeOperation);
+      } catch {
+        // The owning save reports its own failure. A queued explicit save gets
+        // one normal retry below using the current serialization boundary.
+      }
+      if (!isMountedRef.current) return false;
+      // Autosave returns true only when its file path, content revision, quit
+      // generation, and mounted owner all still match. That is already the
+      // authoritative clean result; the React-backed dirty ref may lag its
+      // just-enqueued false update by one layout effect.
+      if (activeSucceeded) return true;
+    }
+
+    const operation = performCanvasSave();
+    saveOperationRef.current = operation;
+    try {
+      return await operation;
+    } finally {
+      if (saveOperationRef.current === operation) saveOperationRef.current = null;
+    }
+  }, [performCanvasSave, isMountedRef]);
+
   const handleSaveRequest = useEffectEvent(async () => saveCanvas());
 
+  const prepareQuitCommit = useEffectEvent(async () => {
+    // Invalidating immediately makes any load already awaiting disk I/O a
+    // stale request. Do this before the render-turn drain so a cancelled quit
+    // never opens a different workspace after the UI is released.
+    loadRequestRef.current += 1;
+    return freezeCanvasForQuit?.();
+  });
+  const releaseQuitCommit = useEffectEvent(() => {
+    releaseCanvasQuitFence?.();
+  });
+
+  const flushDocumentSessions = useCallback(async ({ notify = false } = {}) => {
+    const result = await textDocumentSessions.flushAndSettleAll();
+    if (!result.success && notify) {
+      addToast({
+        title: 'Document needs attention',
+        description: 'Resolve the Markdown or text file save issue before replacing or closing this canvas.',
+        type: 'error',
+      });
+    }
+    return result;
+  }, [addToast]);
+
   useEffect(() => {
+    // Electron invokes these as EventEmitter callbacks. Do not let a renderer
+    // exception turn into a missing acknowledgement: quit fails closed after a
+    // timeout, but a save request deliberately waits for this correlated reply.
+    const sendQuitResponse = (state, requestId) => {
+      try {
+        window.electronAPI?.sendQuitResponse?.(state, requestId);
+      } catch (error) {
+        console.error('Could not acknowledge quit request:', error);
+      }
+    };
+    const sendSaveResponse = (success, requestId) => {
+      try {
+        window.electronAPI?.sendSaveResponse?.(Boolean(success), requestId);
+      } catch (error) {
+        console.error('Could not acknowledge save request:', error);
+      }
+    };
+
     // ── Quit Handshake ──────────────────────────────────────────────────────
     // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
-    const unlistenQuit = window.electronAPI?.onQuitRequest?.(async () => {
-      // A paste can be followed immediately by Cmd+Q. Wait for preload's
-      // outstanding draft invokes and main's disk barrier before answering the
-      // close handshake, otherwise the last edit can trail window destruction.
+    const unlistenQuit = window.electronAPI?.onQuitRequest?.(async ({ requestId } = {}) => {
+      let response = { hasUnsavedChanges: true, documentSaveFailed: true };
       try {
-        await window.electronAPI?.flushNonApiAiPersistence?.();
-      } catch {
-        // Main performs the same barrier before destruction; keep the standard
-        // close handshake available if this renderer-side optimization fails.
+        // A paste can be followed immediately by Cmd+Q. Wait for preload's
+        // outstanding draft invokes and main's disk barrier before answering the
+        // close handshake, otherwise the last edit can trail window destruction.
+        try {
+          await window.electronAPI?.flushNonApiAiPersistence?.();
+        } catch {
+          // Main performs the same barrier before destruction; keep the standard
+          // close handshake available if this renderer-side optimization fails.
+        }
+        const documents = await textDocumentSessions.flushAndSettleAll();
+        response = {
+          hasUnsavedChanges: hasUnsavedChangesRef.current,
+          documentSaveFailed: !documents.success,
+        };
+      } catch (error) {
+        // A failed renderer-side flush is never evidence that the document or
+        // canvas is clean. Return a correlated fail-closed response instead of
+        // leaving main waiting for its timeout.
+        console.error('Could not prepare quit response:', error);
+      } finally {
+        sendQuitResponse(response, requestId);
       }
-      window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
+    });
+
+    // The global quit coordinator asks every renderer to become inert before
+    // its final revalidation. This closes the gap where a window checked early
+    // in a multi-window quit could receive another edit while a later window
+    // is being saved. Inert blocks human input; Canvas's synchronous gate also
+    // rejects programmatic mutations (timers, promises, RF batches). The gate
+    // waits for already-accepted batches before it acknowledges main.
+    const unlistenQuitCommit = window.electronAPI?.onQuitCommitRequest?.(async ({ requestId } = {}) => {
+      if (document.body) document.body.inert = true;
+      try {
+        const frozen = await prepareQuitCommit();
+        if (frozen !== false) window.electronAPI?.sendQuitCommitAck?.(requestId);
+      } catch (error) {
+        // Do not ACK an incomplete state fence. Main will time out, broadcast a
+        // release, and leave this renderer usable rather than trusting a late
+        // programmatic update as clean.
+        console.error('Could not prepare quit commit barrier:', error);
+      }
+    });
+    const unlistenQuitCommitRelease = window.electronAPI?.onQuitCommitRelease?.(() => {
+      releaseQuitCommit();
+      if (document.body) document.body.inert = false;
     });
 
     // ── Preload Listeners ────────────────────────────────────────────────────
-    const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async () => {
-      const success = await handleSaveRequest(); // force save
-      window.electronAPI.sendSaveResponse(success);
+    const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async ({
+      requestId,
+      skipDocumentSessions = false,
+      forceCanvasSave = false,
+    } = {}) => {
+      let success = false;
+      try {
+        if (!skipDocumentSessions) {
+          const documents = await textDocumentSessions.flushAndSettleAll();
+          if (!documents.success) return;
+        }
+        // A document-only edit is already durable at this point. Do not route a
+        // clean/untitled canvas through Save As merely because the user chose a
+        // menu save while its Markdown preview was being settled.
+        if (!hasUnsavedChangesRef.current && !forceCanvasSave) {
+          success = true;
+          return;
+        }
+        success = await handleSaveRequest(); // force save
+      } catch (error) {
+        // requestSaveAndWait has no artificial deadline: a native Save As can
+        // legitimately be user-paced. An exception must therefore answer false
+        // rather than leaving main permanently awaiting this renderer callback.
+        console.error('Could not prepare save response:', error);
+      } finally {
+        sendSaveResponse(success, requestId);
+      }
     });
 
     // ── Window Unload Guard ──────────────────────────────────────────────────
     // Standard browser/electron safety for closing the window tab directly.
     const handleBeforeUnload = (e) => {
+      if (textDocumentSessions.hasUnresolvedChanges()) {
+        // beforeunload is synchronous. Start the durability flush now, but
+        // always keep this window alive until a later close sees it settled.
+        void textDocumentSessions.flushAndSettleAll();
+        e.preventDefault();
+        e.returnValue = '';
+        return;
+      }
       if (hasUnsavedChangesRef.current) {
         e.preventDefault();
         e.returnValue = ''; // Required for Chrome/Electron to show the prompt
@@ -202,6 +354,10 @@ export function useCanvasPersistence({
 
     return () => {
       unlistenQuit?.();
+      unlistenQuitCommit?.();
+      unlistenQuitCommitRelease?.();
+      releaseQuitCommit();
+      if (document.body) document.body.inert = false;
       unlistenSaveAndRespond?.();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
@@ -211,6 +367,8 @@ export function useCanvasPersistence({
   }, []); // Stable: reads live value via ref / useEffectEvent — no need to re-register on change
 
   const handleUnsavedChanges = useCallback(async (actionName) => {
+    const documents = await flushDocumentSessions({ notify: true });
+    if (!documents.success) return false;
     if (!hasUnsavedChangesRef.current) return true;
     
     // Uses the main process OS-level dialog to pause and ask the user
@@ -224,29 +382,34 @@ export function useCanvasPersistence({
     }
     
     return true;
-  }, [saveCanvas]);
+  }, [flushDocumentSessions, saveCanvas]);
 
   const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
-    if (!window.electronAPI || isAnimatingRef?.current) return;
+    if (!window.electronAPI || isAnimatingRef?.current || quitGateRef?.current?.frozen) return;
     const requestId = ++loadRequestRef.current;
+    const gateGeneration = quitGateRef?.current?.generation;
+    const isCurrentLoad = () => isMountedRef.current
+      && requestId === loadRequestRef.current
+      && !quitGateRef?.current?.frozen
+      && quitGateRef?.current?.generation === gateGeneration;
     
     // Security/UX Guard: Prevent overwriting unsaved work
     if (!isSilent) {
       const canProceed = await handleUnsavedChanges('open a different canvas');
-      if (!canProceed || requestId !== loadRequestRef.current) return;
+      if (!canProceed || !isCurrentLoad()) return;
     }
 
     try {
       const startedAt = performance.now();
       const setLoading = (progress, label) => {
-        if (!isMountedRef.current) return;
+        if (!isCurrentLoad()) return;
         setLoadState({ active: true, progress, label });
       };
       const finishLoading = (delayMs = 120) => {
         if (loadHideTimerRef.current) clearTimeout(loadHideTimerRef.current);
         loadHideTimerRef.current = setTimeout(() => {
           loadHideTimerRef.current = null;
-          if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+          if (!isCurrentLoad()) return;
           setLoadState({ active: false, progress: 0, label: '' });
         }, delayMs);
       };
@@ -264,7 +427,7 @@ export function useCanvasPersistence({
       // in flight — loadWorkspace involves a file read plus migrations and
       // can be slow. Bail before touching any state, matching saveCanvas's
       // guard on every post-await write below.
-      if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+      if (!isCurrentLoad()) return;
       setLoading(0.35, 'Reading workspace...');
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
@@ -319,7 +482,7 @@ export function useCanvasPersistence({
         if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
         loadTimerRef.current = setTimeout(() => {
           loadTimerRef.current = null;
-          if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+          if (!isCurrentLoad()) return;
           // ReactFlow may add runtime measurements during the first render;
           // the persistence signature intentionally ignores those while deeply
           // traversing nested canvases. Only clear the dirty flag if persisted
@@ -333,9 +496,9 @@ export function useCanvasPersistence({
           if (liveFingerprint === loadedFingerprint) setHasUnsavedChanges(false);
           const fitDuration = isSilent ? 0 : 800;
           requestAnimationFrame(() => {
-            if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+            if (!isCurrentLoad()) return;
             requestAnimationFrame(() => {
-              if (!isMountedRef.current || requestId !== loadRequestRef.current) return;
+              if (!isCurrentLoad()) return;
               setLoading(0.92, fitDuration > 0 ? 'Fitting workspace...' : 'Framing workspace...');
               customFitView({ duration: fitDuration, reason: isSilent ? 'initial-load' : 'manual-load' });
               setLoading(1, 'Ready');
@@ -352,15 +515,14 @@ export function useCanvasPersistence({
         setLoadState({ active: false, progress: 0, label: '' });
       }
     } catch (err) {
-      if (requestId !== loadRequestRef.current) return;
+      if (!isCurrentLoad()) return;
       EventLogger.error('Failed to load canvas:', err);
-      if (!isMountedRef.current) return;
       setLoadState({ active: false, progress: 0, label: '' });
       if (!isSilent) addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
       // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it
       if (isSilent) updateSetting?.('lastOpenedWorkspace', null);
     }
-  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting, isMountedRef]);
+  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting, isMountedRef, quitGateRef]);
 
   const exportCanvasToPNG = useCallback(() => {
     if (isAnimatingRef?.current || isExportingRef.current) return;
@@ -396,6 +558,7 @@ export function useCanvasPersistence({
     currentFile,
     setCurrentFile,
     saveStateRef, // Exposed so useCanvasInitialization can gate auto-saves on in-progress saves
+    saveOperationRef,
     loadState,
   };
 }

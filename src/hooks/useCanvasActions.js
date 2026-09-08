@@ -8,6 +8,8 @@ import { generateId } from '../utils/idGenerator';
 import { cancelNodeTasksRecursively, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { strokePoints } from '../utils/geometry';
+import { collectOrphanTextDocumentPaths, collectRemainingTextDocumentPaths } from '../utils/osDeletionPaths';
+import { textDocumentSessions } from '../utils/textDocumentSessions';
 
 const CLIPBOARD_KEY = 'infinite-canvas-clipboard';
 const PASTE_REPEAT_OFFSET = 40;
@@ -27,6 +29,7 @@ export function useCanvasActions({
   isAnimatingRef,
   canvasFilePath = null,
   addToast = null,
+  enumerateAllNodes = null,
 }) {
   const { getNodes, getEdges, setEdges: rfSetEdges, getViewport } = useReactFlow();
 
@@ -300,13 +303,46 @@ export function useCanvasActions({
     setDrawings([]);
   }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, canvasFilePath, addToast]);
 
+  const preflightClear = useCallback(async () => {
+    if (isAnimatingRef?.current) return;
+    const allNodes = getNodes();
+    const lockedIds = new Set(allNodes.filter(node => node.data?.locked).map(node => node.id));
+    const removedNodes = allNodes.filter(node => !lockedIds.has(node.id));
+    const allLiveNodes = enumerateAllNodes?.() ?? allNodes;
+    const orphanTextPaths = textDocumentSessions.filterPathsWithoutLiveAliases(
+      collectOrphanTextDocumentPaths(removedNodes, allLiveNodes),
+      collectRemainingTextDocumentPaths(removedNodes, allLiveNodes),
+    );
+    if (orphanTextPaths.length > 0) {
+      try {
+        const result = await textDocumentSessions.flushAndSettlePaths(orphanTextPaths);
+        if (!result.success) {
+          addToast?.({
+            title: 'Canvas was not cleared',
+            description: `Could not safely save ${result.unresolvedFilePaths.join(', ')}. Resolve its text-file conflict or save error first.`,
+            type: 'error',
+          });
+          return;
+        }
+      } catch (error) {
+        addToast?.({
+          title: 'Canvas was not cleared',
+          description: `Could not settle the linked text file: ${error?.message || 'unknown error'}.`,
+          type: 'error',
+        });
+        return;
+      }
+    }
+    doClear();
+  }, [addToast, doClear, enumerateAllNodes, getNodes, isAnimatingRef]);
+
   const clearCanvas = useCallback(() => {
     if (requestClearConfirm) {
-      requestClearConfirm(doClear);
+      requestClearConfirm(preflightClear);
     } else {
-      doClear();
+      void preflightClear();
     }
-  }, [requestClearConfirm, doClear]);
+  }, [requestClearConfirm, preflightClear]);
 
   return { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes };
 }

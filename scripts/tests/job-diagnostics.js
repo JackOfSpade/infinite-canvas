@@ -10,7 +10,7 @@ import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/util
 // must not touch): clipboardCap.js has zero electron/module dependencies, so
 // this is safe and mirrors the EventLogger.js direct-import pattern above.
 import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } from '../../electron/ipc/bugReport/clipboardCap.js';
-import { SAVED_REPORT_RETENTION, __resetSavedBugReportClearForTests, buildClipboardPointer, clearSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
+import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
@@ -386,6 +386,102 @@ export default [
         fs.rmSync(dir, { recursive: true, force: true });
       }
       return { durableOutput: 3 };
+    },
+},
+{
+    name: 'durable terminal receipt reconciles signed run-scoped source recovery after restart',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, search: telemetry.search, resolves: telemetry.resolves,
+        scoring: telemetry.scoring, bucketing: telemetry.bucketing, pipeline: telemetry.pipeline,
+        history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-durable-recovery-receipt-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'durable-recovery-hub';
+      const runId = 'durable-recovery-run';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      const receiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+      try {
+        Object.assign(telemetry, {
+          nodeId, search: null, pipeline: null, scoring: null, bucketing: null,
+          history: null, resolves: { stale: { runId: 'later-run', cumulativeMergeNet: 999 } },
+        });
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: Array.from({ length: 149 }, () => ({})),
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId, nodeId, startedAt: 1_700_000_000_000, completedAt: 1_700_000_239_600,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 149 },
+          funnel: { raw: 200, relevanceDropped: 0, deduped: 160, ageDropped: 0, roleDropped: 11, historyDropped: 0, descriptionEvidenceDropped: 0, kept: 129 },
+          recovery: { mergeNet: 20, sourceId: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }] },
+          scoring: { input: 149, selected: 149, scored: 149, placeholders: 0, unscored: 0, failedBatches: 0 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        const positive = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        const positiveRecovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(positive.includes('129 initial score-ready + 20 recovered = 149 terminal scoring input.')
+          && positive.includes('recovery net +20')
+          && positiveRecovery.includes('recovery +20 = 149 terminal scoring input')
+          && !positive.includes('MUST NOT PERSIST') && !positiveRecovery.includes('MUST NOT PERSIST'),
+        'a redacted +20 recovery aggregate must reconcile initial funnel and terminal scorer after restart without retaining job content');
+
+        // Recovery is pre-preference accounting. The complete candidate pool
+        // still has 149 rows, while 29 are deliberately filtered before the
+        // scorer receives its 120-row subset; comparing recovery to selected
+        // scorer input would falsely reject this otherwise durable run.
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: Array.from({ length: 149 }, () => ({})), gatheredJobCount: 120,
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId, nodeId, startedAt: 1_700_000_000_000, completedAt: 1_700_000_239_600,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 120 },
+          funnel: { raw: 200, relevanceDropped: 0, deduped: 160, ageDropped: 0, roleDropped: 11, historyDropped: 0, descriptionEvidenceDropped: 0, kept: 129 },
+          recovery: { mergeNet: 20 },
+          scoring: { input: 120, selected: 120, scored: 120, placeholders: 0, unscored: 0, failedBatches: 0 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        const partialPreferences = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(partialPreferences.includes('✅ **DURABLE OUTPUT COMPLETE**')
+          && partialPreferences.includes('129 initial score-ready + 20 recovered = 149 candidate pool − 29 preference-filtered = 120 terminal scoring input.'),
+        'durable recovery must state the full candidate-pool-to-preference-to-scorer arithmetic after restart');
+
+        // A signed recovery field is a durable accounting assertion. It cannot
+        // be allowed to coexist with an unrelated candidate pool and still
+        // earn a green restart-only verdict merely because score-ready output
+        // happened to match.
+        const inconsistentRecovery = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+        inconsistentRecovery.recovery = { mergeNet: 19 };
+        fs.writeFileSync(receiptPath, JSON.stringify(inconsistentRecovery), 'utf8');
+        const recoveryMismatch = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(recoveryMismatch.includes('⚠️ **INDETERMINATE**')
+          && recoveryMismatch.includes('durable recovery 129 initial +19 = 148 ≠ saved preference candidate pool 149'),
+        'an inconsistent durable recovery aggregate must prevent a false-green output verdict');
+
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
+          jobs: Array.from({ length: 129 }, () => ({})),
+        }), 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId, nodeId, startedAt: 1_700_000_000_000, completedAt: 1_700_000_239_600,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 129 },
+          funnel: { raw: 200, relevanceDropped: 0, deduped: 160, ageDropped: 0, roleDropped: 11, historyDropped: 0, descriptionEvidenceDropped: 0, kept: 149 },
+          recovery: { mergeNet: -20 },
+          scoring: { input: 129, selected: 129, scored: 129, placeholders: 0, unscored: 0, failedBatches: 0 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        const negative = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(negative.includes('149 initial score-ready − 20 removed by recovery = 129 terminal scoring input.')
+          && negative.includes('recovery net −20'),
+        'a signed negative recovery aggregate must reconcile removals rather than being clamped to zero');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { initial: 129, recovered: 20, terminal: 149 };
     },
 },
 {
@@ -2035,7 +2131,7 @@ export default [
         && direct.markdown.includes('IPC EVT 0 ') && direct.markdown.includes('IPC EVT 2999 '),
       'direct/uncapped generation (the Save-to-file path) retains the full oversized event history with no cap');
 
-      __resetSavedBugReportClearForTests();
+      __resetSavedBugReportPruneForTests();
       registerBugReportHandlers();
       const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
       const sender = { id: 42_501, isDestroyed: () => false, once: () => {}, removeListener: () => {} };
@@ -2065,8 +2161,8 @@ export default [
       assert(!viaIpc.clipboardText.includes('IPC EVT 2999 ') && !viaIpc.clipboardText.includes('IPC EVT 0 '),
         'the clipboard pointer must not carry report body content');
       assert(viaIpc.clipboardText.includes('IPC pointer-delivery fixture.')
-        && viaIpc.clipboardText.includes('deleted when this app next starts'),
-      'the pointer should carry the issue description and state the file is session-scoped');
+        && viaIpc.clipboardText.includes('retained across app restarts'),
+      'the pointer should carry the issue description and state that restart does not invalidate it');
 
       fs.rmSync(viaIpc.savedPath, { force: true });
       return { directLength: direct.markdown.length, pointerLength: viaIpc.clipboardText.length };
@@ -2087,7 +2183,7 @@ export default [
       // Occupy the reports directory path with a regular FILE so mkdir fails.
       // A user is never left with nothing to paste just because the disk write
       // failed — the cap machinery survives precisely to serve this path.
-      __resetSavedBugReportClearForTests();
+      __resetSavedBugReportPruneForTests();
       const dir = savedBugReportDir();
       fs.rmSync(dir, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(dir), { recursive: true });
@@ -4346,12 +4442,13 @@ export default [
         terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 16 },
         funnel: {
           raw: 307, relevanceDropped: 0, deduped: 307, ageDropped: 0,
-          roleDropped: 298, historyDropped: 0, descriptionEvidenceDropped: 1, kept: 8,
+          roleDropped: 298, historyDropped: 0, descriptionEvidenceDropped: 1, finalDedupDropped: 0, kept: 8,
         },
         sources: { indeed: { count: 397, providerGathered: 397, relevanceDropped: 0 } },
       });
       assert(receipt.terminal.scoreReadyCount === 16
         && receipt.funnel.kept === 8
+        && receipt.funnel.finalDedupDropped === 0
         && receipt.sources.indeed.count === 397
         && receipt.sources.indeed.providerGathered === 397,
       'receipt stores the terminal 16-score-ready fact separately from its initial 8-row funnel and keeps source dimensions aligned');
@@ -4784,8 +4881,10 @@ export default [
       const finalDisposition = backend.slice(evidenceFilterStart, returnStart);
       assert(evidenceFilterStart >= 0
         && finalDisposition.includes("skipped: canvasFilePath ? 'deferred until results are visible'")
+        && finalDisposition.includes('const finalDeduped = dedupByTitleCompany(kept')
+        && finalDisposition.indexOf('const finalDeduped = dedupByTitleCompany(kept') > finalDisposition.indexOf('const descriptionEvidence = filterJobsByDescriptionEvidence(kept)')
         && !finalDisposition.includes('await appendJobsHistory('),
-      'low-evidence and gathered-but-unshown jobs must not enter durable seen-history');
+      'low-evidence and gathered-but-unshown jobs must not enter durable seen-history, while enrichment-ready rows receive a final dedup before staging');
 
       const searchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const finishStart = searchRenderer.indexOf('const finishScoringAndSpawn');
@@ -5251,6 +5350,28 @@ export default [
         'sourceJobKey: distinct Google htidocid values remain separate');
       assert(dedupeJobsByKey([googleFirstQuery, googleSecondQuery, differentGoogleListing], sourceJobKey).length === 2,
         'sourceJobKey: duplicate Google cards from two queries collapse before scoring/history');
+      const zipFirstPath = {
+        source: 'ziprecruiter', title: 'Solutions Architect', company: 'Example Co', location: 'Novi, MI',
+        url: 'https://www.ziprecruiter.com/c/Example-Co/Job/Solutions-Architect/-in-Novi,MI?jid=a2ff7a1591c73148',
+      };
+      const zipRenamedPath = {
+        ...zipFirstPath, company: 'Example Co, Inc.',
+        url: 'https://www.ziprecruiter.com/c/Example-Co-Inc/Job/Solutions-Architect-II/-in-Novi,MI?jid=a2ff7a1591c73148',
+      };
+      const zipCanonicalHostPath = {
+        ...zipRenamedPath,
+        url: 'https://ziprecruiter.com/c/Example-Co-Inc/Job/Solutions-Architect-II/-in-Novi,MI?jid=a2ff7a1591c73148',
+      };
+      const zipLookalikeHost = {
+        ...zipFirstPath, company: 'Different Company', title: 'Different Role',
+        url: 'https://not-ziprecruiter.example/jobs?jid=a2ff7a1591c73148',
+      };
+      assert(sourceJobKey(zipFirstPath) === sourceJobKey(zipRenamedPath),
+        'sourceJobKey: a genuine ZipRecruiter jid survives changed display-slug paths');
+      assert(sourceJobKey(zipFirstPath) === sourceJobKey(zipCanonicalHostPath),
+        'sourceJobKey: a genuine ZipRecruiter jid survives the www/canonical host redirect');
+      assert(sourceJobKey(zipFirstPath) !== sourceJobKey(zipLookalikeHost),
+        'sourceJobKey: a jid on a non-ZipRecruiter host is not trusted as ZipRecruiter identity');
       const sf = { title: 'SWE', company: 'Google', location: 'San Francisco, CA' };
       const nyc = { title: 'SWE', company: 'Google', location: 'New York, NY' };
       assert(sourceJobKey(sf) !== sourceJobKey(nyc),
@@ -5305,6 +5426,51 @@ export default [
       assert(dedupJobsAcrossSources([sameSourceA, { ...sameSourceA }]).length === 1,
         'dedupJobsAcrossSources: exact same-source listing ID still collapses query/page overlap');
 
+      // A ZipRecruiter employer slug can differ between result pages despite
+      // the same immutable jid. This must collapse BEFORE title/company
+      // grouping, because the display-company difference otherwise prevents
+      // the same-source identity comparison from ever running.
+      const zipSourceA = {
+        title: 'AI Solutions Architect & Agent Builder', company: 'Dave & Busters', location: 'Novi, MI', source: 'ziprecruiter',
+        url: 'https://www.ziprecruiter.com/c/Dave-Busters/Job/AI-Solutions-Architect/-in-Novi,MI?jid=a2ff7a1591c73148',
+      };
+      const zipSourceB = {
+        ...zipSourceA, company: 'Dave & Busters, Inc.',
+        url: 'https://ziprecruiter.com/c/Dave-Busters-Inc/Job/AI-Solutions-Architect-and-Agent-Builder/-in-Novi,MI?jid=a2ff7a1591c73148',
+      };
+      const zipDrops = [];
+      assert(dedupJobsAcrossSources([zipSourceA, zipSourceB], { onDuplicate: entry => zipDrops.push(entry) }).length === 1
+        && zipDrops[0]?.reason === 'same-source-listing-id',
+      'dedupJobsAcrossSources: same-source Zip jid collapses despite company-slug variation');
+
+      // An extractor-provided native ID is already a source-owned identity.
+      // A localized redirect (or a transient missing URL) must not turn the
+      // same row into a second listing merely because display metadata changed.
+      const indeedNativeA = {
+        title: 'Platform Engineer', company: 'Example Co', location: 'Toronto, ON', source: 'indeed', jobkey: 'native-indeed-42',
+        url: 'https://ca.indeed.com/viewjob?jk=native-indeed-42',
+      };
+      const indeedNativeB = {
+        ...indeedNativeA, title: 'Senior Platform Engineer', company: 'Example Co, Inc.', url: '',
+      };
+      assert(dedupJobsAcrossSources([indeedNativeA, indeedNativeB]).length === 1,
+        'dedupJobsAcrossSources: an explicit same-source native ID survives host changes or a missing URL');
+
+      // If the first Zip card was already absorbed by a matching card from a
+      // different board, its jid still has to remain globally reserved. A
+      // later Zip spelling variant cannot be allowed to re-enter merely
+      // because its changed company label forms a new title/company group.
+      const boardCopyBeforeZip = {
+        ...zipSourceA,
+        source: 'google',
+        url: 'https://www.google.com/search?htidocid=zip-alias-fixture',
+      };
+      const zipAliasDrops = [];
+      assert(dedupJobsAcrossSources([boardCopyBeforeZip, zipSourceA, zipSourceB], {
+        onDuplicate: entry => zipAliasDrops.push(entry),
+      }).length === 1 && zipAliasDrops.length === 2,
+      'dedupJobsAcrossSources: a Zip jid remains reserved after its first card loses to a cross-source copy');
+
       // Real cross-board shape: one source decorates the company/location while
       // both carry the same full JD. The substantial content fingerprint is a
       // safe secondary identity; city remains part of the guard so templated
@@ -5326,6 +5492,19 @@ export default [
         'cross-source copies with the same title/city/full JD collapse despite company and location decoration');
       assert(dedupJobsAcrossSources([glassdoorCopy, otherCityCopy]).length === 2,
         'same title/full JD in a different city remains a distinct requisition');
+
+      // The first pass can only see short board excerpts. Once late enrichment
+      // supplies matching full descriptions, the same conservative helper must
+      // collapse the cross-board copy without touching different-city postings.
+      const shortDice = { title: 'AI Solutions Architect & Agent Builder', company: 'Harman International', location: 'Novi, MI', source: 'dice', snippet: 'AI architect role.' };
+      const shortZip = { ...shortDice, company: 'Harman International Industries', source: 'ziprecruiter', snippet: 'Architect opening.' };
+      assert(dedupJobsAcrossSources([shortDice, shortZip]).length === 2,
+        'short pre-enrichment excerpts do not create an unsafe cross-board collapse');
+      const fullHarmanJd = 'Harman requisition 2026-204. ' + 'Design, build, and operate AI architecture for connected products. '.repeat(12);
+      const enrichedDice = { ...shortDice, snippet: fullHarmanJd };
+      const enrichedZip = { ...shortZip, snippet: fullHarmanJd };
+      assert(dedupJobsAcrossSources([enrichedDice, enrichedZip]).length === 1,
+        'enrichment-ready full descriptions collapse the confirmed cross-board copy');
 
       return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length, orderDependent: orderDependent.length };
     },
@@ -6088,6 +6267,13 @@ export default [
       });
       assert(!missing.reconciled && missing.unexplainedDelta === -79,
         `an unexplained 79-row loss must fail reconciliation, got ${JSON.stringify(missing)}`);
+      const finalDedup = reconcileSearchFunnel({
+        raw: 10, relevanceDropped: 0, deduped: 10, ageDropped: 1,
+        historyDropped: 2, descriptionEvidenceDropped: { total: 1 },
+        finalDedupDropped: 1, kept: 5,
+      });
+      assert(finalDedup.reconciled && finalDedup.expectedKept === 5 && finalDedup.finalDedupDropped === 1,
+        `a final enrichment-ready dedup must be an explicit reconciled funnel stage, got ${JSON.stringify(finalDedup)}`);
       return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped };
     },
   },
@@ -10143,7 +10329,7 @@ export default [
     },
   },
   {
-    name: 'job completion assessment recognizes exhausted browser walk (empty-page) as verified complete',
+    name: 'job completion assessment does not call a ZipRecruiter claimed-total shortfall exhausted',
     run: () => {
       const telemetry = getJobsTelemetry();
       const saved = {
@@ -10169,7 +10355,7 @@ export default [
           sources: {
             ziprecruiter: {
               count: 442, providerGathered: 445, providerTotal: 499,
-              relevanceDropped: 0, stopReason: 'empty-page',
+              relevanceDropped: 0, truncated: true, stopReason: 'provider-total-shortfall',
             },
           },
         }), 'utf8');
@@ -10182,7 +10368,7 @@ export default [
             bySource: {
               ziprecruiter: {
                 count: 442, unique: 442, providerGathered: 445, claimedTotal: 499,
-                unavailableDetailDropped: 3, pagesWalked: 24, stopReason: 'empty-page',
+                unavailableDetailDropped: 3, pagesWalked: 24, truncated: true, stopReason: 'provider-total-shortfall',
               },
             },
           },
@@ -10198,13 +10384,102 @@ export default [
           connectedSourceHubIds: [nodeId], stale: false,
         }]);
 
-        assert(assessment.includes('✅ **VERIFIED COMPLETE**'), `expected VERIFIED COMPLETE, got:\n${assessment}`);
-        assert(assessment.includes('traversed all 445 reachable candidate identities (board advertised ~499; ended at empty-page · 442 usable row(s) retained; 3 confirmed-unavailable detail listings dropped)'),
-          'coverage distinguishes candidate traversal, retained rows, and confirmed-unavailable detail drops');
+        assert(assessment.includes('⚠️ **INDETERMINATE**'), `expected incomplete coverage, got:\n${assessment}`);
+        assert(assessment.includes('walk truncated before the result set ended')
+          && assessment.includes('445 of 499 candidate identities')
+          && assessment.includes('3 confirmed-unavailable detail listings dropped'),
+        'claimed-total shortfall preserves partial rows/unavailable detail accounting without calling the empty page exhaustive');
         assert(!assessment.includes('no scroll-backed Google source'),
           'unqueried Google source note is omitted when other sources are present');
-        assert(!assessment.includes('INDETERMINATE'),
-          'exhausted source does not cause an INDETERMINATE verdict');
+
+        // After restart, a matching receipt/snapshot can still prove that the
+        // retained output was processed, but the durable ZipRecruiter source
+        // fact proves collection itself stopped short. The scoped green output
+        // verdict must state that concrete shortfall in its own headline rather
+        // than softening it to generic missing live coverage.
+        Object.assign(telemetry, {
+          pipeline: null, search: null, scoring: null, bucketing: null,
+          history: null, resolves: {},
+        });
+        const restartOnly = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(restartOnly.includes('✅ **DURABLE OUTPUT COMPLETE**')
+          && restartOnly.includes('Known collection shortfall: `ziprecruiter` traversed 445 of 499 advertised candidate identities.')
+          && restartOnly.includes('The saved output is complete only for the collected rows.'),
+        `restart-only durable output must not conceal an observed collection shortfall, got:\n${restartOnly}`);
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job completion assessment infers an old ZipRecruiter empty-page total shortfall',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline, history: telemetry.history,
+      };
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-completion-legacy-zr-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'completion-hub-legacy-zr';
+      const runId = 'completion-run-legacy-zr-42';
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
+      try {
+        fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
+          runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(), jobs: [{}],
+        }), 'utf8');
+        // This is the durable shape written before `truncated` existed: its
+        // empty page was falsely reported as exhaustive despite 22 advertised
+        // candidate identities never being traversed.
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-last-run.json'), JSON.stringify({
+          runId, nodeId, startedAt: Date.now() - 10_000, completedAt: Date.now(),
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 1 }, stagingStarted: true,
+          cleanup: { attempted: true, cleared: true },
+          funnel: { raw: 419, deduped: 419, kept: 1, relevanceDropped: 0, ageDropped: 0, roleDropped: 418, historyDropped: 0, descriptionEvidenceDropped: 0 },
+          sources: {
+            ziprecruiter: {
+              count: 419, providerGathered: 422, providerTotal: 444,
+              unavailableDetailDropped: 3, relevanceDropped: 0, stopReason: 'empty-page',
+            },
+          },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId, windowId: null,
+          pipeline: { phase: 'completed', active: false, startedAt: Date.now() - 10_000, ts: Date.now(), runId },
+          search: {
+            ts: Date.now() - 9_000, queries: 1, raw: 419, deduped: 419, ageDropped: 0,
+            roleDropped: 418, historyDropped: 0, relevanceDropped: 0, kept: 1, runId,
+            bySource: {
+              ziprecruiter: {
+                count: 419, unique: 419, providerGathered: 422, claimedTotal: 444,
+                unavailableDetailDropped: 3, pagesWalked: 23, stopReason: 'empty-page',
+              },
+            },
+          },
+          resolves: {},
+          scoring: { ts: Date.now() - 7_000, input: 1, selectedForScoring: 1, scored: 1, placeholders: 0, unscored: 0, batches: 1, failedBatches: 0 },
+          bucketing: { ts: Date.now() - 6_000, input: 1, roleCount: 1, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [] },
+          history: { boardDisplay: { input: 1, written: 1 } },
+        });
+
+        const assessment = buildJobCompletionAssessment(canvas, new Set([nodeId]), [{
+          id: 'board-node-legacy-zr', hubState: 'done', resultCount: 1, mergeUnique: 1,
+          renderedCardCount: 1, combineSignature: `${nodeId}=test-fingerprint`,
+          connectedSourceHubIds: [nodeId], stale: false,
+        }]);
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+
+        assert(assessment.includes('⚠️ **INDETERMINATE**')
+          && assessment.includes('walk truncated before the result set ended')
+          && assessment.includes('422 of 444 candidate identities')
+          && assessment.includes('3 confirmed-unavailable detail listings dropped'),
+        `old receipt must remain incomplete, got:\n${assessment}`);
+        assert(recovery.includes('walk hit an empty page before the provider’s verified advertised total; coverage is incomplete')
+          && !recovery.includes('traversed all 422 reachable candidate identities'),
+        `old receipt must not be labelled lossless, got:\n${recovery}`);
       } finally {
         Object.assign(telemetry, saved);
         fs.rmSync(dir, { recursive: true, force: true });
@@ -10872,37 +11147,75 @@ export default [
     },
   },
 {
-    name: 'Saved bug reports are session-scoped: cleared on start, pruned in-session, and never blanket-delete the directory',
+    name: 'Saved bug reports survive restarts, then age/count prune without blanket-deleting the directory',
     run: async () => {
-      __resetSavedBugReportClearForTests();
+      __resetSavedBugReportPruneForTests();
       const dir = savedBugReportDir();
       fs.rmSync(dir, { recursive: true, force: true });
       fs.mkdirSync(dir, { recursive: true });
 
-      // Clearing is what stops the directory growing across app sessions. It
-      // must be surgical: a file a user or another tool dropped in there is not
-      // ours to delete, so only our own bug-report-*.md names are removed.
+      // Startup pruning must retain a recent report pointer across a restart,
+      // while removing expired app-owned reports. It must be surgical: a file
+      // a user or another tool dropped in there is not ours to delete.
       fs.writeFileSync(path.join(dir, 'bug-report-2020-01-01T00-00-00-000Z.md'), 'stale', 'utf8');
       fs.writeFileSync(path.join(dir, 'bug-report-2020-01-02T00-00-00-000Z.md'), 'stale', 'utf8');
+      const freshPath = path.join(dir, 'bug-report-2026-09-07T21-07-14-174Z.md');
+      fs.writeFileSync(freshPath, 'fresh pointer target', 'utf8');
       fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep me', 'utf8');
-      const cleared = await clearSavedBugReports();
-      assert(cleared.removed === 2 && !cleared.error,
-        `clearing should remove exactly the saved reports, got ${JSON.stringify(cleared)}`);
+      const expiredAt = new Date(Date.now() - SAVED_REPORT_MAX_AGE_MS - 1_000);
+      fs.utimesSync(path.join(dir, 'bug-report-2020-01-01T00-00-00-000Z.md'), expiredAt, expiredAt);
+      fs.utimesSync(path.join(dir, 'bug-report-2020-01-02T00-00-00-000Z.md'), expiredAt, expiredAt);
+      const pruned = await pruneSavedBugReports();
+      assert(pruned.removed === 2 && !pruned.error,
+        `startup pruning should remove exactly the expired reports, got ${JSON.stringify(pruned)}`);
+      // Pruning intentionally resolves operational failures as `{ error }` so
+      // startup can remain fire-and-forget. main.js must log that resolved
+      // branch rather than relying only on Promise.catch, which never sees it.
+      const mainSource = fs.readFileSync(path.join(process.cwd(), 'electron/main.js'), 'utf8');
+      assert(mainSource.includes('if (r.error) logger.warn(`[BugReport] could not prune saved reports: ${r.error}`);')
+        && mainSource.includes('else if (r.removed > 0) logger.info(`[BugReport] pruned ${r.removed} expired/excess saved report(s)`);'),
+      'startup report retention must log resolved prune errors while retaining successful-removal telemetry');
       assert(fs.existsSync(path.join(dir, 'notes.txt')),
-        'clearing must never remove a file it did not write');
-      assert(fs.readdirSync(dir).filter(f => /^bug-report-.*\.md$/.test(f)).length === 0,
-        'no saved report should survive the clear');
+        'pruning must never remove a file it did not write');
+      assert(fs.existsSync(freshPath),
+        'a recent report pointer must survive startup pruning and remain readable after restart');
+
+      // The cutoff is strictly older than seven days: a report exactly at the
+      // boundary remains until a later cleanup observes it as older. Freeze the
+      // clock so a few milliseconds spent in this test cannot blur that contract.
+      const boundaryPath = path.join(dir, 'bug-report-seven-day-boundary.md');
+      const requestedBoundaryNow = Date.now();
+      fs.writeFileSync(boundaryPath, 'seven-day boundary', 'utf8');
+      fs.utimesSync(
+        boundaryPath,
+        new Date(requestedBoundaryNow - SAVED_REPORT_MAX_AGE_MS),
+        new Date(requestedBoundaryNow - SAVED_REPORT_MAX_AGE_MS),
+      );
+      // Docker/overlay filesystems may quantize the requested timestamp. Base
+      // the frozen clock on the value that was actually persisted so this is
+      // an exact-boundary test on every supported filesystem.
+      const boundaryNow = fs.statSync(boundaryPath).mtimeMs + SAVED_REPORT_MAX_AGE_MS;
+      const realDateNow = Date.now;
+      try {
+        Date.now = () => boundaryNow;
+        const boundaryPrune = await pruneSavedBugReports();
+        assert(!boundaryPrune.error && fs.existsSync(boundaryPath),
+          'a report exactly seven days old must not be pruned by the strictly-older retention cutoff');
+      } finally {
+        Date.now = realDateNow;
+      }
+      fs.rmSync(boundaryPath, { force: true });
 
       // A missing directory is the normal first-run state, not an error.
-      __resetSavedBugReportClearForTests();
+      __resetSavedBugReportPruneForTests();
       fs.rmSync(dir, { recursive: true, force: true });
-      const onMissing = await clearSavedBugReports();
+      const onMissing = await pruneSavedBugReports();
       assert(onMissing.removed === 0 && !onMissing.error,
-        `clearing an absent directory must succeed quietly, got ${JSON.stringify(onMissing)}`);
+        `pruning an absent directory must succeed quietly, got ${JSON.stringify(onMissing)}`);
 
-      // Within one long session a user can generate many reports; retention
-      // bounds that without waiting for the next app start.
-      __resetSavedBugReportClearForTests();
+      // Within one long session a user can generate many reports; on a writable
+      // disk, count retention bounds that without waiting for the next app start.
+      __resetSavedBugReportPruneForTests();
       const written = [];
       for (let i = 0; i < SAVED_REPORT_RETENTION + 5; i++) {
         written.push(await writeSavedBugReport(`# Report ${i}\nbody ${i}\n`, {}));
@@ -10929,7 +11242,7 @@ export default [
         `byte and character counts must be tracked separately for multi-byte content, got ${JSON.stringify(accented)}`);
 
       fs.rmSync(dir, { recursive: true, force: true });
-      __resetSavedBugReportClearForTests();
+      __resetSavedBugReportPruneForTests();
       return { retention: SAVED_REPORT_RETENTION, remaining: remaining.length };
     },
   },
@@ -10937,7 +11250,7 @@ export default [
     name: 'Clipboard pointer names the file and stays short instead of carrying the report',
     run: () => {
       // The pointer exists so an AI reads the report from disk in segments. It
-      // must therefore say WHERE, HOW BIG, and that the file is session-scoped —
+      // must therefore say WHERE, HOW BIG, and its bounded retention policy —
       // and must stay small enough that pasting it costs nothing.
       const pointer = buildClipboardPointer({
         filePath: '/Users/jack/Library/Application Support/infinite-canvas/bug-reports/bug-report-2026-09-06T17-34-08-094Z.md',
@@ -10957,9 +11270,12 @@ export default [
       // overstates what a reader is about to consume on any multi-byte content.
       assert(pointer.includes('412,883 chars') && !pointer.includes('431,002'),
         `the pointer must report characters, not bytes on disk, got:\n${pointer}`);
-      assert(pointer.includes('deleted when this app next starts')
-        && pointer.includes(`${SAVED_REPORT_RETENTION} newer reports`),
-      'the pointer must name BOTH deletion triggers — app restart and the retention prune — or it promises survival it cannot deliver');
+      assert(pointer.includes('retained across app restarts')
+        && pointer.includes('on app start or a later report write')
+        && pointer.includes('best-effort cleanup normally prunes')
+        && pointer.includes('older than 7 days')
+        && pointer.includes(`${SAVED_REPORT_RETENTION} newest`),
+      'the pointer must truthfully state restart-safe, trigger-based, best-effort age/count retention semantics');
       assert(pointer.includes('segments'),
         'the pointer should tell its reader to read the file in segments rather than inline');
       assert(pointer.includes('Check that everything completed smoothly as expected.'),

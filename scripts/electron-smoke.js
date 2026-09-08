@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { buildResumeDocument } from '../electron/ipc/resumeHtml.js';
+import { BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS } from '../electron/utils/backgroundE2e.js';
 
 // `applicationPdfReconcile` must leave pdf.js to Electron main's Node resolver.
 // If Vite inlines it, pdf.js selects the browser worker path and PDF import
@@ -27,6 +28,7 @@ const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
 // needs the normal Electron runtime for renderer automation.
 delete env.ELECTRON_RUN_AS_NODE;
 env.INFINITE_CANVAS_E2E = '1';
+env.INFINITE_CANVAS_E2E_BACKGROUND = '1';
 
 let app;
 const rendererErrors = [];
@@ -71,6 +73,46 @@ async function waitForCheckbox(locator, checked, label, timeoutMs = 5000) {
     if (await locator.isChecked() === checked) return;
     if (Date.now() > deadline) assert.fail(`${label} (checked=${await locator.isChecked()})`);
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function waitForAsync(predicate, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() > deadline) assert.fail(label);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function waitForFileContent(filePath, expected, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let actual;
+  for (;;) {
+    try {
+      actual = await fs.readFile(filePath, 'utf8');
+      if (actual === expected) return;
+    } catch (error) {
+      actual = `<read failed: ${error?.message || error}>`;
+    }
+    if (Date.now() > deadline) {
+      assert.fail(`${label} (expected=${JSON.stringify(expected)}, actual=${JSON.stringify(actual)})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+let atomicReplaceSequence = 0;
+async function replaceFileAtomically(filePath, content) {
+  const tmpPath = path.join(
+    path.dirname(filePath),
+    `.__smoke_${process.pid}_${Date.now()}_${atomicReplaceSequence += 1}.tmp`,
+  );
+  try {
+    await fs.writeFile(tmpPath, content, 'utf8');
+    await fs.rename(tmpPath, filePath);
+  } finally {
+    await fs.rm(tmpPath, { force: true });
   }
 }
 
@@ -180,6 +222,21 @@ async function openNodeMenu(page, node) {
   await page.locator('.context-menu-enter').waitFor();
 }
 
+// Fixtures deliberately change the persisted workspace out from under the
+// renderer. Stop only the app's browser beforeunload guard for the following
+// controlled reload; accepting that dialog through Playwright races Chromium's
+// reload bookkeeping, while a real user-facing app window remains guarded.
+async function reloadFixture(page) {
+  await page.evaluate(() => {
+    window.addEventListener('beforeunload', event => event.stopImmediatePropagation(), {
+      capture: true,
+      once: true,
+    });
+  });
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+}
+
 try {
   app = await electron.launch({
     args: ['.', `--user-data-dir=${userDataDir}`],
@@ -187,11 +244,51 @@ try {
   });
 
   const page = await app.firstWindow();
+  const backgroundWindowState = await app.evaluate(({ BrowserWindow, Menu, app: electronApp }) => {
+    const windows = BrowserWindow.getAllWindows();
+    return {
+      windows: windows.map((window) => ({
+        visible: window.isVisible(),
+        focusable: window.isFocusable(),
+        focused: window.isFocused(),
+        alwaysOnTop: window.isAlwaysOnTop(),
+      })),
+      activationPolicy: typeof electronApp.getActivationPolicy === 'function'
+        ? electronApp.getActivationPolicy()
+        : null,
+      applicationMenuNull: Menu.getApplicationMenu() === null,
+    };
+  });
+  assert.equal(backgroundWindowState.windows.length, 1,
+    'background smoke must launch exactly one canvas BrowserWindow');
+  assert.deepEqual(backgroundWindowState.windows[0], {
+    visible: false,
+    focusable: false,
+    focused: false,
+    alwaysOnTop: false,
+  }, 'background smoke must not expose or activate its canvas BrowserWindow');
+  assert.equal(backgroundWindowState.applicationMenuNull, true,
+    'background smoke must not install a native application menu');
+  if (process.platform === 'darwin' && backgroundWindowState.activationPolicy !== null) {
+    assert.equal(backgroundWindowState.activationPolicy, 'prohibited',
+      'background smoke must prohibit macOS app activation when Electron exposes the policy');
+  }
+  // All subsequent renderer documents are test fixtures. Prevent their
+  // beforeunload guard from registering so a late Chromium dialog cannot race
+  // Playwright's navigation machinery. The initial document is handled by
+  // reloadFixture's one-shot capture listener below; this init script applies
+  // only after that first controlled reload.
+  await page.addInitScript(() => {
+    const addEventListener = window.addEventListener.bind(window);
+    window.addEventListener = (type, listener, options) => {
+      if (type === 'beforeunload') return;
+      return addEventListener(type, listener, options);
+    };
+  });
   page.on('pageerror', (error) => rendererErrors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
     if (message.type() === 'error') rendererErrors.push(`console: ${message.text()}`);
   });
-
   await page.waitForLoadState('domcontentloaded');
   step('dismiss onboarding');
   await expectVisible(page, 'Welcome to Infinite Canvas');
@@ -317,8 +414,7 @@ try {
     settings.lastOpenedWorkspace = filePath;
     localStorage.setItem(KEY, JSON.stringify(settings));
   }, { filePath: fixturePath, originalPhotoPath, originalSvgPath, spawnMs });
-  await page.reload();
-  await page.waitForLoadState('domcontentloaded');
+  await reloadFixture(page);
   await page.locator('.react-flow__node-sellhub').waitFor();
   await page.locator('.react-flow__node-marketplacecard').waitFor();
   const marketplaceStatus = page.locator('.react-flow__node-marketplacestatus');
@@ -658,9 +754,201 @@ try {
     settings.lastOpenedWorkspace = null;
     localStorage.setItem(KEY, JSON.stringify(settings));
   });
-  await page.reload();
-  await page.waitForLoadState('domcontentloaded');
+  await reloadFixture(page);
   await waitForCount(page.locator('.react-flow__node'), (n) => n === 0, 'restored blank canvas should be empty');
+  // The workspace-load path clears its transient dirty marker after React has
+  // committed the blank canvas. Let that cleanup finish before the next reload
+  // so Electron never raises a beforeunload confirmation for test scaffolding.
+  await page.waitForTimeout(250);
+
+  // ── Shared Markdown-file duplicate sync ─────────────────────────────────
+  // This is deliberately a real Electron path, not a registry unit test: two
+  // document nodes share one local file, renderer sessions, IPC writing, the
+  // main-process watcher, and local-file reads all participate. Everything is
+  // under the disposable preview fixture root.
+  step('sync duplicated Markdown document nodes through disk and conflicts');
+  const markdownSyncDir = path.join(previewFixtureRoot, 'markdown-sync');
+  const markdownSyncFile = path.join(markdownSyncDir, 'shared.md');
+  const markdownSyncWorkspace = path.join(markdownSyncDir, 'markdown-sync.json');
+  // A leading UTF-8 BOM is deliberately part of the CAS baseline. Browser
+  // Response.text() would strip it, whereas the validated text-read IPC must
+  // retain it exactly for the first full editor replacement below.
+  const initialMarkdown = '\uFEFF# Shared draft\r\n\r\nInitial value — café.\r\n';
+  const initialMarkdownTextarea = initialMarkdown.replace(/\r\n|\r/g, '\n');
+  await fs.mkdir(markdownSyncDir, { recursive: true });
+  await fs.writeFile(markdownSyncFile, initialMarkdown, 'utf8');
+  await page.evaluate(async ({ filePath, markdownPath }) => {
+    const fixture = {
+      schemaVersion: 3,
+      nodes: [
+        {
+          id: 'markdown-sync-a', type: 'document', position: { x: 50, y: 80 },
+          width: 560, height: 400,
+          data: { filename: 'shared.md', filePath: markdownPath, isExpanded: true, expandedWidth: 560, expandedHeight: 400 },
+        },
+        {
+          id: 'markdown-sync-b', type: 'document', position: { x: 650, y: 80 },
+          width: 560, height: 400,
+          data: { filename: 'shared.md', filePath: markdownPath, isExpanded: true, expandedWidth: 560, expandedHeight: 400 },
+        },
+      ],
+      edges: [],
+      drawings: [],
+    };
+    await window.electronAPI.saveWorkspace({ data: fixture, filePath });
+    const KEY = 'infiniteCanvas.settings';
+    const settings = JSON.parse(localStorage.getItem(KEY) || '{}');
+    settings.lastOpenedWorkspace = filePath;
+    localStorage.setItem(KEY, JSON.stringify(settings));
+  }, { filePath: markdownSyncWorkspace, markdownPath: markdownSyncFile });
+  step('load duplicated Markdown fixture');
+  await reloadFixture(page);
+  await waitForCount(page.locator('.react-flow__node-document'), (n) => n === 2,
+    'Markdown duplicate fixture should load both document nodes');
+
+  const markdownNodeA = page.locator('.react-flow__node-document[data-id="markdown-sync-a"]');
+  const markdownNodeB = page.locator('.react-flow__node-document[data-id="markdown-sync-b"]');
+  const markdownEditorA = markdownNodeA.getByLabel('Edit shared.md');
+  const markdownEditorB = markdownNodeB.getByLabel('Edit shared.md');
+  await markdownEditorA.waitFor();
+  await markdownEditorB.waitFor();
+  step('exercise Markdown duplicate synchronization');
+  const waitForSyncedMarkdown = (content, label) => waitForAsync(async () => (
+    await markdownEditorA.inputValue() === content && await markdownEditorB.inputValue() === content
+  ), label);
+  assert.equal(initialMarkdown[0], '\uFEFF', 'the Markdown fixture must begin with a UTF-8 BOM');
+  assert.equal(await markdownEditorA.inputValue(), initialMarkdownTextarea, 'first duplicate should present the BOM-prefixed CRLF baseline as textarea LF');
+  assert.equal(await markdownEditorB.inputValue(), initialMarkdownTextarea, 'second duplicate should present the same shared textarea baseline');
+
+  step('Markdown: CRLF and BOM survive a real textarea edit');
+  const crlfEditedTextarea = `${initialMarkdownTextarea}Edited without changing line endings.`;
+  const crlfEditedDisk = `${initialMarkdown}Edited without changing line endings.`;
+  await markdownEditorA.fill(crlfEditedTextarea);
+  await waitForFileContent(markdownSyncFile, crlfEditedDisk,
+    'an actual textarea edit must retain the CRLF disk convention and BOM');
+  await waitForSyncedMarkdown(crlfEditedTextarea,
+    'both duplicate textarea views must retain the same shared CRLF presentation draft');
+
+  step('Markdown: local edits mirror and persist');
+  const editFromA = '# Shared draft\n\nEdited from A.';
+  await markdownEditorA.fill(editFromA);
+  await waitForSyncedMarkdown(editFromA, 'editing A should immediately mirror in B');
+  await waitForFileContent(markdownSyncFile, editFromA.replace(/\n/g, '\r\n'),
+    'editing A should persist the shared file using the established CRLF convention');
+
+  const editFromB = '# Shared draft\n\nEdited from B.';
+  await markdownEditorB.fill(editFromB);
+  await waitForSyncedMarkdown(editFromB, 'editing B should immediately mirror in A');
+  await waitForFileContent(markdownSyncFile, editFromB.replace(/\n/g, '\r\n'),
+    'editing B should persist the shared file using the established CRLF convention');
+
+  // Exercise the real renderer quit-durability handshake without asking main
+  // to close this hidden smoke window. The request is sent immediately after
+  // a duplicate edit, while its normal debounce is still eligible to be
+  // pending; the renderer must flush the shared session before it replies.
+  step('Markdown: quit bridge flushes an immediate shared draft');
+  const quitBridgeDraft = '# Shared draft\n\nFlushed by the non-closing quit bridge.';
+  await markdownEditorA.fill(quitBridgeDraft);
+  const quitBridgeRequestId = `smoke-quit-durability-${Date.now()}`;
+  const quitBridgeResponse = await app.evaluate(({ BrowserWindow, ipcMain }, requestId) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        ipcMain.removeListener('quit-response', handler);
+        reject(new Error('Timed out waiting for the matching quit durability response'));
+      }, 5_000);
+      const handler = (event, response = {}) => {
+        if (event.sender !== window.webContents || response.requestId !== requestId) return;
+        clearTimeout(timeoutId);
+        ipcMain.removeListener('quit-response', handler);
+        resolve(response);
+      };
+      ipcMain.on('quit-response', handler);
+      window.webContents.send('quit-request', { requestId });
+    });
+  }, quitBridgeRequestId);
+  assert.equal(quitBridgeResponse.documentSaveFailed, false,
+    'the non-closing quit bridge should settle the immediate shared Markdown draft');
+  await waitForFileContent(markdownSyncFile, quitBridgeDraft.replace(/\n/g, '\r\n'),
+    'the quit bridge should persist its final shared Markdown draft using the established CRLF convention');
+  await waitForSyncedMarkdown(quitBridgeDraft,
+    'the quit bridge should leave both Markdown duplicate views converged');
+
+  step('Markdown: repeated external saves remain observable');
+  const externalAtomicOne = '# External\n\nAtomic replacement one.';
+  await replaceFileAtomically(markdownSyncFile, externalAtomicOne);
+  await waitForSyncedMarkdown(externalAtomicOne, 'first external atomic replacement should reach both views');
+  const externalAtomicTwo = '# External\n\nAtomic replacement two.';
+  await replaceFileAtomically(markdownSyncFile, externalAtomicTwo);
+  await waitForSyncedMarkdown(externalAtomicTwo, 'second external atomic replacement should reach both views');
+  const externalDirect = '# External\n\nDirect write.';
+  await fs.writeFile(markdownSyncFile, externalDirect, 'utf8');
+  await waitForSyncedMarkdown(externalDirect, 'external direct write should reach both views after atomic replacements');
+
+  step('Markdown: collapsed duplicate reloads current disk content');
+  await markdownNodeA.getByTitle('Collapse Preview').click();
+  await markdownEditorA.waitFor({ state: 'detached' });
+  const whileCollapsed = '# External\n\nChanged while A is collapsed.';
+  await replaceFileAtomically(markdownSyncFile, whileCollapsed);
+  await waitForAsync(async () => await markdownEditorB.inputValue() === whileCollapsed,
+    'expanded duplicate should update while the peer is collapsed');
+  await markdownNodeA.getByTitle('Preview File').click();
+  await markdownEditorA.waitFor();
+  await waitForSyncedMarkdown(whileCollapsed, 're-expanded duplicate should load the current shared file');
+
+  step('Markdown: external conflict reload is safe');
+  const dirtyBeforeReload = '# Local\n\nKeep this draft until conflict resolution.';
+  await markdownEditorA.fill(dirtyBeforeReload);
+  await waitForSyncedMarkdown(dirtyBeforeReload, 'dirty shared draft should mirror before the external conflict');
+  const externalConflictOne = '# External\n\nDisk version wins on Reload.';
+  await replaceFileAtomically(markdownSyncFile, externalConflictOne);
+  await markdownNodeA.getByText('File changed on disk', { exact: true }).waitFor();
+  await markdownNodeB.getByText('File changed on disk', { exact: true }).waitFor();
+  await page.waitForTimeout(1000); // exceed the document debounce: stale draft must remain suspended
+  assert.equal(await fs.readFile(markdownSyncFile, 'utf8'), externalConflictOne,
+    'an external change during a dirty shared draft must not be overwritten before the user chooses');
+  await markdownNodeA.getByText('Reload', { exact: true }).click();
+  await waitForSyncedMarkdown(externalConflictOne, 'Reload should converge both duplicates to the disk version');
+  await waitForCount(markdownNodeA.getByText('File changed on disk', { exact: true }), (n) => n === 0,
+    'Reload should clear A conflict banner');
+  await waitForCount(markdownNodeB.getByText('File changed on disk', { exact: true }), (n) => n === 0,
+    'Reload should clear B conflict banner');
+
+  step('Markdown: external conflict Keep mine converges');
+  const dirtyBeforeKeep = '# Local\n\nKeep mine must win deliberately.';
+  await markdownEditorB.fill(dirtyBeforeKeep);
+  await waitForSyncedMarkdown(dirtyBeforeKeep, 'B dirty draft should mirror before Keep mine conflict');
+  const externalConflictTwo = '# External\n\nDisk version loses on Keep mine.';
+  await fs.writeFile(markdownSyncFile, externalConflictTwo, 'utf8');
+  await markdownNodeA.getByText('File changed on disk', { exact: true }).waitFor();
+  await markdownNodeB.getByText('File changed on disk', { exact: true }).waitFor();
+  await markdownNodeB.getByText('Keep mine', { exact: true }).click();
+  await waitForFileContent(markdownSyncFile, dirtyBeforeKeep, 'Keep mine should persist the shared draft');
+  await waitForSyncedMarkdown(dirtyBeforeKeep, 'Keep mine should converge both duplicates on the persisted draft');
+  await waitForCount(markdownNodeA.getByText('File changed on disk', { exact: true }), (n) => n === 0,
+    'Keep mine should clear A conflict banner');
+  await waitForCount(markdownNodeB.getByText('File changed on disk', { exact: true }), (n) => n === 0,
+    'Keep mine should clear B conflict banner');
+
+  step('Markdown: one duplicate can be removed safely');
+  await markdownNodeA.click();
+  await page.keyboard.press('Delete');
+  await markdownNodeA.waitFor({ state: 'detached' });
+  await waitForCount(page.getByRole('heading', { name: 'Delete from OS?', exact: true }), (n) => n === 0,
+    'deleting one duplicate must not offer to trash the shared local file');
+  const afterRemovingA = '# External\n\nB remains subscribed.';
+  await fs.writeFile(markdownSyncFile, afterRemovingA, 'utf8');
+  await waitForAsync(async () => await markdownEditorB.inputValue() === afterRemovingA,
+    'removing one duplicate must leave the remaining watcher subscribed');
+
+  await page.evaluate(() => {
+    const KEY = 'infiniteCanvas.settings';
+    const settings = JSON.parse(localStorage.getItem(KEY) || '{}');
+    settings.lastOpenedWorkspace = null;
+    localStorage.setItem(KEY, JSON.stringify(settings));
+  });
+  await reloadFixture(page);
+  await waitForCount(page.locator('.react-flow__node'), (n) => n === 0, 'Markdown sync fixture should cleanly return to a blank canvas');
 
   // Create and edit a text node, then verify history controls.
   step('create, edit, undo, and redo text');
@@ -1034,26 +1322,39 @@ try {
   assert.deepEqual(rendererErrors, [], 'generated pagination workspace should not emit runtime errors');
   console.log('Electron smoke test passed');
 } finally {
-  // Terminate the exact process Playwright launched. Closing the last window
-  // can be blocked by the app's unsaved-work guard, which would orphan the main
-  // process and poison the next run's single-instance state after a failure.
+  // Playwright's ElectronApplication.close() explicitly calls app.quit(), which
+  // reaches main's background before-quit cleanup. A POSIX SIGTERM is only a
+  // process signal and is not an Electron lifecycle contract, so it must remain
+  // a last-resort kill rather than the primary shutdown path.
   if (app) {
     const electronProcess = app.process();
     if (electronProcess.exitCode === null) {
-      await new Promise((resolve) => {
-        const timeout = setTimeout(resolve, 2_000);
-        electronProcess.once('exit', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        electronProcess.kill('SIGTERM');
-      });
+      let timeoutId;
+      try {
+        await Promise.race([
+          app.close(),
+          new Promise(resolve => {
+            // Main gives background cleanup a bounded window to release a
+            // headless Chromium profile and loopback server before app.exit().
+            // Keep a margin before the hard-kill fallback for event-loop lag.
+            timeoutId = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000);
+          }),
+        ]);
+      } catch (error) {
+        // A rejected app.close() must not skip the SIGKILL fallback or either
+        // disposable-root cleanup below.
+        console.warn(`Electron smoke shutdown failed: ${error?.message || error}`);
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
     }
     if (electronProcess.exitCode === null) {
       electronProcess.kill('SIGKILL');
     }
   }
   await new Promise((resolve) => setTimeout(resolve, 250));
-  await fs.rm(userDataDir, { recursive: true, force: true });
-  await fs.rm(previewFixtureRoot, { recursive: true, force: true });
+  await Promise.allSettled([
+    fs.rm(userDataDir, { recursive: true, force: true }),
+    fs.rm(previewFixtureRoot, { recursive: true, force: true }),
+  ]);
 }

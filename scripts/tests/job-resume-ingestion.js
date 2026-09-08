@@ -780,28 +780,33 @@ export default [
         const canvasActions = fs.readFileSync(path.resolve('src/hooks/useCanvasActions.js'), 'utf8');
         const finalizeStart = deletionHook.indexOf('const finalizeNodeDeletion = () => {');
         const promptStart = deletionHook.indexOf('if (osPaths.length > 0 && window.electronAPI)', finalizeStart);
-        const promptEnd = deletionHook.indexOf('}, [requestConfirm, undo, canvasFilePath, addToast]);', promptStart);
+        const promptEnd = deletionHook.indexOf('}, [requestConfirm, undo, canvasFilePath, addToast, enumerateAllNodes]);', promptStart);
         const deletionPrompt = deletionHook.slice(promptStart, promptEnd);
         assert(deletionHook.includes('discardDeletedJobRuns(deletedNodes, canvasFilePath')
-          && canvas.includes('useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast })')
+          && canvas.includes('const { onNodesDelete } = useCanvasOSDeletion({')
           && canvas.includes('canvasFilePath: currentFile,')
+          && canvas.includes('enumerateAllNodes: navigation.enumerateAllNodes,')
           && canvasActions.includes("allNodes.filter(node => !lockedIds.has(node.id))")
           && canvasActions.includes('discardDeletedJobRuns(')
           && canvasActions.includes('discardDeletedJobAnalysisSnapshots(')
           && canvasActions.includes('Canvas cleared with a warning')
           && canvasActions.includes('let analysisCleanupWarningShown = false;')
           && canvasActions.includes('const showJobCleanupWarning = () =>')
+          && canvasActions.includes('const preflightClear = useCallback(async () =>')
+          && canvasActions.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
           && deletionHook.includes('discardDeletedJobAnalysisSnapshots(deletedNodes, canvasFilePath')
           && deletionHook.includes('Hub deleted with a warning')
           && deletionHook.includes('let analysisCleanupWarningShown = false;')
-          && canvas.includes('useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast })')
+          && canvas.includes('const { onNodesDelete } = useCanvasOSDeletion({')
           && canvas.includes('canvasFilePath: currentFile,\n    addToast,')
           && finalizeStart >= 0 && promptStart > finalizeStart
-          && deletionPrompt.includes('onConfirm: async () => {\n          finalizeNodeDeletion();')
-          && deletionPrompt.includes('onCancel: finalizeNodeDeletion')
+          && deletionHook.includes('const settleOrphanTextDocuments = async () =>')
+          && deletionHook.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
+          && deletionPrompt.includes('onConfirm: async () => {\n          if (!await settleOrphanTextDocuments()) return;\n          finalizeNodeDeletion();')
+          && deletionPrompt.includes('onCancel: async () => {\n          if (!await settleOrphanTextDocuments()) return;\n          finalizeNodeDeletion();')
           && deletionPrompt.includes('onAbort: undo ? () => undo() : undefined')
-          && deletionPrompt.includes('} else {\n      finalizeNodeDeletion();'),
-        'interactive deletion and programmatic Clear Canvas both dispatch exact cleanup with the captured canvas path, while an OS-dialog Abort restores the hub without first discarding its run');
+          && deletionPrompt.includes('} else {\n      void (async () => {\n        if (!await settleOrphanTextDocuments()) return;\n        finalizeNodeDeletion();'),
+        'interactive deletion and programmatic Clear Canvas settle the last text draft before exact cleanup, while an OS-dialog Abort restores the hub without first discarding its run');
         const priorWindow = globalThis.window;
         const cleanupFailures = [];
         try {

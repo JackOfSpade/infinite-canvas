@@ -33,6 +33,7 @@ import * as PDFLib from 'pdf-lib';
 import { PDFDocument } from 'pdf-lib';
 import { logger } from '../logger.js';
 import { ATS_SAFE_PDF_FONT_TOKENS, getDesignSystemDir, webFontFacesReadyExpression } from './resumeHtml.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 const { BrowserWindow } = electronPkg;
 
@@ -258,6 +259,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
 
 async function renderPdfOnce(html, { signal, document = null } = {}) {
   throwIfAborted(signal);
+  const backgroundE2E = isBackgroundE2E();
 
   let tempDir = null;
   let win = null;
@@ -275,16 +277,23 @@ async function renderPdfOnce(html, { signal, document = null } = {}) {
 
     win = new BrowserWindow({
       show: false,
+      // The print renderer is already invisible. Make that intent explicit for
+      // the background smoke as well so a future render cannot activate a
+      // task-switcher entry or starve its own readiness/print timers.
+      focusable: !backgroundE2E,
+      skipTaskbar: backgroundE2E,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
+        backgroundThrottling: !backgroundE2E,
         // No preload — this is our own trusted, self-authored HTML (built by
         // resumeHtml.js from the model's markup + the design system's CSS),
         // not a page we need to script the way browserViewMonitor.js does
         // for hostile third-party sites.
       },
     });
+    if (backgroundE2E) win.setAlwaysOnTop(false);
     signal?.addEventListener('abort', onAbort);
     throwIfAborted(signal);
 

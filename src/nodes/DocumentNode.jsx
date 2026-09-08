@@ -1,13 +1,12 @@
-import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useRef, useState } from 'react';
 import { useReactFlow, NodeResizer } from '@xyflow/react';
 import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { renderMarkdown } from '../utils/markdownRenderer';
 import { getFileCategoryInfo, THEME_COLORS, toLocalFileUrl } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
-import { TIMINGS, docSaveDebounceMs } from '../utils/timings';
+import { textDocumentSessions, textDocumentToTextarea } from '../utils/textDocumentSessions';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
-import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -313,40 +312,16 @@ const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirt
 });
 
 /**
- * Editable text/markdown preview.
- * .txt  -> always shows a textarea
- * .md   -> always shows the editor and live preview side by side
- * Auto-saves to disk via electronAPI.writeTextFile with debounce.
+ * A view onto the per-file session. Two duplicated nodes therefore receive the
+ * same snapshot and dispatch edits into the same debounce/write lane.
  */
-const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, onFileChanged, initialFontSize, onFontSizeChange }) {
+const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, initialFontSize, onFontSizeChange }) {
   const isMd = String(filename ?? '').toLowerCase().endsWith('.md');
-
-  // ── Disk-content state via reducer ────────────────────────────────────────
-  // All disk-fetch state is consolidated here to satisfy react-hooks/set-state-in-effect:
-  // dispatch() from async callbacks is always safe; we never call setState at the effect top.
-  const [diskState, dispatchDisk] = React.useReducer(
-    // reducer lives inline here (small, pure)
-    (state, action) => {
-      if (action.type === 'loading') return { status: 'loading', content: null, error: null, gen: action.gen };
-      if (action.type === 'refreshing') return { ...state, gen: action.gen };
-      if (action.gen !== state.gen) return state; // stale dispatch — discard
-      if (action.type === 'loaded') return { status: 'done', content: action.content, error: null, gen: state.gen };
-      if (action.type === 'error') return { status: 'error', content: null, error: action.error, gen: state.gen };
-      return state;
-    },
-    { status: 'loading', content: null, error: null, gen: 0 }
-  );
-
-  // draftInitialised: ensures the draft is only seeded on the first successful fetch.
-  const draftInitialised = useRef(false);
-
-
-  // ── Edit state ─────────────────────────────────────────────────────
-  // draftContent: what's currently in the textarea (may differ from diskContent)
-  const [draftContent, setDraftContent] = useState(null);  // null until first disk load
-  const [saveStatus, setSaveStatus] = useState('idle'); // 'idle'|'saving'|'saved'|'error'
-  const [externalChange, setExternalChange] = useState(false); // disk changed while editing
+  const [sessionState, setSessionState] = useState(() => textDocumentSessions.getSnapshot(filePath));
   const [fontSize, setFontSizeLocal] = useState(initialFontSize || 12);
+
+  useEffect(() => textDocumentSessions.attach(filePath, setSessionState), [filePath]);
+
   const setFontSize = useCallback((updater) => {
     setFontSizeLocal(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -354,502 +329,117 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
       return next;
     });
   }, [onFontSizeChange]);
-
-  const handleZoomIn = useCallback((e) => {
-    e?.stopPropagation();
-    setFontSize(prev => Math.min(prev + 2, 48));
-  }, [setFontSize]);
-
-  const handleZoomOut = useCallback((e) => {
-    e?.stopPropagation();
-    setFontSize(prev => Math.max(prev - 2, 8));
-  }, [setFontSize]);
-
+  const handleZoomIn = useCallback((e) => { e?.stopPropagation(); setFontSize(prev => Math.min(prev + 2, 48)); }, [setFontSize]);
+  const handleZoomOut = useCallback((e) => { e?.stopPropagation(); setFontSize(prev => Math.max(prev - 2, 8)); }, [setFontSize]);
   const handleWheel = useCallback((e) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.stopPropagation();
-      if (e.deltaY < 0) {
-        setFontSize(prev => Math.min(prev + 1, 48));
-      } else if (e.deltaY > 0) {
-        setFontSize(prev => Math.max(prev - 1, 8));
-      }
-    }
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.stopPropagation();
+    if (e.deltaY < 0) setFontSize(prev => Math.min(prev + 1, 48));
+    else if (e.deltaY > 0) setFontSize(prev => Math.max(prev - 1, 8));
   }, [setFontSize]);
-
-  const saveTimerRef = useRef(null);
-  const saveFeedbackTimerRef = useRef(null);
-  const pendingWriteRef = useRef(null);
-  const writeChainRef = useRef(Promise.resolve());
-  const latestDraftRevisionRef = useRef(0);
-  const discardedThroughRevisionRef = useRef(0);
-  const loadGenerationRef = useRef(0);
-  const activeWriteRequestRef = useRef(null);
-  const lastSettledWriteRef = useRef(null);
-  const watcherWriteSuspensionRef = useRef(null);
-  const draftContentRef = useRef(draftContent);
-  const diskContentRef = useRef(diskState.content);
-  const filePathRef = useRef(filePath);
-  const isMountedRef = useIsMountedRef();
-  useLayoutEffect(() => {
-    if (watcherWriteSuspensionRef.current
-        && watcherWriteSuspensionRef.current.filePath !== filePath) {
-      watcherWriteSuspensionRef.current = null;
-    }
-    filePathRef.current = filePath;
-    draftContentRef.current = draftContent;
-    diskContentRef.current = diskState.content;
-  }, [filePath, draftContent, diskState.content]);
-
-  useEffect(() => {
-    const gen = ++loadGenerationRef.current;
-    dispatchDisk({ type: 'loading', gen });
-    draftInitialised.current = false; // new filePath = new draft
-    let cancelled = false;
-    fetch(toLocalFileUrl(filePath) + `?_g=${gen}`)
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
-      .then(text => {
-        if (cancelled || gen !== loadGenerationRef.current) return;
-        dispatchDisk({ type: 'loaded', content: text, gen });
-        // Seed the draft once. setState inside .then() is always safe per the lint rule.
-        if (!draftInitialised.current) { draftInitialised.current = true; setDraftContent(text); }
-      })
-      .catch(err => { if (!cancelled) dispatchDisk({ type: 'error', error: err.message || 'Failed to load file', gen }); });
-    return () => { cancelled = true; };
-  }, [filePath]);
-
-  // ── Debounced disk write ─────────────────────────────────────────────────
-  // IPC handlers resolve `{ success: false }` rather than rejecting, so writes
-  // must validate the result explicitly. Promise chaining serializes writes:
-  // if a slow earlier save overlaps newer typing, it can no longer finish last
-  // and overwrite the newest file contents on disk.
-  const enqueueWrite = useCallback((request) => {
-    const performWrite = async () => {
-      // "Reload" discards debounced and queued local edits. A write that had
-      // already entered IPC cannot be cancelled, but every request still
-      // waiting in this local chain is skipped before it touches the file.
-      if (request.revision <= discardedThroughRevisionRef.current) return;
-      activeWriteRequestRef.current = request;
-      if (isMountedRef.current) {
-        if (saveFeedbackTimerRef.current) clearTimeout(saveFeedbackTimerRef.current);
-        setSaveStatus('saving');
-      }
-      try {
-        const result = await window.electronAPI?.writeTextFile?.(request.filePath, request.content);
-        if (!result?.success) throw new Error(result?.error || 'Failed to write text file');
-        lastSettledWriteRef.current = request;
-        if (!isMountedRef.current) return;
-
-        // The reducer ignores a completion from an older load generation. The
-        // revision/path checks separately ensure stale writes never paint a
-        // green "Saved" status over a newer draft or a newly relinked file.
-        dispatchDisk({ type: 'loaded', content: request.content, gen: request.gen });
-        const isLatest = request.revision === latestDraftRevisionRef.current
-          && request.filePath === filePathRef.current;
-        if (!isLatest) {
-          setSaveStatus('idle');
-          return;
-        }
-
-        setSaveStatus('saved');
-        saveFeedbackTimerRef.current = setTimeout(() => {
-          saveFeedbackTimerRef.current = null;
-          if (isMountedRef.current
-              && request.revision === latestDraftRevisionRef.current
-              && request.filePath === filePathRef.current) {
-            setSaveStatus('idle');
-          }
-        }, TIMINGS.FEEDBACK_MS);
-      } catch (err) {
-        EventLogger.error('TextPreview write failed:', err);
-        if (!isMountedRef.current) return;
-        const isLatest = request.revision === latestDraftRevisionRef.current
-          && request.filePath === filePathRef.current;
-        setSaveStatus(isLatest ? 'error' : 'idle');
-      } finally {
-        if (activeWriteRequestRef.current === request) {
-          activeWriteRequestRef.current = null;
-        }
-      }
-    };
-
-    // Recover the chain after a defensive unexpected rejection so one failed
-    // write can never permanently block every later edit from being persisted.
-    writeChainRef.current = writeChainRef.current.then(performWrite, performWrite);
-  }, [isMountedRef]);
-
-  const writeToDisk = useCallback((content) => {
-    if (!window.electronAPI?.writeTextFile) return;
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    if (saveFeedbackTimerRef.current) {
-      clearTimeout(saveFeedbackTimerRef.current);
-      saveFeedbackTimerRef.current = null;
-    }
-    const request = {
-      filePath,
-      content,
-      gen: loadGenerationRef.current,
-      revision: ++latestDraftRevisionRef.current,
-    };
-    if (watcherWriteSuspensionRef.current?.filePath === filePath) {
-      // A watcher reconciliation owns the disk decision. Keep the newest draft
-      // in React state/revision refs, but do not arm a timer that could overwrite
-      // an external version before it has been classified.
-      pendingWriteRef.current = null;
-      setSaveStatus('idle');
-      return;
-    }
-    pendingWriteRef.current = request;
-    setSaveStatus('idle'); // shows amber dot while timer is running
-    saveTimerRef.current = setTimeout(() => {
-      saveTimerRef.current = null;
-      if (pendingWriteRef.current !== request) return;
-      pendingWriteRef.current = null;
-      enqueueWrite(request);
-    }, docSaveDebounceMs(content.length));  // longer idle window for longer docs
-  }, [filePath, enqueueWrite]);
-
-  // When the file watcher fires (passed down from DocumentNode via
-  // onFileChanged), suspend every write that has not entered IPC, then classify
-  // the settled disk value before deciding whether local writes may resume.
-  useEffect(() => {
-    if (!onFileChanged) return;
-    return onFileChanged(() => {
-      // The active fetch already targets this path. Starting a second
-      // generation here would invalidate it and could leave the preview stuck
-      // loading if the redundant watcher fetch then failed.
-      if (diskState.status === 'loading') return;
-
-      const watchedPath = filePath;
-      const activeWriteAtEvent = activeWriteRequestRef.current;
-      const gen = ++loadGenerationRef.current;
-      watcherWriteSuspensionRef.current = { filePath: watchedPath, gen };
-
-      // Cancel the debounce and invalidate every request still waiting behind
-      // the active IPC call. New keystrokes advance the draft revision but
-      // writeToDisk keeps them timer-free until this reconciliation resolves.
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      pendingWriteRef.current = null;
-      discardedThroughRevisionRef.current = Math.max(
-        discardedThroughRevisionRef.current,
-        latestDraftRevisionRef.current
-      );
-      const writeBarrier = writeChainRef.current;
-      dispatchDisk({ type: 'refreshing', gen });
-
-      const isCurrent = () => isMountedRef.current
-        && gen === loadGenerationRef.current
-        && filePathRef.current === watchedPath
-        && watcherWriteSuspensionRef.current?.gen === gen;
-      const releaseSuspension = () => {
-        if (!isCurrent()) return false;
-        watcherWriteSuspensionRef.current = null;
-        return true;
-      };
-
-      // A notification may be our own atomic rename OR a real external write
-      // immediately after it. Wait for the serialized chain, then retry reads
-      // until one spans a stable draft revision so stale async work can never
-      // make the classification decision.
-      void (async () => {
-        try {
-          await writeBarrier;
-          let readAttempt = 0;
-          while (isCurrent()) {
-            const draftRevision = latestDraftRevisionRef.current;
-            const currentDraft = draftContentRef.current;
-            const currentDisk = diskContentRef.current;
-            readAttempt += 1;
-
-            const response = await fetch(
-              toLocalFileUrl(watchedPath) + `?_g=${gen}-${readAttempt}`
-            );
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const text = await response.text();
-            if (!isCurrent()) return;
-            if (draftRevision !== latestDraftRevisionRef.current) continue;
-
-            const lastWrite = lastSettledWriteRef.current;
-            const reflectsOwnWrite = activeWriteAtEvent?.filePath === watchedPath
-              && lastWrite?.revision === activeWriteAtEvent.revision
-              && lastWrite.content === text;
-            const convergedWithDraft = text === currentDraft;
-
-            if (reflectsOwnWrite || convergedWithDraft) {
-              // Own watcher event (including an older serialized draft), or an
-              // external writer converged to our exact draft: update the disk
-              // baseline without showing a false conflict.
-              dispatchDisk({ type: 'loaded', content: text, gen });
-              setExternalChange(false);
-              if (!releaseSuspension()) return;
-              // A newer edit may have been suspended while an older own write
-              // settled. Resume only now that disk classification is safe.
-              if (currentDraft !== null && text !== currentDraft) writeToDisk(currentDraft);
-              return;
-            }
-
-            if (currentDraft !== null && currentDraft !== currentDisk) {
-              if (saveFeedbackTimerRef.current) {
-                clearTimeout(saveFeedbackTimerRef.current);
-                saveFeedbackTimerRef.current = null;
-              }
-              setSaveStatus('idle');
-              if (!releaseSuspension()) return;
-              // Suspended/queued writes stay discarded. Reload and Keep Mine
-              // are the only actions allowed to resolve a genuine conflict.
-              setExternalChange(true);
-              return;
-            }
-
-            if (!releaseSuspension()) return;
-            dispatchDisk({ type: 'loaded', content: text, gen });
-            setDraftContent(text);
-            setExternalChange(false);
-            return;
-          }
-        } catch {
-          if (!isCurrent()) return;
-          if (saveFeedbackTimerRef.current) {
-            clearTimeout(saveFeedbackTimerRef.current);
-            saveFeedbackTimerRef.current = null;
-          }
-          setSaveStatus('idle');
-          if (!releaseSuspension()) return;
-          // An unreadable changed file is also a user decision; never resume a
-          // suspended draft blindly when classification could not complete.
-          setExternalChange(true);
-        }
-      })();
-    });
-  }, [onFileChanged, diskState.status, filePath, isMountedRef, writeToDisk]);
-
-  // Collapsing an expanded text node unmounts TextPreview. Promote its pending
-  // debounced edit into the serialized write chain instead of dropping it (the
-  // old timer deliberately returned when `isMounted` became false, losing the
-  // user's last few seconds of typing). This also flushes before a relink swaps
-  // the component to a different file path.
-  useEffect(() => () => {
-    if (saveFeedbackTimerRef.current) {
-      clearTimeout(saveFeedbackTimerRef.current);
-      saveFeedbackTimerRef.current = null;
-    }
-    const pending = pendingWriteRef.current;
-    if (!pending || pending.filePath !== filePath) return;
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    pendingWriteRef.current = null;
-    enqueueWrite(pending);
-  }, [filePath, enqueueWrite]);
 
   const handleChange = useCallback((e) => {
-    const val = e.target.value;
-    setDraftContent(val);
-    if (!isLocked) writeToDisk(val);
-  }, [isLocked, writeToDisk]);
-
-  const handleReloadFromDisk = useCallback(async () => {
-    setExternalChange(false);
-    watcherWriteSuspensionRef.current = null;
-    // The user chose the disk version, so discard any local edit that is still
-    // inside the debounce window. Already-running atomic writes cannot be
-    // cancelled. Mark every existing revision as discarded so queued
-    // (not-yet-started) requests are skipped before they touch the file.
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
+    if (!isLocked) {
+      textDocumentSessions.editFromTextarea(filePath, e.target.value);
     }
-    pendingWriteRef.current = null;
-    discardedThroughRevisionRef.current = latestDraftRevisionRef.current;
-    latestDraftRevisionRef.current += 1;
-    if (saveFeedbackTimerRef.current) {
-      clearTimeout(saveFeedbackTimerRef.current);
-      saveFeedbackTimerRef.current = null;
-    }
-    // Trigger a fresh fetch by dispatching a new loading generation. This is
-    // also the reload token: a relink, unmount, or newer refresh invalidates
-    // every continuation below before it can update the replacement file.
-    const reloadPath = filePath;
-    const gen = ++loadGenerationRef.current;
-    dispatchDisk({ type: 'loading', gen });
-
-    try {
-      // A write already inside Electron IPC cannot be cancelled. Wait for the
-      // entire chain that existed at the reload decision to settle before
-      // reading, otherwise that write could finish after this fetch and leave
-      // the UI showing content that no longer matches the file on disk.
-      const writeBarrier = writeChainRef.current;
-      await writeBarrier;
-      if (!isMountedRef.current
-          || gen !== loadGenerationRef.current
-          || filePathRef.current !== reloadPath) return;
-
-      const response = await fetch(toLocalFileUrl(reloadPath) + `?_g=${gen}`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const text = await response.text();
-      if (!isMountedRef.current
-          || gen !== loadGenerationRef.current
-          || filePathRef.current !== reloadPath) return;
-      dispatchDisk({ type: 'loaded', content: text, gen });
-      setDraftContent(text);
-    } catch (err) {
-      if (!isMountedRef.current
-          || gen !== loadGenerationRef.current
-          || filePathRef.current !== reloadPath) return;
-      const error = err?.message || 'Failed to reload file';
-      EventLogger.error('TextPreview reload failed:', err);
-      dispatchDisk({ type: 'error', error, gen });
-    }
-  }, [filePath, isMountedRef]);
-
+  }, [filePath, isLocked]);
+  const handleReloadFromDisk = useCallback(() => { void textDocumentSessions.reloadFromDisk(filePath); }, [filePath]);
   const handleKeepEdits = useCallback(() => {
-    setExternalChange(false);
-    // The disk version is now known to differ. Re-queue the visible draft so
-    // "Keep mine" means persist it, not merely hide the warning while the file
-    // remains on the external version.
-    if (!isLocked && draftContent !== null) writeToDisk(draftContent);
-  }, [draftContent, isLocked, writeToDisk]);
+    if (!isLocked) textDocumentSessions.keepMine(filePath);
+  }, [filePath, isLocked]);
+  const handleRetrySave = useCallback(() => {
+    if (!isLocked) textDocumentSessions.retrySave(filePath);
+  }, [filePath, isLocked]);
 
-  // ── Status indicator ─────────────────────────────────────────────────────
-  // The visual dot is rendered absolutely (see <StatusIndicator />) so it never
-  // affects flow layout — only `isDirty` is computed here.
-  const isDirty = draftContent !== null && draftContent !== diskState.content;
+  const { status, content: draftContent, diskContent, saveStatus, externalChange, error } = sessionState;
+  const textareaContent = textDocumentToTextarea(draftContent);
+  const isDirty = draftContent !== null && draftContent !== diskContent;
   const deferredPreviewSource = useDeferredValue(draftContent);
   const renderedMarkdown = React.useMemo(() => renderMarkdown(deferredPreviewSource), [deferredPreviewSource]);
-
-  // ── Shared textarea props ────────────────────────────────────────────────
-  const textareaBaseClass =
-    'nodrag nowheel min-h-0 flex-1 w-full resize-none p-3 text-white/85 font-mono leading-relaxed outline-none transition-colors ';
-  const textareaStateClass =
-    (isLocked ? 'cursor-not-allowed opacity-60' : 'cursor-text');
-  const textareaClass =
-    `${textareaBaseClass}rounded-md bg-black/20 border border-white/5 shadow-inner ` +
-    `focus:border-sky-500/40 focus:bg-black/30 ${textareaStateClass}`;
-  const markdownTextareaClass =
-    `${textareaBaseClass}border border-white/10 bg-black/10 rounded-md focus:border-sky-500/40 focus:bg-black/20 ${textareaStateClass}`;
-
-  const ZoomControls = (
+  const textareaBaseClass = 'nodrag nowheel min-h-0 flex-1 w-full resize-none p-3 text-white/85 font-mono leading-relaxed outline-none transition-colors ';
+  const textareaStateClass = isLocked ? 'cursor-not-allowed opacity-60' : 'cursor-text';
+  const textareaClass = `${textareaBaseClass}rounded-md bg-black/20 border border-white/5 shadow-inner focus:border-sky-500/40 focus:bg-black/30 ${textareaStateClass}`;
+  const markdownTextareaClass = `${textareaBaseClass}border border-white/10 bg-black/10 rounded-md focus:border-sky-500/40 focus:bg-black/20 ${textareaStateClass}`;
+  const zoomControls = (
     <div className="absolute bottom-3 right-5 flex items-center gap-1.5 bg-black/40 backdrop-blur-md rounded px-1.5 py-1 border border-white/10 z-20">
-      <button onClick={handleZoomOut} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom Out">
-        <ZoomOut size={16} />
-      </button>
-      <button onClick={handleZoomIn} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom In">
-        <ZoomIn size={16} />
-      </button>
+      <button onClick={handleZoomOut} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom Out"><ZoomOut size={16} /></button>
+      <button onClick={handleZoomIn} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom In"><ZoomIn size={16} /></button>
     </div>
   );
-
-  // ── Loading / error states ───────────────────────────────────────────────
-  if (diskState.status === 'error') {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-4">
-        <AlertTriangle className="w-7 h-7 text-red-400 shrink-0" />
-        <span className="text-white/70 text-xs">Couldn&rsquo;t load file</span>
-        <span className="text-white/30 text-[10px] font-mono">{diskState.error}</span>
-      </div>
-    );
-  }
-
-  if (diskState.status === 'loading' || draftContent === null) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="w-5 h-5 rounded-full border-2 border-t-transparent border-sky-400 animate-spin opacity-60" />
-      </div>
-    );
-  }
-
-  // ── External-change banner ───────────────────────────────────────────────
-  const ExternalChangeBanner = externalChange ? (
+  const externalChangeBanner = externalChange ? (
     <div className="flex items-center gap-2 px-2 py-1.5 bg-amber-500/15 border-b border-amber-500/20 text-amber-300 text-[10px] shrink-0">
       <AlertTriangle size={11} className="shrink-0" />
-      <span className="flex-1">File changed on disk</span>
+      <span className="flex-1">{error ? 'Couldn\'t reread file; keeping your draft' : 'File changed on disk'}</span>
       <button
         onClick={handleReloadFromDisk}
         className="nodrag px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/35 transition-colors text-[10px]"
-      >Reload</button>
+      >
+        Reload
+      </button>
       <button
         onClick={handleKeepEdits}
-        className="nodrag px-1.5 py-0.5 rounded hover:bg-white/10 transition-colors text-[10px] text-white/50"
-      >Keep mine</button>
+        disabled={isLocked}
+        className={`nodrag px-1.5 py-0.5 rounded transition-colors text-[10px] text-white/50 ${
+          isLocked ? 'cursor-not-allowed opacity-40' : 'hover:bg-white/10'
+        }`}
+      >
+        Keep mine
+      </button>
+    </div>
+  ) : null;
+  // A generic IPC failure (not a CAS conflict) used to be visible only as a
+  // red status dot. Keep the conflict decision above unchanged, while making
+  // actionable failures such as the hard-link atomicity rejection readable
+  // and safely retryable with the session's existing CAS baseline.
+  const saveErrorBanner = saveStatus === 'error' && !externalChange && error ? (
+    <div className="flex items-center gap-2 px-2 py-1.5 bg-red-500/15 border-b border-red-500/20 text-red-200 text-[10px] shrink-0">
+      <AlertTriangle size={11} className="shrink-0" />
+      <span className="flex-1 min-w-0">{error}</span>
+      <button
+        onClick={handleRetrySave}
+        disabled={isLocked}
+        className={`nodrag px-1.5 py-0.5 rounded transition-colors text-[10px] ${
+          isLocked ? 'cursor-not-allowed opacity-40' : 'bg-red-500/20 hover:bg-red-500/35'
+        }`}
+      >
+        Retry
+      </button>
     </div>
   ) : null;
 
-  // ── .txt — always editable ───────────────────────────────────────────────
-  if (!isMd) {
-    return (
-      <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
-        {ExternalChangeBanner}
-        <textarea
-          className={textareaClass}
-          style={{ fontSize: `${fontSize}px` }}
-          value={draftContent}
-          onChange={handleChange}
-          readOnly={isLocked}
-          onPointerDown={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-          onWheel={handleWheel}
-          spellCheck={false}
-        />
-        <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} />
-        {ZoomControls}
-      </div>
-    );
-  }
+  if (status === 'error') return (
+    <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-4">
+      <AlertTriangle className="w-7 h-7 text-red-400 shrink-0" /><span className="text-white/70 text-xs">Couldn&rsquo;t load file</span><span className="text-white/30 text-[10px] font-mono">{error}</span>
+    </div>
+  );
+  if (status === 'loading' || draftContent === null) return <div className="flex-1 flex items-center justify-center"><div className="w-5 h-5 rounded-full border-2 border-t-transparent border-sky-400 animate-spin opacity-60" /></div>;
 
-  // ── .md — persistent editor + live preview ──────────────────────────────
+  if (!isMd) return (
+    <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
+      {externalChangeBanner}
+      {saveErrorBanner}
+      <textarea className={textareaClass} style={{ fontSize: `${fontSize}px` }} value={textareaContent} onChange={handleChange} readOnly={isLocked} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} onWheel={handleWheel} spellCheck={false} />
+      <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} />
+      {zoomControls}
+    </div>
+  );
+
   return (
     <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
-      {ExternalChangeBanner}
-
+      {externalChangeBanner}
+      {saveErrorBanner}
       <div className="flex flex-1 min-h-0 w-full gap-1.5 pt-1 overflow-hidden">
-        <section
-          className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner"
-          aria-label={`Markdown editor for ${filename}`}
-        >
-          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">
-            Edit
-          </div>
-          <textarea
-            className={markdownTextareaClass}
-            style={{ fontSize: `${fontSize}px` }}
-            value={draftContent}
-            onChange={handleChange}
-            readOnly={isLocked}
-            onPointerDown={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-            onWheel={handleWheel}
-            spellCheck={false}
-            autoFocus={!isLocked}
-            aria-label={`Edit ${filename}`}
-          />
-          <StatusIndicator
-            saveStatus={saveStatus}
-            isDirty={isDirty}
-            className="absolute top-2 right-3 z-20 pointer-events-none"
-          />
+        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner" aria-label={`Markdown editor for ${filename}`}>
+          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">Edit</div>
+          <textarea className={markdownTextareaClass} style={{ fontSize: `${fontSize}px` }} value={textareaContent} onChange={handleChange} readOnly={isLocked} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} onWheel={handleWheel} spellCheck={false} autoFocus={!isLocked} aria-label={`Edit ${filename}`} />
+          <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} className="absolute top-2 right-3 z-20 pointer-events-none" />
         </section>
-
-        <section
-          className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner"
-          aria-label={`Markdown preview for ${filename}`}
-        >
-          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">
-            Preview
-          </div>
-          <div
-            className="nodrag nowheel min-h-0 flex-1 w-full overflow-auto p-3 text-preview-md"
-            style={{ fontSize: `${fontSize}px` }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-            onWheel={handleWheel}
-            dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
-          />
+        <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/5 bg-black/20 shadow-inner" aria-label={`Markdown preview for ${filename}`}>
+          <div className="flex h-7 shrink-0 items-center border-b border-white/5 px-3 text-[10px] font-medium text-white/60">Preview</div>
+          <div className="nodrag nowheel min-h-0 flex-1 w-full overflow-auto p-3 text-preview-md" style={{ fontSize: `${fontSize}px` }} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} onWheel={handleWheel} dangerouslySetInnerHTML={{ __html: renderedMarkdown }} />
         </section>
       </div>
-      {ZoomControls}
+      {zoomControls}
     </div>
   );
 });
@@ -864,18 +454,6 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   const isExpanded = !!data.isExpanded;
   const [hoveringMedia, setHoveringMedia] = useState(false);
   const { updateNodeData, setNodes } = useReactFlow();
-
-  // Stable ref that TextPreview registers its file-change handler into.
-  // Using a ref (not state) keeps it out of the React dependency graph—
-  // the registration itself is a side-effect, not a render concern.
-  const textFileChangedCallbackRef = useRef(null);
-
-  // Stable registration function passed to TextPreview as `onFileChanged`.
-  // TextPreview calls this once with its handler; calling the returned function unregisters.
-  const onTextFileChanged = useCallback((handler) => {
-    textFileChangedCallbackRef.current = handler;
-    return () => { textFileChangedCallbackRef.current = null; };
-  }, []);
 
   const handleFontSizeChange = useCallback((size) => {
     updateNodeData(id, { editorFontSize: size });
@@ -895,14 +473,16 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   useEffect(() => {
     if (!data.filePath || !window.electronAPI) return;
     window.electronAPI.startFileWatch(data.filePath);
-    const removeListener = window.electronAPI.onFileChanged((changedPath) => {
+    const removeListener = window.electronAPI.onFileChanged((changedPath, notificationId) => {
       if (changedPath !== data.filePath) return;
       if (isImage && imgRef.current) {
         imgVersionRef.current += 1;
         imgRef.current.src = `${toLocalFileUrl(data.filePath)}?v=${imgVersionRef.current}`;
       }
-      // Notify TextPreview of external disk change so it can decide whether to reload
-      if (isText) textFileChangedCallbackRef.current?.();
+      // Every expanded duplicate shares one per-file reconciliation session.
+      // Calling this from each node is intentional: the registry deduplicates
+      // the renderer broadcast into one read/classification pass.
+      if (isText) void textDocumentSessions.notifyFileChanged(data.filePath, notificationId);
     });
     return () => {
       removeListener();
@@ -1087,7 +667,6 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
               filePath={data.filePath}
               filename={data.filename}
               isLocked={!!data.locked}
-              onFileChanged={onTextFileChanged}
               initialFontSize={data.editorFontSize}
               onFontSizeChange={handleFontSizeChange}
             />

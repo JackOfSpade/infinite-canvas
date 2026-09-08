@@ -13,9 +13,12 @@ export function useCanvasInitialization({
   hasUnsavedChanges,
   setHasUnsavedChanges,
   flushStack,
+  quitGateRef,
+  quitFenceReleaseVersion = 0,
   isAnimatingRef,
   navigationStateSwapRef,
   saveStateRef, // Ref to the active save state — prevents auto-save running concurrently with manual saves
+  saveOperationRef, // Promise lane shared with close-time/manual saves
 }) {
   const isMountedRef = useIsMountedRef();
 
@@ -69,11 +72,17 @@ export function useCanvasInitialization({
 
     let timer;
     let cancelled = false;
+    // A quit fence invalidates an autosave that was scheduled or serialized by
+    // the prior interactive generation. It may still finish an already-started
+    // disk write, but must not mark a newer/final revalidation clean.
+    const gateGeneration = quitGateRef?.current?.generation;
+    const isCurrentGeneration = () => !quitGateRef?.current?.frozen
+      && quitGateRef?.current?.generation === gateGeneration;
     const retry = (delayMs) => {
-      if (!cancelled) timer = setTimeout(attemptSave, delayMs);
+      if (!cancelled && isCurrentGeneration()) timer = setTimeout(attemptSave, delayMs);
     };
     const attemptSave = async () => {
-      if (cancelled) return;
+      if (cancelled || !isCurrentGeneration()) return;
       // Safety guard 1: never auto-save while navigation animations are active
       // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) {
@@ -113,7 +122,7 @@ export function useCanvasInitialization({
         flushStack: flushRef.current,
         fallbackState: stateRef.current,
       });
-      if (cancelled || !isMountedRef.current) return;
+      if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return;
       if (!data.nodes || !Array.isArray(data.nodes)) return;
 
       // Capture the serialized revision. A later edit tears down this effect,
@@ -142,23 +151,34 @@ export function useCanvasInitialization({
       }
       if (saveStateRef) saveStateRef.current = 'autosaving';
 
-      try {
-        const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
-        if (cancelled || !isMountedRef.current) return;
-        const snapshotIsCurrent = currentFileRef.current === currentFile
-          && stateRevisionRef.current === savedRevision;
-        if (res?.success && res.filePath && snapshotIsCurrent) {
-          // Only update currentFile if the path changed (e.g. an on-disk rename
-          // was resolved by the save implementation).
-          if (res.filePath !== currentFile) setCurrentFile(res.filePath);
-          setHasUnsavedChanges(false);
-        } else if (!res?.success && !res?.canceled) {
-          EventLogger.error('[auto-save] saveWorkspace failed:', res?.error || 'unknown error');
+      const operation = (async () => {
+        try {
+          const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+          if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return false;
+          const snapshotIsCurrent = currentFileRef.current === currentFile
+            && stateRevisionRef.current === savedRevision;
+          if (res?.success && res.filePath && snapshotIsCurrent) {
+            // Only update currentFile if the path changed (e.g. an on-disk rename
+            // was resolved by the save implementation).
+            if (res.filePath !== currentFile) setCurrentFile(res.filePath);
+            hasUnsavedChangesRef.current = false;
+            setHasUnsavedChanges(false);
+          } else if (!res?.success && !res?.canceled) {
+            EventLogger.error('[auto-save] saveWorkspace failed:', res?.error || 'unknown error');
+          }
+          return Boolean(res?.success && res.filePath && snapshotIsCurrent);
+        } catch (err) {
+          EventLogger.error('[auto-save] saveWorkspace failed:', err);
+          return false;
+        } finally {
+          if (saveStateRef?.current === 'autosaving') saveStateRef.current = 'idle';
         }
-      } catch (err) {
-        EventLogger.error('[auto-save] saveWorkspace failed:', err);
+      })();
+      if (saveOperationRef) saveOperationRef.current = operation;
+      try {
+        await operation;
       } finally {
-        if (saveStateRef?.current === 'autosaving') saveStateRef.current = 'idle';
+        if (saveOperationRef?.current === operation) saveOperationRef.current = null;
       }
     };
 
@@ -168,5 +188,5 @@ export function useCanvasInitialization({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, isMountedRef]);
+  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, saveOperationRef, isMountedRef, quitGateRef, quitFenceReleaseVersion]);
 }

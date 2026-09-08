@@ -5,6 +5,7 @@ import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
 import { isValidCompensationExperienceBandLadder } from './jobCompensation.js';
 import { logger } from '../logger.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 const { dialog, BrowserWindow, safeStorage } = electronPkg;
 
@@ -371,6 +372,7 @@ export function registerSettingsHandlers() {
   // absolute path (or null if the user canceled). The renderer is responsible
   // for then calling update-settings to persist it.
   handleSafe('pick-service-account-file', async () => {
+    if (isBackgroundE2E()) return { path: null };
     const { canceled, filePaths } = await dialog.showOpenDialog({
       title: 'Select Google service-account.json',
       properties: ['openFile'],

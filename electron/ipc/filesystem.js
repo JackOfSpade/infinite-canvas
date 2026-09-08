@@ -14,6 +14,7 @@ import {
 } from './missingPreviewRelink.js';
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
 import { isWithinDirectory, isExistingFileAsync, isSensitivePath } from '../utils/pathSafety.js';
+import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
 
 // Extensions the 'open-file' handler will hand to the OS shell. Covers the
 // image/document/media/archive types this app's own drop/preview handling
@@ -117,19 +118,532 @@ export async function resolveAllowedOpenFilePath(filePath) {
 }
 
 const ALLOWED_TEXT_EDIT_EXTS = new Set(['.md', '.txt']);
+const MAX_OS_DELETE_PROTECTION_PATHS = 512;
+const MAX_OS_DELETE_PROTECTION_PATH_LENGTH = 4096;
 
 /** True when a document is one of the two formats the renderer exposes as editable. */
 function isAllowedTextEditExt(filePath) {
   return ALLOWED_TEXT_EDIT_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
 }
 
+function osDeleteProtectedError() {
+  const error = new Error('The item is still represented by another canvas node and was kept on disk.');
+  error.code = 'OS_DELETE_PROTECTED';
+  return error;
+}
+
+function isResolvedDescendant(candidateDirectory, survivorPath) {
+  const relative = path.relative(candidateDirectory, survivorPath);
+  return relative !== '' && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function inspectDeletionProtectionPath(filePath, { lstat, realpath }) {
+  const normalizedPath = path.normalize(filePath);
+  const lexicalStat = await lstat(normalizedPath);
+  const resolvedPath = await realpath(normalizedPath);
+  const resolvedStat = await lstat(resolvedPath);
+  if (!resolvedStat.isFile() && !resolvedStat.isDirectory()) throw osDeleteProtectedError();
+  return {
+    normalizedPath,
+    resolvedPath,
+    resolvedIdentity: { dev: resolvedStat.dev, ino: resolvedStat.ino },
+    // A final symlink is a removable directory entry, not a directory to
+    // recurse through. Its resolved target still participates in same-target
+    // protection below; ambiguous/broken links fail conservatively.
+    isDirectory: lexicalStat.isDirectory() && !lexicalStat.isSymbolicLink(),
+  };
+}
+
 /**
- * Global registry of active file watchers.
- * key: filePath
- * value: { watcher: FSWatcher, clients: Map<WebContents, number> }
- *   where clients map tracks how many times a specific renderer window has requested this path.
+ * Defense in depth for the renderer's pre-delete duplicate filter. Protection
+ * paths are untrusted hints: malformed, unavailable, or excessive entries can
+ * only refuse a trash request; they never grant broader filesystem authority.
  */
-const activeWatchers = new Map();
+export async function assertDeleteTargetNotRepresented(filePath, protectedPaths = [], {
+  sender = null,
+  validate = validateMutablePath,
+  lstat = fs.promises.lstat,
+  realpath = fs.promises.realpath,
+} = {}) {
+  const safePath = await validate(filePath, { sender });
+  if (!Array.isArray(protectedPaths)
+      || protectedPaths.length > MAX_OS_DELETE_PROTECTION_PATHS) {
+    throw osDeleteProtectedError();
+  }
+  if (protectedPaths.length === 0) return safePath;
+
+  let candidate;
+  try {
+    candidate = await inspectDeletionProtectionPath(safePath, { lstat, realpath });
+  } catch {
+    // Preserve existing candidate authorization errors above, but once a
+    // survivor list is present any ambiguity in target resolution is a reason
+    // to keep the OS item rather than risk deleting a live representation.
+    throw osDeleteProtectedError();
+  }
+
+  for (const survivorPath of protectedPaths) {
+    if (typeof survivorPath !== 'string' || !survivorPath.trim()
+        || survivorPath.length > MAX_OS_DELETE_PROTECTION_PATH_LENGTH
+        || !path.isAbsolute(survivorPath)) {
+      throw osDeleteProtectedError();
+    }
+    let survivor;
+    try {
+      survivor = await inspectDeletionProtectionPath(survivorPath, { lstat, realpath });
+    } catch {
+      throw osDeleteProtectedError();
+    }
+    if (candidate.resolvedPath === survivor.resolvedPath
+        || hasSameIdentity(candidate.resolvedIdentity, survivor.resolvedIdentity)
+        // A represented symlink located inside this folder is itself moved to
+        // Trash when the folder is moved, even if that symlink resolves outside
+        // the folder. Protect both the resolved target hierarchy and the
+        // normalized lexical hierarchy; protection-list entries can only make
+        // this destructive operation refuse, never expand its authority.
+        || (candidate.isDirectory && (
+          isResolvedDescendant(candidate.resolvedPath, survivor.resolvedPath)
+          || isResolvedDescendant(candidate.normalizedPath, survivor.normalizedPath)
+        ))) {
+      throw osDeleteProtectedError();
+    }
+  }
+  return safePath;
+}
+
+/**
+ * Share one durable directory watcher per target path. Watching the file itself
+ * is not durable: an atomic save replaces its inode, which makes macOS stop
+ * delivering later events through that watcher. A parent-directory watch keeps
+ * following the same basename across each replacement.
+ *
+ * `start()` reserves the sender count before its asynchronous access check. A
+ * React effect cleanup can therefore call `stop()` while that check is pending
+ * without allowing a late registration to leak a watcher/client count.
+ */
+export function createFileWatchRegistry({
+  watch = fs.watch,
+  watchFile = fs.watchFile,
+  unwatchFile = fs.unwatchFile,
+  access = fs.promises.access,
+  realpath = fs.promises.realpath,
+  retryMs = 1000,
+  pollInterval = 1000,
+  verificationInterval = 30_000,
+  onError = (error, filePath) => logger.warn(`[FileSystem] Watcher error for ${filePath}:`, error),
+} = {}) {
+  const activeWatchers = new Map();
+  const MISSING_WATCH_TARGET_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+  const broadcast = (filePath, entry) => {
+    if (activeWatchers.get(filePath) !== entry) return;
+    for (const clientSender of [...entry.clients.keys()]) {
+      try {
+        if (clientSender.isDestroyed()) {
+          removeSender(clientSender, filePath, { all: true });
+        } else {
+          clientSender.send('file-changed', filePath);
+        }
+      } catch {
+        // WebContents can be destroyed between isDestroyed() and send(). Do
+        // not let a native fs callback throw; release every refcount it owns.
+        removeSender(clientSender, filePath, { all: true });
+      }
+    }
+  };
+
+  const stopPolling = (filePath, entry) => {
+    if (!entry.pollListener) return;
+    try { unwatchFile(entry.watchPath || filePath, entry.pollListener); } catch { /* ignore */ }
+    entry.pollListener = null;
+  };
+
+  const stopVerificationPolling = (filePath, entry) => {
+    if (!entry.verificationPollListener) return;
+    try {
+      unwatchFile(entry.verificationPath || entry.watchPath || filePath, entry.verificationPollListener);
+    } catch { /* ignore */ }
+    entry.verificationPollListener = null;
+    entry.verificationPath = null;
+  };
+
+  const closeEntry = (filePath, entry) => {
+    if (activeWatchers.get(filePath) !== entry) return;
+    activeWatchers.delete(filePath);
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+    if (entry.aliasRetryTimer) clearTimeout(entry.aliasRetryTimer);
+    entry.aliasRetryTimer = null;
+    stopPolling(filePath, entry);
+    stopVerificationPolling(filePath, entry);
+    stopAliasPolling(filePath, entry);
+    try { entry.watcher?.close(); } catch { /* ignore */ }
+    entry.watcher = null;
+    try { entry.aliasWatcher?.close(); } catch { /* ignore */ }
+    entry.aliasWatcher = null;
+    entry.rebindQueued = false;
+  };
+
+  const scheduleRetry = (filePath, entry) => {
+    if (entry.retryTimer || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    entry.retryTimer = setTimeout(() => {
+      entry.retryTimer = null;
+      attachNativeWatcher(filePath, entry);
+    }, retryMs);
+  };
+
+  const scheduleAliasRetry = (filePath, entry) => {
+    if (entry.aliasRetryTimer || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    entry.aliasRetryTimer = setTimeout(() => {
+      entry.aliasRetryTimer = null;
+      attachAliasWatcher(filePath, entry);
+    }, retryMs);
+  };
+
+  const recoverNativeWatcher = (filePath, entry, watcher, error = null) => {
+    // Both a real FSWatcher error and an unexpected close mean this native
+    // subscription is no longer trustworthy. Deliberate shutdown removes the
+    // entry first, and error recovery clears entry.watcher before close(), so
+    // those later close events cannot start a duplicate fallback/retry loop.
+    if (entry.watcher !== watcher || activeWatchers.get(filePath) !== entry) return;
+    entry.watcher = null;
+    try { watcher.close(); } catch { /* ignore */ }
+    if (error) onError(error, filePath);
+    // A close can stand in for the final directory event. Refresh
+    // conservatively, then retain subscribers with polling until reattach.
+    broadcast(filePath, entry);
+    startPolling(filePath, entry);
+    void rebindLexicalTarget(filePath, entry);
+    scheduleRetry(filePath, entry);
+  };
+
+  const startPolling = (filePath, entry) => {
+    if (entry.pollListener || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    // The high-frequency fallback poll subsumes the healthy-native-watch
+    // verifier while the latter is detached/unavailable.
+    stopVerificationPolling(filePath, entry);
+    const pollListener = (current, previous) => {
+      if (activeWatchers.get(filePath) !== entry || entry.pollListener !== pollListener) return;
+      if (current.mtimeMs !== previous.mtimeMs
+          || current.ctimeMs !== previous.ctimeMs
+          || current.size !== previous.size
+          || current.ino !== previous.ino
+          || current.nlink !== previous.nlink) {
+        // A native watcher can be unavailable while a regular lexical file is
+        // replaced by a symlink. Re-resolve before future events follow an old
+        // directory as though it were still the target.
+        void rebindLexicalTarget(filePath, entry);
+        broadcast(filePath, entry);
+      }
+    };
+    entry.pollListener = pollListener;
+    try {
+      // Follow the canonical target just like the native directory watcher.
+      // fs.watchFile usually follows a final symlink itself, but explicitly
+      // using the resolved path also covers aliases whose parent differs from
+      // their target's parent.
+      watchFile(entry.watchPath || filePath, { interval: pollInterval }, pollListener);
+    } catch (error) {
+      entry.pollListener = null;
+      onError(error, filePath);
+    }
+  };
+
+  const startVerificationPolling = (filePath, entry) => {
+    if (entry.verificationPollListener || activeWatchers.get(filePath) !== entry
+        || entry.clients.size === 0 || entry.pollListener) return;
+    const verificationPath = entry.watchPath || filePath;
+    const pollListener = (current, previous) => {
+      if (activeWatchers.get(filePath) !== entry
+          || entry.verificationPollListener !== pollListener) return;
+      if (current.mtimeMs !== previous.mtimeMs
+          || current.ctimeMs !== previous.ctimeMs
+          || current.size !== previous.size
+          || current.ino !== previous.ino
+          || current.nlink !== previous.nlink) {
+        // fs.watch may silently lose events on network/virtual filesystems.
+        // Keep a deliberately low-frequency stat check even while its native
+        // directory watcher remains live, so an otherwise invisible change
+        // still reaches the renderer and rebinds a replaced lexical target.
+        void rebindLexicalTarget(filePath, entry);
+        broadcast(filePath, entry);
+      }
+    };
+    entry.verificationPollListener = pollListener;
+    entry.verificationPath = verificationPath;
+    try {
+      watchFile(verificationPath, { interval: verificationInterval }, pollListener);
+    } catch (error) {
+      entry.verificationPollListener = null;
+      entry.verificationPath = null;
+      onError(error, filePath);
+    }
+  };
+
+  const stopAliasPolling = (filePath, entry) => {
+    if (!entry.aliasPollListener) return;
+    try { unwatchFile(filePath, entry.aliasPollListener); } catch { /* ignore */ }
+    entry.aliasPollListener = null;
+  };
+
+  const startAliasPolling = (filePath, entry) => {
+    if (entry.aliasPollListener || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    const pollListener = (current, previous) => {
+      if (activeWatchers.get(filePath) !== entry || entry.aliasPollListener !== pollListener) return;
+      if (current.mtimeMs !== previous.mtimeMs
+          || current.ctimeMs !== previous.ctimeMs
+          || current.size !== previous.size
+          || current.ino !== previous.ino
+          || current.nlink !== previous.nlink) {
+        void rebindLexicalTarget(filePath, entry);
+      }
+    };
+    entry.aliasPollListener = pollListener;
+    try {
+      // Poll the lexical path rather than the resolved target so an absent
+      // filename can become observable when it is created later.
+      watchFile(filePath, { interval: pollInterval }, pollListener);
+      // watchFile starts from a snapshot; probe after registration so creation
+      // during setup is not lost as an initial baseline.
+      void rebindLexicalTarget(filePath, entry);
+    } catch (error) {
+      entry.aliasPollListener = null;
+      onError(error, filePath);
+    }
+  };
+
+  const detachTargetWatch = (filePath, entry) => {
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+    stopPolling(filePath, entry);
+    stopVerificationPolling(filePath, entry);
+    const watcher = entry.watcher;
+    entry.watcher = null;
+    try { watcher?.close(); } catch { /* ignore */ }
+  };
+
+  const needsAliasWatch = (entry) => entry.aliasDir !== entry.dir || entry.aliasBasename !== entry.basename;
+  const needsLexicalWatch = (entry) => entry.awaitingTarget || needsAliasWatch(entry);
+
+  const detachAliasWatch = (entry) => {
+    if (entry.aliasRetryTimer) clearTimeout(entry.aliasRetryTimer);
+    entry.aliasRetryTimer = null;
+    stopAliasPolling(entry.filePath, entry);
+    const watcher = entry.aliasWatcher;
+    entry.aliasWatcher = null;
+    try { watcher?.close(); } catch { /* ignore */ }
+  };
+
+  const attachNativeWatcher = (filePath, entry) => {
+    if (entry.watcher || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    let watcher = null;
+    try {
+      watcher = watch(entry.dir, (eventType, filename) => {
+        if (entry.watcher !== watcher || activeWatchers.get(filePath) !== entry) return;
+        // Some platforms omit filename. Forward those events conservatively:
+        // they may be for this target, whereas a named sibling is provably not.
+        if (filename != null && String(filename) !== entry.basename) return;
+        // A regular path can itself be replaced by a final symlink. Normal
+        // atomic saves resolve to the same target, while an actual retarget is
+        // rebound asynchronously without ever changing the renderer contract.
+        if (eventType === 'rename') void rebindLexicalTarget(filePath, entry);
+        broadcast(filePath, entry);
+      });
+      entry.watcher = watcher;
+      stopPolling(filePath, entry);
+      startVerificationPolling(filePath, entry);
+      watcher.on('error', (error) => {
+        recoverNativeWatcher(filePath, entry, watcher, error);
+      });
+      watcher.once('close', () => recoverNativeWatcher(filePath, entry, watcher));
+      // Close the realpath→watch attachment race for aliases and paths that
+      // were replaced by a final symlink during setup.
+      void rebindLexicalTarget(filePath, entry);
+    } catch (error) {
+      onError(error, filePath);
+      startPolling(filePath, entry);
+      scheduleRetry(filePath, entry);
+    }
+  };
+
+  const recoverAliasWatcher = (filePath, entry, watcher, error = null) => {
+    if (entry.aliasWatcher !== watcher || activeWatchers.get(filePath) !== entry) return;
+    entry.aliasWatcher = null;
+    try { watcher.close(); } catch { /* ignore */ }
+    if (error) onError(error, filePath);
+    // A close/error may have hidden an alias replacement. Re-resolve now and
+    // keep retrying the lexical parent watcher while clients remain.
+    void rebindLexicalTarget(filePath, entry);
+    startAliasPolling(filePath, entry);
+    scheduleAliasRetry(filePath, entry);
+  };
+
+  const attachAliasWatcher = (filePath, entry) => {
+    if (!needsLexicalWatch(entry) || entry.aliasWatcher
+        || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    let watcher = null;
+    try {
+      watcher = watch(entry.aliasDir, (_eventType, filename) => {
+        if (entry.aliasWatcher !== watcher || activeWatchers.get(filePath) !== entry) return;
+        // A null filename is not safely ignorable: it can be the alias itself.
+        if (filename != null && String(filename) !== entry.aliasBasename) return;
+        void rebindLexicalTarget(filePath, entry);
+      });
+      entry.aliasWatcher = watcher;
+      stopAliasPolling(filePath, entry);
+      watcher.on('error', (error) => recoverAliasWatcher(filePath, entry, watcher, error));
+      watcher.once('close', () => recoverAliasWatcher(filePath, entry, watcher));
+      // The lexical watcher is now armed; immediately re-resolve so a creation
+      // or retarget inside watch() setup cannot be missed indefinitely.
+      void rebindLexicalTarget(filePath, entry);
+    } catch (error) {
+      onError(error, filePath);
+      startAliasPolling(filePath, entry);
+      scheduleAliasRetry(filePath, entry);
+    }
+  };
+
+  const rebindLexicalTarget = async (filePath, entry) => {
+    if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+    if (entry.rebinding) {
+      entry.rebindQueued = true;
+      return;
+    }
+    entry.rebinding = true;
+    try {
+      const canonicalPath = await realpath(filePath);
+      if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+      if (canonicalPath === entry.watchPath && !entry.awaitingTarget) return;
+
+      // Keep the old target alive until the new referent is known. This avoids
+      // losing the only parent watcher during a delete-then-create symlink swap.
+      detachTargetWatch(filePath, entry);
+      entry.watchPath = canonicalPath;
+      entry.dir = path.dirname(canonicalPath);
+      entry.basename = path.basename(canonicalPath);
+      entry.awaitingTarget = false;
+      attachNativeWatcher(filePath, entry);
+      if (needsAliasWatch(entry)) attachAliasWatcher(filePath, entry);
+      else detachAliasWatch(entry);
+      // The lexical node now refers to another file, even if the target emitted
+      // no content event. Tell its renderer session to reread/classify it.
+      broadcast(filePath, entry);
+    } catch (error) {
+      // A dangling alias commonly occurs during delete-then-create replacement.
+      // Retain the old target watcher until a later lexical event can rebind.
+      if (activeWatchers.get(filePath) === entry && entry.clients.size > 0
+          && !(entry.awaitingTarget && MISSING_WATCH_TARGET_CODES.has(error?.code))) {
+        onError(error, filePath);
+      }
+    } finally {
+      if (activeWatchers.get(filePath) === entry) {
+        entry.rebinding = false;
+        if (entry.rebindQueued) {
+          entry.rebindQueued = false;
+          void rebindLexicalTarget(filePath, entry);
+        }
+      }
+    }
+  };
+
+  const removeSender = (sender, filePath, { all = false } = {}) => {
+    const entry = activeWatchers.get(filePath);
+    if (!entry || !entry.clients.has(sender)) return;
+    const remaining = all ? 0 : entry.clients.get(sender) - 1;
+    if (remaining > 0) entry.clients.set(sender, remaining);
+    else entry.clients.delete(sender);
+    if (entry.clients.size === 0) closeEntry(filePath, entry);
+  };
+
+  const ensureSenderCleanup = (sender) => {
+    if (sender.__fsWatchCleanupAttached) return;
+    sender.__fsWatchCleanupAttached = true;
+    sender.once('destroyed', () => {
+      for (const filePath of [...activeWatchers.keys()]) {
+        removeSender(sender, filePath, { all: true });
+      }
+    });
+  };
+
+  const start = async (sender, filePath) => {
+    // IPC may be queued just as a renderer is torn down. Do not reserve a
+    // client count or attach its destroyed WebContents to cleanup bookkeeping.
+    if (!sender || sender.isDestroyed?.()) return;
+    let entry = activeWatchers.get(filePath);
+    if (entry) {
+      entry.clients.set(sender, (entry.clients.get(sender) || 0) + 1);
+      ensureSenderCleanup(sender);
+      await entry.starting;
+      return;
+    }
+
+    entry = {
+      clients: new Map([[sender, 1]]),
+      filePath,
+      aliasDir: path.dirname(filePath),
+      aliasBasename: path.basename(filePath),
+      dir: path.dirname(filePath),
+      basename: path.basename(filePath),
+      // The registry remains keyed by the renderer spelling so start/stop and
+      // broadcasts retain their existing contract. The OS watcher follows the
+      // canonical target, however: a final symlink can live in a completely
+      // different directory from the file it resolves to.
+      watchPath: filePath,
+      watcher: null,
+      aliasWatcher: null,
+      aliasPollListener: null,
+      pollListener: null,
+      verificationPollListener: null,
+      verificationPath: null,
+      retryTimer: null,
+      aliasRetryTimer: null,
+      rebinding: false,
+      rebindQueued: false,
+      awaitingTarget: false,
+      starting: null,
+    };
+    activeWatchers.set(filePath, entry);
+    ensureSenderCleanup(sender);
+
+    entry.starting = (async () => {
+      try {
+        await access(filePath);
+        // A cleanup may have removed the reservation while access was pending.
+        if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+
+        const canonicalPath = await realpath(filePath);
+        // The caller can unmount while realpath is in flight too. Do not let
+        // that late result resurrect a closed entry or attach a watcher.
+        if (activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
+        entry.watchPath = canonicalPath;
+        entry.dir = path.dirname(canonicalPath);
+        entry.basename = path.basename(canonicalPath);
+
+        attachNativeWatcher(filePath, entry);
+        attachAliasWatcher(filePath, entry);
+      } catch (error) {
+        if (MISSING_WATCH_TARGET_CODES.has(error?.code)
+            && activeWatchers.get(filePath) === entry && entry.clients.size > 0) {
+          // Retain one exact lexical parent subscription for a missing path.
+          // Other validation/permission failures still reject and clean up.
+          entry.awaitingTarget = true;
+          attachAliasWatcher(filePath, entry);
+          return;
+        }
+        closeEntry(filePath, entry);
+        throw error;
+      } finally {
+        entry.starting = null;
+      }
+    })();
+    await entry.starting;
+  };
+
+  return { start, stop: (sender, filePath) => removeSender(sender, filePath) };
+}
+
+const fileWatchRegistry = createFileWatchRegistry();
 
 /**
  * Module-level recursive directory scanner.
@@ -200,6 +714,11 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
 /**
  * Helper to perform an atomic write (write to tmp then rename).
  */
+// Cleanup is deliberately age-gated for artifacts from another interrupted
+// process. Temps created by this process receive the stronger exact-path guard
+// below, even if an unusually slow write outlives that age threshold.
+const activeOwnedTempPaths = new Set();
+
 export async function atomicWriteFile(targetPath, data) {
   let finalPath = targetPath;
   try {
@@ -213,6 +732,7 @@ export async function atomicWriteFile(targetPath, data) {
   let mode = 0o600;
   try { mode = (await fs.promises.stat(finalPath)).mode & 0o777; }
   catch { /* New files default to owner-only; existing files keep their mode. */ }
+  activeOwnedTempPaths.add(tmpPath);
   try {
     await fs.promises.writeFile(tmpPath, data, { encoding: 'utf8', mode });
     await fs.promises.rename(tmpPath, finalPath);
@@ -220,6 +740,8 @@ export async function atomicWriteFile(targetPath, data) {
     // Clean up tmp file if write succeeded but rename failed
     try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
     throw err;
+  } finally {
+    activeOwnedTempPaths.delete(tmpPath);
   }
 }
 
@@ -279,6 +801,25 @@ async function inspectMutablePath(filePath, { sender = null, textOnly = false } 
 }
 
 /**
+ * Whether the spelling supplied by the renderer traverses any symlink. This
+ * is deliberately lexical: realpath alone cannot distinguish a harmless
+ * case/Unicode spelling difference from a final symlink that can later be
+ * retargeted. It is used only to opt a read into renderer session sharing;
+ * failures are conservatively treated as alias-unsafe by the caller.
+ */
+async function pathContainsSymlinkComponent(normalizedPath) {
+  const root = path.parse(normalizedPath).root;
+  const relative = path.relative(root, normalizedPath);
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    if (!segment) continue;
+    current = path.join(current, segment);
+    if ((await fs.promises.lstat(current)).isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+/**
  * Validate a renderer-requested mutation target. Text edits return the
  * canonical target rather than the caller-controlled symlink spelling; delete
  * keeps the lexical path so trashing a link does not trash its referent.
@@ -292,26 +833,214 @@ function hasSameIdentity(stat, identity) {
   return stat.dev === identity.dev && stat.ino === identity.ino;
 }
 
+const TEXT_TARGET_REPLACEMENT_CODES = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ESTALE']);
+const TEXT_TARGET_REVALIDATION_MESSAGE = 'The text file path changed while it was being validated.';
+const TEXT_FILE_HARDLINK_UNSUPPORTED = 'TEXT_FILE_HARDLINK_UNSUPPORTED';
+// This code has deliberately narrower semantics than a generic write error:
+// the replacement has already reached the filesystem, but the parent directory
+// could not be synced after it. The renderer must retain it until an idempotent
+// retry verifies that durability barrier rather than treating its own watcher
+// notification as a normal successful save.
+const TEXT_FILE_DURABILITY_UNVERIFIED = 'TEXT_FILE_DURABILITY_UNVERIFIED';
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(['EISDIR', 'EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
+
+function textFileConflictError() {
+  const error = new Error('The text file changed since this edit was loaded.');
+  error.code = 'TEXT_FILE_CONFLICT';
+  return error;
+}
+
+function textFileHardlinkUnsupportedError() {
+  const error = new Error(
+    'Text files with multiple hard links cannot be edited safely. Break the hard link before saving changes.',
+  );
+  error.code = TEXT_FILE_HARDLINK_UNSUPPORTED;
+  return error;
+}
+
+function throwTextTargetMutationAsConflict(error) {
+  if (TEXT_TARGET_REPLACEMENT_CODES.has(error?.code)
+      || error?.message === TEXT_TARGET_REVALIDATION_MESSAGE) {
+    throw textFileConflictError();
+  }
+  throw error;
+}
+
+async function withTextTargetMutationConflict(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    throwTextTargetMutationAsConflict(error);
+  }
+}
+
 async function assertMutableTextTargetIdentity(target) {
-  const targetStat = await fs.promises.lstat(target.resolvedPath);
+  const [targetStat, currentResolvedPath] = await withTextTargetMutationConflict(() => Promise.all([
+    fs.promises.lstat(target.resolvedPath),
+    // The canonical inode alone is insufficient for a lexical symlink path:
+    // L can be retargeted from A to B after inspection while A remains intact.
+    // Every post-I/O assertion must prove that the caller's original spelling
+    // still resolves to the target identity we approved.
+    fs.promises.realpath(target.normalizedPath),
+  ]));
   if (!targetStat.isFile() || targetStat.isSymbolicLink()
-      || !hasSameIdentity(targetStat, target.targetIdentity)) {
-    throw new Error('The text file changed while the edit was being saved.');
+      || !hasSameIdentity(targetStat, target.targetIdentity)
+      || currentResolvedPath !== target.resolvedPath) {
+    throw textFileConflictError();
   }
   await assertMutableTextParentIdentity(target);
+  return targetStat;
+}
+
+async function assertMutableTextTargetSingleLink(target) {
+  const targetStat = await assertMutableTextTargetIdentity(target);
+  // Atomic rename replaces one directory entry, which would silently detach
+  // this spelling from every other hard link. Reads are harmless and an
+  // idempotent parent-fsync retry is still allowed, but a content-changing
+  // replacement must reject rather than splitting what appeared to be one file.
+  if (targetStat.nlink > 1) throw textFileHardlinkUnsupportedError();
 }
 
 async function assertMutableTextParentIdentity(target) {
-  const [parentStat, currentParentPath] = await Promise.all([
+  const [parentStat, currentParentPath] = await withTextTargetMutationConflict(() => Promise.all([
     fs.promises.lstat(target.parentPath),
     fs.promises.realpath(target.parentPath),
-  ]);
+  ]));
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()
       || currentParentPath !== target.parentPath
       || !hasSameIdentity(parentStat, target.parentIdentity)) {
-    throw new Error('The text file parent changed while the edit was being saved.');
+    throw textFileConflictError();
   }
 }
+
+/**
+ * A synced temporary file alone is not a durable atomic replacement: the
+ * directory entry created by rename must also reach stable storage. POSIX
+ * permits fsync on a directory; Windows does not reliably expose a directory
+ * handle, so only that known unsupported shape is a successful no-op. Other
+ * errors deliberately surface after the rename: the next idempotent CAS retry
+ * will sync the directory again rather than claiming an unverified save.
+ */
+export async function syncTextParentDirectory(parentPath, {
+  open = fs.promises.open,
+  platform = process.platform,
+} = {}) {
+  let directoryHandle = null;
+  try {
+    directoryHandle = await open(parentPath, 'r');
+    await directoryHandle.sync();
+    return true;
+  } catch (error) {
+    const unsupported = UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error?.code)
+      || (platform === 'win32' && error?.code === 'EPERM');
+    if (unsupported) return false;
+    throw error;
+  } finally {
+    // A close failure means the durability barrier was not fully observed; do
+    // not mask it as a successful save.
+    if (directoryHandle) await directoryHandle.close();
+  }
+}
+
+async function syncValidatedTextWriteParent(parentPath) {
+  try {
+    await syncTextParentDirectory(parentPath);
+  } catch (error) {
+    const durabilityError = new Error(
+      'The text file was replaced, but its containing directory could not be synchronized. Retry the save to confirm it is durable.',
+    );
+    durabilityError.code = TEXT_FILE_DURABILITY_UNVERIFIED;
+    durabilityError.durabilityErrorCode = error?.code;
+    throw durabilityError;
+  }
+}
+
+/**
+ * Read an editable text document through the exact same validated UTF-8 path
+ * used by compare-and-swap writes. In particular, do not route an editor
+ * baseline through Response.text(): the web UTF-8 decoder removes a leading
+ * BOM, whereas Node's UTF-8 strings (and the writer's CAS baseline) retain it.
+ *
+ * This read intentionally does not acquire the write FIFO. A later atomic
+ * replacement is harmless: the CAS writer remains the final authority and
+ * reports a normal conflict rather than overwriting a newer disk version. The
+ * canonical path is a stable logical-target token: it survives this writer's
+ * atomic inode replacement, but changes if a lexical final symlink is retargeted.
+ */
+export async function readValidatedTextFile(filePath, { sender = null } = {}) {
+  const target = await inspectMutablePath(filePath, { sender, textOnly: true });
+  // Sweep only this opened document directory, asynchronously and with the
+  // stale-age guard below, so text temp recovery never delays a read or
+  // touches a live writer's private temp.
+  void cleanupTempFiles(target.parentPath).catch((error) => {
+    logger.warn(`[FileSystem] Text temp cleanup failed for ${target.parentPath}:`, error);
+  });
+  const content = await withTextTargetMutationConflict(
+    () => fs.promises.readFile(target.resolvedPath, 'utf8'),
+  );
+  // Do not hand the renderer a baseline from a target that was replaced while
+  // it was being read. The resulting conflict/read error is safer than a
+  // misleading expected-content value for a different inode.
+  await assertMutableTextTargetIdentity(target);
+  let sessionIdentityToken;
+  let directIdentityCandidate = false;
+  try {
+    // A direct path may differ from realpath only in case or Unicode form and
+    // is safe to coalesce. Any symlink component is deliberately omitted: its
+    // target token remains a CAS precondition, but it must never select or be
+    // selected as a shared renderer editing session.
+    directIdentityCandidate = !await pathContainsSymlinkComponent(target.normalizedPath);
+  } catch {
+    // Sharing is an optimization; ambiguity must preserve independent sessions.
+  }
+  if (directIdentityCandidate) {
+    // Classification itself walks the lexical path asynchronously. Re-prove
+    // both the referent and parent after that walk, then classify once more,
+    // so a direct→symlink or symlink→direct replacement spanning the
+    // original post-read assertion cannot receive a stale merge token. These
+    // identity assertions deliberately live outside the best-effort catch:
+    // returning old bytes after a proven path change would be unsafe even if
+    // sharing were disabled.
+    await assertMutableTextTargetIdentity(target);
+    let remainedDirect = false;
+    try {
+      remainedDirect = !await pathContainsSymlinkComponent(target.normalizedPath);
+    } catch {
+      // Sharing is an optimization; ambiguity must preserve independent sessions.
+    }
+    if (remainedDirect) {
+      await assertMutableTextTargetIdentity(target);
+      sessionIdentityToken = target.resolvedPath;
+    }
+  }
+  return { content, targetToken: target.resolvedPath, sessionIdentityToken };
+}
+
+// Text writes originate from independent document nodes (and potentially
+// independent renderer windows), so their renderer-side write chains cannot
+// serialize each other. Keep the critical compare-and-replace sequence FIFO
+// per real path in the main process instead. Each tail is always resolved in
+// `finally`, so a rejected write can never poison later saves for that file.
+const textWriteLocks = new Map();
+
+async function withTextWriteLock(canonicalPath, operation) {
+  const previous = textWriteLocks.get(canonicalPath) || Promise.resolve();
+  let release;
+  const tail = new Promise((resolve) => { release = resolve; });
+  textWriteLocks.set(canonicalPath, tail);
+
+  // A prior operation may reject; its `finally` has still released its tail,
+  // and this operation must retain FIFO ordering rather than inherit its error.
+  await previous.catch(() => {});
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (textWriteLocks.get(canonicalPath) === tail) textWriteLocks.delete(canonicalPath);
+  }
+}
+
+const RETRY_TEXT_WRITE_WITH_NEW_CANONICAL_PATH = Symbol('retry-text-write-with-new-canonical-path');
 
 /**
  * Validate and atomically replace an existing text document without following
@@ -320,36 +1049,152 @@ async function assertMutableTextParentIdentity(target) {
  * swap windows available through the renderer IPC. The final rename replaces a
  * last-moment target symlink itself; it never follows that link.
  */
-export async function writeValidatedTextFile(filePath, content, { sender = null } = {}) {
+export async function writeValidatedTextFile(filePath, content, {
+  sender = null,
+  expectedContent,
+  expectedTargetToken,
+} = {}) {
   if (typeof content !== 'string') throw new Error('Text file content must be a string.');
-  const target = await inspectMutablePath(filePath, { sender, textOnly: true });
-  await fs.promises.access(target.resolvedPath, fs.constants.W_OK);
-  await assertMutableTextTargetIdentity(target);
+  if (expectedContent !== undefined && typeof expectedContent !== 'string') {
+    throw new Error('Expected text content must be a string when provided.');
+  }
+  if (expectedTargetToken !== undefined && typeof expectedTargetToken !== 'string') {
+    throw new Error('Expected text target token must be a string when provided.');
+  }
 
-  const tmpPath = path.join(target.parentPath, `.__ic_text_${randomUUID()}.tmp`);
-  let tmpCreated = false;
-  try {
-    const handle = await fs.promises.open(tmpPath, 'wx', target.mode || 0o600);
-    tmpCreated = true;
+  // Resolve once to choose a canonical lock. Re-resolve after acquiring it: a
+  // symlink could have been repointed while queued, in which case release this
+  // lock and join the FIFO for the newly resolved canonical target instead.
+  for (;;) {
+    let initialTarget;
     try {
-      await handle.writeFile(content, { encoding: 'utf8' });
-      await handle.sync();
-    } finally {
-      await handle.close();
+      initialTarget = await inspectMutablePath(filePath, { sender, textOnly: true });
+    } catch (error) {
+      // A loaded editor supplies a baseline. If its target disappeared or the
+      // final symlink changed before it reached the FIFO, surface the same
+      // Reload/Keep mine decision instead of an opaque save failure. Legacy
+      // callers intentionally keep their pre-existing validation semantics.
+      if (expectedContent !== undefined || expectedTargetToken !== undefined) {
+        throwTextTargetMutationAsConflict(error);
+      }
+      throw error;
     }
-    await assertMutableTextTargetIdentity(target);
-    await fs.promises.rename(tmpPath, target.resolvedPath);
-    tmpCreated = false;
-    return target.resolvedPath;
-  } finally {
-    if (tmpCreated) {
-      // Do not follow a replaced parent merely to clean up. If its identity no
-      // longer matches, the old directory (and temp) is outside our safe handle.
+    void cleanupTempFiles(initialTarget.parentPath).catch((error) => {
+      logger.warn(`[FileSystem] Text temp cleanup failed for ${initialTarget.parentPath}:`, error);
+    });
+    // Content alone cannot distinguish a delayed/missed watcher notification
+    // after a final symlink L was retargeted from A to byte-identical B. Bind a
+    // session's precondition to the canonical logical target it actually read.
+    if (expectedTargetToken !== undefined && initialTarget.resolvedPath !== expectedTargetToken) {
+      throw textFileConflictError();
+    }
+    const result = await withTextWriteLock(initialTarget.resolvedPath, async () => {
+      const target = await withTextTargetMutationConflict(
+        () => inspectMutablePath(filePath, { sender, textOnly: true }),
+      );
+      if (expectedTargetToken !== undefined && target.resolvedPath !== expectedTargetToken) {
+        throw textFileConflictError();
+      }
+      if (target.resolvedPath !== initialTarget.resolvedPath) {
+        // A precondition belongs to the file the renderer loaded. Retrying on
+        // a newly repointed symlink would apply that old baseline to a different
+        // referent, so surface the normal Reload/Keep mine decision instead.
+        if (expectedContent !== undefined || expectedTargetToken !== undefined) {
+          throw textFileConflictError();
+        }
+        return RETRY_TEXT_WRITE_WITH_NEW_CANONICAL_PATH;
+      }
+
+      await withTextTargetMutationConflict(
+        () => fs.promises.access(target.resolvedPath, fs.constants.W_OK),
+      );
+      await assertMutableTextTargetIdentity(target);
+
+      // Read only after the path and identity are established inside the lock.
+      // A repeated write of the already-requested content is idempotent; every
+      // other mismatch is a genuine stale-baseline conflict.
+      const currentContent = await withTextTargetMutationConflict(
+        () => fs.promises.readFile(target.resolvedPath, 'utf8'),
+      );
+      await assertMutableTextTargetIdentity(target);
+      if (expectedContent !== undefined
+          && currentContent !== expectedContent
+          && currentContent !== content) {
+        throw textFileConflictError();
+      }
+      // A prior invocation can complete rename and then fail its directory
+      // sync. Treat an idempotent retry as another durability attempt rather
+      // than returning success before the parent directory is confirmed.
+      if (currentContent === content) {
+        await syncValidatedTextWriteParent(target.parentPath);
+        return target.resolvedPath;
+      }
+
+      // Check only after the idempotent branch above: hard-linked previews are
+      // readable and an already-completed replacement can still retry its
+      // directory durability barrier without changing content.
+      await assertMutableTextTargetSingleLink(target);
+
+      const tmpPath = path.join(target.parentPath, `.__ic_text_${randomUUID()}.tmp`);
+      let tmpCreated = false;
       try {
-        await assertMutableTextParentIdentity(target);
-        await fs.promises.unlink(tmpPath);
-      } catch { /* best-effort cleanup without traversing a changed parent */ }
-    }
+        const handle = await withTextTargetMutationConflict(
+          () => fs.promises.open(tmpPath, 'wx', target.mode),
+        );
+        tmpCreated = true;
+        activeOwnedTempPaths.add(tmpPath);
+        try {
+          // fs.open applies process umask to its creation mode. Restore the
+          // target's exact bits on the already-private O_EXCL temp before the
+          // existing fsync so rename cannot drop group/other write access.
+          await handle.chmod(target.mode);
+          await handle.writeFile(content, { encoding: 'utf8' });
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await assertMutableTextTargetSingleLink(target);
+        // Identity checks catch atomic replacement, but an external editor can
+        // also modify this inode in place. Re-read immediately before rename so
+        // an expected-baseline write does not overwrite that newer content.
+        if (expectedContent !== undefined) {
+          const contentBeforeRename = await withTextTargetMutationConflict(
+            () => fs.promises.readFile(target.resolvedPath, 'utf8'),
+          );
+          await assertMutableTextTargetSingleLink(target);
+          if (contentBeforeRename !== currentContent && contentBeforeRename !== content) {
+            throw textFileConflictError();
+          }
+        }
+        // Node exposes no descriptor-relative, no-follow rename that can pin a
+        // mutable final symlink through this syscall. The immediately preceding
+        // identity assertion rejects every observed retarget; a retarget in the
+        // unavoidable final check→rename OS window can still replace the former
+        // canonical referent (never the new symlink referent). A later CAS or
+        // watcher reconciliation detects that change rather than redirecting a
+        // write into the newly selected file.
+        // A hard link may be added while the private temp is being written, so
+        // repeat the freshly-lstat-verified single-link check immediately
+        // before the irreversible directory-entry replacement.
+        await assertMutableTextTargetSingleLink(target);
+        await withTextTargetMutationConflict(() => fs.promises.rename(tmpPath, target.resolvedPath));
+        tmpCreated = false;
+        await syncValidatedTextWriteParent(target.parentPath);
+        return target.resolvedPath;
+      } finally {
+        if (tmpCreated) {
+          // Do not follow a replaced parent merely to clean up. If its identity no
+          // longer matches, the old directory (and temp) is outside our safe handle.
+          try {
+            await assertMutableTextParentIdentity(target);
+            await fs.promises.unlink(tmpPath);
+          } catch { /* best-effort cleanup without traversing a changed parent */ }
+        }
+        activeOwnedTempPaths.delete(tmpPath);
+      }
+    });
+
+    if (result !== RETRY_TEXT_WRITE_WITH_NEW_CANONICAL_PATH) return result;
   }
 }
 
@@ -757,6 +1602,7 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('open-file', async (_event, filePath) => {
+    if (isBackgroundE2E()) throw backgroundE2EDisabledError('Opening a file in the OS');
     // Security Guard: allowlist of expected document/media extensions rather
     // than a denylist of known-executable ones. A denylist is inherently
     // incomplete (the old one missed .jar/.dmg/.pkg/.deb/.appimage/.command/
@@ -776,6 +1622,7 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('open-external', async (_event, url) => {
+    if (isBackgroundE2E()) throw backgroundE2EDisabledError('Opening an external URL');
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error(`Invalid protocol: ${parsed.protocol}. Only http and https are allowed for external links.`);
@@ -787,6 +1634,7 @@ export function registerFilesystemHandlers() {
     const { data, filePath } = args;
     let targetPath = filePath;
     if (!targetPath) {
+      if (isBackgroundE2E()) return { canceled: true };
       const { canceled, filePath: dialogPath } = await dialog.showSaveDialog({
         title: 'Save Canvas',
         defaultPath: 'canvas.json',
@@ -835,6 +1683,7 @@ export function registerFilesystemHandlers() {
     let targetPath = opts?.filePath;
     
     if (!targetPath) {
+      if (isBackgroundE2E()) return { canceled: true };
       const { canceled, filePaths } = await dialog.showOpenDialog({
         title: 'Open Canvas',
         properties: ['openFile'],
@@ -915,110 +1764,41 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('start-file-watch', async (event, filePath) => {
-    const sender = event.sender;
-
-    // Helper: attach a one-time cleanup listener the first time this sender
-    // appears in any entry of activeWatchers. This ensures the watcher is
-    // properly torn down even if the sender subscribes to an already-active path.
-    const ensureSenderCleanup = (s) => {
-      if (s.__fsWatchCleanupAttached) return;
-      s.__fsWatchCleanupAttached = true;
-      s.once('destroyed', () => {
-        for (const [fPath, entry] of activeWatchers.entries()) {
-          if (entry.clients.has(s)) {
-            entry.clients.delete(s);
-            if (entry.clients.size === 0) {
-              try { entry.watcher.close(); } catch { /* ignore */ }
-              activeWatchers.delete(fPath);
-            }
-          }
-        }
-      });
-    };
-
-    if (activeWatchers.has(filePath)) {
-      const entry = activeWatchers.get(filePath);
-      const count = entry.clients.get(sender) || 0;
-      entry.clients.set(sender, count + 1);
-      ensureSenderCleanup(sender); // attach cleanup for this sender if not yet done
-      return;
-    }
-
-    await fs.promises.access(filePath);
-
-    const watcher = fs.watch(filePath, (eventType) => {
-      // Atomic saves (tmp-write + rename over the target — how this app's own
-      // writeValidatedTextFile saves, and how most editors save) surface as
-      // 'rename', not 'change'. Forward those too whenever the path still
-      // resolves, so an external atomic save isn't silently missed.
-      if (eventType === 'change' || (eventType === 'rename' && fs.existsSync(filePath))) {
-        const entry = activeWatchers.get(filePath);
-        if (!entry) return;
-        for (const [clientSender] of entry.clients) {
-          if (!clientSender.isDestroyed()) {
-            clientSender.send('file-changed', filePath);
-          }
-        }
-      }
-    });
-
-    // The `access` above yielded, so a concurrent start for the same path (two
-    // document nodes bound to one file mounting in the same flush) may have
-    // registered its own watcher meanwhile. Fold this sender into the winning
-    // entry and close the duplicate — leaving it open orphans a watch that
-    // still fires, delivering every external save twice. The re-check happens
-    // before the error listener is attached so a duplicate can never tear down
-    // the surviving entry.
-    const registered = activeWatchers.get(filePath);
-    if (registered) {
-      try { watcher.close(); } catch { /* ignore */ }
-      registered.clients.set(sender, (registered.clients.get(sender) || 0) + 1);
-      ensureSenderCleanup(sender);
-      return;
-    }
-
-    watcher.on('error', (err) => {
-      logger.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
-      const entry = activeWatchers.get(filePath);
-      if (entry) {
-        try { entry.watcher.close(); } catch { /* ignore */ }
-        activeWatchers.delete(filePath);
-      }
-    });
-
-    const clients = new Map();
-    clients.set(sender, 1);
-    activeWatchers.set(filePath, { watcher, clients });
-    ensureSenderCleanup(sender);
+    await fileWatchRegistry.start(event.sender, filePath);
   });
 
 
   handleSafe('stop-file-watch', async (event, filePath) => {
-    const sender = event.sender;
-    const entry = activeWatchers.get(filePath);
-    
-    if (entry && entry.clients.has(sender)) {
-      const current = entry.clients.get(sender);
-      if (current <= 1) {
-        entry.clients.delete(sender);
-      } else {
-        entry.clients.set(sender, current - 1);
-      }
-
-      if (entry.clients.size === 0) {
-        activeWatchers.delete(filePath);
-        try { if (entry.watcher) entry.watcher.close(); } catch { /* ignore */ }
-      }
-    }
+    fileWatchRegistry.stop(event.sender, filePath);
   });
 
-  handleSafe('delete-os-file', async (event, filePath) => {
-    const safePath = await validateMutablePath(filePath, { sender: event.sender });
+  handleSafe('delete-os-file', async (event, request) => {
+    if (isBackgroundE2E()) return { canceled: true };
+    // Preserve the old string payload for an already-open renderer while the
+    // preload bridge rolls out the survivor-protection object payload.
+    const filePath = typeof request === 'string' ? request : request?.filePath;
+    const protectedPaths = typeof request === 'string' ? [] : request?.protectedPaths;
+    const safePath = await assertDeleteTargetNotRepresented(filePath, protectedPaths, {
+      sender: event.sender,
+    });
     await shell.trashItem(safePath);
   });
 
-  handleSafe('write-text-file', async (event, { filePath, content }) => {
-    await writeValidatedTextFile(filePath, content, { sender: event.sender });
+  handleSafe('read-text-file', async (event, filePath) => (
+    readValidatedTextFile(filePath, { sender: event.sender })
+  ));
+
+  handleSafe('write-text-file', async (event, {
+    filePath,
+    content,
+    expectedContent,
+    expectedTargetToken,
+  }) => {
+    await writeValidatedTextFile(filePath, content, {
+      sender: event.sender,
+      expectedContent,
+      expectedTargetToken,
+    });
   });
 }
 
@@ -1028,33 +1808,74 @@ export function registerFilesystemHandlers() {
  *
  * @param {string} [targetDir] - Directory to scan. Defaults to process.cwd() in dev.
  */
-const cleanedDirs = new Set();
+const cleanupNextEligibleAt = new Map();
+const OWNED_TEMP_MAX_AGE_MS = 60 * 60 * 1000;
+const OWNED_TEMP_RESCAN_MS = 15 * 60 * 1000;
+const OWNED_TEMP_RETRY_MS = 60 * 1000;
+const TEXT_TEMP_FILE_PATTERN = /^\.__ic_text_[0-9a-f-]{36}\.tmp$/i;
 
-// Module-private: invoked only from save-workspace / load-workspace below.
+function isOwnedTempFileName(fileName) {
+  return (fileName.includes('.__ic_atomic_') && fileName.endsWith('.tmp'))
+    || TEXT_TEMP_FILE_PATTERN.test(fileName);
+}
+
+/**
+ * Remove only stale, regular files with one of our temp filename shapes.
+ * `lstat` deliberately refuses a filename-shaped symlink rather than
+ * following it, and the age gate protects a live/in-flight writer.
+ * Exported for deterministic non-GUI regression coverage.
+ */
+export async function cleanupStaleOwnedTempFiles(targetDir, {
+  readdir = fs.promises.readdir,
+  lstat = fs.promises.lstat,
+  unlink = fs.promises.unlink,
+  now = () => Date.now(),
+  maxAgeMs = OWNED_TEMP_MAX_AGE_MS,
+  isActivePath = candidatePath => activeOwnedTempPaths.has(candidatePath),
+} = {}) {
+  const files = await readdir(targetDir);
+  const nowMs = now();
+  let nextEligibleAt = null;
+  for (const fileName of files) {
+    if (!isOwnedTempFileName(fileName)) continue;
+    const candidatePath = path.join(targetDir, fileName);
+    try {
+      const stats = await lstat(candidatePath);
+      if (!stats.isFile() || stats.isSymbolicLink() || isActivePath(candidatePath)) continue;
+      if (nowMs - stats.mtimeMs <= maxAgeMs) {
+        const eligibleAt = stats.mtimeMs + maxAgeMs + 1;
+        nextEligibleAt = nextEligibleAt === null
+          ? eligibleAt
+          : Math.min(nextEligibleAt, eligibleAt);
+        continue;
+      }
+      await unlink(candidatePath);
+    } catch { /* concurrent writers/deletes must not fail a load or save */ }
+  }
+  return { nextEligibleAt };
+}
+
+// Bounded per-directory wrapper invoked by canvas and opened text documents.
 async function cleanupTempFiles(targetDir) {
   const dir = targetDir || process.cwd();
-  
-  // Logical proof: .tmp files are only orphaned if the ENTIRE process crashes. 
-  // Any failed write during an active session cleans up its own .tmp file. 
-  // Thus, sweeping a directory more than once per session is mathematically 
-  // redundant and could cause severe I/O lag on network drives during auto-saves.
-  if (cleanedDirs.has(dir)) return;
-  cleanedDirs.add(dir);
+  const nowMs = Date.now();
+  const scheduledAt = cleanupNextEligibleAt.get(dir);
+  if (scheduledAt && nowMs < scheduledAt) return;
 
+  // Normal failed writes clean up immediately. Leftovers come from process
+  // interruption or a parent replacement where following the old path is
+  // unsafe. Re-sweep at a bounded cadence, and sooner when a currently-fresh
+  // artifact ages past the safe deletion threshold during a long app session.
   try {
-    const files = await fs.promises.readdir(dir);
-    // Explicitly target ONLY our own atomic files
-    const tmpFiles = files.filter(f => f.includes('.__ic_atomic_') && f.endsWith('.tmp'));
-    for (const f of tmpFiles) {
-      try {
-        const stats = await fs.promises.stat(path.join(dir, f));
-        // Only delete if older than 1 hour (safety against concurrent writes from active run)
-        if (Date.now() - stats.mtimeMs > 60 * 60 * 1000) {
-          await fs.promises.unlink(path.join(dir, f));
-        }
-      } catch { /* ignore */ }
-    }
+    const { nextEligibleAt } = await cleanupStaleOwnedTempFiles(dir, { now: () => nowMs });
+    cleanupNextEligibleAt.set(dir, Math.min(
+      nowMs + OWNED_TEMP_RESCAN_MS,
+      nextEligibleAt ?? Infinity,
+    ));
   } catch (err) {
+    // A transient unavailable/network directory must be eligible for a later
+    // retry rather than being permanently marked clean.
+    cleanupNextEligibleAt.set(dir, nowMs + OWNED_TEMP_RETRY_MS);
     logger.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
   }
 }

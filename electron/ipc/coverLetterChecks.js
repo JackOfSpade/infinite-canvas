@@ -1171,6 +1171,77 @@ export function checkAnchorRelevance(paragraphs = [], jobText = '', researchText
     `${letterWide.length} off-posting stack tool name(s) across ${list.length} paragraph(s)`);
 }
 
+// A sentence can name an otherwise sound accomplishment and then spend its
+// final appositive merely declaring that the accomplishment is relevant. That
+// leaves the recruiter to infer the connection to the named responsibility.
+// Keep this deliberately limited to the generated comma-tail shape: judging
+// whether every sentence is persuasive would require semantic scoring, while
+// this construction has no explanatory work beyond the assertion itself.
+const DETACHED_RELEVANCE_ASSERTION = /,\s*(?:work|experience|background|skills?|qualifications?|migration|transition|change|decision)\s+(?:(?:that|which)\s+(?:is|was|are|were)\s+)?(?:(?:directly|closely)\s+)?(?:relevant|applicable)\s+to\s+(?:this|the)\s+(?:role|position)(?:['’]s)?\b/iu;
+
+/** Requires an asserted relevance tail to explain the action-to-need connection. */
+export function checkDetachedRelevanceClaim(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const match = DETACHED_RELEVANCE_ASSERTION.exec(text(sentence));
+      if (!match) continue;
+      observations.push(`paragraph ${index + 1} ends with an asserted relevance tail (“${boundedDetailValue(match[0])}”); connect the named action directly to the specific responsibility, using conditional language for work that would occur after hiring, or remove the relevance label`);
+      if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
+    }
+    if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
+  }
+  return observationResult('detached-relevance-claim', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) explain relevance through an action-to-responsibility connection`);
+}
+
+// Completed experience belongs in a past-tense evidence sentence, but the work
+// the candidate proposes to do after hiring is contingent. Limit the check to
+// the generated bridge shape where a candidate-owned experience noun becomes
+// the subject of a non-conditional readiness claim ("prepared/equips me to
+// contribute"). This leaves ordinary past evidence and current capability
+// statements alone while requiring the prospective contribution itself to be
+// conditional or otherwise explicitly future-facing.
+const NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION = /\b(?:this|that|my|the)\s+(?:[\p{L}’'-]+\s+){0,3}(?:experience|work|background|practice|project|(?:migration|transition|decision)(?:\s+(?:experience|work|background|practice|project))?)\s+(?:help(?:s|ed)|enable(?:s|d)|allow(?:s|ed)|prepare(?:s|d)|equip(?:s|ped)|position(?:s|ed))\s+me\s+(?:to\s+)?(?:contribute|support|help|advance|strengthen|improve|build|deliver)\b/iu;
+const PROSPECTIVE_CONTRIBUTION_TARGET = /\b(?:(?:this|your)\s+(?:[\p{L}’'-]+\s+){0,2}(?:role|position|team|organization|organisation|department|program|programme|work|systems?|services?|moderni[sz]ation)|the\s+(?:role|position))\b/iu;
+
+function companyReferenceAliases(companyName = '') {
+  const name = text(companyName);
+  if (!name) return [];
+  const ignored = new Set(['and', 'of', 'the', 'for', 'at']);
+  const acronym = words(name)
+    .filter(word => !ignored.has(normalized(word)))
+    .map(word => word[0] || '')
+    .join('');
+  return [...new Set([name, acronym.length >= 2 ? acronym : ''].filter(Boolean))];
+}
+
+function namesProspectiveCompany(sentence, companyName = '') {
+  const line = normalized(sentence);
+  return companyReferenceAliases(companyName).some(alias => {
+    const company = normalized(alias);
+    return line.includes(`${company}'s`) || line.includes(`at ${company}`) || line.includes(`for ${company}`);
+  });
+}
+
+/** Keeps target-facing contribution claims conditional or future-facing. */
+export function checkProspectiveContributionTense(paragraphs = [], companyName = '') {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const observations = [];
+  for (let index = 0; index < list.length; index++) {
+    for (const sentence of sentences(list[index])) {
+      const match = NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION.exec(text(sentence));
+      if (!match || (!PROSPECTIVE_CONTRIBUTION_TARGET.test(text(sentence)) && !namesProspectiveCompany(sentence, companyName))) continue;
+      observations.push(`paragraph ${index + 1} uses a past/present readiness bridge for prospective-employer work (“${boundedDetailValue(match[0])}”); state the completed work as past evidence, then use conditional or future-facing target language, such as “At the target employer, I would apply that experience to …”`);
+      if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
+    }
+    if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
+  }
+  return observationResult('prospective-contribution-tense', observations, MAX_COPY_PRECISION_OBSERVATIONS,
+    `${list.length} paragraph(s) frame proposed employer contributions conditionally or prospectively`);
+}
+
 // “I built X. I built Y too.” appends a second proof without saying why it
 // follows. Both halves are required before a sentence is flagged: an additive
 // opener in front of a non-evidence sentence is ordinary connective prose.
@@ -1870,6 +1941,37 @@ export function checkOpeningDemonstrative(paragraphs = []) {
     `${list.length} paragraph(s) anchor their opening references in the preceding paragraph`);
 }
 
+// At a paragraph boundary, “The district” after “Thomson School District”
+// makes the prior employer sound like generic context rather than the named
+// source of the next evidence. This is intentionally narrower than a ban on
+// definite descriptions: only organization labels that match a known employer
+// named in the immediately preceding paragraph are in scope.
+const EMPLOYER_ORGANIZATION_LABELS = new Set([
+  'district', 'department', 'agency', 'company', 'organization', 'organisation',
+  'university', 'college', 'hospital', 'city', 'county', 'state',
+]);
+const OPENING_EMPLOYER_SHORTHAND = /^the\s+(?:school\s+)?([\p{L}’'-]+)\b/iu;
+
+/** Requires a named employer bridge instead of its definite shorthand at a paragraph boundary. */
+export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const employers = (Array.isArray(employerNames) ? employerNames : []).map(text).filter(Boolean);
+  const observations = [];
+  for (let index = 1; index < list.length; index++) {
+    const paragraph = text(list[index]);
+    const match = OPENING_EMPLOYER_SHORTHAND.exec(paragraph);
+    const label = normalized(match?.[1]);
+    if (!label || !EMPLOYER_ORGANIZATION_LABELS.has(label)) continue;
+    const previous = normalized(list[index - 1]);
+    const employer = employers.find(name => words(name).includes(label) && previous.includes(normalized(name)));
+    if (!employer) continue;
+    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming ${employer} in the prior paragraph; repeat the proper name to bridge the evidence explicitly`);
+    if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
+  }
+  return observationResult('opening-employer-shorthand', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
+    `${list.length} paragraph(s) retain explicit prior-employer references across paragraph boundaries`);
+}
+
 /** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
 export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '') {
   const checks = [
@@ -1942,6 +2044,8 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkReferenceClarity(paragraphs),
     checkModifierAttachment(paragraphs),
     checkAnchorRelevance(paragraphs, jobText, researchText),
+    checkDetachedRelevanceClaim(paragraphs),
+    checkProspectiveContributionTense(paragraphs, companyName),
     checkAdditiveSeam(paragraphs),
     checkResponsibilityTransition(paragraphs),
     checkToolCallsGardenPath(paragraphs),
@@ -1958,6 +2062,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkDirectWelcomeClosing(paragraphs),
     checkLegalStatus(paragraphs),
     checkOpeningDemonstrative(paragraphs),
+    checkOpeningEmployerShorthand(paragraphs, priorEmployers),
     checkEntailedPremise(paragraphs),
   ];
 }

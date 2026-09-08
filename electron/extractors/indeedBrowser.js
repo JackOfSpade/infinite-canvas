@@ -21,6 +21,7 @@ import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from '../ipc/browser/backgroundScrapeBrowser.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
+import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
 
 // Indeed runs a SEPARATE site per country and each one only returns that
 // country's postings — `l=` is a place filter WITHIN a site, not a country
@@ -476,6 +477,16 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
   const targets = rows.filter(job =>
     String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
   );
+  if (isBackgroundE2E()) {
+    return {
+      jobs: rows,
+      attempted: 0,
+      recovered: 0,
+      remaining: targets.length,
+      unavailable: [],
+      challengeReason: 'background-e2e-disabled',
+    };
+  }
   if (targets.length === 0) {
     return { jobs: rows, attempted: 0, recovered: 0, remaining: 0, unavailable: [], challengeReason: null };
   }
@@ -612,6 +623,19 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
 export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null) {
+  if (isBackgroundE2E()) {
+    const disabled = backgroundE2EDisabledError('Indeed browser extraction');
+    return {
+      items: [],
+      warning: {
+        code: 'background-e2e-disabled',
+        severity: 'block',
+        evidence: `${disabled.code}: ${disabled.message}`,
+        suggestion: 'Background smoke mode deliberately blocks headed Chrome. Run the normal app to scrape Indeed.',
+      },
+      gathered: 0,
+    };
+  }
   const reservation = getSharedProfileReservationInfo();
   if (reservation) {
     return {

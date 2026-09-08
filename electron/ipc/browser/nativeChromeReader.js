@@ -7,6 +7,7 @@ import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePa
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
 import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
+import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 
 const execFile = promisify(execFileCb);
 
@@ -548,6 +549,10 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
   const results = new Map();
   const fillAll = (error) => { for (const u of urls) results.set(u, { ok: false, error }); return results; };
 
+  if (isBackgroundE2E()) {
+    const error = backgroundE2EDisabledError('Native Chrome hub read');
+    return fillAll(`${error.code}: ${error.message}`);
+  }
   if (process.platform !== 'darwin') return fillAll('Native (non-CDP) read is macOS-only.');
   if (urls.length === 0) return results;
 

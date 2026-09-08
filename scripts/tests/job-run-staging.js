@@ -1,4 +1,4 @@
-import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, completeRunWithReceipt, evaluateJobPreferences, fs, getJobsTelemetry, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, completeRunWithReceipt, evaluateJobPreferences, fs, getJobsTelemetry, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 
 export default [
   {
@@ -847,7 +847,10 @@ export default [
     name: 'job run staging: durable scoring receipt is run-scoped and redacted',
     run: () => {
       const telemetry = getJobsTelemetry();
-      const saved = { nodeId: telemetry.nodeId, search: telemetry.search, pipeline: telemetry.pipeline, scoring: telemetry.scoring };
+      const saved = {
+        nodeId: telemetry.nodeId, search: telemetry.search, pipeline: telemetry.pipeline,
+        scoring: telemetry.scoring, resolves: telemetry.resolves,
+      };
       try {
         telemetry.nodeId = 'receipt-hub';
         telemetry.search = {
@@ -865,17 +868,38 @@ export default [
               providerGathered: 7,
               locationScopeUnenforced: true,
             },
+            linkedin: {
+              count: 60,
+              providerGathered: 60,
+              cap: { type: 'source-internal', limit: 150 },
+              stopReason: 'result-ceiling',
+            },
           },
         };
         telemetry.pipeline = { runId: 'receipt-run', startedAt: 100 };
+        const ownership = { nodeId: 'receipt-hub', jobRunId: 'receipt-run' };
+        const stampedResolve = recordLinkedinResolveAttempt('linkedin', {}, ownership);
+        const stampedMerge = recordResolveMergeOutcome('linkedin', {
+          replacedExisting: 0, fresh: 20, pendingBefore: 0, pendingAfter: 20,
+        }, ownership);
+        assert(stampedResolve?.runId === 'receipt-run'
+          && stampedMerge?.runId === 'receipt-run'
+          && stampedMerge.cumulativeMergeNet === 20,
+        `renderer merge outcomes must retain current-run provenance, got ${JSON.stringify(stampedMerge)}`);
         telemetry.scoring = {
           runId: 'other-run', input: 91, selectedForScoring: 90, scored: 89,
           placeholders: 88, unscored: 1, failedBatches: 7, cappedForBudget: 1,
           providerCalls: 99, failureReason: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }],
         };
+        telemetry.resolves = {
+          stale: {
+            runId: 'other-run', hasMergeTelemetry: true, cumulativeMergeNet: 999,
+            jobs: [{ title: 'MUST NOT PERSIST' }],
+          },
+        };
         const mismatch = sanitizeLastRunReceipt(buildJobRunCompletionReceipt('receipt-run', 200));
-        assert(!Object.hasOwn(mismatch, 'scoring'),
-          `completion must not borrow scoring from another run, got ${JSON.stringify(mismatch.scoring)}`);
+        assert(!Object.hasOwn(mismatch, 'scoring') && !Object.hasOwn(mismatch, 'recovery'),
+          `completion must not borrow scoring or recovery from another run, got ${JSON.stringify(mismatch)}`);
 
         const hostile = sanitizeLastRunReceipt({
           runId: 'receipt-run',
@@ -884,10 +908,14 @@ export default [
             cappedForBudget: 1, providerCalls: 2, prompt: 'MUST NOT PERSIST',
             failureReason: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }], url: 'https://MUST-NOT-PERSIST.example',
           },
+          recovery: {
+            mergeNet: -7, sourceId: 'MUST NOT PERSIST', jobs: [{ title: 'MUST NOT PERSIST' }],
+          },
         });
         assert(JSON.stringify(hostile).includes('MUST NOT PERSIST') === false
+          && hostile.recovery?.mergeNet === -7
           && Object.keys(hostile.scoring).every(key => ['input', 'selected', 'scored', 'placeholders', 'unscored', 'failedBatches', 'cappedForBudget', 'providerCalls'].includes(key)),
-        `scoring sanitizer must whitelist aggregates only, got ${JSON.stringify(hostile.scoring)}`);
+        `receipt sanitizers must whitelist signed recovery/scoring aggregates only, got ${JSON.stringify(hostile)}`);
         const absentCoverage = sanitizeLastRunReceipt({
           runId: 'receipt-run',
           scoring: {},
@@ -912,6 +940,14 @@ export default [
         assert(pageCap.sources.dice.cap?.type === 'pages-per-platform' && pageCap.sources.dice.cap.limit === 2
           && !JSON.stringify(pageCap).includes('MUST NOT PERSIST'),
         `safe page caps must survive receipt sanitization without details, got ${JSON.stringify(pageCap)}`);
+        const linkedInCap = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          sources: { linkedin: { cap: { type: 'source-internal', limit: 150 }, stopReason: 'result-ceiling' } },
+        });
+        assert(linkedInCap.sources.linkedin.cap?.type === 'source-internal'
+          && linkedInCap.sources.linkedin.cap.limit === 150
+          && linkedInCap.sources.linkedin.stopReason === 'result-ceiling',
+        `LinkedIn's own ceiling must survive the durable receipt distinctly from a user cap, got ${JSON.stringify(linkedInCap.sources.linkedin)}`);
         const mixedStops = sanitizeLastRunReceipt({
           runId: 'receipt-run',
           sources: {
@@ -930,17 +966,24 @@ export default [
           runId: 'receipt-run', input: 4, selectedForScoring: 3, scored: 3,
           placeholders: 1, unscored: 0, failedBatches: 1, cappedForBudget: 1, providerCalls: 2,
         };
+        telemetry.resolves = {
+          linkedin: { runId: 'receipt-run', hasMergeTelemetry: true, cumulativeMergeNet: 20 },
+          stale: { runId: 'other-run', hasMergeTelemetry: true, cumulativeMergeNet: 999 },
+        };
         const matched = sanitizeLastRunReceipt(buildJobRunCompletionReceipt('receipt-run', 200));
         const serialized = JSON.stringify(matched);
-        assert(matched.version >= 2 && matched.scoring?.input === 4 && matched.scoring.selected === 3
+        assert(matched.version === 3 && matched.scoring?.input === 4 && matched.scoring.selected === 3
           && matched.scoring.scored === 3 && matched.scoring.placeholders === 1
           && matched.scoring.unscored === 0 && matched.scoring.failedBatches === 1
           && matched.scoring.cappedForBudget === 1 && matched.scoring.providerCalls === 2
+          && matched.recovery?.mergeNet === 20
           && matched.sources?.dice?.pagesWalked === 4
           && matched.sources?.dice?.providerGathered === 190
           && matched.sources?.dice?.unavailableDetailDropped === 2
-          && matched.sources?.glassdoor?.locationScopeUnenforced === true,
-          `matching scoring aggregates must survive sanitization, got ${serialized}`);
+          && matched.sources?.glassdoor?.locationScopeUnenforced === true
+          && matched.sources?.linkedin?.cap?.type === 'source-internal'
+          && matched.sources?.linkedin?.cap?.limit === 150,
+          `matching run-scoped scoring/recovery aggregates must survive sanitization, got ${serialized}`);
         assert(!serialized.includes('MUST NOT PERSIST') && !('failureReason' in matched.scoring) && !('jobs' in matched.scoring),
           `receipt scoring must remain aggregate-only, got ${serialized}`);
         return { mismatchRejected: true, selected: matched.scoring.selected };

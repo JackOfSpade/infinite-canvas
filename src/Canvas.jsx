@@ -73,6 +73,7 @@ import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
 import { buildCustomizationDialogData, filterNodeCustomizationUpdates } from './utils/nodeCustomization';
+import { settlePreFenceCanvasBatches } from './utils/quitCommitSettle';
 
 const wheelZoomDelta = (event) => {
   const platform = window.navigator?.platform || '';
@@ -101,10 +102,34 @@ export function Canvas() {
   const reactFlowWrapper = useRef(null);
   const cursorsRef = useRef(null);
   const drawingLayerRef = useRef(null);
-  const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
-  const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
-  const [drawings, setDrawings] = useState([]);
+  const [nodes, setNodesBase, onNodesChangeBase] = useNodesState([]);
+  const [edges, setEdgesBase, onEdgesChangeBase] = useEdgesState([]);
+  const [drawings, setDrawingsBase] = useState([]);
+  const [quitFenceReleaseVersion, setQuitFenceReleaseVersion] = useState(0);
   const confirmDialogDataRef = useRef(null);
+
+  // A global quit has two renderer phases: first block human input, then make
+  // the canvas state terminal while main revalidates every window. `inert`
+  // alone does not stop a promise, a React Flow batch, or a navigation timer
+  // from mutating this controlled state. Keep the raw setters private and
+  // expose this one gate to every Canvas-owned mutation path instead.
+  //
+  // The generation is deliberately retained after a cancelled quit. Long-lived
+  // operations such as loadCanvas capture it before awaiting; their completion
+  // cannot revive a pre-commit workspace after the UI is released again.
+  const quitGateRef = useRef({ frozen: false, generation: 0, commitEpoch: 0 });
+  const guardCanvasSetter = useCallback((setState, update) => {
+    if (quitGateRef.current.frozen) return false;
+    // Do not re-check from within a functional updater. JavaScript cannot
+    // interleave between the check above and enqueueing it; rejecting an
+    // already-accepted updater later would drop the exact pre-quit edit that
+    // the final settle is required to save.
+    setState(update);
+    return true;
+  }, []);
+  const setNodes = useCallback((update) => guardCanvasSetter(setNodesBase, update), [guardCanvasSetter, setNodesBase]);
+  const setEdges = useCallback((update) => guardCanvasSetter(setEdgesBase, update), [guardCanvasSetter, setEdgesBase]);
+  const setDrawings = useCallback((update) => guardCanvasSetter(setDrawingsBase, update), [guardCanvasSetter, setDrawingsBase]);
 
   // Self-healing orphan-edge prune: whenever the node set changes, drop any
   // edge whose source/target isn't a live node. Belt-and-suspenders for the
@@ -153,6 +178,10 @@ export function Canvas() {
   }, []);
 
   const onNodesChange = useCallback((changes) => {
+    // React Flow's controlled BatchProvider delivers instance.setNodes() and
+    // updateNodeData() through this callback. Fence it before logging/snapshot
+    // side effects as well as before the base state setter.
+    if (quitGateRef.current.frozen) return;
     // Prevent removal of locked nodes
     const filteredChanges = changes.filter(ch => {
       if (ch.type === 'remove') {
@@ -194,6 +223,7 @@ export function Canvas() {
   const isInteractionRef = useRef(false);
 
   const onEdgesChange = useCallback((changes) => {
+    if (quitGateRef.current.frozen) return;
     snapshotOnDelete(changes);
     changes.forEach(ch => {
       if (ch.type === 'remove') EventLogger.log(`edge removed id=${ch.id}`);
@@ -245,9 +275,54 @@ export function Canvas() {
   const navigation = useCanvasNavigation({
     nodes, edges, drawings,
     setNodes, setEdges, setDrawings,
+    quitGateRef,
     clearHistory,
     animationDuration,
   });
+  const freezeNavigationForQuit = navigation.freezeForQuit;
+
+  const freezeCanvasForQuit = useCallback(async () => {
+    const commitEpoch = quitGateRef.current.commitEpoch + 1;
+    quitGateRef.current.commitEpoch = commitEpoch;
+    if (quitGateRef.current.frozen) return true;
+
+    // The actual state fence is synchronous: no promise continuation can pass
+    // this point until main explicitly releases this cancelled quit. Crucially,
+    // fence *before* awaiting the controlled React Flow batch drain below:
+    // `inert` only blocks people, not a promise/timer that fires on either of
+    // those paint turns. State setters accepted before this synchronous point
+    // still commit because their functional updaters deliberately have no
+    // inner fence check.
+    quitGateRef.current.frozen = true;
+    quitGateRef.current.generation += 1;
+    freezeNavigationForQuit();
+
+    // A controlled React Flow instance batches updates through a layout-effect
+    // queue. Let edits accepted before the synchronous fence reach Canvas refs
+    // before acknowledging the barrier. A shared timeout fallback keeps a
+    // minimized/occluded renderer from hanging this IPC handshake forever.
+    await settlePreFenceCanvasBatches();
+    // Main may have timed out and broadcast a release while Chromium was
+    // throttling paint callbacks. A stale preparation must never ACK or
+    // reassert ownership after that release.
+    if (quitGateRef.current.commitEpoch !== commitEpoch) return false;
+    return quitGateRef.current.frozen;
+  }, [freezeNavigationForQuit]);
+
+  const releaseCanvasQuitFence = useCallback(() => {
+    // Invalidate a still-awaiting pre-fence drain as well as unfreezing a
+    // completed one. See freezeCanvasForQuit's epoch check above.
+    quitGateRef.current.commitEpoch += 1;
+    quitGateRef.current.frozen = false;
+    // Advancing the imperative generation invalidates the autosave timer that
+    // belonged to the pre-quit interactive state. Releasing only the ref would
+    // not cause useCanvasInitialization's effect to run again, so a cancelled
+    // quit could leave an already-dirty canvas without another autosave until
+    // the user made a further edit. This presentation-neutral counter re-arms
+    // that timer without cloning canvas state or falsely marking a clean canvas
+    // dirty.
+    setQuitFenceReleaseVersion(version => version + 1);
+  }, []);
   // Sync isNavigationAnimatingRef synchronously via useLayoutEffect (to catch frames as early as possible)
   // to close the 1-frame race window where isAnimating is true but the ref hasn't
   // been updated yet, allowing event handlers to bypass the animation guard.
@@ -275,11 +350,14 @@ export function Canvas() {
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
     hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
-    saveStateRef, loadState,
+    saveStateRef, saveOperationRef, loadState,
   } = useCanvasPersistence({
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
     resetStack: navigation.resetStack,
+    quitGateRef,
+    freezeCanvasForQuit,
+    releaseCanvasQuitFence,
     clearHistory,
     isAnimatingRef: isNavigationAnimatingRef,
     updateSetting,
@@ -288,9 +366,12 @@ export function Canvas() {
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
     flushStack: navigation.flushStack,
+    quitGateRef,
+    quitFenceReleaseVersion,
     isAnimatingRef: isNavigationAnimatingRef,
     navigationStateSwapRef: navigation.stateSwapRef,
     saveStateRef,
+    saveOperationRef,
   });
 
   // Queued work may outlive an individual card view (for example while a job
@@ -323,10 +404,12 @@ export function Canvas() {
   // one-shot — the direct flag keeps the quit handshake honest either way, so
   // a clean-quit cannot silently drop the state change.
   const nudgeLocalAiPersistence = useCallback(() => {
+    if (quitGateRef.current.frozen) return false;
     setNodes((prev) => (prev.length ? prev.slice() : prev));
     setHasUnsavedChanges(true);
+    return true;
   }, [setNodes, setHasUnsavedChanges]);
-  useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence: nudgeLocalAiPersistence });
+  useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence: nudgeLocalAiPersistence, quitGateRef });
 
   // ── Initial canvas population on mount ──────────────────────────────────
   // Each window is told what to show via the loaded URL's `init` query param,
@@ -368,6 +451,7 @@ export function Canvas() {
   useEffect(() => {
     if (!window.electronAPI?.onCanvasFileRenamed) return;
     return window.electronAPI.onCanvasFileRenamed((newPath) => {
+      if (quitGateRef.current.frozen) return;
       if (!newPath) return;
       setCurrentFile(newPath);
       updateSetting?.('lastOpenedWorkspace', newPath);
@@ -422,26 +506,36 @@ export function Canvas() {
     confirmDialogDataRef.current = confirmDialogData;
   }, [confirmDialogData]);
 
-  const handleConfirmDialogConfirm = useCallback(() => {
-    EventLogger.log('ConfirmDialog CONFIRMED');
-    confirmDialogDataRef.current?.onConfirm();
-    setConfirmDialogData(null);
+  const resolveConfirmDialog = useCallback(async (actionName, eventName) => {
+    const dialog = confirmDialogDataRef.current;
+    const action = dialog?.[actionName];
+    EventLogger.log(`ConfirmDialog ${eventName}`);
+    try {
+      // ConfirmDialog keeps itself mounted and disabled until this promise
+      // resolves. Deletion/clear preflight may need to settle a final linked
+      // text draft before task cleanup or a filesystem trash action begins.
+      await action?.();
+    } catch (error) {
+      EventLogger.error(`ConfirmDialog ${eventName} failed:`, error);
+    } finally {
+      if (confirmDialogDataRef.current === dialog) setConfirmDialogData(null);
+    }
   }, [setConfirmDialogData]);
 
+  const handleConfirmDialogConfirm = useCallback(() => {
+    return resolveConfirmDialog('onConfirm', 'CONFIRMED');
+  }, [resolveConfirmDialog]);
+
   const handleConfirmDialogCancel = useCallback(() => {
-    EventLogger.log('ConfirmDialog CANCELLED');
-    confirmDialogDataRef.current?.onCancel?.();
-    setConfirmDialogData(null);
-  }, [setConfirmDialogData]);
+    return resolveConfirmDialog('onCancel', 'CANCELLED');
+  }, [resolveConfirmDialog]);
 
   // X button — caller-provided "undo everything this dialog was about to act
   // on" callback. Used by the delete-from-disk dialog to roll back the canvas
   // deletion that triggered it. No-op if the caller didn't provide one.
   const handleConfirmDialogAbort = useCallback(() => {
-    EventLogger.log('ConfirmDialog ABORTED/UNDONE');
-    confirmDialogDataRef.current?.onAbort?.();
-    setConfirmDialogData(null);
-  }, [setConfirmDialogData]);
+    return resolveConfirmDialog('onAbort', 'ABORTED/UNDONE');
+  }, [resolveConfirmDialog]);
 
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState(null); // 'pen' | 'eraser' | null
@@ -491,7 +585,7 @@ export function Canvas() {
 
   const { handleDrop: handleDropBase, handleDragOver, handleDragLeave } = useCanvasDragAndDrop({
     setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth,
-    addElementsGlobally: navigation.addElementsGlobally,
+    addElementsGlobally: navigation.addElementsGlobally, quitGateRef,
   });
   // Guard drops during navigation animations — a drop during the ~300ms fade would
   // append a node to the old canvas state and then the animation's setNodes would
@@ -507,7 +601,13 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
-  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath: currentFile, addToast });
+  const { onNodesDelete } = useCanvasOSDeletion({
+    requestConfirm,
+    undo,
+    canvasFilePath: currentFile,
+    addToast,
+    enumerateAllNodes: navigation.enumerateAllNodes,
+  });
 
   const { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes } = useCanvasActions({
     takeSnapshot,
@@ -523,6 +623,7 @@ export function Canvas() {
     isAnimatingRef: isNavigationAnimatingRef,
     canvasFilePath: currentFile,
     addToast,
+    enumerateAllNodes: navigation.enumerateAllNodes,
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({

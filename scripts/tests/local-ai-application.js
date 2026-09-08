@@ -375,6 +375,16 @@ export default [
         && localSource.includes('keep general domain principles distinct from personal experience')
         && localSource.includes('listing’s description rather than independently verified fact')
         && localSource.includes('COVER_LETTER_COPY_PRECISION_RULE')
+        && localSource.includes('COVER_LETTER_RELEVANCE_LINK_RULE')
+        && localSource.includes('COVER_LETTER_BOUNDARY_REFERENCE_RULE')
+        && localSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
+        && localSource.includes('maintenance or cost rationale can explain an earlier decision')
+        && localSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
+        && localSource.includes('Keep completed experience in a past-tense evidence sentence')
+        && localSource.includes('That project prepared/equips me to contribute')
+        && localSource.includes('At the target employer, I would apply that experience')
+        && localSource.includes('do not open with organization shorthand such as “The district”')
+        && localSource.includes('Ordinary definite descriptions such as “The system” remain appropriate')
         && localSource.includes('Punctuate introductory phrases')
         && localSource.includes('recruiter seeing it for the first time')
         && localSource.includes('concrete actor, artifact, and action')
@@ -428,6 +438,14 @@ export default [
         && normalizedRoutineSource.includes('Give every paragraph one argumentative job')
         && normalizedRoutineSource.includes('make each evidence paragraph identify the branch it develops')
         && normalizedRoutineSource.includes('last sentence of every non-final paragraph')
+        && normalizedRoutineSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
+        && normalizedRoutineSource.includes('maintenance or cost rationale can explain an earlier decision')
+        && normalizedRoutineSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
+        && normalizedRoutineSource.includes('Keep completed experience in a past-tense evidence sentence')
+        && normalizedRoutineSource.includes('That project prepared me to contribute')
+        && normalizedRoutineSource.includes('I would apply that experience')
+        && normalizedRoutineSource.includes('do not open with an organization shorthand such as `The district`')
+        && normalizedRoutineSource.includes('ordinary definite descriptions such as `The system`')
         && normalizedRoutineSource.includes('must not introduce a new organizing frame')
         && normalizedRoutineSource.includes('ask the employer to choose between products, prototypes, or initiatives')
         && normalizedRoutineSource.includes('selected scope as `this role` or the work itself')
@@ -470,7 +488,7 @@ export default [
       'the card exposes repair for historical partial bundles, waits for a stable Local AI result before auto-importing, and retains fit, render, and validation recovery paths');
       assert(fallbackSource.includes("next.status === 'render-retry-required'")
         && fallbackSource.includes("actionLabel: 'Retry layout check'")
-        && fallbackSource.includes('await importJob(node, jobId, exactResultSha256, orphanJob)')
+        && fallbackSource.includes('await importJob(node, jobId, exactResultSha256, orphanJob')
         && fallbackSource.includes('dedupeKey: `local-ai-retry:${jobId}:${exactResultSha256}`')
         && fallbackSource.includes('LOCAL_AI_RETRY_NOTICE_INTERVAL_MS')
         && toastSource.includes('normalizedDedupeKey')
@@ -1262,6 +1280,9 @@ export default [
         ['conditionally deferential closing', 'I would welcome the chance to talk about that work.', 'direct-welcome-closing'],
         ['opaque responsibility pivot', 'Keeping the district data consistent across its tools was a different problem. I solved it with Python integration jobs.', 'responsibility-transition'],
         ['same-job responsibility opener', 'The same job also included assessing software before adoption.', 'responsibility-transition'],
+        ['detached relevance tail', "As a software engineer for Thomson School District, I moved operational data and workflows from internal systems to third-party platforms, work relevant to this role's legacy modernization and cross-program integration responsibilities.", 'detached-relevance-claim'],
+        ['present-tense prospective contribution', "That migration experience helps me contribute to this role's legacy-modernization responsibilities.", 'prospective-contribution-tense'],
+        ['past-readiness prospective contribution', "That project prepared me to contribute to this role's legacy-modernization and cross-program integration responsibilities.", 'prospective-contribution-tense'],
         ['employer-choice closing', 'I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.', 'direct-welcome-closing'],
         ['literalized decision frame', 'Model delegation and a purchased platform are two answers to one build-or-buy call.', 'claimed-equivalence'],
       ]) {
@@ -3538,8 +3559,10 @@ export default [
           && fallbackSource.includes('selectOrphanedLocalAiJobs')
           && fallbackSource.includes('suppressReveal: isOrphan'),
         'the mounted canvas manager discovers deleted-card jobs and marks their automatic save as non-revealing');
-        assert(saveSource.includes('if (!suppressReveal)') && saveSource.includes('await shell.openPath(dir)'),
-          'save-application skips the Finder/Explorer reveal when recovery requests it, while preserving normal explicit-save reveals');
+        assert(saveSource.includes('const revealSkipped = suppressReveal || isBackgroundE2E()')
+          && saveSource.includes('if (!revealSkipped)')
+          && saveSource.includes('await shell.openPath(dir)'),
+        'save-application skips Finder/Explorer for recovery and background smoke mode, while preserving normal explicit-save reveals');
         return { discovered: discovered.map((job) => job.id), orphaned: orphaned.map((job) => job.id) };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });

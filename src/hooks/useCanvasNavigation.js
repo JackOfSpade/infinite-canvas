@@ -18,6 +18,7 @@ import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 export function useCanvasNavigation({
   nodes, edges, drawings,
   setNodes, setEdges, setDrawings,
+  quitGateRef,
   clearHistory,
   animationDuration,
 }) {
@@ -34,17 +35,37 @@ export function useCanvasNavigation({
   const stateSwapRef = useRef(false);
   const navTimersRef = useRef([]); // All pending navigation setTimeout IDs
   const navFramesRef = useRef([]); // All pending requestAnimationFrame IDs
+
+  // Unlike active nodes/edges/drawings, stack state is hidden from React Flow
+  // but is still serialized by flushStack. It therefore needs the same quit
+  // fence as the Canvas-owned setters; otherwise a late job result could alter
+  // a parent canvas while the visible child window is inert.
+  const canMutateCanvas = useCallback(() => !quitGateRef?.current?.frozen, [quitGateRef]);
+  const setStackGuarded = useCallback((update) => {
+    if (!canMutateCanvas()) return false;
+    setStack(update);
+    return true;
+  }, [canMutateCanvas]);
+
+  const freezeForQuit = useCallback(() => {
+    isNavigatingRef.current = false;
+    navTimersRef.current.forEach(id => clearTimeout(id));
+    navTimersRef.current = [];
+    navFramesRef.current.forEach(id => cancelAnimationFrame(id));
+    navFramesRef.current = [];
+    // These are visual-only state transitions. Reset them so a cancelled quit
+    // returns to an interactive, non-animating canvas rather than leaving a
+    // stale fade overlay after the state fence is released.
+    setIsAnimating(false);
+    setAnimPhase(null);
+  }, []);
   useEffect(() => {
     return () => {
       // Safety: reset navigation flag and cancel all pending timers to prevent
       // stale state updates if the component is torn down mid-transition.
-      isNavigatingRef.current = false;
-      navTimersRef.current.forEach(id => clearTimeout(id));
-      navTimersRef.current = [];
-      navFramesRef.current.forEach(id => cancelAnimationFrame(id));
-      navFramesRef.current = [];
+      freezeForQuit();
     };
-  }, []);
+  }, [freezeForQuit]);
 
   // flushStack can run from a save shortcut immediately after a visible node
   // update. Layout timing guarantees these refs match that committed render
@@ -71,7 +92,7 @@ export function useCanvasNavigation({
    * Dive into a nested canvas node.
    */
   const diveIn = useCallback((nodeId) => {
-    if (isNavigatingRef.current) return;
+    if (!canMutateCanvas() || isNavigatingRef.current) return;
     isNavigatingRef.current = true;
 
     // Fast fail if node doesn't exist
@@ -94,6 +115,7 @@ export function useCanvasNavigation({
     // animationDuration / 2, i.e. 100/200/300ms by the user's animation setting).
     const t1 = setTimeout(() => {
       navTimersRef.current = navTimersRef.current.filter(id => id !== t1);
+      if (!canMutateCanvas()) return;
       
       // Re-fetch the node from our latest ref to guarantee we capture any IPC updates
       const latestNode = nodesRef.current.find(n => n.id === nodeId);
@@ -114,7 +136,7 @@ export function useCanvasNavigation({
       };
 
       stateSwapRef.current = true;
-      setStack(s => [...s, parentState]);
+      setStackGuarded(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
       setDrawings(canvasData.drawings || []);
@@ -123,6 +145,7 @@ export function useCanvasNavigation({
       // Let React render the new data, then center and fade in
       const frameId = requestAnimationFrame(() => {
         navFramesRef.current = navFramesRef.current.filter(id => id !== frameId);
+        if (!canMutateCanvas()) return;
         // Centre on child content at current zoom — never change zoom
         const currentVp = reactFlow.getViewport();
         const childNodes = canvasData.nodes || [];
@@ -146,6 +169,7 @@ export function useCanvasNavigation({
 
         const t2 = setTimeout(() => {
           navTimersRef.current = navTimersRef.current.filter(id => id !== t2);
+          if (!canMutateCanvas()) return;
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
@@ -155,7 +179,7 @@ export function useCanvasNavigation({
       navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t1);
-  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
+  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory, canMutateCanvas, setStackGuarded]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Jump to a specific breadcrumb level.
@@ -164,7 +188,7 @@ export function useCanvasNavigation({
    */
   const jumpTo = useCallback((targetIndex) => {
     const currentStack = stackRef.current;
-    if (isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
+    if (!canMutateCanvas() || isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
     isNavigatingRef.current = true;
 
     EventLogger.log(`canvas dive-out → depth ${targetIndex} (was ${currentStack.length})`);
@@ -175,6 +199,7 @@ export function useCanvasNavigation({
 
     const t3 = setTimeout(() => {
       navTimersRef.current = navTimersRef.current.filter(id => id !== t3);
+      if (!canMutateCanvas()) return;
       const { nodes: cn, edges: ce, drawings: cd } = syncStackUpward(
         nodesRef.current, edgesRef.current, drawingsRef.current,
         currentStack, currentStack.length - 1, targetIndex
@@ -182,7 +207,7 @@ export function useCanvasNavigation({
 
       const targetViewport = currentStack[targetIndex].viewport;
       stateSwapRef.current = true;
-      setStack(s => s.slice(0, targetIndex));
+      setStackGuarded(s => s.slice(0, targetIndex));
       setNodes(cn);
       setEdges(ce);
       setDrawings(cd);
@@ -190,11 +215,13 @@ export function useCanvasNavigation({
 
       const frameId = requestAnimationFrame(() => {
         navFramesRef.current = navFramesRef.current.filter(id => id !== frameId);
+        if (!canMutateCanvas()) return;
         reactFlow.setViewport(targetViewport, { duration: 0 });
         setAnimPhase('fade-in');
 
         const t4 = setTimeout(() => {
           navTimersRef.current = navTimersRef.current.filter(id => id !== t4);
+          if (!canMutateCanvas()) return;
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
@@ -204,15 +231,15 @@ export function useCanvasNavigation({
       navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t3);
-  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
+  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory, canMutateCanvas, setStackGuarded]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Dive out one level (back to parent).
    */
   const diveOut = useCallback(() => {
-    if (isNavigatingRef.current || stackRef.current.length === 0) return;
+    if (!canMutateCanvas() || isNavigatingRef.current || stackRef.current.length === 0) return;
     jumpTo(stackRef.current.length - 1);
-  }, [jumpTo]);
+  }, [jumpTo, canMutateCanvas]);
 
   /**
    * Flush: sync all pending sub-canvas edits back through the stack.
@@ -260,7 +287,7 @@ export function useCanvasNavigation({
    * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
   const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
-    if (isNavigatingRef.current || stackRef.current.length === 0) return;
+    if (!canMutateCanvas() || isNavigatingRef.current || stackRef.current.length === 0) return;
 
     const targetIndex = explicitTargetIndex !== undefined ? explicitTargetIndex : stackRef.current.length - 1;
     // Don't extract if the target is the current level or deeper than available stack
@@ -287,7 +314,7 @@ export function useCanvasNavigation({
     clearHistory?.();
 
     // Inject into ancestor's saved state
-    setStack(s => {
+    setStackGuarded(s => {
       if (s.length <= targetIndex) return s;
       
       const newStack = [...s];
@@ -329,7 +356,7 @@ export function useCanvasNavigation({
       newStack[targetIndex] = { ...targetParent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
-  }, [setNodes, setEdges, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
+  }, [setNodes, setEdges, clearHistory, canMutateCanvas, setStackGuarded]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Globally updates a node's data by ID, regardless of whether it is 
@@ -337,6 +364,7 @@ export function useCanvasNavigation({
    * nested inside a group's canvasData.
    */
   const updateNodeDataGlobally = useCallback((nodeId, dataUpdate) => {
+    if (!canMutateCanvas()) return false;
     // Always update both active nodes and the stack. deepUpdateNode is a pure function
     // that returns the original array reference unchanged when nothing matches, so
     // calling it on both is safe and avoids the async-flag race condition that existed
@@ -346,7 +374,7 @@ export function useCanvasNavigation({
       return updated ? newNodes : prev;
     });
 
-    setStack(prevStack => {
+    setStackGuarded(prevStack => {
       let stackUpdated = false;
       const newStack = prevStack.map(level => {
         const { updated, nodes: newNodes } = deepUpdateNode(level.nodes, nodeId, dataUpdate);
@@ -355,7 +383,8 @@ export function useCanvasNavigation({
       });
       return stackUpdated ? newStack : prevStack;
     });
-  }, [setNodes]);
+    return true;
+  }, [setNodes, canMutateCanvas, setStackGuarded]);
 
   /**
    * Appends new nodes and edges to the targetNodeId either inside its subcanvas or as siblings.
@@ -363,6 +392,7 @@ export function useCanvasNavigation({
    * preceding updates (e.g. removing the dragged node from its old location).
    */
   const addElementsGlobally = useCallback((targetNodeId, newNodesPayload, newEdgesPayload = [], placement = 'inside') => {
+    if (!canMutateCanvas()) return false;
     setNodes(prevNodes => {
       const { updated, nodes: newNodes } = deepAddElements(
         prevNodes, edgesRef.current, targetNodeId, newNodesPayload, newEdgesPayload, placement
@@ -382,7 +412,7 @@ export function useCanvasNavigation({
       });
     }
 
-    setStack(prevStack => {
+    setStackGuarded(prevStack => {
       let stackUpdated = false;
       const newStack = prevStack.map(level => {
         const { updated: lu, nodes: newStackNodes, edges: newStackEdges } = deepAddElements(
@@ -393,15 +423,18 @@ export function useCanvasNavigation({
       });
       return stackUpdated ? newStack : prevStack;
     });
-  }, [setNodes, setEdges]);
+    return true;
+  }, [setNodes, setEdges, canMutateCanvas, setStackGuarded]);
 
   /**
    * Reset the navigation stack entirely (e.g. when loading a new workspace).
    * This ensures we return to root level and discard all stale parent state.
    */
   const resetStack = useCallback(() => {
-    setStack([]);
-  }, []);
+    if (!canMutateCanvas()) return false;
+    setStackGuarded([]);
+    return true;
+  }, [canMutateCanvas, setStackGuarded]);
 
   // Memoize the returned object itself. Every piece here is already stable
   // (useCallback-memoized functions, a ref, or primitives/breadcrumbs that only
@@ -421,6 +454,7 @@ export function useCanvasNavigation({
     updateNodeDataGlobally,
     addElementsGlobally,
     resetStack,
+    freezeForQuit,
     breadcrumbs,
     depth,
     isAnimating,
@@ -428,7 +462,7 @@ export function useCanvasNavigation({
     stateSwapRef,
   }), [
     diveIn, diveOut, jumpTo, flushStack, enumerateAllNodes, extractToLevel,
-    updateNodeDataGlobally, addElementsGlobally, resetStack,
+    updateNodeDataGlobally, addElementsGlobally, resetStack, freezeForQuit,
     breadcrumbs, depth, isAnimating, animPhase, stateSwapRef,
   ]);
 }

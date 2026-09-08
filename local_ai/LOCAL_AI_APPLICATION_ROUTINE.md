@@ -182,14 +182,36 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    applied to the position itself rather than to the evidence. A
    concluding or transitional sentence must name the concrete responsibility,
    system, decision, or process it synthesizes and remain within that evidence's
-   scope. Treat phrases such as `most of my work` and `throughout my career` as
+   scope. Never end a sentence with an appositive that merely labels prior work
+   as relevant to this role (for example `, work relevant to this role's legacy
+   modernization responsibilities`). Connect the named action directly to the
+   concrete responsibility, using conditional language for work that would
+   occur after hiring, or remove the relevance label.
+   Every evidence block must let a recruiter identify why it matters to the
+   target work. A prior employer's maintenance or cost rationale can explain an
+   earlier decision, but it is not an employer-facing conclusion unless the
+   action-to-target link is already explicit. Add that link when needed; do not
+   repeat the target formulaically when the existing prose already makes it
+   clear. Keep completed experience in a past-tense evidence sentence. When
+   describing work the candidate would do after hiring, use conditional or
+   explicitly future-facing language. Do not make the completed project the
+   subject of a past/present readiness bridge such as `That project prepared
+   me to contribute to the target employer's modernization` or `That project
+   equips me to contribute`. Prefer a direct bridge such as `At the target
+   employer, I would apply that experience to modernizing legacy systems`.
+   Treat phrases such as `most of my work` and `throughout my career` as
    factual breadth claims that require source support. Across paragraph
    boundaries a demonstrative must find its referent in the immediately
    preceding paragraph: replace `this`, `that`, or `it` when more than one
    antecedent is plausible, and never open a paragraph with `That <thing>` or
    `This <thing>` unless the previous paragraph is about that thing; otherwise
-   restate the referent in full. Pair noun phrases with noun phrases or actions
-   with actions; do not add bureaucratic padding to conceal a mismatch. Do not
+   restate the referent in full. When a new paragraph follows one that names a
+   prior employer, do not open with an organization shorthand such as `The
+   district`; repeat the proper name when it bridges the next evidence block.
+   This does not prohibit ordinary definite descriptions such as `The system`
+   when they name the paragraph's actual subject. Pair noun phrases with noun
+   phrases or actions with actions; do not add bureaucratic padding to conceal
+   a mismatch. Do not
    compress a multi-step workflow into an opaque endpoint range; name its
    supported actions directly. Read every sentence once as a recruiter seeing
    it for the first time. Reject idiom, figurative personification, or an

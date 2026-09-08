@@ -47,9 +47,10 @@ const MANIFEST_SUFFIX = '.jobs-run.json';
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
 const LAST_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
-// Version 2 adds the redacted, run-scoped scoring aggregate and safe source-cap
-// coverage. Readers remain compatible with v1 because every added field is optional.
-const JOB_RUN_RECEIPT_VERSION = 2;
+// Version 3 adds the redacted, run-scoped post-search recovery delta alongside
+// scoring and safe source-cap coverage. Readers remain compatible because every
+// added field is optional.
+const JOB_RUN_RECEIPT_VERSION = 3;
 // A manifest older than this is "stale" — not auto-offered for resume (the user
 // likely abandoned it). 24h; the renderer can still surface a manual choice.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -179,7 +180,12 @@ function sanitizeReceiptRevealOutcomes(values) {
 
 function sanitizeReceiptSourceCap(cap) {
   if (!cap || typeof cap !== 'object' || Array.isArray(cap)) return null;
-  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(cap.type)) return null;
+  // `source-internal` is a provider's own finite result ceiling (currently
+  // LinkedIn's 150-offset walk), not a user-configured collection cap. It is
+  // still safe aggregate-only provenance and the report explicitly refuses it
+  // as configured-cap proof; dropping it here left a durable `result-ceiling`
+  // stop with no number after restart.
+  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(cap.type)) return null;
   // A cap is completion evidence, not a display hint. Do not coerce truthy
   // values or fractions into a different integer cap (for example, 0.5 → 0),
   // since that could make a malformed receipt look like a user-configured
@@ -293,6 +299,16 @@ function sanitizeReceiptScoring(scoring) {
   };
 }
 
+function sanitizeReceiptRecovery(recovery) {
+  if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) return null;
+  // Recovery is deliberately one signed integer. It reconciles the initial
+  // funnel to the terminal scorer after restart, while excluding source IDs,
+  // job rows, listing text, URLs, and renderer event detail.
+  const mergeNet = recovery.mergeNet;
+  if (typeof mergeNet !== 'number' || !Number.isSafeInteger(mergeNet)) return null;
+  return { mergeNet };
+}
+
 /**
  * Whitelist the completion receipt shape. Keep this boundary defensive: this
  * artifact is read by support reports after restart, so it must never become a
@@ -329,9 +345,11 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     roleDropped: receiptNumber(receipt.funnel.roleDropped),
     historyDropped: receiptNumber(receipt.funnel.historyDropped),
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
+    ...(receipt.funnel.finalDedupDropped != null ? { finalDedupDropped: receiptNumber(receipt.funnel.finalDedupDropped) } : {}),
     kept: receiptNumber(receipt.funnel.kept),
   } : null;
   const scoring = sanitizeReceiptScoring(receipt.scoring);
+  const recovery = sanitizeReceiptRecovery(receipt.recovery);
   return {
     version: JOB_RUN_RECEIPT_VERSION,
     runId,
@@ -346,6 +364,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     },
     ...(funnel ? { funnel } : {}),
     ...(scoring ? { scoring } : {}),
+    ...(recovery ? { recovery } : {}),
     sources,
     stagingStarted: receipt.stagingStarted === true,
     cleanup: {

@@ -1,9 +1,10 @@
 import React from 'react';
+import { textDocumentSessions } from '../utils/textDocumentSessions';
 
 export class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null, errorInfo: null };
+    this.state = { hasError: false, error: null, errorInfo: null, reloading: false, reloadError: null };
   }
 
   static getDerivedStateFromError(error) {
@@ -15,8 +16,44 @@ export class ErrorBoundary extends React.Component {
     this.setState({ errorInfo });
   }
 
-  handleReload = () => {
-    window.location.reload();
+  handleReload = async () => {
+    this.setState({ reloading: true, reloadError: null });
+    try {
+      // The boundary replaces Canvas, so its persistence hooks are already
+      // unmounted by the time this button is pressed. Settle shared text-file
+      // drafts here rather than allowing a direct reload to abandon them.
+      const result = await textDocumentSessions.flushAndSettleAll();
+      if (!result.success) {
+        const paths = result.unresolvedFilePaths?.join(', ');
+        this.setState({
+          reloading: false,
+          reloadError: `Reload paused: resolve the unsaved text file${paths ? ` (${paths})` : ''} first.`,
+        });
+        return;
+      }
+      window.location.reload();
+    } catch (error) {
+      this.setState({
+        reloading: false,
+        reloadError: `Reload paused: ${error?.message || 'could not settle text-file changes'}.`,
+      });
+    }
+  };
+
+  handleReloadWithoutSavingTextDrafts = () => {
+    this.setState({ reloading: true, reloadError: null });
+    try {
+      // This is the explicit escape hatch for a render failure that removed
+      // every Reload/Keep mine control. It cancels local debounce/queued work;
+      // a write already handed to Electron cannot be recalled.
+      textDocumentSessions.abandonAll();
+      window.location.reload();
+    } catch (error) {
+      this.setState({
+        reloading: false,
+        reloadError: `Could not abandon text-file drafts: ${error?.message || 'unknown error'}.`,
+      });
+    }
   };
 
   render() {
@@ -39,13 +76,29 @@ export class ErrorBoundary extends React.Component {
               <div className="text-red-400 mb-2">{this.state.error && this.state.error.toString()}</div>
               <div className="text-slate-500 whitespace-pre-wrap">{this.state.errorInfo && this.state.errorInfo.componentStack}</div>
             </div>
+
+            {this.state.reloadError && (
+              <p className="mb-4 text-sm text-amber-300" role="alert">{this.state.reloadError}</p>
+            )}
             
-            <div className="flex justify-end">
+            <p className="mb-4 text-xs text-slate-400">
+              Reloading without saving cancels pending text-draft writes. A write already sent to the app cannot be recalled.
+            </p>
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={this.handleReloadWithoutSavingTextDrafts}
+                disabled={this.state.reloading}
+                className="px-4 py-2 border border-red-500/50 text-red-200 hover:bg-red-500/15 rounded font-medium transition-colors"
+              >
+                Reload Without Saving Text Drafts
+              </button>
               <button 
                 onClick={this.handleReload}
+                disabled={this.state.reloading}
                 className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors shadow-lg"
               >
-                Reload Application
+                {this.state.reloading ? 'Saving text files…' : 'Reload Application'}
               </button>
             </div>
           </div>

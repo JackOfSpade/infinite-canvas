@@ -1955,6 +1955,12 @@ export default [
       assert(renderSource.includes('document.fonts.load(descriptor, \'A\')')
         && renderSource.includes('display:none content'),
       'hidden Electron renderer explicitly loads bundled faces before all-panel readiness validation');
+      assert(renderSource.includes('const backgroundE2E = isBackgroundE2E();')
+        && renderSource.includes('focusable: !backgroundE2E')
+        && renderSource.includes('skipTaskbar: backgroundE2E')
+        && renderSource.includes('backgroundThrottling: !backgroundE2E')
+        && renderSource.includes('if (backgroundE2E) win.setAlwaysOnTop(false)'),
+      'hidden Electron PDF renderer must retain the non-activating background-smoke window policy');
       assert(resumeDoc.includes('loadRequiredDocumentFaces')
         && resumeDoc.includes('document.fonts.addEventListener(\'loadingdone\', check)'),
       'editable workspace explicitly requests the document\'s required faces and clears a stale warning after a later font batch');

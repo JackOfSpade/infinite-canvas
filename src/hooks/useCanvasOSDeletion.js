@@ -1,6 +1,8 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { cancelNodeTasksRecursively, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../utils/canvasInteractions';
+import { collectOrphanTextDocumentPaths, collectRemainingTextDocumentPaths, collectSurvivingRepresentedPaths, collectTrashEligiblePaths } from '../utils/osDeletionPaths';
+import { textDocumentSessions } from '../utils/textDocumentSessions';
 
 /**
  * Recursively collects OS file/folder paths from a node tree, for the "also move
@@ -21,39 +23,42 @@ import { cancelNodeTasksRecursively, discardDeletedJobAnalysisSnapshots, discard
  * user's resume/photos. This is the fix for "deleting a hub mid-run asks to
  * keep the file on disk."
  */
-function extractPaths(nodes, pathsToDelete) {
-  nodes.forEach(n => {
-    // Nodes that ARE a single file's on-canvas representation.
-    if ((n.type === 'document' || n.type === 'listing') && n.data?.filePath) {
-      pathsToDelete.add(n.data.filePath);
-    }
-
-    // Listing nodes can hold multiple image assets.
-    if (n.type === 'listing' && Array.isArray(n.data?.imagePaths)) {
-      n.data.imagePaths.forEach(p => {
-        if (p) pathsToDelete.add(p);
-      });
-    }
-
-    if (n.type === 'group') {
-      if (n.data?.filePath) {
-        // Group created from a folder drag-in: delete the entire OS folder
-        pathsToDelete.add(n.data.filePath);
-      } else {
-        // Organic sub-canvas: recurse into children to delete inner files
-        if (n.data?.canvasData?.nodes) extractPaths(n.data.canvasData.nodes, pathsToDelete);
-        if (n.data?.nodes) extractPaths(n.data.nodes, pathsToDelete);
-      }
-    }
-  });
-}
-
-export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = null, addToast = null }) {
+export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = null, addToast = null, enumerateAllNodes = null }) {
   const onNodesDelete = useCallback((deletedNodes) => {
-    const pathsToDelete = new Set();
-    extractPaths(deletedNodes, pathsToDelete);
-    const osPaths = Array.from(pathsToDelete);
+    // The ignored-ID scan is independent of React Flow's callback ordering:
+    // onNodesDelete runs before its controlled remove change has committed.
+    // It prevents deleting one duplicate node from offering to trash the file
+    // still represented by another node (including inside a nested canvas).
+    const allLiveNodes = enumerateAllNodes?.() ?? [];
+    const osPaths = collectTrashEligiblePaths(deletedNodes, allLiveNodes);
+    const protectedPaths = collectSurvivingRepresentedPaths(deletedNodes, allLiveNodes);
+    const orphanTextPaths = textDocumentSessions.filterPathsWithoutLiveAliases(
+      collectOrphanTextDocumentPaths(deletedNodes, allLiveNodes),
+      collectRemainingTextDocumentPaths(deletedNodes, allLiveNodes),
+    );
     let analysisCleanupWarningShown = false;
+
+    const settleOrphanTextDocuments = async () => {
+      if (orphanTextPaths.length === 0) return true;
+      try {
+        const result = await textDocumentSessions.flushAndSettlePaths(orphanTextPaths);
+        if (result.success) return true;
+        undo?.();
+        addToast?.({
+          title: 'Deletion restored',
+          description: `Could not safely save ${result.unresolvedFilePaths.join(', ')}. Resolve its text-file conflict or save error, then delete it again.`,
+          type: 'error',
+        });
+      } catch (error) {
+        undo?.();
+        addToast?.({
+          title: 'Deletion restored',
+          description: `Could not settle the linked text file: ${error?.message || 'unknown error'}.`,
+          type: 'error',
+        });
+      }
+      return false;
+    };
 
     // Commit all background lifecycle cleanup at the same boundary as the
     // canvas deletion. When the OS-file prompt is present its X/Escape/backdrop
@@ -99,19 +104,35 @@ export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = nul
         cancelLabel: 'Keep OS File',
         variant: 'warning',
         onConfirm: async () => {
+          if (!await settleOrphanTextDocuments()) return;
           finalizeNodeDeletion();
           for (const path of osPaths) {
             // Proceed with OS deletion even if unmounted because user confirmed
             try {
-              await window.electronAPI.deleteOSFile(path);
+              const result = await window.electronAPI.deleteOSFile(path, protectedPaths);
+              if (!result?.success) {
+                addToast?.({
+                  title: 'File kept on disk',
+                  description: result?.error || 'The item is still represented by another canvas node and was kept on disk.',
+                  type: 'warning',
+                });
+              }
             } catch (err) {
               EventLogger.error('Failed to trash file/folder:', err);
+              addToast?.({
+                title: 'File kept on disk',
+                description: err?.message || 'Could not move the linked item to trash.',
+                type: 'warning',
+              });
             }
           }
         },
         // Declining disk deletion still commits the already-applied canvas
         // deletion, so retire its tasks and exact recovery ownership too.
-        onCancel: finalizeNodeDeletion,
+        onCancel: async () => {
+          if (!await settleOrphanTextDocuments()) return;
+          finalizeNodeDeletion();
+        },
         // X-in-the-corner: roll the canvas back so the nodes that triggered
         // this dialog reappear. ReactFlow has already pushed the deletion
         // onto the undo stack by the time onNodesDelete fires, so one undo()
@@ -120,9 +141,12 @@ export function useCanvasOSDeletion({ requestConfirm, undo, canvasFilePath = nul
         onAbort: undo ? () => undo() : undefined,
       });
     } else {
-      finalizeNodeDeletion();
+      void (async () => {
+        if (!await settleOrphanTextDocuments()) return;
+        finalizeNodeDeletion();
+      })();
     }
-  }, [requestConfirm, undo, canvasFilePath, addToast]);
+  }, [requestConfirm, undo, canvasFilePath, addToast, enumerateAllNodes]);
 
   return { onNodesDelete };
 }

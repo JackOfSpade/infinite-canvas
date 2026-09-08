@@ -40,6 +40,7 @@ import {
 } from '../../src/utils/persistenceTransientState.js';
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -2462,6 +2463,7 @@ export function registerBugReportHandlers() {
   // maxChars is passed here even though the clipboard path below shares this
   // same generateMarkdown function.
   handleSafe('export-bug-report', async (event, payload) => {
+    if (isBackgroundE2E()) return { success: false, canceled: true };
     const { markdown: markdownContent } = generateMarkdown(payload, event.sender?.id ?? null);
 
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -2483,7 +2485,7 @@ export function registerBugReportHandlers() {
   // truncated downstream or burns most of a context window in one message;
   // a short path pointer lets an AI read the file from disk in segments
   // instead. See electron/ipc/bugReport/reportFile.js for the file lifecycle
-  // (cleared on every app start, pruned to SAVED_REPORT_RETENTION per session).
+  // (retained across app starts, then pruned by age and count retention).
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
     const full = generateMarkdown(payload, event.sender?.id ?? null); // UNCAPPED — the file is the artifact
 

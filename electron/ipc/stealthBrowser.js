@@ -24,6 +24,7 @@ import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js'
 import { createBackgroundScrapePage, prepareBackgroundScrapeLaunchOptions } from './browser/backgroundScrapeBrowser.js';
 import { saveDiceApiKey } from './settings.js';
 import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 // Apply stealth evasions
 puppeteer.use(StealthPlugin());
@@ -1204,6 +1205,9 @@ async function _fetchDiceKeyFromBundle() {
 }
 
 async function _browserRefreshDiceApiKey() {
+  // Keep the normal HTTP/bundle extraction path available to the smoke. Only
+  // the final headed Puppeteer fallback is disallowed in background mode.
+  if (isBackgroundE2E()) return null;
   const tmpDir = path.join(os.tmpdir(), `ic-dice-refresh-${Date.now()}`);
   let browser;
   try {

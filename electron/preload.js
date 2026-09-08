@@ -12,6 +12,43 @@ function createListener(channel) {
   };
 }
 
+// Every document node used to subscribe directly to ipcRenderer's one
+// file-changed event. Duplicated nodes therefore turned one OS notification
+// into many renderer callbacks with no way to identify that they were the
+// same event. Keep one native listener and fan it out with a monotonically
+// increasing notification ID; existing one-argument callbacks remain valid.
+const fileChangedSubscribers = new Set();
+let fileChangedNotificationId = 0;
+let fileChangedListener = null;
+
+function onFileChanged(callback) {
+  const subscriber = (filePath, notificationId) => callback(filePath, notificationId);
+  fileChangedSubscribers.add(subscriber);
+  if (!fileChangedListener) {
+    fileChangedListener = (_event, filePath) => {
+      const notificationId = ++fileChangedNotificationId;
+      // One disposed/third-party renderer callback must not prevent sibling
+      // duplicate document nodes from receiving this OS change. Snapshot first
+      // so cleanup during delivery also cannot mutate this notification's fanout.
+      for (const listener of [...fileChangedSubscribers]) {
+        try {
+          listener(filePath, notificationId);
+        } catch (error) {
+          console.error('file-changed subscriber failed:', error);
+        }
+      }
+    };
+    ipcRenderer.on('file-changed', fileChangedListener);
+  }
+  return () => {
+    fileChangedSubscribers.delete(subscriber);
+    if (fileChangedSubscribers.size === 0 && fileChangedListener) {
+      ipcRenderer.removeListener('file-changed', fileChangedListener);
+      fileChangedListener = null;
+    }
+  };
+}
+
 // Draft updates are intentionally non-blocking while the user types. Keep the
 // promises in preload (which also owns the quit bridge) so shutdown can await
 // every update before asking main to flush its deferred disk checkpoint.
@@ -48,26 +85,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
-  deleteOSFile: (filePath) => ipcRenderer.invoke('delete-os-file', filePath),
-  writeTextFile: (filePath, content) => ipcRenderer.invoke('write-text-file', { filePath, content }),
+  deleteOSFile: (filePath, protectedPaths = []) => ipcRenderer.invoke('delete-os-file', {
+    filePath,
+    protectedPaths,
+  }),
+  readTextFile: (filePath) => ipcRenderer.invoke('read-text-file', filePath),
+  writeTextFile: (filePath, content, expectedDiskContent, expectedTargetToken) => ipcRenderer.invoke('write-text-file', {
+    filePath,
+    content,
+    expectedContent: expectedDiskContent,
+    expectedTargetToken,
+  }),
 
   // Report which canvas file this window currently has open so the main
   // process can avoid opening the same file in a second window.
   setWindowFile: (filePath) => ipcRenderer.send('window:set-current-file', filePath),
 
-  onFileChanged: createListener('file-changed'),
+  onFileChanged,
   // Fired when the open canvas file is renamed on disk (e.g. in Finder) and the
   // main process followed it by inode. Payload: the new absolute path.
   onCanvasFileRenamed: createListener('canvas:file-renamed'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),
-  sendQuitResponse: (hasUnsavedChanges) => ipcRenderer.send('quit-response', { hasUnsavedChanges }),
+  onQuitCommitRequest: createListener('quit-commit-request'),
+  onQuitCommitRelease: createListener('quit-commit-release'),
+  sendQuitResponse: (state, requestId) => ipcRenderer.send('quit-response', {
+    ...(typeof state === 'object' && state !== null ? state : { hasUnsavedChanges: state }),
+    requestId,
+  }),
+  sendQuitCommitAck: (requestId) => ipcRenderer.send('quit-commit-ack', { requestId }),
   
   // Custom dialogs wrapper
   promptUnsavedChanges: (actionName) => ipcRenderer.invoke('prompt-unsaved-changes', actionName),
   onRequestSaveAndRespond: createListener('request-save-and-respond'),
-  sendSaveResponse: (success) => ipcRenderer.send('save-response', { success }),
+  sendSaveResponse: (success, requestId) => ipcRenderer.send('save-response', { success, requestId }),
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
   generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),

@@ -341,7 +341,16 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
 
   const funnel = receipt.funnel;
   if (funnel) {
-    lines.push(`  - Initial-search funnel: ${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    const recoveryNet = signedCount(receipt.recovery?.mergeNet);
+    const scoringInput = nonnegativeCount(receipt.scoring?.selected ?? receipt.scoring?.input);
+    const reconcilesTerminalInput = recoveryNet != null && scoringInput != null
+      && funnel.kept + recoveryNet === scoringInput;
+    const recoveryDetail = recoveryNet == null
+      ? ''
+      : reconcilesTerminalInput
+        ? ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} = ${scoringInput} terminal scoring input`
+        : ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} recorded`;
+    lines.push(`  - Initial-search funnel: ${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -372,12 +381,24 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
         parts.push(`${source.providerGathered} of ${source.providerTotal} candidate identities advertised by the provider`);
       }
       const configuredCaps = configuredSourceCaps(source, source.stopReason);
-      if (source.truncated === true && configuredCaps.length === 0) {
-        const stops = String(source.stopReason || '').split('/').map(reason => reason.trim()).filter(Boolean);
+      const stops = String(source.stopReason || '').split('/').map(reason => reason.trim().toLowerCase()).filter(Boolean);
+      // Receipts written before the explicit `truncated` flag was added can
+      // still preserve ZipRecruiter's verified headline total.  An empty page
+      // below that total is the same observable shortfall as the new explicit
+      // stop, not evidence that the advertised corpus was exhausted.
+      const legacyZipTotalShortfall = isZipRecruiterTotalShortfall(
+        sourceId,
+        Number(source.providerTotal),
+        Number(source.providerGathered),
+        stops,
+      );
+      if ((source.truncated === true || legacyZipTotalShortfall) && configuredCaps.length === 0) {
         const truncation = stops.includes('page-error')
           ? '⚠️ walk truncated after an API page request failed'
           : stops.includes('query-error')
             ? '⚠️ walk truncated after an API query failed'
+            : legacyZipTotalShortfall || stops.includes('provider-total-shortfall')
+              ? '⚠️ walk hit an empty page before the provider’s verified advertised total; coverage is incomplete'
             : stops.includes('no-new-rows')
               ? '⚠️ walk stopped after a repeated/no-new-rows page; coverage is unproven'
               : stops.includes('page-ceiling')
@@ -688,6 +709,21 @@ function configuredSourceCaps(source, stopReason) {
     .filter(Boolean);
 }
 
+// ZipRecruiter is the sole browser source whose headline corpus count is
+// retained as a verified provider total. Older durable receipts predate the
+// explicit `truncated` bit, but an `empty-page` before that recorded total is
+// still a concrete, observed collection shortfall.
+function isZipRecruiterTotalShortfall(sourceId, total, gathered, stopReasons) {
+  return String(sourceId || '').trim().toLowerCase() === 'ziprecruiter'
+    && Number.isFinite(total)
+    && total >= 0
+    && Number.isFinite(gathered)
+    && gathered >= 0
+    && gathered < total
+    && Array.isArray(stopReasons)
+    && stopReasons.includes('empty-page');
+}
+
 // Return only the metadata needed for the compact completion reconciliation.
 // This deliberately shares the ownership rule used by the full recovery
 // section: a legacy directory-scoped snapshot is usable only when it names the
@@ -837,6 +873,31 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const receiptUnscored = nonnegativeCount(receiptScoring?.unscored);
   const receiptFailedBatches = nonnegativeCount(receiptScoring?.failedBatches);
   const receiptCappedForBudget = nonnegativeCount(receiptScoring?.cappedForBudget);
+  const receiptInitialKept = nonnegativeCount(receipt?.funnel?.kept);
+  const receiptRecovery = signedCount(receipt?.recovery?.mergeNet);
+  const receiptRecoveryExpectedInput = receiptInitialKept != null && receiptRecovery != null
+    ? receiptInitialKept + receiptRecovery
+    : null;
+  // Recovery merges change the post-history candidate queue. Job Preferences
+  // run only afterwards, so a partially filtered run correctly has fewer
+  // scorer inputs than this queue. The saved snapshot retains both dimensions:
+  // `candidatePoolJobs` is the pre-preference universe, while `jobs` is the
+  // score-ready subset. Validate the recovery aggregate against the former.
+  const receiptRecoveryReconcilesCandidatePool = receiptRecoveryExpectedInput != null
+    && snapshot.candidatePoolJobs != null
+    && receiptRecoveryExpectedInput === snapshot.candidatePoolJobs;
+  const receiptPreferenceFiltered = receiptRecoveryReconcilesCandidatePool
+    && snapshot.jobs != null && snapshot.candidatePoolJobs > snapshot.jobs
+    ? snapshot.candidatePoolJobs - snapshot.jobs
+    : null;
+  const receiptRecoveryInconsistent = receiptRecovery != null
+    && !receiptRecoveryReconcilesCandidatePool;
+  const receiptRecoveryReconcilesInput = receiptRecoveryExpectedInput != null
+    && receiptScoreInput != null
+    && receiptRecoveryExpectedInput === receiptScoreInput;
+  const receiptRecoveryReconcilesViaPreferences = receiptPreferenceFiltered != null
+    && receiptScoreInput != null
+    && snapshot.jobs === receiptScoreInput;
   const receiptScoringInconsistent = !!receiptScoring && (
     // selected is the scorer input; scored + unscored must account for every
     // selected row. A budget cap is outside that scorer partition, so only
@@ -869,7 +930,8 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   // Another hub's live run is telemetry about a different run, so for THIS run
   // it is the same evidentiary position as a restart: no live telemetry at all.
   const noLiveSearchTelemetry = foreignLiveRun || (!telemetry?.search && !telemetry?.pipeline);
-  const durableOutputOnly = durableCompletedOutput && noLiveSearchTelemetry && !receiptScoringInconsistent;
+  const durableOutputOnly = durableCompletedOutput && noLiveSearchTelemetry
+    && !receiptScoringInconsistent && !receiptRecoveryInconsistent;
   // A completed zero-result run deliberately never invokes scoring or board
   // taxonomy: there is no score-ready input for either stage.  Prove that
   // vacuous completion from three independent retained facts instead of
@@ -1004,6 +1066,9 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
         const unavailableDetailDropped = nonnegativeCount(source?.unavailableDetailDropped);
         const stopReason = String(source?.stopReason || source?.stop || '').trim();
         const stopReasons = stopReason ? stopReason.split('/').map(s => s.trim().toLowerCase()) : [];
+        const legacyZipTotalShortfall = isZipRecruiterTotalShortfall(sourceId, total, gathered, stopReasons);
+        const sourceTruncated = source?.truncated === true || legacyZipTotalShortfall;
+        const coverageStopReason = legacyZipTotalShortfall ? 'provider-total-shortfall' : stopReason;
         const warning = source?.warning && typeof source.warning === 'object'
           ? {
               code: receiptIdentifier(source.warning.code, ''),
@@ -1018,7 +1083,7 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
         // wholly clean ending as reachable exhaustion. Any cap, error, or
         // no-new-rows stop remains unproven/incomplete rather than inheriting
         // this favorable interpretation from a sibling query.
-        const exhaustedByStop = source?.truncated !== true
+        const exhaustedByStop = !sourceTruncated
           && stopReasons.length > 0
           && stopReasons.every(r => ['provider-total', 'short-page', 'empty-page', 'end-of-results'].includes(r));
         // A scroll-backed source has an independent, stronger exhaustion fact:
@@ -1031,8 +1096,8 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
 
         if (merged.has(sourceId)) {
           const existing = merged.get(sourceId);
-          if (!existing.stopReason && stopReason) {
-            existing.stopReason = stopReason;
+          if (!existing.stopReason && coverageStopReason) {
+            existing.stopReason = coverageStopReason;
             existing.isExhausted = isExhausted;
             existing.exhaustionEvidence = exhaustionEvidence;
           }
@@ -1040,13 +1105,21 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
           // telemetry. A coherent all-query reveal receipt is enough to prove
           // this source's visible result set was exhausted; do not try to union
           // partial per-query arrays, which could manufacture a false proof.
-          if (!existing.isExhausted && revealExhausted) {
+          if (!existing.truncated && !existing.isExhausted && revealExhausted) {
             existing.isExhausted = true;
             existing.exhaustionEvidence = 'scroll-end';
           }
           if (!existing.warning && warning) existing.warning = warning;
           if (countrySkipped) existing.countrySkipped = true;
           if (existing.retained == null && Number.isFinite(retained) && retained >= 0) existing.retained = retained;
+          if (existing.total == null && Number.isFinite(total) && total >= 0) existing.total = total;
+          if (existing.gathered == null && Number.isFinite(gathered) && gathered >= 0) existing.gathered = gathered;
+          if (sourceTruncated) {
+            existing.truncated = true;
+            existing.stopReason = coverageStopReason || existing.stopReason;
+            existing.isExhausted = false;
+            existing.exhaustionEvidence = null;
+          }
           // Live telemetry and its durable receipt normally repeat the same
           // per-source aggregate. Keep the larger observed value rather than
           // summing duplicate evidence, while still preserving a newer receipt
@@ -1072,8 +1145,8 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
           gathered: Number.isFinite(gathered) && gathered >= 0 ? gathered : null,
           retained: Number.isFinite(retained) && retained >= 0 ? retained : null,
           unavailableDetailDropped,
-          truncated: source?.truncated === true,
-          stopReason: stopReason || null,
+          truncated: sourceTruncated,
+          stopReason: coverageStopReason || null,
           isExhausted,
           exhaustionEvidence,
           warning,
@@ -1196,6 +1269,9 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   if (receiptScoringInconsistent) {
     gaps.push(`durable receipt scoring is incomplete (input ${receiptScoreInput ?? '?'} → scored ${receiptScored ?? '?'} · placeholders ${receiptPlaceholders ?? '?'} · unscored ${receiptUnscored ?? '?'} · failed batches ${receiptFailedBatches ?? '?'})`);
   }
+  if (receiptRecoveryInconsistent) {
+    gaps.push(`durable recovery ${receiptInitialKept ?? '?'} initial ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)} = ${receiptRecoveryExpectedInput ?? '?'} ≠ saved preference candidate pool ${snapshot.candidatePoolJobs ?? '?'}`);
+  }
   if (expected != null && expected < 0) gaps.push(`search/recovery produced an impossible negative input (${expected})`);
   if (expected != null && snapshot.state === 'parseable' && snapshot.candidatePoolJobs != null
     && snapshot.candidatePoolJobs !== expected) {
@@ -1309,6 +1385,19 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
   const configuredCapQualifier = configuredCapSources.length > 0
     ? ` ${configuredCapSources.length} source(s) stopped at an explicit configured collection cap (${configuredCapSources.map(source => `\`${source.id}\` ${(source.configuredCaps || []).map(cap => `${cap.type}=${cap.limit}`).join(' + ')}`).join(', ')}); this verdict covers the collected output, not the provider's full corpus.`
     : '';
+  // A durable receipt can prove both that the saved score-ready output was
+  // written and that collection stopped short. Keep those claims separate:
+  // green here means the retained output is internally complete, never that
+  // the provider corpus was fully collected. Naming an observed shortfall in
+  // the headline avoids hiding that concrete fact behind the softer "does not
+  // verify gather coverage" wording used for ordinary restart-only evidence.
+  const durableCollectionShortfallQualifier = shortSources.length > 0
+    ? ` Known collection shortfall: ${shortSources.map(source => (
+      source.total != null && source.gathered != null
+        ? `\`${source.id}\` traversed ${source.gathered} of ${source.total} advertised candidate identities`
+        : `\`${source.id}\` walk was truncated before the result set ended`
+    )).join('; ')}. The saved output is complete only for the collected rows.`
+    : '';
   const ordinaryCoverageQualifier = applicableCoverageSources.length === 0
     ? (countrySkippedSources.length > 0
       ? ` All recorded sources were intentionally skipped as not applicable to the selected country scope (${countrySkippedSources.map(source => `\`${source.id}\``).join(', ')}).`
@@ -1345,11 +1434,17 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
       ? `✅ **COMPLETED WITH COLLECTION QUALIFICATIONS** — every reconciled stage agrees.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}${boardClearQualifier}`
       : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}${boardClearQualifier}`
     : durableOutputOnly
-      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
+      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${durableCollectionShortfallQualifier}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
-    ? '- Search + recovery: not retained in this process.'
+    ? receiptRecoveryReconcilesInput
+      ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''} = ${receiptScoreInput} terminal scoring input.`
+      : receiptRecoveryReconcilesViaPreferences
+        ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''} = ${snapshot.candidatePoolJobs} candidate pool − ${receiptPreferenceFiltered} preference-filtered = ${receiptScoreInput} terminal scoring input.`
+      : receiptRecovery != null
+        ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept ?? '?'} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''}${receiptScoreInput != null ? ` · terminal scoring input ${receiptScoreInput}` : ''}.`
+        : '- Search + recovery: not retained in this process.'
     : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''}${preferenceFiltered ? ` − ${preferenceFiltered} removed by Job Preferences` : ''} = ${expectedAfterPreferences} expected scoring input.`;
   const scoringLine = completedZeroResult
     ? '- Scoring: not required — zero score-ready jobs.'
@@ -1371,7 +1466,7 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
     ? '- Terminal receipt: absent — prior-process completion cannot be proven.'
     : !receipt
       ? '- Terminal receipt: present but invalid.'
-      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}.`;
+      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''}${receiptRecovery != null ? ` · recovery net ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}.`;
   const snapshotLine = snapshot.state === 'parseable'
     ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
     : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
@@ -1434,13 +1529,13 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
       ? ' · country scope is region-unverified (retained rows were not discarded)'
       : '';
     if ((source.configuredCaps || []).length > 0) return `ℹ️ \`${source.id}\` stopped at configured ${(source.configuredCaps || []).map(cap => `${cap.type} cap ${cap.limit}`).join(' + ')} — collection intentionally bounded${regionQualifier}`;
-    if (source.truncated) return `⚠️ \`${source.id}\` walk truncated before the result set ended`;
     const retainedDetail = source.retained != null && source.gathered != null && source.retained !== source.gathered
       ? ` · ${source.retained} usable row(s) retained`
       : '';
     const unavailableDetail = source.unavailableDetailDropped > 0
       ? `${retainedDetail ? ';' : ' ·'} ${source.unavailableDetailDropped} confirmed-unavailable detail listing${source.unavailableDetailDropped === 1 ? '' : 's'} dropped`
       : '';
+    if (source.truncated) return `⚠️ \`${source.id}\` walk truncated before the result set ended${retainedDetail}${unavailableDetail}${regionQualifier}`;
     if (source.total == null && source.isExhausted) {
       const ending = source.exhaustionEvidence === 'scroll-end'
         ? 'all scroll queries reached end-of-list'
@@ -2142,9 +2237,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       ? ` → title-relevance-dropped ${s.relevanceDropped}`
       : '';
     const descriptionDeferred = Number(s.descriptionEvidenceDropped?.total) || 0;
+    const finalDedupDropped = Number(s.finalDedupDropped) || 0;
+    const finalDedupStage = finalDedupDropped > 0
+      ? ` → final-enrichment-dedup-dropped: ${finalDedupDropped}`
+      : '';
     const evidenceStage = descriptionDeferred > 0
-      ? ` → evidence-deferred: ${descriptionDeferred} → **scoring-eligible: ${s.kept}**`
-      : ` → **new: ${s.kept}**`;
+      ? ` → evidence-deferred: ${descriptionDeferred}${finalDedupStage} → **scoring-eligible: ${s.kept}**`
+      : `${finalDedupStage} → **new: ${s.kept}**`;
     // The pinned-target-role gate sits between the age and history stages. It is
     // usually the LARGEST drop in a role-pinned run, so omitting it left the
     // funnel with an unexplained hole between "age-dropped" and "history-dropped".
@@ -2176,6 +2275,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       : Number(s.roleDropped) > 0
         ? '- _(dedup / age / role-gate / history drops are by-design — not jobs we failed to analyze; the role gate is the pinned target role, not a relevance heuristic)_'
         : '- _(dedup / age / history drops are by-design — not jobs we failed to analyze; provider-returned rows are not locally title-filtered)_');
+    if (finalDedupDropped > 0) {
+      lines.push('- _(The final-enrichment dedup removes only high-confidence same-listing copies after full descriptions become available.)_');
+    }
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {
       const summary = Object.entries(dedup.counts || {}).map(([reason, count]) => `${reason}=${count}`).join(', ');
@@ -2185,7 +2287,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const dropped = item.dropped || {};
         const keptId = kept.nativeId || kept.url || '(no listing ID)';
         const droppedId = dropped.nativeId || dropped.url || '(no listing ID)';
-        lines.push(`  - \`${item.reason || 'unknown'}\`: kept ${kept.source || '?'} "${kept.title || '?'}" — ${kept.location || '(no location)'} [${keptId}] · dropped ${dropped.source || '?'} [${droppedId}]`);
+        lines.push(`  - \`${item.reason || 'unknown'}\`${item.stage ? ` (${item.stage})` : ''}: kept ${kept.source || '?'} "${kept.title || '?'}" — ${kept.location || '(no location)'} [${keptId}] · dropped ${dropped.source || '?'} [${droppedId}]`);
       }
       if (dedup.omitted > 0) lines.push(`  - _${dedup.omitted} additional dedup drop(s) omitted from this bounded trace._`);
     }
@@ -2573,6 +2675,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           flag = ' ⚠️ (an anti-bot challenge bounced the walk back to page 1 twice; the scraper gave up rather than loop — pages past the challenge were never read.)';
         } else if (v.stopReason === 'provider-result-window') {
           flag = ' ℹ️ (the visible pager ended and a direct request for the next numbered page was redirected or clamped elsewhere — the provider’s reachable result window ended before its advertised count.)';
+        } else if (v.stopReason === 'provider-total-shortfall') {
+          flag = ' ⚠️ (ZipRecruiter extracted an empty page before its verified advertised total. Partial rows were kept, but result-set coverage is incomplete.)';
         } else if (v.stopReason === 'user-done') {
           // Misnamed: a user-initiated stop sets signal.aborted and resolves to
           // `aborted`. This is the abort-free early exit, and because earlyExit

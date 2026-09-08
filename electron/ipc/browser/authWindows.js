@@ -7,6 +7,7 @@ import { execFile as execFileCb, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
+import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 
 // ── Auth-window cadence ───────────────────────────────────────────────────────
 // Timing for the human-in-the-loop auth/captcha windows: how responsively we
@@ -1043,6 +1044,7 @@ async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false 
  * the login browser is closed immediately to prevent process leaks.
  */
 export async function openLoginWindow(platformId, sender = null) {
+  if (isBackgroundE2E()) throw backgroundE2EDisabledError('Login window');
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
   const releaseProfileReservation = reserveSharedProfile(`login-window:${platformId}`);
@@ -1823,6 +1825,7 @@ export function nativeIndeedChallengeExitDisposition({ cleanObservationAtExit = 
  * The caller must release its Puppeteer profile reservation before invoking it.
  */
 export async function openNativeIndeedChallengeWindow(url, sender = null, { challengeObserved = false, signal = null } = {}) {
+  if (isBackgroundE2E()) throw backgroundE2EDisabledError('Native Indeed challenge window');
   if (!isStrictIndeedHttpsUrl(url)) {
     throw new Error('Native Indeed challenge handoff requires an https Indeed URL.');
   }
@@ -2139,6 +2142,7 @@ async function launchVisibleWindow(label, url, launchOpts) {
  * function does not retry on its own.
  */
 export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null, secondTabUrl = null, inlineItemsPostprocessor = null) {
+  if (isBackgroundE2E()) throw backgroundE2EDisabledError('Captcha resolve window');
   if (!url) throw new Error('openCaptchaResolveWindow requires a url');
 
   const executablePath = process.env.CHROME_PATH || await findChromePath();

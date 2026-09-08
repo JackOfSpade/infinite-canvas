@@ -142,18 +142,28 @@ export default [
         && transportSource.includes('ipcMain.removeHandler?.(channel)'),
       'manual-AI handlers can be safely re-registered by a controlled development reload without duplicate Electron IPC registrations');
       assert(mainSource.includes('hasPendingNonApiAiRequestsForSender(expectedSender)')
-        && mainSource.includes("return { action: 'save' }")
+        && mainSource.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true }")
         && mainSource.includes('await flushNonApiAiPersistence()')
         && dialogSource.includes("new CustomEvent('non-api-ai-node-pending'")
         && jobSearchSource.includes('Auto-resuming manual AI run'),
       'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, and auto-resumes after reload');
+      assert(mainSource.includes('async function flushNonApiAiPersistenceForLifecycle(win, actionType)')
+        && mainSource.includes("if (!await flushNonApiAiPersistenceForLifecycle(win, 'close')) return;")
+        && mainSource.includes("return flushNonApiAiPersistenceForLifecycle(win, 'quit');")
+        && mainSource.includes('Could Not Save AI Draft')
+        && mainSource.includes('`${verb} Without Saving AI Draft`')
+        && mainSource.includes('return choice === 1;')
+        && mainSource.includes('Could not flush Non-API AI persistence before')
+        && mainSource.includes('Could not complete canvas window close safely')
+        && mainSource.includes('Could not complete app quit safely'),
+      'a rejected AI-draft durability barrier must keep close/quit fail-closed, explain the failure, and not escape an async Electron event listener');
       const closeCheck = mainSource.slice(mainSource.indexOf('async function checkUnsavedChanges'), mainSource.indexOf('// ── Window creation'));
       assert(closeCheck.indexOf('hasPendingNonApiAiRequestsForSender(expectedSender)')
           < closeCheck.indexOf('if (rendererState.hasUnsavedChanges)')
         && preloadSource.includes('const pendingNonApiAiDraftWrites = new Set()')
         && preloadSource.includes('await Promise.allSettled([...pendingNonApiAiDraftWrites])')
         && persistenceSource.indexOf('await window.electronAPI?.flushNonApiAiPersistence?.()')
-          < persistenceSource.indexOf('window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current)'),
+          < persistenceSource.indexOf('sendQuitResponse(response, requestId);'),
       'pending handoffs force a save independently of the dirty flag, and shutdown waits for every draft write before replying');
       assert(!dialogSource.includes("new CustomEvent('non-api-ai-node-settled'")
         && !jobSearchSource.includes("document.addEventListener('non-api-ai-node-settled'")

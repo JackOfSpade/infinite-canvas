@@ -17,6 +17,7 @@ export function useCanvasDragAndDrop({
   takeSnapshot,
   depth,
   addElementsGlobally,
+  quitGateRef,
 }) {
   const depthRef = useRef(depth);
   useEffect(() => {
@@ -75,6 +76,13 @@ export function useCanvasDragAndDrop({
 
   const handleDrop = useCallback(async (event) => {
     event.preventDefault();
+    if (quitGateRef?.current?.frozen) return;
+    // A native file extraction can outlive a cancelled global quit. Keep the
+    // drop bound to the interactive generation that started it rather than
+    // appending its stale result after the renderer is released.
+    const gateGeneration = quitGateRef?.current?.generation;
+    const isCurrentDrop = () => !quitGateRef?.current?.frozen
+      && quitGateRef?.current?.generation === gateGeneration;
     setIsDrawingMode(false);
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const nodeType = event.dataTransfer.getData('app/node-type');
@@ -145,7 +153,7 @@ export function useCanvasDragAndDrop({
       // as a plain document like any other file.
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(files, position);
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || !isCurrentDrop()) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
@@ -185,7 +193,7 @@ export function useCanvasDragAndDrop({
         insertNodes([newNode]);
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getIntersectingNodes, getNode, addElementsGlobally, isMountedRef]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getIntersectingNodes, getNode, addElementsGlobally, isMountedRef, quitGateRef]);
 
   return { handleDrop, handleDragOver, handleDragLeave };
 }

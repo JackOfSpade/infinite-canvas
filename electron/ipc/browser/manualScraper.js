@@ -32,6 +32,7 @@ import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLim
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
+import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgroundE2e.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
@@ -466,6 +467,7 @@ export function resolveManualSourceStopReason({
   hitUnhandledPagination = false,
   hitChallengeRecoveryLoop = false,
   hitProviderResultWindow = false,
+  hitProviderTotalShortfall = false,
   dataStopReason = null,
 } = {}) {
   if (sourceSkipped) return 'blocked';
@@ -493,6 +495,12 @@ export function resolveManualSourceStopReason({
   // was redirected/clamped somewhere else. This is a provider result-window
   // boundary, not proof that the advertised corpus was exhausted.
   if (hitProviderResultWindow) return 'provider-result-window';
+  // ZipRecruiter's query-string result header is the one browser-board total we
+  // have verified against a full walk. An empty page before that total is an
+  // observation about this pager, not proof that every advertised candidate was
+  // reached. Keep it distinct from `empty-page`, which downstream correctly
+  // treats as a lossless terminal condition when no contrary total exists.
+  if (hitProviderTotalShortfall) return 'provider-total-shortfall';
   // A data-driven stop (age-window / no-new-jobs, from makeJobPageStop via
   // task.options.onPageScraped) means the walk ended because the DATA said
   // stop, not because it was cut short by the hub's page ceiling — surface it
@@ -5959,6 +5967,10 @@ export function resetManualScraperTelemetry() {
 // it is the ONLY channel this module has to the renderer, and it is optional so
 // direct callers and tests need not supply one.
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null, opts = {}) {
+  if (isBackgroundE2E()) {
+    clearManualScraperTelemetry('disabled');
+    throw backgroundE2EDisabledError('Manual browser scraping');
+  }
   const { resetDiagnostics = true, sourceIndexBase = 0, sourceTotal = null, onActivity = null } = opts;
   setActivitySink(onActivity);
   // Direct callers start a complete browser-scrape run here. The jobs
@@ -6046,6 +6058,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // is declared per-query and cannot be read at the resolve site.
       let hitChallengeRecoveryLoop = false;
       let hitProviderResultWindow  = false;
+      let hitProviderTotalShortfall = false;
       // Queries skipped because Glassdoor's non-canonical route cannot carry the
       // location marker. Counted so a run where EVERY query was skipped cannot
       // report a clean `completed` with zero jobs and no stated reason.
@@ -6625,8 +6638,28 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             }
           }
 
-          // No jobs on this page despite a clean extraction → end of results
+          // No jobs on this page despite a clean extraction usually ends this
+          // query. ZipRecruiter's query-string header is a verified exception:
+          // when it still advertises identities we have not traversed, this
+          // empty page is a pager shortfall, not evidence that the source is
+          // exhausted. Preserve all partial rows, but carry an explicit
+          // truncated terminal fact rather than green-lighting the source.
           if (extracted.length === 0) {
+            if (sourceId === 'ziprecruiter'
+              && Number.isFinite(Number(sourceClaimedTotal))
+              && providerSeen.size < Number(sourceClaimedTotal)) {
+              hitProviderTotalShortfall = true;
+              const shortfall = Number(sourceClaimedTotal) - providerSeen.size;
+              logger.warn(`[BrowserScraper] ${srcName} page ${pageNum} extracted no jobs after ${providerSeen.size}/${sourceClaimedTotal} advertised candidate identities — preserving ${shortfall} candidate identity shortfall as incomplete coverage`);
+              recordManualScraperTelemetry({
+                phase: 'provider-total-shortfall', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                pageNum, count: allJobs.length,
+                claimedTotal: sourceClaimedTotal,
+                providerGathered: providerSeen.size,
+                shortfall,
+              }, { updateActive: false });
+            }
             hitEmptyPage = true;
             break;
           }
@@ -7227,6 +7260,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitUnhandledPagination,
         hitChallengeRecoveryLoop,
         hitProviderResultWindow,
+        hitProviderTotalShortfall,
         dataStopReason,
       });
       const result = {
@@ -7283,6 +7317,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         providerGathered: providerSeen.size,
         unavailableDetailDropped: sourceUnavailableDetailDropped,
         providerDuplicatesDropped: Math.max(0, sourcePhysicalCards - providerSeen.size),
+        // A ZipRecruiter empty page below its verified advertised total is not
+        // a clean end-of-results. Keep the partial result usable while making
+        // the coverage qualification durable through jobs.js and the receipt.
+        truncated: hitProviderTotalShortfall,
         relevanceDropped: 0,
         preCapRelevanceDropped: 0,
         relevanceRejected: [],

@@ -179,6 +179,53 @@ export default [
     },
   },
   {
+    name: 'Application PDF reconcile: PDF-only separators cannot offset a later wrapped compound',
+    run: () => {
+      const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">'
+        + '<h1>Jack Wu</h1>'
+        + '<p>Software Engineer <span class="sep" aria-hidden="true">·</span> B.S. Computer Science</p>'
+        + '<p>Email <span class="sep" aria-hidden="true">·</span> Phone</p>'
+        + '<p>Software Engineer <span class="sep" aria-hidden="true">·</span> Thomson School District '
+        + '<span class="sep" aria-hidden="true">·</span> Loveland, CO</p>'
+        + '<ul><li>Migrated ticketing and repair-tracking systems and data to third-party platforms, with integrations, '
+        + 'data-migration workflows, automation, validation, and operational tooling.</li></ul>'
+        + '</main></section></body></html>';
+      const blocks = [
+        { page: 1, x: 56, y: 700, text: 'Jack Wu' },
+        { page: 1, x: 56, y: 680, text: 'Software Engineer · B.S. Computer Science' },
+        { page: 1, x: 56, y: 660, text: 'Email · Phone' },
+        { page: 1, x: 56, y: 640, text: 'Software Engineer · Thomson School District · Loveland, CO' },
+        { page: 1, x: 56, y: 620, text: '• Migrated ticketing and repair-tracking systems and data to third-party platforms, with integrations, data-' },
+        { page: 1, x: 72, y: 605, text: 'migration workflows, automation, validation, and operational tooling.' },
+      ];
+      const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(result.success && result.status === 'unchanged' && result.changed === false
+        && result.exactTextMatch === true && result.html === source,
+      `aria-hidden PDF-only separators must not make a later wrapped compound ambiguous, got ${JSON.stringify(result)}`);
+      return { pdfOnlySeparators: 4, wrappedCompoundPreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: PDF-only separators do not hide a shifted suspended hyphen',
+    run: () => {
+      const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">'
+        + '<h1>Jack Wu</h1><p>Engineer <span aria-hidden="true">·</span> B.S.</p>'
+        + '<ul><li>Supported part- and full-time schedules.</li></ul>'
+        + '</main></section></body></html>';
+      const blocks = [
+        { page: 1, x: 56, y: 700, text: 'Jack Wu' },
+        { page: 1, x: 56, y: 680, text: 'Engineer · B.S.' },
+        { page: 1, x: 56, y: 640, text: '• Supported flexible part-' },
+        { page: 1, x: 72, y: 625, text: 'and full-time schedules.' },
+      ];
+      const result = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(!result.success && result.status === 'conflict' && result.html === source
+        && !result.html.includes('part-and'),
+      `ignoring visual separators must not weaken shifted suspended-hyphen protection, got ${JSON.stringify(result)}`);
+      return { conflict: true, sourcePreserved: result.html === source };
+    },
+  },
+  {
     name: 'Application PDF reconcile: a wrapped compound cannot conceal an adjacent deletion',
     run: () => {
       const source = resumeBulletWorkspace('Built full-scale reliable systems.');

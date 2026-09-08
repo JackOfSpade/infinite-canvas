@@ -32,7 +32,7 @@
  *     (the Indeed extractors and manual browser scraper). Prefers the source's
  *     stable native id (Indeed's `jobkey`); when the raw URL embeds a stable
  *     listing id, preserves that instead of query-specific URL noise (Google
- *     for Jobs' `htidocid`); then uses the raw URL and finally the
+ *     for Jobs' `htidocid`, ZipRecruiter's host-validated `jid`); then uses the raw URL and finally the
  *     location-aware composed key — so a nationwide search's genuinely distinct
  *     same-title/same-company reqs in different cities stay separate when no
  *     native id is present.
@@ -61,7 +61,23 @@ export function jobTitleCompanyLocationKey(job) {
  * browser path previously fell back to title|company and could over-collapse a
  * nationwide search's distinct-location reqs that share a title and company.
  */
-function sourceStableUrlKey(url) {
+function parsedHttpUrlOrNull(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && parsed.hostname
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isZipRecruiterHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'ziprecruiter.com' || host.endsWith('.ziprecruiter.com');
+}
+
+function sourceStableUrlKey(url, source = '') {
   const raw = String(url || '').trim();
   if (!raw) return '';
   // Google For Jobs' cards all use the shared `/search` path. Their opaque
@@ -72,12 +88,27 @@ function sourceStableUrlKey(url) {
   // lowercasing it could merge two ids.
   const htidocid = googleJobsDocumentId(raw);
   if (htidocid) return `google-htidocid:${htidocid}`;
+  // ZipRecruiter listing URLs can differ in their company/title/location path
+  // segments while their `jid` remains the actual posting identity. Only trust
+  // that parameter on a real ZipRecruiter host: arbitrary URLs are allowed to
+  // carry a `jid` query parameter and must never impersonate a listing.
+  const parsed = parsedHttpUrlOrNull(raw);
+  if (keyPart(source) === 'ziprecruiter' && parsed && isZipRecruiterHost(parsed.hostname)) {
+    const jid = String(parsed.searchParams.get('jid') || '').trim();
+    if (/^[a-z0-9][a-z0-9_-]{5,127}$/i.test(jid)) {
+      // `www.ziprecruiter.com` and `ziprecruiter.com` are the same first-party
+      // listing namespace. Host validation above prevents an arbitrary `jid`
+      // from claiming that identity; once validated, retaining the host here
+      // would make a harmless canonical-host redirect defeat the dedup.
+      return `ziprecruiter-jid:${jid.toLowerCase()}`;
+    }
+  }
   return raw;
 }
 
 export function sourceJobKey(job) {
   return job?.jobkey
-    || sourceStableUrlKey(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url)
+    || sourceStableUrlKey(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url, job?.source)
     || jobTitleCompanyLocationKey(job);
 }
 
@@ -120,14 +151,50 @@ function normalizedNativeIdOrNull(job) {
   return id || null;
 }
 
+// A source-scoped listing key is stronger than title/company metadata and is
+// intentionally checked before title/company grouping. Explicit native IDs are
+// source-scoped: the source already names the issuing platform, and redirects
+// or a missing URL must not split one platform's stable ID. URL-derived
+// identities additionally retain their validated/canonical host namespace so
+// an untrusted host cannot claim ZipRecruiter's `jid` identity.
+function sourceListingIdentityKey(job) {
+  const source = keyPart(job?.source);
+  const rawUrl = String(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url || '').trim();
+  const parsed = parsedHttpUrlOrNull(rawUrl);
+  const host = parsed?.hostname?.toLowerCase() || '';
+  // ZipRecruiter's two first-party host spellings can serve the same jid. Keep
+  // them in one trusted host namespace while retaining host isolation for every
+  // other source/URL identity.
+  const identityHost = source === 'ziprecruiter' && isZipRecruiterHost(host)
+    ? 'ziprecruiter.com'
+    : host;
+  const namespace = source
+    ? `source:${source}|host:${identityHost || '?'}`
+    : (identityHost ? `host:${identityHost}` : '');
+  const nativeId = normalizedNativeIdOrNull(job);
+  if (nativeId) {
+    const nativeNamespace = source
+      ? `source:${source}`
+      : (identityHost ? `host:${identityHost}` : '');
+    return nativeNamespace ? `${nativeNamespace}|native:${nativeId}` : '';
+  }
+  if (!namespace) return '';
+  const stableUrl = sourceStableUrlKey(rawUrl, source);
+  if (stableUrl && stableUrl !== rawUrl) return `${namespace}|stable:${stableUrl}`;
+  // Exact URLs remain a valid within-source identity, but only after parsing
+  // their host; malformed or hostless strings are deliberately not elevated to
+  // a global listing identity.
+  return parsed ? `${namespace}|url:${parsed.href}` : '';
+}
+
 // Query overlap can make one source return the same card twice. That narrow,
 // exact listing check must stay distinct from the title/company cross-board
 // heuristic: two concurrent requisitions can legitimately share title,
 // employer, and location while carrying different IDs / URLs.
 function sameSourceListingIdentity(a, b) {
-  const aNative = normalizedNativeIdOrNull(a);
-  const bNative = normalizedNativeIdOrNull(b);
-  if (aNative && bNative) return aNative === bNative;
+  const aIdentity = sourceListingIdentityKey(a);
+  const bIdentity = sourceListingIdentityKey(b);
+  if (aIdentity && bIdentity) return aIdentity === bIdentity;
   const aUrl = normalizedUrlOrNull(a);
   const bUrl = normalizedUrlOrNull(b);
   return !!aUrl && aUrl === bUrl;
@@ -191,8 +258,18 @@ export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
   const arr = Array.isArray(jobs) ? jobs : [];
   const groups = new Map(); // titleCompanyKey -> [{ job, loc, source }] kept representatives, in first-seen order
   const contentGroups = new Map(); // title|full-JD fingerprint -> [{ source, city, job }]
+  const sourceListingReps = new Map(); // source+host+native/stable URL identity -> kept job
   const result = [];
   for (const job of arr) {
+    // Do this before title/company grouping. A board can alter an employer's
+    // display slug between pages (or emit a suffix such as ", Inc."), which
+    // made two URLs with the same real listing ID land in separate groups.
+    const listingIdentity = sourceListingIdentityKey(job);
+    const listingMatch = listingIdentity ? sourceListingReps.get(listingIdentity) : null;
+    if (listingMatch) {
+      onDuplicate?.({ reason: 'same-source-listing-id', kept: listingMatch, dropped: job });
+      continue;
+    }
     const content = descriptionFingerprint(job);
     const source = keyPart(job?.source);
     const city = locationCityOrNull(job);
@@ -202,6 +279,12 @@ export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
       const contentMatch = contentReps.find(rep =>
         rep.source !== source && (city === null || rep.city === null || city === rep.city));
       if (contentMatch) {
+        // Retain this source's exact listing identity even though its first
+        // card lost to a cross-source copy. A later page can spell the company
+        // differently while carrying the same native ID/jid; without this
+        // alias it would miss both the source map and title/company group and
+        // re-enter the result set.
+        if (listingIdentity) sourceListingReps.set(listingIdentity, contentMatch.job);
         onDuplicate?.({ reason: 'cross-source-full-description', kept: contentMatch.job, dropped: job });
         continue;
       }
@@ -214,6 +297,7 @@ export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
     if (!kept) {
       groups.set(groupKey, [{ job, loc, source }]);
       result.push(job);
+      if (listingIdentity) sourceListingReps.set(listingIdentity, job);
       continue;
     }
     // Legacy/unit-test rows may omit source entirely. In that ambiguous case
@@ -231,12 +315,17 @@ export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
     if (!match) {
       kept.push({ job, loc, source });
       result.push(job);
+      if (listingIdentity) sourceListingReps.set(listingIdentity, job);
       continue;
     }
     // Matched an ambiguous (unknown-location) representative via a
     // known-location job — adopt that location so later jobs compare against
     // the real city, not "anything goes" forever.
     if (match.loc === null && loc !== null) match.loc = loc;
+    // As above, a first card may be absorbed by the cross-board heuristic.
+    // Preserve its stronger per-source identity so future spelling/path
+    // variants of that exact listing cannot reappear as a new group.
+    if (listingIdentity) sourceListingReps.set(listingIdentity, match.job);
     onDuplicate?.({ reason: 'cross-source-title-company-location', kept: match.job, dropped: job });
   }
   return result;

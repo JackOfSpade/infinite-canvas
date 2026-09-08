@@ -33,11 +33,11 @@ const LOCAL_AI_RETRY_NOTICE_INTERVAL_MS = 30_000;
  * that slip through are rejected by the main process's per-job
  * LOCAL_AI_IMPORT_IN_FLIGHT mutex and the manifest 'imported' save window.
  */
-export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence }) {
-  const ctxRef = useRef({ navigation, getCurrentFile, addToast, nudgePersistence });
+export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef = null }) {
+  const ctxRef = useRef({ navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef });
   useEffect(() => {
-    ctxRef.current = { navigation, getCurrentFile, addToast, nudgePersistence };
-  }, [navigation, getCurrentFile, addToast, nudgePersistence]);
+    ctxRef.current = { navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef };
+  }, [navigation, getCurrentFile, addToast, nudgePersistence, quitGateRef]);
 
   // jobId → { resultSha256, observedAt }: same two-poll settle window the card
   // uses, so a result.json mid-write is never imported.
@@ -62,6 +62,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
   useEffect(() => {
     let disposed = false;
 
+    const currentQuitGeneration = () => ctxRef.current.quitGateRef?.current?.generation;
+    const isCurrentQuitGeneration = (generation) => {
+      const gate = ctxRef.current.quitGateRef?.current;
+      return !gate?.frozen && (generation === undefined || gate?.generation === generation);
+    };
+
     // Fresh read of the card node straight from the navigation refs — the
     // per-tick snapshot can be minutes old by the time an earlier job's
     // import+save completes.
@@ -78,8 +84,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
     // a write that lands only in navigation-stack state never passes through
     // the dirty-flag effect (it watches active nodes only), and without the
     // nudge a terminal 'saved' could miss the canvas file entirely.
-    const writeState = (nodeId, jobId, patch, { terminal = false } = {}) => {
-      if (disposed) return false;
+    const writeState = (nodeId, jobId, patch, { terminal = false, generation } = {}) => {
+      if (disposed || !isCurrentQuitGeneration(generation)) return false;
       if (!terminal && isJobCardMounted(nodeId)) return false;
       const nav = ctxRef.current.navigation;
       if (!nav?.updateNodeDataGlobally) return false;
@@ -127,16 +133,22 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           // busy/no-op click or another retryable failure cannot leave this
           // hidden job without recovery UI for the throttle interval.
           retryOfferedAtRef.current.delete(retryKey);
-          await importJob(node, jobId, exactResultSha256, orphanJob);
+          // A retry is a fresh user action after any cancelled quit, so bind it
+          // to the generation current at click time rather than the stale toast.
+          await importJob(node, jobId, exactResultSha256, orphanJob, currentQuitGeneration());
         },
       });
     };
 
-    const importJob = async (node, jobId, resultSha256, orphanJob = null) => {
+    const importJob = async (node, jobId, resultSha256, orphanJob = null, generation = currentQuitGeneration()) => {
       const { addToast: toast, getCurrentFile: currentFile } = ctxRef.current;
       const nodeId = node.id;
       const isOrphan = Boolean(orphanJob);
-      if (disposed || importBusyRef.current) return;
+      const writeImportState = (patch, options = {}) => writeState(nodeId, jobId, patch, {
+        ...options,
+        generation,
+      });
+      if (disposed || importBusyRef.current || !isCurrentQuitGeneration(generation)) return;
       // Liveness: the card may have been dismissed/deleted since this tick's
       // enumeration — never import (and auto-save into Applied Jobs) a job the
       // user discarded.  A discovered on-disk job deliberately has no card:
@@ -150,7 +162,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       const activeCanvasFilePath = currentFile ? currentFile() : null;
       const saveCanvasFilePath = isOrphan ? local.canvasFilePath : activeCanvasFilePath;
       if (!saveCanvasFilePath) {
-        if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' });
+        if (!isOrphan) writeImportState({ status: 'completed', message: 'Save this canvas, then reopen this card to import the completed result.' });
         return;
       }
       // Do not let an orphan discovered for one canvas finish after this
@@ -160,7 +172,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         return;
       }
       importBusyRef.current = true;
-      if (!isOrphan) writeState(nodeId, jobId, { status: 'importing', message: 'Local AI result found — importing…' });
+      if (!isOrphan) writeImportState({ status: 'importing', message: 'Local AI result found — importing…' });
       EventLogger.log(`[LocalAI] fallback import start job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId} (card unmounted)`}`);
       try {
         const imported = await window.electronAPI.importLocalApplication({
@@ -168,7 +180,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           canvasFilePath: local.canvasFilePath || saveCanvasFilePath,
           expectedResultSha256: resultSha256,
         });
-        if (disposed) return;
+        if (disposed || !isCurrentQuitGeneration(generation)) return;
         if (!imported?.success || !imported.localApplication) {
           const importError = new Error(imported?.error || 'Could not import the Local AI result.');
           if (imported?.errorCode) importError.code = imported.errorCode;
@@ -176,7 +188,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         const result = imported.localApplication;
         if (result.status === 'revision-required') {
-          if (!isOrphan) writeState(nodeId, jobId, {
+          if (!isOrphan) writeImportState({
             ...result.localJob, status: 'revision-required',
             message: result.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.',
           });
@@ -190,7 +202,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         if (result.status === 'render-retry-required') {
           const retryMessage = result.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.';
-          if (!isOrphan) writeState(nodeId, jobId, {
+          if (!isOrphan) writeImportState({
             ...result.localJob, status: 'render-retry-required',
             message: retryMessage,
           });
@@ -209,7 +221,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (result.status === 'revision-exhausted') {
-          if (!isOrphan) writeState(nodeId, jobId, {
+          if (!isOrphan) writeImportState({
             ...result.localJob, status: 'revision-exhausted',
             message: result.fitMessage || 'The overflowing document remained unchanged after an explicit diminishing-returns review. No bundle was saved.',
           });
@@ -259,6 +271,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           if (saved?.errorCode) saveError.code = saved.errorCode;
           throw saveError;
         }
+        if (!isCurrentQuitGeneration(generation)) return;
         const savedPatch = {
           status: 'saved',
           message: missingArtifacts.length
@@ -271,7 +284,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         };
         if (!isOrphan) {
           savedTerminalRef.current.set(jobId, savedPatch);
-          writeState(nodeId, jobId, savedPatch, { terminal: true });
+          writeImportState(savedPatch, { terminal: true });
         }
         EventLogger.log(`[LocalAI] fallback saved job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`} dir=${saved.dir}`);
         toast?.({
@@ -284,17 +297,17 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           type: missingArtifacts.length || resumeOverflow ? 'error' : 'success',
         });
       } catch (error) {
-        if (disposed) return;
+        if (disposed || !isCurrentQuitGeneration(generation)) return;
         if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
           settlingRef.current.delete(jobId);
-          if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
+          if (!isOrphan) writeImportState({ status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
           return;
         }
         if (error?.code === 'LOCAL_AI_IMPORT_IN_FLIGHT') {
-          if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' });
+          if (!isOrphan) writeImportState({ status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' });
           return;
         }
-        if (!isOrphan) writeState(nodeId, jobId, { status: 'completed', message: error?.message || String(error) });
+        if (!isOrphan) writeImportState({ status: 'completed', message: error?.message || String(error) });
         EventLogger.log(`[LocalAI] fallback import failed job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`}: ${error?.message || error}`);
         ctxRef.current.addToast?.({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
       } finally {
@@ -303,12 +316,17 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       }
     };
 
-    const driveJob = async (node, orphanJob = null) => {
+    const driveJob = async (node, orphanJob = null, generation = currentQuitGeneration()) => {
       const { getCurrentFile: currentFile } = ctxRef.current;
       const local = node.data.localApplication;
       const jobId = local.id;
       const nodeId = node.id;
       const isOrphan = Boolean(orphanJob);
+      const writeDriveState = (patch, options = {}) => writeState(nodeId, jobId, patch, {
+        ...options,
+        generation,
+      });
+      if (!isCurrentQuitGeneration(generation)) return;
       // A terminal 'saved' this manager already committed may have been lost
       // from state (same-flush navigation swap). Re-assert it rather than
       // polling the save-deleted job dir and misdiagnosing the outcome.
@@ -319,7 +337,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           savedTerminalRef.current.delete(jobId);
           return;
         }
-        writeState(nodeId, jobId, savedTerminal, { terminal: true });
+        writeDriveState(savedTerminal, { terminal: true });
         return;
       }
       const canvasFilePath = local.canvasFilePath || (currentFile ? currentFile() : null);
@@ -328,7 +346,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         const statusResult = await window.electronAPI.getLocalApplicationStatus({ jobId, canvasFilePath });
         // The card may have mounted while the IPC round-trip was in flight —
         // it owns the job now.
-        if (disposed || isJobCardMounted(nodeId)) return;
+        if (disposed || !isCurrentQuitGeneration(generation) || isJobCardMounted(nodeId)) return;
         if (!statusResult?.success || !statusResult.localJob) throw new Error(statusResult?.error || 'Could not check Local AI job status.');
         statusErrorStreakRef.current.delete(jobId);
         const next = statusResult.localJob;
@@ -337,13 +355,13 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           // is in its time-bounded window. Hold in a waiting state — writing
           // 'importing' into data would misread as a resumable orphan.
           settlingRef.current.delete(jobId);
-          writeState(nodeId, jobId, { status: 'completed', message: next.message || 'Another import of this result is finishing — waiting…' });
+          writeDriveState({ status: 'completed', message: next.message || 'Another import of this result is finishing — waiting…' });
           return;
         }
         if (next.status === 'render-retry-required') {
           settlingRef.current.delete(jobId);
           const resultSha256 = String(next.resultSha256 || '');
-          if (!isOrphan) writeState(nodeId, jobId, { ...next });
+          if (!isOrphan) writeDriveState({ ...next });
           offerRenderRetry({
             node, jobId, resultSha256, orphanJob, message: next.message,
           });
@@ -351,36 +369,38 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         if (next.status !== 'completed') {
           settlingRef.current.delete(jobId);
-          writeState(nodeId, jobId, { ...next });
+          writeDriveState({ ...next });
           return;
         }
         const resultSha256 = String(next.resultSha256 || '');
         if (!resultSha256) {
-          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Local AI result found — waiting for a stable file snapshot…' });
+          writeDriveState({ ...next, status: 'completed', message: 'Local AI result found — waiting for a stable file snapshot…' });
           return;
         }
         const settled = settlingRef.current.get(jobId);
         const now = Date.now();
         if (!settled || settled.resultSha256 !== resultSha256) {
           settlingRef.current.set(jobId, { resultSha256, observedAt: now });
-          writeState(nodeId, jobId, { ...next, status: 'completed', message: 'Local AI result found — waiting briefly for the final save…' });
+          writeDriveState({ ...next, status: 'completed', message: 'Local AI result found — waiting briefly for the final save…' });
           return;
         }
         if (now - settled.observedAt < LOCAL_AI_RESULT_SETTLE_MS) return;
-        await importJob(node, jobId, resultSha256, orphanJob);
+        await importJob(node, jobId, resultSha256, orphanJob, generation);
       } catch (error) {
-        if (disposed) return;
+        if (disposed || !isCurrentQuitGeneration(generation)) return;
         const streak = (statusErrorStreakRef.current.get(jobId) || 0) + 1;
         statusErrorStreakRef.current.set(jobId, streak);
         if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
         statusErrorStreakRef.current.delete(jobId);
         EventLogger.log(`[LocalAI] fallback poll failed ${LOCAL_AI_STATUS_ERROR_STREAK_LIMIT}x job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`}; retrying: ${error?.message || error}`);
-        if (!isOrphan) writeState(nodeId, jobId, { status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` });
+        if (!isOrphan) writeDriveState({ status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` });
       }
     };
 
     const tick = async () => {
       if (disposed || tickBusyRef.current) return;
+      const generation = currentQuitGeneration();
+      if (!isCurrentQuitGeneration(generation)) return;
       const nav = ctxRef.current.navigation;
       if (!nav?.enumerateAllNodes || !window.electronAPI?.getLocalApplicationStatus || !window.electronAPI?.importLocalApplication) return;
       tickBusyRef.current = true;
@@ -388,9 +408,10 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         const allNodes = nav.enumerateAllNodes();
         const pending = selectFallbackLocalAiJobs(allNodes);
         for (const node of pending) {
-          if (disposed) return;
-          await driveJob(node);
+          if (disposed || !isCurrentQuitGeneration(generation)) return;
+          await driveJob(node, null, generation);
         }
+        if (!isCurrentQuitGeneration(generation)) return;
         const canvasFilePath = ctxRef.current.getCurrentFile?.();
         if (!canvasFilePath || !window.electronAPI?.discoverLocalApplications) return;
         let discovery;
@@ -413,8 +434,8 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           .filter(Boolean));
         const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);
         for (const orphanJob of orphaned) {
-          if (disposed) return;
-          await driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob);
+          if (disposed || !isCurrentQuitGeneration(generation)) return;
+          await driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob, generation);
         }
       } finally {
         tickBusyRef.current = false;

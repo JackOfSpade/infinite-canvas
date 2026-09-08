@@ -274,7 +274,7 @@ function alphanumericToken(token) {
  * rejoined; a DOM pair such as `part-`, `and` keeps its separator. If neither
  * shape is established, callers must refuse to serialize the ambiguous text.
  */
-function reconcileExtractedText(value, currentTokens) {
+function reconcileExtractedText(value, currentTokens, { ignorePresentationalAlignment = false } = {}) {
   const text = normalizeReconcileText(value);
   const matches = [...text.matchAll(PDF_TEXT_TOKEN)];
   const rawTokens = matches.map(match => match[0]);
@@ -284,6 +284,14 @@ function reconcileExtractedText(value, currentTokens) {
   }
 
   const tokens = [];
+  // Resume PDFs contain visual bullets/dots that the trusted DOM deliberately
+  // marks aria-hidden. They remain in the extracted token stream until the
+  // resume presentation pass below, but must not shift the DOM position used
+  // to classify a later wrapped hyphen.
+  const alignmentTokens = ignorePresentationalAlignment
+    ? currentTokens.filter(token => !isPresentationalToken(token))
+    : currentTokens;
+  let alignmentTokenCount = 0;
   const separatorRemovals = [];
   let ambiguousHyphen = false;
   for (let index = 0; index < matches.length; index += 1) {
@@ -295,10 +303,11 @@ function reconcileExtractedText(value, currentTokens) {
     const separator = previousMatch ? text.slice(separatorStart, match.index) : '';
     if (previousMatch && /\s/u.test(separator)
       && attachedHyphenToken(previousToken) && alphanumericToken(token)) {
-      const currentIndex = tokens.length - 1;
+      const outputIndex = tokens.length - 1;
+      const currentIndex = alignmentTokenCount - 1;
       const joined = `${previousToken}${token}`;
-      if (joined === currentTokens[currentIndex]) {
-        tokens[currentIndex] = joined;
+      if (joined === alignmentTokens[currentIndex]) {
+        tokens[outputIndex] = joined;
         separatorRemovals.push([separatorStart, match.index]);
         continue;
       }
@@ -310,12 +319,13 @@ function reconcileExtractedText(value, currentTokens) {
       // insertion shifts token positions, a global match would preserve the
       // separator at the lexical occurrence and silently corrupt it. Only the
       // trusted pair at this exact aligned position resolves the ambiguity.
-      if (!(attachedHyphenToken(currentTokens[currentIndex])
-        && alphanumericToken(currentTokens[currentIndex + 1]))) {
+      if (!(attachedHyphenToken(alignmentTokens[currentIndex])
+        && alphanumericToken(alignmentTokens[currentIndex + 1]))) {
         ambiguousHyphen = true;
       }
     }
     tokens.push(token);
+    if (!ignorePresentationalAlignment || !isPresentationalToken(token)) alignmentTokenCount += 1;
   }
 
   let safeText = text;
@@ -483,7 +493,11 @@ function restoreDomPresentationTokens(current, incoming) {
 function resumePdfTextTokens(lines, current) {
   // Join visual lines losslessly first. reconcileExtractedText removes only a
   // separator whose compound identity is established by the current DOM.
-  return reconcileExtractedText(lines.map(line => line.text).join(' '), current);
+  // PDF-only visual separators must not offset that identity check; the next
+  // pass restores the exact presentation-token shape owned by the DOM.
+  return reconcileExtractedText(lines.map(line => line.text).join(' '), current, {
+    ignorePresentationalAlignment: true,
+  });
 }
 
 function lcsPairs(left, right) {

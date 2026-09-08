@@ -25,6 +25,7 @@ import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicati
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import {
   checkCompoundHyphenation,
   checkEvidenceGrounding,
@@ -2234,8 +2235,9 @@ export function registerJobApplicationHandlers() {
     // orphaned Local AI handoff has no card (and may finish while the user is
     // working elsewhere), so its recovery path explicitly suppresses this
     // focus-stealing side effect.
+    const revealSkipped = suppressReveal || isBackgroundE2E();
     let openErr = '';
-    if (!suppressReveal) {
+    if (!revealSkipped) {
       try { openErr = await shell.openPath(dir); }
       catch (error) { openErr = String(error?.message || error); }
     }
@@ -2245,9 +2247,9 @@ export function registerJobApplicationHandlers() {
       applicationExport: {
         status: 'saved', destination: dir, savedAt: Date.now(), manifest,
         bundleError,
-        revealSucceeded: suppressReveal ? null : !openErr,
+        revealSucceeded: revealSkipped ? null : !openErr,
         revealError: openErr || null,
-        revealSkipped: Boolean(suppressReveal),
+        revealSkipped,
         integrityVerified: manifest.every(item => item.integrityVerified),
         sync: {
           registered: true,

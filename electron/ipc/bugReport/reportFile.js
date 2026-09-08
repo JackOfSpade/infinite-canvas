@@ -10,13 +10,14 @@
 // instead of receiving one giant paste that either gets silently truncated
 // downstream or burns most of a context window in one message.
 //
-// The saved-report directory is NOT a permanent archive — it exists only to
-// bridge "generated this session" to "read by whatever consumed the
-// clipboard paste, during this same session". main.js clears it once at
-// startup (see clearSavedBugReports below) so filing many reports across many
-// app sessions can never grow it without bound, and writeSavedBugReport
-// additionally prunes to SAVED_REPORT_RETENTION files as a same-session
-// second guard against a single runaway session filing hundreds of reports.
+// The saved-report directory is a short-lived handoff archive. A clipboard
+// pointer may be consumed after Electron restarts (for example, an assistant
+// can open the app while it is investigating the path), so deleting every
+// report at startup would invalidate the pointer before it can be read.
+// Keep a best-effort bounded recent history instead: main.js and each write
+// target reports older than SAVED_REPORT_MAX_AGE_MS and reports outside the
+// SAVED_REPORT_RETENTION newest. This controls normal disk growth without
+// making a restart destructive.
 
 import electronPkg from 'electron';
 import fs from 'fs';
@@ -26,8 +27,9 @@ const { app } = electronPkg;
 
 export const SAVED_REPORT_DIR = 'bug-reports';
 export const SAVED_REPORT_RETENTION = 20;
+export const SAVED_REPORT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-// The delete gate for both clearSavedBugReports and the retention prune. Be
+// The delete gate for the startup and write-time retention prunes. Be
 // precise about what this actually guarantees: it matches the NAME SHAPE this
 // module writes, not the file's authorship — nothing here can distinguish a
 // file we wrote from one that merely looks like it. A file with an unrelated
@@ -46,24 +48,24 @@ export function savedBugReportDir() {
 }
 
 // A report can be written moments after the app boots — the "Copy to
-// clipboard" click that triggers a write and the startup clear are racing by
-// design. Without this guard a slow clear (many stale files, a slow disk)
-// could delete the very file a report the user just generated points at.
-// clearSavedBugReports stashes its own in-flight promise here so
+// clipboard" click that triggers a write and the startup prune are racing by
+// design. Without this guard, a concurrent prune could count files before a
+// write finishes and leave retention timing nondeterministic. The startup
+// prune stashes its own in-flight promise here so
 // writeSavedBugReport can await it — success or failure — before it ever
 // creates the directory or a file inside it.
-let inFlightClear = null;
+let inFlightStartupPrune = null;
 
-// Test-only reset: without this, a clear kicked off by one test's app-start
+// Test-only reset: without this, a prune kicked off by one test's app-start
 // simulation would leak into the next test's writeSavedBugReport call and
 // make it wait on a promise nothing in that test ever awaited or observed.
 // Matches the `__xForTests` escape-hatch convention used elsewhere (see
 // electron/ipc/applicationSync.js __resetApplicationSyncWorkspacesForTests).
-export function __resetSavedBugReportClearForTests() {
-  inFlightClear = null;
+export function __resetSavedBugReportPruneForTests() {
+  inFlightStartupPrune = null;
 }
 
-async function performClear() {
+async function pruneSavedReports({ protectedFilePath = null } = {}) {
   // Resolved INSIDE the try: `savedBugReportDir()` reaches app.getPath, which
   // can throw. Outside the try that throw would REJECT this promise, breaking
   // the "every failure path resolves with { error }" contract the callers below
@@ -74,13 +76,34 @@ async function performClear() {
     dir = savedBugReportDir();
     // Create rather than merely check: a fresh userData dir (first run) has
     // no bug-reports/ subfolder yet, and that must read as "nothing to
-    // remove", not an error.
+    // prune", not an error.
     await fs.promises.mkdir(dir, { recursive: true });
     const entries = await fs.promises.readdir(dir);
-    for (const name of entries) {
-      if (!SAVED_REPORT_FILE_RE.test(name)) continue; // differently-named files are left alone
+    const now = Date.now();
+    const stated = await Promise.all(entries
+      .filter((name) => SAVED_REPORT_FILE_RE.test(name))
+      .map(async (name) => {
+        const filePath = path.join(dir, name);
+        try {
+          const stat = await fs.promises.stat(filePath);
+          return stat.isFile() ? { filePath, mtimeMs: stat.mtimeMs } : null;
+        } catch {
+          return null; // vanished or unreadable between readdir and stat
+        }
+      }));
+    const reports = stated.filter(Boolean).sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const expired = reports.filter((report) => now - report.mtimeMs > SAVED_REPORT_MAX_AGE_MS);
+    const fresh = reports.filter((report) => now - report.mtimeMs <= SAVED_REPORT_MAX_AGE_MS);
+    // A newly written report is protected from the write-time pruning pass.
+    // Filesystems can assign equal mtime values to a rapid burst of writes, so
+    // sorting alone cannot prove the current pointer is the newest one.
+    const removableFresh = protectedFilePath
+      ? fresh.filter((report) => report.filePath !== protectedFilePath)
+      : fresh;
+    const overCount = removableFresh.slice(0, Math.max(0, fresh.length - SAVED_REPORT_RETENTION));
+    for (const { filePath } of [...expired, ...overCount]) {
       try {
-        await fs.promises.unlink(path.join(dir, name));
+        await fs.promises.unlink(filePath);
         removed++;
       } catch {
         // Best-effort per file: one locked/already-gone entry must not stop
@@ -99,9 +122,9 @@ async function performClear() {
 // every later step, including createWindow(). Every failure path above
 // resolves with `{ error }` instead of rejecting, so there is nothing here
 // for a caller to accidentally let escape as a rejection either.
-export async function clearSavedBugReports() {
-  const promise = performClear();
-  inFlightClear = promise;
+export async function pruneSavedBugReports() {
+  const promise = pruneSavedReports();
+  inFlightStartupPrune = promise;
   return promise;
 }
 
@@ -131,52 +154,26 @@ async function writeCollisionFreeReport(dir, date, content) {
   }
 }
 
-// Best-effort: a failure here must never turn a successful write into a
-// reported failure. The write already landed and its path was already
-// returned to the caller; only cleanup of OLDER files is at stake.
-async function pruneOldSavedReports(dir) {
-  try {
-    const entries = await fs.promises.readdir(dir);
-    const reportFiles = entries.filter((name) => SAVED_REPORT_FILE_RE.test(name));
-    if (reportFiles.length <= SAVED_REPORT_RETENTION) return;
-
-    // Sort by mtime, not filename: the filename embeds a generation
-    // timestamp, but a collision suffix (`-2`, `-3`, …) would otherwise sort
-    // a same-millisecond file out of true age order.
-    const stated = await Promise.all(reportFiles.map(async (name) => {
-      const filePath = path.join(dir, name);
-      try {
-        const stat = await fs.promises.stat(filePath);
-        return { filePath, mtimeMs: stat.mtimeMs };
-      } catch {
-        return null; // vanished between readdir and stat; nothing to prune
-      }
-    }));
-    const alive = stated.filter(Boolean).sort((a, b) => a.mtimeMs - b.mtimeMs);
-    const excess = alive.length - SAVED_REPORT_RETENTION;
-    for (let i = 0; i < excess; i++) {
-      await fs.promises.unlink(alive[i].filePath).catch(() => {});
-    }
-  } catch {
-    // Listing itself failed (e.g. directory removed underneath us) — the
-    // report this call exists to protect was already written successfully.
-  }
-}
-
+// Best-effort: a cleanup failure must never turn a successful report write
+// into a reported failure. The report already landed on disk; only cleanup of
+// older files is at stake.
 // May throw (mkdir/write failures propagate) — the caller (bugReport.js's
 // generate-bug-report-markdown handler) needs that failure to trigger its
 // inline-fallback path rather than silently reporting success with nothing
 // on disk.
 export async function writeSavedBugReport(markdown, meta = {}) {
   void meta; // reserved for future provenance (e.g. reportWindowId); unused today
-  // Never race the startup sweep — see the `inFlightClear` comment above.
-  if (inFlightClear) await inFlightClear.catch(() => {});
+  // Never race the startup prune — see the `inFlightStartupPrune` comment above.
+  if (inFlightStartupPrune) await inFlightStartupPrune.catch(() => {});
 
   const dir = savedBugReportDir();
   await fs.promises.mkdir(dir, { recursive: true });
   const filePath = await writeCollisionFreeReport(dir, new Date(), markdown);
 
-  await pruneOldSavedReports(dir);
+  // The report just landed successfully. Retention cleanup is best-effort, so
+  // a transient directory/listing failure cannot turn that success into a
+  // failed clipboard pointer.
+  await pruneSavedReports({ protectedFilePath: filePath });
 
   return {
     filePath,
@@ -197,9 +194,9 @@ export async function writeSavedBugReport(markdown, meta = {}) {
 // of the redesign is that this stays short while the real content lives in
 // the file it points at.
 export function buildClipboardPointer(info = {}) {
-  // The retention prune runs on every write, so a pointer cannot promise the
-  // file survives the whole session — after SAVED_REPORT_RETENTION newer
-  // reports it is gone. Say both triggers rather than only the app-restart one.
+  // Retention cleanup is triggered at startup and on every write. It is
+  // best-effort, so a pointer is durable across restarts but cannot promise
+  // permanent storage or an exact deletion time.
   const retention = SAVED_REPORT_RETENTION;
   const { filePath, chars, bytes, lines, eventLines, filterCode, generatedAt, description } = info;
   // Prefer the true character count; fall back to the byte count only for a
@@ -230,7 +227,7 @@ Read the full report from this path:
 - Size: ${formatCount(sizeChars)} chars · ${formatCount(lines)} lines${eventLineClause}
 - Filter code: ${code}
 - Generated: ${generatedAt}
-- Lifetime: deleted when this app next starts, or once ${retention} newer reports are filed — read it now.
+- Lifetime: retained across app restarts; on app start or a later report write, best-effort cleanup normally prunes reports older than 7 days or outside the ${retention} newest — read it soon.
 
 This file may be too large to read in one pass. Read it in segments (line or byte
 offsets) rather than expecting its contents inline.${descriptionSection}`;

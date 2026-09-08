@@ -14,6 +14,7 @@ import {
   checkCompoundHyphenation,
   checkContainerizationTechnologyRoles,
   checkDanglingParagraphTransition,
+  checkDetachedRelevanceClaim,
   checkDirectWelcomeClosing,
   checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
@@ -32,6 +33,7 @@ import {
   checkNeedGrounding,
   checkNeedsPortfolio,
   checkOpeningDemonstrative,
+  checkOpeningEmployerShorthand,
   checkEntailedPremise,
   checkParallelStructure,
   checkPlainRegister,
@@ -39,6 +41,7 @@ import {
   checkPostingReference,
   checkPriorEmployerOpening,
   checkPunctuationStyle,
+  checkProspectiveContributionTense,
   checkRedundancy,
   checkResumeBulletFocus,
   checkReferenceClarity,
@@ -794,6 +797,44 @@ export default [
         && abstractCategoryPivot.detail.includes('paragraph 2 opens evidence with a bare category transition (“Beyond moving operations, I used Python ETL to …”)')
         && abstractCategoryPivot.detail.includes('“beyond” marks addition but does not explain the relationship'),
       'abstract lifecycle categories and bare beyond-openers cannot stand in for the relationship between proofs');
+      const detachedRelevance = checkDetachedRelevanceClaim([
+        "As a software engineer for Thomson School District, I moved operational data and workflows from internal systems to third-party platforms, work relevant to this role's legacy modernization and cross-program integration responsibilities.",
+      ]);
+      const explainedRelevance = checkDetachedRelevanceClaim([
+        "As a software engineer for Thomson School District, I moved internal systems and their operational data to third-party platforms, building migration workflows and validation for the legacy-modernization work this role describes.",
+        'Experience relevant to this role includes building migration workflows and validation for replacement platforms.',
+      ]);
+      assert(!detachedRelevance.passed && detachedRelevance.id === 'detached-relevance-claim'
+        && detachedRelevance.detail.includes("work relevant to this role's")
+        && detachedRelevance.detail.includes('using conditional language for work that would occur after hiring'),
+      'a trailing relevance assertion cannot make the recruiter infer the action-to-responsibility connection');
+      assert(explainedRelevance.passed,
+        `an explicit mechanism and a non-detached relevance noun phrase remain valid: ${explainedRelevance.detail}`);
+      const presentContribution = checkProspectiveContributionTense([
+        "That migration experience helps me contribute to this role's legacy-modernization responsibilities.",
+      ]);
+      const pastReadinessContribution = checkProspectiveContributionTense([
+        "That project prepared me to contribute to ODFW's legacy-system modernization and cross-program data flows.",
+      ], 'Oregon Department of Fish and Wildlife');
+      const prospectiveContribution = checkProspectiveContributionTense([
+        'At ODFW, I would apply that migration experience to modernizing legacy systems and architecting cross-program data flows.',
+        'I built migration workflows and validated operational data for the replacement platforms.',
+      ], 'Oregon Department of Fish and Wildlife');
+      const historicalPreparation = checkProspectiveContributionTense([
+        "That training prepared me to support Thomson School District's replacement systems the following year.",
+        'That training prepared me to support the systems during the following school year.',
+      ], 'Oregon Department of Fish and Wildlife');
+      assert(!presentContribution.passed && presentContribution.id === 'prospective-contribution-tense'
+        && presentContribution.detail.includes('past/present readiness bridge')
+        && presentContribution.detail.includes('I would apply that experience'),
+      'completed experience cannot be framed as a present-tense promise to a prospective employer');
+      assert(!pastReadinessContribution.passed
+        && pastReadinessContribution.detail.includes('prepared me to contribute'),
+      'a completed project cannot use past readiness as the tense anchor for named prospective-employer work');
+      assert(prospectiveContribution.passed,
+        `conditional target contribution and ordinary past-tense evidence remain valid: ${prospectiveContribution.detail}`);
+      assert(historicalPreparation.passed,
+        `readiness for documented past work at a prior employer remains valid: ${historicalPreparation.detail}`);
       const mirroredCategoryScaffold = checkResponsibilityTransition([
         'My implementation experience covers workflow change and data exchange. I handled workflow change by transferring internal operations to third-party systems. In separate integration work, I addressed data exchange by connecting the district system to those solutions.',
         'My implementation experience covers workflow change and data exchange. I handled workflow change such as transferring internal operations to third-party systems. I addressed the data exchange by connecting the district system to those solutions.',
@@ -829,6 +870,20 @@ export default [
         && evaluatedCategoryPivot.detail.includes('only renames one work category as broader than another')
         && evaluatedCategoryPivot.detail.includes('opens evidence with a bare category transition'),
       'the complete evaluator routes both abstract category pivots into its single prose-revision attempt');
+      const evaluatedDetachedRelevance = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: ["I moved operational data and workflows to third-party platforms, experience directly relevant to this role's legacy modernization responsibilities."],
+        evidence, researchText: '',
+      }).find(check => check.id === 'detached-relevance-claim');
+      assert(evaluatedDetachedRelevance && !evaluatedDetachedRelevance.passed,
+        'the complete evaluator routes detached relevance assertions into its single prose-revision attempt');
+      const evaluatedPresentContribution = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: ["That project prepared me to contribute to ODFW's legacy-system modernization and cross-program data flows."],
+        evidence, researchText: '', companyName: 'Oregon Department of Fish and Wildlife',
+      }).find(check => check.id === 'prospective-contribution-tense');
+      assert(evaluatedPresentContribution && !evaluatedPresentContribution.passed,
+        'the complete evaluator routes past or present readiness bridges for prospective contribution into its single prose-revision attempt');
       const posting = checkPostingReference([
         'Owning the rollout end-to-end is what your posting wants sped up.',
         'The job ad asks for the same repair work, as advertised.',
@@ -1266,6 +1321,38 @@ export default [
       assert(fixedPhrase.passed, `pronoun and fixed-phrase demonstratives are out of scope: ${fixedPhrase.detail}`);
       const firstParagraph = checkOpeningDemonstrative(['That evaluation practice is the subject of this letter and needs no anchor.']);
       assert(firstParagraph.passed, 'the first paragraph has no previous paragraph to anchor to and is never flagged');
+      const shorthandEmployer = checkOpeningEmployerShorthand([
+        'At Thomson School District, I migrated internal systems and their operational data to third-party platforms.',
+        'The district chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+      ], ['Thomson School District']);
+      const explicitEmployer = checkOpeningEmployerShorthand([
+        'At Thomson School District, I migrated internal systems and their operational data to third-party platforms.',
+        'Thomson School District chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+      ], ['Thomson School District']);
+      const ordinaryDefiniteDescription = checkOpeningEmployerShorthand([
+        'At Thomson School District, I migrated internal systems and their operational data to third-party platforms.',
+        'The system validated records before the cutover.',
+      ], ['Thomson School District']);
+      const unanchoredDistrict = checkOpeningEmployerShorthand([
+        'I migrated internal systems and their operational data to third-party platforms.',
+        'The district chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+      ], ['Thomson School District']);
+      assert(!shorthandEmployer.passed && shorthandEmployer.id === 'opening-employer-shorthand'
+        && shorthandEmployer.detail.includes('“The district chose …”')
+        && shorthandEmployer.detail.includes('Thomson School District'),
+      'a new paragraph cannot replace a just-named prior employer with organization shorthand');
+      assert(explicitEmployer.passed && ordinaryDefiniteDescription.passed && unanchoredDistrict.passed,
+        `an explicit employer bridge, ordinary definite description, and a district with no prior named-employer antecedent remain allowed: ${explicitEmployer.detail}; ${ordinaryDefiniteDescription.detail}; ${unanchoredDistrict.detail}`);
+      const evaluatedEmployerShorthand = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: [
+          'At Thomson School District, I migrated internal systems and their operational data to third-party platforms.',
+          'The district chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+        ],
+        evidence: { roles: [{ company: 'Thomson School District' }] }, researchText: '',
+      }).find(check => check.id === 'opening-employer-shorthand');
+      assert(evaluatedEmployerShorthand && !evaluatedEmployerShorthand.passed,
+        'the complete evaluator routes paragraph-opening prior-employer shorthand into its single prose-revision attempt');
       return { flagged: flagged.detail, logistics: proseOnlyLogistics.detail, planGate: legalGate.checks.find(check => check.id === 'logistics-legal-status').detail, unanchored: unanchored.detail };
     },
   },
@@ -1497,9 +1584,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 33, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 36, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(8).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative,entailed-premise',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,legal-status,opening-demonstrative,opening-employer-shorthand,entailed-premise',
       'the register and style checks are appended after the established seven, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },

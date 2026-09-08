@@ -17,6 +17,7 @@ import { parseAiJson } from './jsonRepair.js';
 import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './schemaValidation.js';
 import { abortNodeTasks, cancellationError, getCurrentIpcRequestContext } from './ipcUtils.js';
 import { logger } from '../logger.js';
+import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 const { app, ipcMain, shell } = electronPkg;
 
@@ -749,6 +750,7 @@ export function registerNonApiAiHandlers() {
   }));
 
   ipcMain.handle('reveal-non-api-ai-attachment', async (event, args = {}) => {
+    if (isBackgroundE2E()) return { revealed: false, skipped: true };
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const filePath = typeof args.filePath === 'string' ? args.filePath : '';
     const record = pendingRequests.get(requestId);
