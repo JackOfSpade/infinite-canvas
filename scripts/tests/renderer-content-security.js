@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom';
 import { renderMarkdown } from '../../src/utils/markdownRenderer.js';
 import { escapeHtmlAttribute, normalizeExternalHttpUrl } from '../../src/utils/urlSafety.js';
+import { openExternalFailureMessage, openExternalUrl } from '../../src/utils/openExternal.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../../src/utils/jobListingUrl.js';
 import { describeUnexpectedNetworkTarget } from '../test-stubs/networkGuard.mjs';
 import { assert } from './testHelpers.js';
@@ -54,6 +55,45 @@ export default [
         assert(normalizeExternalHttpUrl(unsafe) === '', `unsafe external scheme must be rejected: ${unsafe}`);
       }
       return { accepted: normalizeExternalHttpUrl('example.test/path') };
+    },
+  },
+  {
+    name: 'renderer external dispatcher surfaces failure envelopes and rejections once',
+    run: async () => {
+      let calls = 0;
+      const envelope = await openExternalUrl('https://example.test/', {
+        dispatcher: async () => { calls++; return { success: false, error: 'OS browser unavailable' }; },
+      });
+      assert(!envelope.ok && envelope.reason === 'dispatch-failed' && calls === 1,
+        `resolved handleSafe failure must not be treated as opened: ${JSON.stringify(envelope)}`);
+      const rejected = await openExternalUrl('https://example.test/', {
+        dispatcher: async () => { throw new Error('IPC disconnected'); },
+      });
+      assert(!rejected.ok && rejected.reason === 'dispatch-failed',
+        'rejected external IPC must become the same visible failure outcome');
+      const malformed = await openExternalUrl('https://example.test/', {
+        dispatcher: async () => undefined,
+      });
+      assert(!malformed.ok && malformed.reason === 'dispatch-failed',
+        'a malformed/missing IPC success envelope must not masquerade as an opened browser');
+      const fallbackCalls = [];
+      const fallbackWindow = { opener: { sensitive: true } };
+      const fallback = await openExternalUrl('example.test/path', {
+        fallback: (...args) => { fallbackCalls.push(args); return fallbackWindow; },
+      });
+      assert(fallback.ok && fallback.fallback && fallbackCalls[0][0] === 'https://example.test/path'
+        && fallbackCalls[0][1] === '_blank' && fallbackCalls[0].length === 2
+        && fallbackWindow.opener === null,
+      'renderer-only fallback retains normalized target and synchronously severs opener isolation');
+      const blockedPopup = await openExternalUrl('https://example.test/', { fallback: () => null });
+      assert(!blockedPopup.ok && blockedPopup.reason === 'dispatch-failed',
+        'a popup-blocked browser fallback must surface failure rather than silently succeed');
+      const invalid = await openExternalUrl('javascript:alert(1)', { dispatcher: async () => ({ success: true }) });
+      assert(!invalid.ok && openExternalFailureMessage(invalid) === 'No safe web link is available.',
+        'unsafe external targets remain blocked with concise user copy');
+      assert(openExternalFailureMessage(envelope) === 'Could not open the link. Please try again.',
+        'dispatcher errors do not expose OS/IPC detail in a toast');
+      return { envelope: envelope.reason, fallback: fallback.fallback };
     },
   },
   {

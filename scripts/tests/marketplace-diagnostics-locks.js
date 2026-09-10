@@ -1,4 +1,4 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 
 export default [
   {
@@ -761,6 +761,7 @@ export default [
       // must still let the next live operation acquire normally.
       let releaseHead;
       const headGate = new Promise(resolve => { releaseHead = resolve; });
+      const sharedDepthBefore = getSharedProfileLockSnapshot().queueDepth;
       const head = withSharedProfileLock(() => headGate);
       await Promise.resolve();
       const controller = new AbortController();
@@ -773,11 +774,15 @@ export default [
         new Promise(resolve => { timeoutId = setTimeout(() => resolve('timed-out'), 100); }),
       ]);
       clearTimeout(timeoutId);
+      assert(getSharedProfileLockSnapshot().queueDepth === sharedDepthBefore + 2,
+        'an early-aborted caller remains in physical FIFO depth until its queued no-op reaches the head');
       const follower = withSharedProfileLock(async () => 'live-follower');
       releaseHead();
       assert(earlyAbort === 'AbortError' && ranAborted === false
         && await head === undefined && await follower === 'live-follower',
       `an aborted queued profile operation never starts and does not wedge its follower — got ${earlyAbort}`);
+      assert(getSharedProfileLockSnapshot().queueDepth === sharedDepthBefore,
+        'shared FIFO depth returns to baseline after the aborted physical slot settles');
       return { ok: true, order: order.join(',') };
     },
   },
@@ -907,13 +912,58 @@ export default [
       // The guard must not leak across unrelated, non-nested calls afterward.
       const afterNested = await withSharedProfileLock(async () => 'after-nested');
       assert(afterNested === 'after-nested', 'the lock keeps working normally for later, non-nested callers');
-      // Different lock instances (e.g. marketplaceBrowserLock vs statusCheckLock)
-      // are independent — calling one from inside the other is NOT reentrancy.
-      const crossLockResult = await withMarketplaceBrowserLock(async () => {
-        return withStatusCheckLock(async () => 'cross-lock-ok');
+      // Marketplace and job work now use the SAME profile FIFO. Nested aliases
+      // must fail fast rather than deadlocking; status checks remain independent.
+      let aliasErr = null;
+      await withMarketplaceBrowserLock(async () => {
+        try { await withSharedProfileLock(async () => 'should-not-run'); }
+        catch (err) { aliasErr = err.message; }
       });
-      assert(crossLockResult === 'cross-lock-ok', 'nesting a DIFFERENT lock inside another is not treated as reentrant');
+      assert(typeof aliasErr === 'string' && aliasErr.includes('reentrant'),
+        `nested marketplace/shared aliases reject instead of deadlocking — got ${aliasErr}`);
+      const crossLockResult = await withMarketplaceBrowserLock(async () => withStatusCheckLock(async () => 'cross-lock-ok'));
+      assert(crossLockResult === 'cross-lock-ok', 'status checks stay independent of the shared Chrome-profile FIFO');
+
+      // AsyncLocalStorage deliberately follows resources created in a lock.
+      // Once the originating owner has released, that inherited context must
+      // not poison a later timer callback as permanently reentrant.
+      let settleDeferred;
+      const deferredResult = new Promise(resolve => { settleDeferred = resolve; });
+      await withSharedProfileLock(async () => {
+        setTimeout(() => {
+          withSharedProfileLock(async () => 'deferred-after-release')
+            .then(settleDeferred, error => settleDeferred(error));
+        }, 0);
+      });
+      const deferred = await deferredResult;
+      assert(deferred === 'deferred-after-release',
+        `a deferred descendant may acquire after its original owner releases — got ${deferred?.message || deferred}`);
       return { ok: true };
+    },
+  },
+{
+    name: 'marketplace and job browser work share one FIFO with snapshot metadata and marketplace queue depth',
+    run: async () => {
+      const before = getMarketplaceBrowserQueueDepth();
+      let release;
+      const hold = new Promise(resolve => { release = resolve; });
+      const order = [];
+      const marketplace = withMarketplaceBrowserLock(async () => {
+        order.push('marketplace-start');
+        const snapshot = getSharedProfileLockSnapshot();
+        assert(snapshot.active?.label === 'marketplace browser workflow', `marketplace holder is named in the shared snapshot — got ${JSON.stringify(snapshot)}`);
+        await hold;
+        order.push('marketplace-end');
+      });
+      await Promise.resolve();
+      const job = withSharedProfileLock(async () => { order.push('job'); }, null, 'job test workflow');
+      assert(getMarketplaceBrowserQueueDepth() === before + 2,
+        `marketplace queue-depth includes the marketplace holder plus a queued job profile workflow — got ${getMarketplaceBrowserQueueDepth()}`);
+      release();
+      await Promise.all([marketplace, job]);
+      assert(order.join(',') === 'marketplace-start,marketplace-end,job', `one shared FIFO preserves order — got ${order}`);
+      assert(getMarketplaceBrowserQueueDepth() === before, 'shared queue depth returns to baseline');
+      return { order };
     },
   },
 {

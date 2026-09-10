@@ -1,7 +1,7 @@
 /**
  * Network IPC handlers — URL title fetching and task cancellation.
  */
-import { handleSafe, abortNodeTasks, nodeCancellationError } from './ipcUtils.js';
+import { handleSafe, abortNodeTasks, abortNodeTasksAndWait, nodeCancellationError } from './ipcUtils.js';
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
 
@@ -19,6 +19,15 @@ export function registerNetworkHandlers() {
     // board clear / node deleted). Without it the main process could only see
     // the generic sentinel and reported every user Reset as "Node deleted".
     if (nodeId) abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause));
+  });
+
+  // Transactional cancellation (Job Board) needs acknowledgement that the
+  // aborted handler has reached its own finally/sidecar-cleanup boundary before
+  // the shared queue lane is released. This handler is deliberately not wrapped
+  // in handleSafe, otherwise it would register—and abort—itself under `nodeId`.
+  ipcMain.handle('cancel-node-task-and-wait', async (event, { nodeId, cause = null } = {}) => {
+    if (!nodeId) return { abortedCount: 0, settled: true };
+    return abortNodeTasksAndWait(nodeId, event.sender, nodeCancellationError(cause));
   });
 
   handleSafe('fetch-url-title', async (event, url, signal) => {

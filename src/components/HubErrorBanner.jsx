@@ -1,5 +1,7 @@
 import React from 'react';
 import { AlertTriangle, X, RefreshCw } from 'lucide-react';
+import { useToast } from './ToastProvider';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 
 // A billing/credit error can come from either provider, and each has its own
 // top-up page. The renderer doesn't hold the active provider, but the failing
@@ -31,6 +33,7 @@ function detectBillingProvider(msg) {
  * inputs) rather than be wiped to a "Try Again" wall.
  */
 export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onDismiss }) {
+  const { addToast } = useToast();
   const msg = String(errorMessage || '');
   const isBillingDepleted = /prepayment credits are depleted|billing|insufficient/i.test(msg);
   const billingTarget = isBillingDepleted ? BILLING_TARGETS[detectBillingProvider(msg)] : null;
@@ -80,14 +83,25 @@ export function HubErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onD
             {!locked && isBillingDepleted && (
               <button
                 type="button"
-                onClick={(e) => {
+                onClick={async (e) => {
                   e.stopPropagation();
                   // Route to the failing provider's own top-up page. If the
                   // provider can't be told from the error text, fall back to the
                   // in-app AI settings rather than guessing (which is the bug
                   // this replaced — it always opened Gemini's page).
                   if (billingTarget?.url) {
-                    window.electronAPI?.openExternal?.(billingTarget.url);
+                    const opened = await openExternalUrl(billingTarget.url, {
+                      dispatcher: window.electronAPI?.openExternal,
+                      fallback: window.open,
+                    });
+                    if (!opened.ok) {
+                      addToast({
+                        title: 'Cannot Open Billing',
+                        description: openExternalFailureMessage(opened),
+                        type: 'error',
+                        dedupeKey: 'billing-open-external',
+                      });
+                    }
                   } else {
                     document.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
                   }

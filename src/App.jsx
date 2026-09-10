@@ -5,6 +5,7 @@ import { Canvas } from './Canvas';
 import { ToastProvider } from './components/ToastProvider';
 import { SessionStatusProvider } from './contexts/SessionStatusContext';
 import { ModuleRunQueueProvider } from './contexts/ModuleRunQueueContext';
+import { JobSearchCoordinatorProvider } from './contexts/JobSearchCoordinatorContext';
 import './index.css';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -17,9 +18,11 @@ export default function App() {
         <SessionStatusProvider>
           <ToastProvider>
             <ModuleRunQueueProvider>
-              <ReactFlowProvider>
-                <Canvas />
-              </ReactFlowProvider>
+              <JobSearchCoordinatorProvider>
+                <ReactFlowProvider>
+                  <Canvas />
+                </ReactFlowProvider>
+              </JobSearchCoordinatorProvider>
             </ModuleRunQueueProvider>
           </ToastProvider>
         </SessionStatusProvider>

@@ -24,6 +24,7 @@ import { detectAntiBotSignal } from './antiBotDetector.js';
 import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, isLoginUrlPath } from './browser/authWindows.js';
 import { shouldUseNativeRead } from './browser/nativeChromeReader.js';
 import { tryGetStore } from './settings.js';
+import { withSharedProfileLock } from './sharedProfileLock.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
@@ -171,13 +172,21 @@ export function isConfirmedDisconnectedVerdict(verdict) {
  * Inconclusive transport failures are explicitly not confirmed disconnects;
  * callers should use isConfirmedDisconnectedVerdict before gating work.
  */
-export async function verifySellMonitorLogin(platformId) {
+export async function verifySellMonitorLogin(platformId, { signal = null } = {}) {
   // Outer try/catch so any unforeseen exception (Chrome failed to launch,
   // module import error, network stack panic) becomes a verdict instead
   // of bubbling up. Without this, the open-login-window handler's catch
   // returns `{ success: false }` and writeStatusCache is never called,
   // leaving a stale cache entry and an opaque renderer toast.
   try {
+    const abortReason = () => signal?.reason?.message || signal?.reason || 'Verification was cancelled.';
+    const abortedVerdict = () => ({
+      connected: false,
+      inconclusive: true,
+      reason: `Verification cancelled: ${abortReason()}`,
+      trace: { target: null, aborted: true },
+    });
+    if (signal?.aborted) return abortedVerdict();
     const config = getSellMonitorConfig(platformId) || getJobLoginConfig(platformId);
     // Prefer verifyUrls / verifyUrl (universal logged-in pages like /my/account)
     // over sellerUrl. Some job boards split auth by host, so a profile URL can
@@ -198,6 +207,7 @@ export async function verifySellMonitorLogin(platformId) {
     // present → connected; absent → fall through to the normal body/URL verify,
     // which correctly confirms the logged-out shell.
     if (config?.verifyViaCookie && await hasPlatformAuthCookie(platformId)) {
+      if (signal?.aborted) return abortedVerdict();
       logger.info(`[Accounts] ${platformId} verified via auth cookie (SPA client-render-safe; body verify skipped)`);
       return {
         connected: true,
@@ -243,14 +253,21 @@ export async function verifySellMonitorLogin(platformId) {
         // authenticated sessions. The clean path uses the same persistent
         // cookies but loads images normally so eBay/etc don't fingerprint us
         // as a bot.
-        r = await fetchHtmlClean(target, { timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS, waitForRenderMs: config?.verifyRenderWaitMs || 0 });
+        r = await fetchHtmlClean(target, {
+          timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS,
+          waitForRenderMs: config?.verifyRenderWaitMs || 0,
+          signal,
+        });
       } catch (e) {
         // We never got a readable page (the fetch threw — e.g. a `page.content()
         // timed out` anti-bot reload loop). That is NOT proof of logout, so mark
         // the verdict `inconclusive`: callers must keep the prior session status
         // and not flip the pill / card to "needs login" off a transient failure.
-        const trace = { target, error: e?.message || String(e) };
-        return { connected: false, inconclusive: true, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace: { target, checks: [...traces, trace] } };
+        const trace = { target, error: e?.message || String(e), ...(signal?.aborted ? { aborted: true } : {}) };
+        const reason = signal?.aborted
+          ? `Verification cancelled: ${abortReason()}`
+          : `Verification fetch failed: ${e?.message || String(e)}`;
+        return { connected: false, inconclusive: true, reason, trace: { target, checks: [...traces, trace] } };
       }
       if (!r.ok) {
         // Fetcher returned an error shape rather than a page — same transient,
@@ -296,7 +313,9 @@ export async function verifySellMonitorLogin(platformId) {
       // do NOT assert connected off stale cookies — inconclusive only PRESERVES, never
       // upgrades. A plain 401/403 with NO challenge signal is still a genuine auth wall.
       if (antiBot) {
-        const session = await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
+        const session = signal?.aborted
+          ? { connected: false, cookieCount: 0 }
+          : await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
         trace.antiBot = antiBot.code;
         trace.sessionCookieHeuristic = !!session?.connected;
         trace.sessionCookieCount = session?.cookieCount || 0;
@@ -526,18 +545,19 @@ export function buildTrustedNativeLoginVerdict(platformId, result) {
   };
 }
 
-async function verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult = null } = {}) {
-  let verdict = await verifySellMonitorLogin(platformId);
+async function verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult = null, signal = null } = {}) {
+  let verdict = await verifySellMonitorLogin(platformId, { signal });
   const shouldRetry = isInlineLoginPlatform(platformId)
     && nativeResult?.nativeChrome
     && nativeResult?.result === 'auto-detected'
     && !verdict.connected
-    && verdict.inconclusive;
+    && verdict.inconclusive
+    && !signal?.aborted;
   if (!shouldRetry) return verdict;
 
   logger.warn(`[Accounts] ${platformId} post-login verify inconclusive after native auto-detect (${verdict.reason}) — retrying once after cookies/render settle`);
   await new Promise(resolve => setTimeout(resolve, 1500));
-  const retry = await verifySellMonitorLogin(platformId);
+  const retry = await verifySellMonitorLogin(platformId, { signal });
   retry.trace = {
     ...(retry.trace || {}),
     postLoginRetry: true,
@@ -551,7 +571,7 @@ async function verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResu
   return retry;
 }
 
-async function completeLoginWindowVerification(platformId, result) {
+async function completeLoginWindowVerification(platformId, result, { signal = null } = {}) {
   if (isTrustedNativeLoginResult(platformId, result)) {
     const verdict = buildTrustedNativeLoginVerdict(platformId, result);
     // A native login window uses the REAL macOS Keychain to encrypt cookies
@@ -650,7 +670,7 @@ async function completeLoginWindowVerification(platformId, result) {
     return { ...(result || {}), connected: true, reason: verdict.reason };
   }
 
-  const verdict = await verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult: result });
+  const verdict = await verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult: result, signal });
   // An inconclusive verify (timed out / errored before reading the page)
   // right after the window closed is NOT proof the login failed — caching
   // not-connected here would bounce a just-logged-in user straight back to
@@ -858,16 +878,23 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
     }
     const startedAt = Date.now();
     try {
-      // Wrap in a hard timeout so one wedged platform can't stall the whole verify
-      // (see VERIFY_HARD_TIMEOUT_MS). On timeout this rejects → the catch below
-      // records it as not-connected and the worker moves on.
-      let hardTimer;
-      const verdict = await Promise.race([
-        verifySellMonitorLogin(platformId),
-        new Promise((_, reject) => { hardTimer = setTimeout(
-          () => reject(new Error(`verify exceeded ${VERIFY_HARD_TIMEOUT_MS}ms hard timeout — a page navigation likely wedged (anti-bot reload loop)`)),
-          VERIFY_HARD_TIMEOUT_MS); }),
-      ]).finally(() => clearTimeout(hardTimer));
+      // Abort the actual verifier on timeout, then await its own cleanup before
+      // releasing the profile FIFO. A Promise.race here used to release the lock
+      // while fetchHtmlClean still owned a singleton page in the background.
+      const verifyAbort = new AbortController();
+      const timeoutReason = `verify exceeded ${VERIFY_HARD_TIMEOUT_MS}ms hard timeout — a page navigation likely wedged (anti-bot reload loop)`;
+      let hardTimer = null;
+      const verdict = await withSharedProfileLock(async () => {
+        // A visible/native login or Solve closes the retained singleton to take
+        // browser-data. Hold the profile turn for this reader's complete page
+        // lifetime so that handoff cannot detach an in-flight verification tab.
+        try {
+          hardTimer = setTimeout(() => verifyAbort.abort(new Error(timeoutReason)), VERIFY_HARD_TIMEOUT_MS);
+          return await verifySellMonitorLogin(platformId, { signal: verifyAbort.signal });
+        } finally {
+          if (hardTimer) clearTimeout(hardTimer);
+        }
+      }, null, `accounts startup verify:${platformId}`);
       const ms = Date.now() - startedAt;
       // Don't cache a not-connected verdict that's really a browser TEARDOWN: if the
       // user opens a login/captcha window mid-verify, closeStealthBrowser() kills
@@ -944,18 +971,20 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   // This is the same ownership + safety rule used by the post-login cookie
   // survival check above; without it a clean startup verify leaves Chrome
   // holding browser-data's OS lock for the rest of the app session.
-  const stealthAfter = getStealthBrowserInfo();
-  const weStartedIt = stealthAfter.connected
-    && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
-  if (weStartedIt) {
-    const busy = await getBrowserSessionResetBlocker();
-    if (busy) {
-      logger.info(`[Accounts] Leaving the shared browser up after startup verify — ${busy}`);
-    } else {
-      await closeStealthBrowser(false);
-      logger.info('[Accounts] Released idle shared browser after startup verify');
+  await withSharedProfileLock(async () => {
+    const stealthAfter = getStealthBrowserInfo();
+    const weStartedIt = stealthAfter.connected
+      && (!stealthBefore.connected || stealthAfter.generation !== stealthBefore.generation);
+    if (weStartedIt) {
+      const busy = await getBrowserSessionResetBlocker();
+      if (busy) {
+        logger.info(`[Accounts] Leaving the shared browser up after startup verify — ${busy}`);
+      } else {
+        await closeStealthBrowser(false);
+        logger.info('[Accounts] Released idle shared browser after startup verify');
+      }
     }
-  }
+  }, null, 'accounts startup verify cleanup');
 
   const finishedAt = Date.now();
   _lastVerifyRun = {
@@ -999,7 +1028,7 @@ export function getActiveLoginFlowInfo() {
  * against a simultaneous Settings login racing the same userDataDir — instead
  * of a second, divergent copy.
  */
-export async function runPlatformLoginFlow(platformId, sender) {
+export async function runPlatformLoginFlow(platformId, sender, { signal = null } = {}) {
   // Always open the login window — even when the cache says connected.
   // The cache-shortcut (re-verify silently, skip window) was removed because
   // stale cookies can make verifySellMonitorLogin return a false positive,
@@ -1016,11 +1045,13 @@ export async function runPlatformLoginFlow(platformId, sender) {
     return await existing;
   }
 
-  const flow = (async () => {
+  const runFlow = async () => {
     try {
-      const result = await openLoginWindow(platformId, sender);
-      return await completeLoginWindowVerification(platformId, result);
+      const result = await openLoginWindow(platformId, sender, signal);
+      if (signal?.aborted) throw signal.reason || Object.assign(new Error('Login window cancelled'), { name: 'AbortError' });
+      return await completeLoginWindowVerification(platformId, result, { signal });
     } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
       // Catch path: openLoginWindow itself blew up BEFORE any verification ran
       // (Chrome failed to launch, profile-lock contention, unknown platform,
       // etc.) — a tooling/launch failure, not evidence that the user's EXISTING
@@ -1042,7 +1073,14 @@ export async function runPlatformLoginFlow(platformId, sender) {
       await writeStatusCache(platformId, prior, { lastReason: msg, lastTrace: trace });
       return { connected: prior, reason: msg, error: msg, inconclusive: true };
     }
-  })();
+  };
+
+  // Register this promise in activeLoginFlows BEFORE waiting on the global
+  // profile FIFO. A rapid second Settings/Jobs click therefore adopts the
+  // pending flow instead of queueing a duplicate Chrome window. Callers must
+  // not wrap this helper in the same lock: doing so hides an already-pending
+  // flow until after its first window has completed.
+  const flow = withSharedProfileLock(runFlow, signal, `accounts login:${platformId}`);
 
   activeLoginFlows.set(platformId, flow);
   try {
@@ -1089,8 +1127,8 @@ export function registerAccountsHandlers() {
   // verify) lives in the exported runPlatformLoginFlow above so the Job
   // Search source card's "Log in" action can call the exact same flow
   // directly, without going through IPC or duplicating this logic.
-  handleSafe('open-login-window', async (_event, { platformId }) => {
-    return await runPlatformLoginFlow(platformId, _event.sender);
+  handleSafe('open-login-window', async (_event, { platformId }, signal) => {
+    return await runPlatformLoginFlow(platformId, _event.sender, { signal });
   });
 
   // Check-and-login flow: check session → if not logged in, open login → verify
@@ -1099,7 +1137,7 @@ export function registerAccountsHandlers() {
   // Both pre- and post-login checks use the disk cache + verifySellMonitorLogin
   // path — never the broken getSessionStatus cookie heuristic, which false-
   // positives on anonymous tracking cookies (see note on `check-sell-monitor-auth`).
-  handleSafe('check-and-login', async (_event, { platformId }) => {
+  handleSafe('check-and-login', async (_event, { platformId }, signal) => {
     // Step 1: Quick cache lookup. If we already have a positive verdict
     // from a prior verified login, trust it and skip Chrome entirely.
     const cache = await readStatusCache();
@@ -1107,39 +1145,17 @@ export function registerAccountsHandlers() {
       return { platform: platformId, connected: true, loginOpened: false };
     }
 
-    // Share the dedup with open-login-window — if either handler has a flow
-    // in flight for this platform, this call awaits it instead of starting
-    // a parallel login + verify that would race on userDataDir.
-    const existing = activeLoginFlows.get(platformId);
-    if (existing) {
-      logger.info(`[Accounts] check-and-login deduping to in-flight login for ${platformId}`);
-      const result = await existing;
-      return { platform: platformId, connected: !!result?.connected, loginOpened: true, reason: result?.reason };
+    // Reuse the same single-flight registration as Settings. It is installed
+    // before the profile lock wait, so check-and-login and open-login-window
+    // cannot queue two same-platform visible windows behind one another.
+    // That shared flow performs completeLoginWindowVerification(platformId, loginResult)
+    // after the visible window closes; do not replace it with a raw verifier here.
+    logger.info(`[Accounts] ${platformId} not in verified-login cache — opening login window`);
+    const verified = await runPlatformLoginFlow(platformId, _event.sender, { signal });
+    if (_event.sender.isDestroyed()) {
+      return { platform: platformId, connected: !!verified.connected, loginOpened: true };
     }
-
-    const flow = (async () => {
-    try {
-      // Step 2: Not in cache — open login window (blocks until user closes it).
-      logger.info(`[Accounts] ${platformId} not in verified-login cache — opening login window`);
-      const loginResult = await openLoginWindow(platformId, _event.sender);
-      const verified = await completeLoginWindowVerification(platformId, loginResult);
-
-      if (_event.sender.isDestroyed()) {
-        return { platform: platformId, connected: !!verified.connected, loginOpened: true };
-      }
-      return { platform: platformId, connected: !!verified.connected, loginOpened: true, reason: verified.reason, ...(verified.inconclusive ? { inconclusive: true } : {}) };
-    } catch (error) {
-      logger.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));
-      return { platform: platformId, connected: false, loginOpened: false, error: error?.message || String(error) };
-    }
-    })();  // close the flow IIFE
-
-    activeLoginFlows.set(platformId, flow);
-    try {
-      return await flow;
-    } finally {
-      activeLoginFlows.delete(platformId);
-    }
+    return { platform: platformId, connected: !!verified.connected, loginOpened: true, reason: verified.reason, ...(verified.inconclusive ? { inconclusive: true } : {}) };
   });
 
   // ── Sell Monitor Auth (moved from marketplace.js — these are auth concerns) ──

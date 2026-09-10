@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 
@@ -1442,6 +1442,47 @@ export default [
       assert(unwrapInlineExtractorItems(wrapped) === wrapped.items, 'wrapped extractor items are accepted by visible Solve flow');
       assert(unwrapInlineExtractorItems({ items: 'bad' }) === null, 'invalid wrapped extractor result is rejected');
       return { ok: true };
+  },
+},
+{
+    name: 'visible auth windows: reject unsafe URLs, diagnose blank startup, and suppress retry-created blank tabs',
+    run: () => {
+      assert(validateVisibleWindowUrl('https://example.test/login').ok,
+        'visible auth/captcha navigation accepts canonical HTTPS URLs');
+      for (const unsafe of ['about:blank', 'javascript:alert(1)', 'file:///tmp/x', '', 'not a url']) {
+        assert(!validateVisibleWindowUrl(unsafe).ok, `visible auth/captcha navigation rejects ${JSON.stringify(unsafe)}`);
+      }
+      const blank = classifyVisibleWindowNavigation({
+        requestedUrl: 'https://example.test/login', actualUrl: 'about:blank',
+        assignmentError: 'Execution context was destroyed', fallbackAttempted: true,
+        fallbackError: 'Navigation timeout of 4000 ms exceeded',
+      });
+      assert(!blank.ok && blank.result === 'navigation-error'
+        && blank.requestedUrl === 'https://example.test/login'
+        && blank.actualUrl === 'about:blank' && blank.fallbackAttempted
+        && blank.error.includes('Navigation timeout'),
+      `blank startup is terminal/actionable after one fallback, got ${JSON.stringify(blank)}`);
+      const landed = classifyVisibleWindowNavigation({
+        requestedUrl: 'https://example.test/login', actualUrl: 'https://example.test/home',
+        assignmentError: 'context destroyed during native navigation', fallbackAttempted: false,
+      });
+      assert(landed.ok && landed.result === 'navigated',
+        'a native location assignment may destroy its context but is successful once the page leaves about:blank');
+      const unsafeLanding = classifyVisibleWindowNavigation({
+        requestedUrl: 'https://example.test/login', actualUrl: 'chrome-error://chromewebdata/',
+      });
+      assert(!unsafeLanding.ok && unsafeLanding.result === 'navigation-error'
+        && unsafeLanding.error.includes('unsafe/non-http(s)'),
+      `a non-http(s) landing must not be mistaken for successful navigation — got ${JSON.stringify(unsafeLanding)}`);
+      const launch = visibleWindowLaunchOptions({ args: ['--window-size=1100,800'] });
+      assert(launch.waitForInitialPage === false && launch.args.includes('--no-startup-window')
+        && launch.ignoreDefaultArgs.includes('about:blank'),
+      'every visible Puppeteer launch removes Puppeteer\'s positional about:blank and suppresses Chrome startup windows before a collision retry can hand them to the holder session');
+      assert(visibleWindowLaunchOptions(launch).args.filter(arg => arg === '--no-startup-window').length === 1,
+        'launch hardening remains idempotent across option composition');
+      assert(visibleWindowLaunchOptions(launch).ignoreDefaultArgs.filter(arg => arg === 'about:blank').length === 1,
+        'about:blank filtering remains idempotent across option composition');
+      return { blankResult: blank.result, startupWindowSuppressed: true };
     },
   },
 {

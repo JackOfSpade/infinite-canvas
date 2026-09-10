@@ -2,15 +2,15 @@ import electronPkg from 'electron';
 const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
-import { getJobsTelemetry, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
+import { getCurrentRequestJobAnalysisPaths, getJobsTelemetryForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycle } from '../nonApiAi.js';
 import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
-import { getJobAnalysisPaths, snapshotOwnedByCanvas } from '../jobAnalysisPaths.js';
-import { readLastRunReceiptSync, sanitizeLastRunReceipt } from '../jobRunStaging.js';
+import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
+import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
 import { ago, modelTag, pipelineScope, formatAge, redactReportUrl, redactReportUrlsInText, shortId } from './helpers.js';
@@ -181,18 +181,260 @@ ${lines.join('\n')}
 // is empty after an app restart — the precise time recovery evidence matters.
 const JOB_RUN_MANIFEST_SUFFIX = '.jobs-run.json';
 const JOB_RUN_STAGING_SUFFIX = '.jobs-staging.jsonl';
-function recoveryPathsForCanvas(canvasFilePath) {
+const JOB_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
+// A report is assembled synchronously on Electron's main process.  Retaining
+// every abandoned hub sidecar (or reading every multi-megabyte staging ledger)
+// would make a diagnostic request itself capable of stalling the app. Keep a
+// useful surface bounded and state exactly when additional scopes/bytes were
+// not inspected.
+const MAX_RECOVERY_ARTIFACT_SCOPES = 12;
+const MAX_RECOVERY_STAGING_BYTES = 256 * 1024;
+// Analysis snapshots deliberately retain full job descriptions for later
+// recovery. A normal small completed run can therefore exceed the staging
+// preview budget even though it remains reasonable bounded metadata to parse
+// for ownership/count diagnostics. Keep this independently capped from JSONL
+// staging so reports stay bounded without misclassifying ordinary snapshots.
+const MAX_RECOVERY_METADATA_BYTES = 512 * 1024;
+const MAX_RECOVERY_DIRECTORY_ENTRIES = 256;
+const MAX_RECOVERY_ACTIVE_SCOPE_CANDIDATES = MAX_RECOVERY_ARTIFACT_SCOPES * 4;
+
+function safeRecoveryFileInfo(filePath) {
+  // Reports inspect files beside a user-controlled canvas. Never follow a
+  // symlink here: besides crossing the report's ownership boundary, a link to
+  // a FIFO can block Electron's main process before a byte limit helps.
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isFile() ? { mtimeMs: Number(stat.mtimeMs) || 0, size: Math.max(0, Number(stat.size) || 0) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function boundedRegularFileRead(filePath, maxBytes = MAX_RECOVERY_METADATA_BYTES) {
+  const noFollow = fs.constants?.O_NOFOLLOW;
+  const nonBlocking = fs.constants?.O_NONBLOCK;
+  if (!Number.isInteger(noFollow) || !Number.isInteger(nonBlocking)) return { exists: true, errorCode: 'UNSAFE_FILE' };
+  let fd;
+  try {
+    // O_NOFOLLOW plus fstat on the opened descriptor closes the lstat/open
+    // race. A rename after open is harmless because the descriptor still
+    // refers to the regular file we checked.
+    // O_NONBLOCK closes the remaining regular-file-to-FIFO rename race before
+    // fstat can reject the opened descriptor.
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return { exists: true, errorCode: 'UNSAFE_FILE' };
+    const totalBytes = Math.max(0, Number(stat.size) || 0);
+    const bytesToRead = Math.min(totalBytes, Math.max(0, maxBytes));
+    const buffer = Buffer.alloc(bytesToRead);
+    const bytesRead = bytesToRead > 0 ? fs.readSync(fd, buffer, 0, bytesToRead, 0) : 0;
+    return {
+      exists: true,
+      text: buffer.subarray(0, bytesRead).toString('utf8'),
+      truncated: totalBytes > bytesRead,
+      omittedBytes: Math.max(0, totalBytes - bytesRead),
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { exists: false };
+    return { exists: true, errorCode: receiptIdentifier(error?.code, 'READ_ERROR') };
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch { /* descriptor already unusable */ }
+    }
+  }
+}
+
+function safeArtifactOwner(scope) {
+  if (!scope) return null;
+  try {
+    const owner = decodeURIComponent(scope);
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(owner) ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeOwnerId(ownerId) {
+  return typeof ownerId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(ownerId)
+    ? ownerId
+    : null;
+}
+
+function artifactScopeMatchesOwner(artifact, ownerId) {
+  const safeOwner = safeOwnerId(ownerId);
+  if (!safeOwner) return false;
+  if (artifact?.legacy) return true;
+  if (artifact?.generation === 'escaped') return safeArtifactOwner(artifact.scope) === safeOwner;
+  if (artifact?.generation === 'hashed') {
+    const expected = jobRunPathScopeForCanvas(artifact.canvasFilePath, safeOwner);
+    return !!expected
+      && expected.canvasHash === artifact.canvasHash
+      && expected.ownerHash === artifact.ownerHash;
+  }
+  return false;
+}
+
+function hasBasenameCanvasCollision(scope) {
+  if (!scope?.canvasPath) return true;
+  return [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]
+    .some((candidate) => {
+      if (path.resolve(candidate) === scope.canvasPath) return false;
+      // Any sibling entry (including a symlink or directory) makes the old
+      // basename-only generation ambiguous. It need not be a readable regular
+      // file to deny a legacy fallback.
+      try { return !!fs.lstatSync(candidate); } catch { return false; }
+    });
+}
+
+// A canvas used to have one recovery ledger and one terminal receipt. Modern
+// canvases keep those sidecars per Job Search hub so a paused handoff in hub A
+// cannot hide or overwrite hub B's recovery state. Bug reports must enumerate
+// the directory rather than use the regular singleton reader: its deliberately
+// conservative fallback declines to choose between several scoped receipts.
+// Do not render the filename/encoded owner itself -- it is directory data, not
+// trusted report content. The manifest/receipt's already-redacted identifiers
+// are the only owner facts that cross this boundary.
+function recoveryArtifactsForCanvas(canvasFilePath, currentJobHubIds = []) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return { artifacts: [], omittedCount: 0 };
+  const dir = path.dirname(canvasFilePath);
+  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
+  const byScope = new Map();
+  const scopeInfo = jobRunPathScopeForCanvas(canvasFilePath);
+  if (!scopeInfo) return { artifacts: [], omittedCount: 0 };
+  const basenameCollision = hasBasenameCanvasCollision(scopeInfo);
+  const add = (key, field, filePath, metadata = {}) => {
+    const info = safeRecoveryFileInfo(filePath);
+    if (!info) return;
+    const record = byScope.get(key) || {
+      key,
+      legacy: metadata.legacy === true,
+      generation: metadata.generation || 'legacy',
+      scope: metadata.scope || '',
+      canvasHash: metadata.canvasHash || null,
+      ownerHash: metadata.ownerHash || null,
+      ownerId: metadata.ownerId || null,
+      canvasFilePath,
+      active: false,
+      manifest: null,
+      staging: null,
+      receipt: null,
+      newestMtimeMs: 0,
+    };
+    record[field] = filePath;
+    record.active ||= metadata.active === true;
+    record.newestMtimeMs = Math.max(record.newestMtimeMs, info.mtimeMs);
+    byScope.set(key, record);
+  };
+  const addLegacy = () => {
+    const manifest = path.join(dir, `${base}${JOB_RUN_MANIFEST_SUFFIX}`);
+    const staging = path.join(dir, `${base}${JOB_RUN_STAGING_SUFFIX}`);
+    const receipt = path.join(dir, `${base}${JOB_RUN_RECEIPT_SUFFIX}`);
+    add('legacy', 'manifest', manifest, { legacy: true });
+    add('legacy', 'staging', staging, { legacy: true });
+    add('legacy', 'receipt', receipt, { legacy: true });
+  };
+  if (!basenameCollision) addLegacy();
+  const scoped = [
+    ['manifest', `${base}.jobs-run.`, '.json'],
+    ['staging', `${base}.jobs-staging.`, '.jsonl'],
+    ['receipt', `${base}.jobs-last-run.`, '.json'],
+  ];
+
+  // Include current hubs directly before looking for abandoned scopes. This
+  // keeps a stale alphabetically-earlier filename from crowding the live hub
+  // out of a bounded report, while the fixed candidate cap prevents a damaged
+  // canvas payload with thousands of fake node IDs from turning into I/O.
+  const activeOwners = [...new Set([...(currentJobHubIds instanceof Set ? currentJobHubIds : currentJobHubIds || [])]
+    .map(safeOwnerId)
+    .filter(Boolean))]
+    .sort()
+    .slice(0, MAX_RECOVERY_ACTIVE_SCOPE_CANDIDATES);
+  const activeOwnerHashes = new Map();
+  for (const ownerId of activeOwners) {
+    const ownerScope = jobRunPathScopeForCanvas(canvasFilePath, ownerId);
+    if (!ownerScope) continue;
+    activeOwnerHashes.set(ownerScope.ownerHash, ownerId);
+    const key = `hashed:${ownerScope.ownerHash}`;
+    for (const [field, prefix, suffix] of scoped) {
+      add(key, field, path.join(dir, `${prefix}${ownerScope.canvasHash}.${ownerScope.ownerHash}${suffix}`), {
+        active: true,
+        generation: 'hashed',
+        scope: ownerScope.ownerHash,
+        canvasHash: ownerScope.canvasHash,
+        ownerHash: ownerScope.ownerHash,
+        ownerId,
+      });
+    }
+  }
+
+  let scanTruncated = false;
+  try {
+    const handle = fs.opendirSync(dir, { bufferSize: 16 });
+    try {
+      for (let scanned = 0; scanned < MAX_RECOVERY_DIRECTORY_ENTRIES; scanned++) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        const name = entry.name;
+        for (const [field, prefix, suffix] of scoped) {
+          if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+          const scope = name.slice(prefix.length, -suffix.length);
+          const hashedPrefix = `${scopeInfo.canvasHash}.`;
+          if (scope.startsWith(hashedPrefix)) {
+            const ownerHash = scope.slice(hashedPrefix.length);
+            if (!/^[a-f0-9]{24}$/.test(ownerHash)) break;
+            add(`hashed:${ownerHash}`, field, path.join(dir, name), {
+              active: activeOwnerHashes.has(ownerHash),
+              generation: 'hashed', scope: ownerHash, canvasHash: scopeInfo.canvasHash, ownerHash,
+              ownerId: activeOwnerHashes.get(ownerHash) || null,
+            });
+          } else if (!basenameCollision && safeArtifactOwner(scope)) {
+            // First-generation owner-scoped sidecars remain readable during
+            // migration, but their reversible filename owner is checked again
+            // against the manifest/receipt before attribution.
+            add(`escaped:${scope}`, field, path.join(dir, name), {
+              active: activeOwners.includes(safeArtifactOwner(scope)), generation: 'escaped', scope,
+            });
+          }
+          break;
+        }
+      }
+      // Do not enumerate an arbitrarily large canvas directory merely to make
+      // an exact omitted count. One extra read is enough to disclose that the
+      // directory scan itself hit its safety ceiling.
+      scanTruncated = !!handle.readSync();
+    } finally {
+      handle.closeSync();
+    }
+  } catch { /* legacy/current direct paths above remain usable */ }
+
+  const all = [...byScope.values()].sort((a, b) => {
+    if (a.active !== b.active) return a.active ? -1 : 1;
+    if (a.legacy !== b.legacy) return a.legacy ? -1 : 1;
+    // Current owners are already prioritized over abandoned artifacts. Keep
+    // their display order stable so two simultaneous live hubs do not appear
+    // to swap identities simply because their writes land milliseconds apart.
+    if (a.active && b.active) return String(a.ownerId || a.scope).localeCompare(String(b.ownerId || b.scope));
+    if (a.newestMtimeMs !== b.newestMtimeMs) return b.newestMtimeMs - a.newestMtimeMs;
+    return a.key.localeCompare(b.key);
+  });
+  const omittedByScope = Math.max(0, all.length - MAX_RECOVERY_ARTIFACT_SCOPES);
+  return {
+    artifacts: all.slice(0, MAX_RECOVERY_ARTIFACT_SCOPES),
+    omittedCount: omittedByScope,
+    scanTruncated,
+  };
+}
+
+function recoveryPathsForCanvas(canvasFilePath, currentJobHubIds = []) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
   const dir = path.dirname(canvasFilePath);
   const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
-  const analysis = getJobAnalysisPaths(canvasFilePath, path.join(app.getPath('userData'), 'job-search'));
+  const analysisFallbackDir = path.join(app.getPath('userData'), 'job-search');
   return {
     manifest: path.join(dir, `${base}${JOB_RUN_MANIFEST_SUFFIX}`),
     staging: path.join(dir, `${base}${JOB_RUN_STAGING_SUFFIX}`),
-    currentSnapshot: analysis.jsonPath,
-    lastSuccessSnapshot: analysis.lastSuccessJsonPath,
-    legacyCurrentSnapshot: analysis.legacyJsonPath,
-    legacyLastSuccessSnapshot: analysis.legacyLastSuccessJsonPath,
+    analysisFallbackDir,
+    recoveryArtifacts: recoveryArtifactsForCanvas(canvasFilePath, currentJobHubIds),
   };
 }
 
@@ -201,8 +443,7 @@ function recoveryPathsForCanvas(canvasFilePath) {
 // Run every on-disk object back through the staging module's whitelist before
 // rendering: a support report must never turn a modified sidecar into a path
 // for exporting a job, query, URL, prompt, response, profile, or error body.
-function readLastRunReceiptSnapshot(canvasFilePath) {
-  const raw = readLastRunReceiptSync(canvasFilePath);
+function receiptSnapshotFromRaw(raw) {
   if (!raw) return { exists: false };
   const status = raw?.terminal?.status;
   const outcome = raw?.terminal?.outcome;
@@ -213,12 +454,69 @@ function readLastRunReceiptSnapshot(canvasFilePath) {
   return { exists: true, receipt };
 }
 
+function readLastRunReceiptSnapshot(canvasFilePath) {
+  const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath);
+  return receiptPath ? readArtifactReceiptSnapshot({ receipt: receiptPath, legacy: true }) : { exists: false };
+}
+
+function readArtifactReceiptSnapshot(artifact) {
+  if (!artifact?.receipt) return { exists: false };
+  const parsed = parseRecoveryJson(artifact.receipt);
+  if (!parsed.exists) return { exists: false };
+  if (parsed.errorCode || parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
+    return { exists: true, invalid: true };
+  }
+  const recordedOwner = receiptIdentifier(parsed.value.nodeId, '');
+  if (!artifact.legacy && !artifactScopeMatchesOwner(artifact, recordedOwner)) {
+    return { exists: true, invalid: true, ownershipMismatch: true };
+  }
+  return receiptSnapshotFromRaw(parsed.value);
+}
+
+function readReceiptForCurrentHubs(canvasFilePath, currentJobHubIds, preferredOwner = null) {
+  const owners = [...new Set([preferredOwner, ...(currentJobHubIds instanceof Set ? currentJobHubIds : currentJobHubIds || [])]
+    .map(safeOwnerId)
+    .filter(Boolean))]
+    .slice(0, MAX_RECOVERY_ACTIVE_SCOPE_CANDIDATES);
+  const observed = [];
+  for (const ownerId of owners) {
+    const scope = jobRunPathScopeForCanvas(canvasFilePath, ownerId);
+    if (!scope) continue;
+    const state = readArtifactReceiptSnapshot({
+      receipt: lastRunReceiptPathForCanvas(canvasFilePath, ownerId),
+      legacy: false,
+      generation: 'hashed',
+      scope: scope.ownerHash,
+      canvasHash: scope.canvasHash,
+      ownerHash: scope.ownerHash,
+      canvasFilePath,
+    });
+    if (!state.exists) continue;
+    observed.push({ ownerId, state });
+  }
+  const preferred = safeOwnerId(preferredOwner);
+  const selected = preferred ? observed.find(entry => entry.ownerId === preferred) : null;
+  if (selected) return selected.state;
+  if (observed.length === 1) return observed[0].state;
+  if (observed.length > 1) return { exists: true, ambiguous: true };
+  return hasBasenameCanvasCollision(jobRunPathScopeForCanvas(canvasFilePath))
+    ? { exists: false }
+    : readLastRunReceiptSnapshot(canvasFilePath);
+}
+
 function receiptIdentifier(value, fallback = 'not recorded') {
   const text = typeof value === 'string' ? value.trim() : '';
   // IDs in app-created receipts are UUID-like. Do not render arbitrary strings
   // from a file beside the canvas even though the persistence sanitizer kept
   // them for ownership checks.
   return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : fallback;
+}
+
+// Snapshots are on-disk artifacts too.  Their run IDs are metadata, not free
+// prose: never let a malformed/hand-edited snapshot inject a URL, prompt, or
+// newline into a support report merely because its owner and canvas match.
+function snapshotRunIdentifier(value) {
+  return receiptIdentifier(value, 'not recorded');
 }
 
 export function receiptTime(value) {
@@ -292,12 +590,15 @@ function revealOutcomeLabel(outcome) {
   return `q${outcome?.queryIndex || '?'}/${outcome?.queryTotal || '?'} ${outcome?.count ?? '?'} card(s) after ${outcome?.iterations ?? '?'} reveal pass(es) — ${meaning}`;
 }
 
-function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
+function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label = 'Last terminal run receipt') {
   if (!receiptState?.exists) {
-    return '- Last terminal run receipt: absent — completion of any prior-process run is **unknown**; this build has no durable terminal evidence for it.';
+    return `- ${label}: absent — completion of any prior-process run is **unknown**; this build has no durable terminal evidence for it.`;
+  }
+  if (receiptState.ownershipMismatch) {
+    return `- ${label}: ⚠️ ignored because its receipt owner does not match the scoped artifact filename.`;
   }
   if (receiptState.invalid || !receiptState.receipt) {
-    return '- Last terminal run receipt: ⚠️ present but invalid — completion is **unknown**.';
+    return `- ${label}: ⚠️ present but invalid — completion is **unknown**.`;
   }
 
   const receipt = receiptState.receipt;
@@ -336,7 +637,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
     ? ` · terminal score-ready ${Math.max(0, Math.floor(terminalScoreReady))}`
     : '';
   const lines = [
-    `- Last terminal run receipt: ${status} · ${outcome}${terminalScoreReadyDetail} · run \`${receiptIdentifier(receipt.runId)}\` · started ${receiptTime(receipt.startedAt)} · ended ${receiptTime(receipt.completedAt)}${receiptElapsed(receipt.startedAt, receipt.completedAt)} · ${receipt.stagingStarted ? 'staging started' : 'staging not recorded'} · ${cleanup} · ${receiptHubCorrelation(receipt.nodeId, currentNodeIds)} · ${provenance}`,
+    `- ${label}: ${status} · ${outcome}${terminalScoreReadyDetail} · run \`${receiptIdentifier(receipt.runId)}\` · started ${receiptTime(receipt.startedAt)} · ended ${receiptTime(receipt.completedAt)}${receiptElapsed(receipt.startedAt, receipt.completedAt)} · ${receipt.stagingStarted ? 'staging started' : 'staging not recorded'} · ${cleanup} · ${receiptHubCorrelation(receipt.nodeId, currentNodeIds)} · ${provenance}`,
   ];
 
   const funnel = receipt.funnel;
@@ -439,18 +740,32 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline) {
   return lines.join('\n');
 }
 
-function readRecoveryText(filePath) {
-  try {
-    return { exists: true, text: fs.readFileSync(filePath, 'utf8') };
-  } catch (error) {
-    if (error?.code === 'ENOENT') return { exists: false };
-    return { exists: true, errorCode: error?.code || 'READ_ERROR' };
+function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline) {
+  const receiptArtifacts = artifacts.filter(artifact => artifact.receipt);
+  if (receiptArtifacts.length === 0) return [formatLastRunReceipt({ exists: false }, currentNodeIds, livePipeline)];
+  if (receiptArtifacts.length === 1) {
+    return [formatLastRunReceipt(readArtifactReceiptSnapshot(receiptArtifacts[0]), currentNodeIds, livePipeline)];
   }
+  const lines = [`- Terminal run receipts: ${receiptArtifacts.length} retained across independently recoverable Job Search hubs.`];
+  for (const [index, artifact] of receiptArtifacts.entries()) {
+    lines.push(formatLastRunReceipt(
+      readArtifactReceiptSnapshot(artifact),
+      currentNodeIds,
+      livePipeline,
+      `Terminal run receipt ${index + 1}/${receiptArtifacts.length}`,
+    ));
+  }
+  return lines;
+}
+
+function readRecoveryText(filePath) {
+  return boundedRegularFileRead(filePath);
 }
 
 function parseRecoveryJson(filePath) {
   const read = readRecoveryText(filePath);
   if (!read.exists || read.errorCode) return read;
+  if (read.truncated) return { ...read, errorCode: 'TOO_LARGE' };
   try { return { ...read, value: JSON.parse(read.text) }; }
   catch { return { ...read, parseError: true }; }
 }
@@ -475,10 +790,11 @@ function recoveryCanvasCorrelation(recordedCanvasPath, canvasFilePath) {
 }
 
 function recoveryHubCorrelation(nodeId, currentNodeIds) {
-  if (!nodeId) return 'hub not recorded';
-  return currentNodeIds?.has?.(nodeId)
-    ? `hub \`${nodeId}\` is present in this canvas`
-    : `⚠️ hub \`${nodeId}\` is not present in this canvas`;
+  const safeId = receiptIdentifier(nodeId, '');
+  if (!safeId) return 'hub identifier omitted';
+  return currentNodeIds?.has?.(safeId)
+    ? `hub \`${safeId}\` is present in this canvas`
+    : `⚠️ hub \`${safeId}\` is not present in this canvas`;
 }
 
 function profileCountLabel(profile) {
@@ -489,25 +805,112 @@ function profileCountLabel(profile) {
   return `profile present (${fields} field(s) · ${roles} work-history row(s) · ${skills} skill(s))`;
 }
 
-function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, currentNodeIds) {
-  let parsed = parseRecoveryJson(filePath);
-  let legacyIgnored = false;
-  const legacyIgnoredLabel = () => legacyIgnored ? ' · ⚠️ unowned legacy artifact ignored' : '';
-  // New namespaced records take precedence. A legacy directory-scoped record
-  // is a fallback only when it explicitly identifies this same saved canvas;
-  // otherwise another canvas in the folder could leak stale recovery facts.
-  if ((parsed.exists === false || parsed.parseError) && legacyFilePath) {
-    const legacy = parseRecoveryJson(legacyFilePath);
-    if (legacy.value && snapshotOwnedByCanvas(legacy.value, canvasFilePath)) {
-      parsed = { ...legacy, legacyOwned: true };
-    } else if (legacy.exists) {
-      legacyIgnored = true;
+function snapshotOwnerId(snapshot) {
+  const owner = snapshot?.sourceHubId || snapshot?.nodeId || null;
+  return typeof owner === 'string' && owner.trim() ? owner.trim() : null;
+}
+
+function snapshotOwnedByHub(snapshot, canvasFilePath, ownerId) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  const normalizeOwner = (value) => typeof value === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value.trim())
+    ? value.trim()
+    : null;
+  const expectedOwner = normalizeOwner(ownerId);
+  if (!expectedOwner) return false;
+  // Keep this in lock-step with jobs.js's exact ownership classifier. A
+  // snapshot written half-way through an old migration can retain both root
+  // and snapshotContext fields; accepting only the first one would allow a
+  // contradictory artifact to masquerade as an owner-scoped bundle.
+  const rawOwners = [
+    snapshot.sourceHubId,
+    snapshot.nodeId,
+    snapshot.snapshotContext?.sourceHubId,
+    snapshot.snapshotContext?.nodeId,
+  ];
+  if (rawOwners.some(value => value != null && !normalizeOwner(value))) return false;
+  const owners = [...new Set(rawOwners.filter(value => value != null).map(normalizeOwner))];
+  if (owners.length !== 1 || owners[0] !== expectedOwner) return false;
+
+  const rawCanvases = [snapshot.canvasFilePath, snapshot.snapshotContext?.canvasFilePath];
+  if (rawCanvases.some(value => value != null && (typeof value !== 'string' || !value.trim()))) return false;
+  let expectedCanvas;
+  try { expectedCanvas = typeof canvasFilePath === 'string' && canvasFilePath.trim() ? path.resolve(canvasFilePath) : null; }
+  catch { return false; }
+  if (!expectedCanvas) return false;
+  let canvases;
+  try { canvases = [...new Set(rawCanvases.filter(value => value != null).map(value => path.resolve(value)))]; }
+  catch { return false; }
+  return canvases.length === 1 && canvases[0] === expectedCanvas;
+}
+
+// Read a modern owner bundle first, then only fall back to prior generations
+// when their embedded canvas *and* hub ownership exactly match the owner being
+// inspected. This prevents an old canvas-wide snapshot from being attributed to
+// every current hub after the move to owner-specific paths.
+function ownedSnapshotRecord(canvasFilePath, fallbackDir, ownerId, kind) {
+  const paths = getJobAnalysisPaths(canvasFilePath, fallbackDir, ownerId);
+  const isCurrent = kind === 'current';
+  const candidates = [
+    { filePath: isCurrent ? paths.jsonPath : paths.lastSuccessJsonPath, legacy: false },
+    { filePath: isCurrent ? paths.legacyCanvasJsonPath : paths.legacyCanvasLastSuccessJsonPath, legacy: true, canvasHashed: true },
+    { filePath: isCurrent ? paths.legacyJsonPath : paths.legacyLastSuccessJsonPath, legacy: true },
+  ].filter(candidate => candidate.filePath);
+  let observed = false;
+  // Unlike the owner-scoped primary, legacy paths are shared by every hub on
+  // the canvas. Keep that distinction so the formatter can inspect one shared
+  // artifact without rendering N-1 misleading sibling "absent" rows.
+  let primaryObserved = false;
+  let ignored = false;
+  let invalid = null;
+  let primaryInvalid = false;
+  for (const candidate of candidates) {
+    const parsed = parseRecoveryJson(candidate.filePath);
+    if (!parsed.exists) continue;
+    observed = true;
+    if (!candidate.legacy) primaryObserved = true;
+    if (parsed.errorCode || parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
+      // A malformed primary may use an ownership-verified older snapshot, but
+      // the final report keeps an explicit warning. Legacy parse failures
+      // cannot be attributed safely.
+      if (!candidate.legacy) {
+        invalid = parsed;
+        primaryInvalid = true;
+      }
+      else ignored = true;
+      continue;
     }
+    if (snapshotOwnedByHub(parsed.value, canvasFilePath, ownerId)) {
+      return {
+        state: 'parseable', parsed: { ...parsed, legacyOwned: candidate.legacy }, ownerId, observed, primaryObserved, ignored, primaryInvalid,
+      };
+    }
+    ignored = true;
   }
-  if (!parsed.exists) return `- ${label}: absent${legacyIgnoredLabel()}`;
-  if (parsed.errorCode) return `- ${label}: ⚠️ unreadable (\`${parsed.errorCode}\`)${legacyIgnoredLabel()}`;
+  if (invalid) return { state: 'invalid', parsed: invalid, ownerId, observed, primaryObserved, ignored, primaryInvalid };
+  return { state: 'absent', parsed: { exists: false }, ownerId, observed, primaryObserved, ignored, primaryInvalid };
+}
+
+function ownedSnapshotRecords(canvasFilePath, currentJobHubIds, kind) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return [];
+  const fallbackDir = path.join(app.getPath('userData'), 'job-search');
+  const ownerIds = [...new Set([...(currentJobHubIds instanceof Set ? currentJobHubIds : currentJobHubIds || [])]
+    .filter(id => typeof id === 'string' && id.trim())
+    .map(id => id.trim()))].sort();
+  return ownerIds.map(ownerId => ownedSnapshotRecord(canvasFilePath, fallbackDir, ownerId, kind));
+}
+
+function snapshotRecoveryLine(label, record, canvasFilePath, currentNodeIds) {
+  const parsed = record?.parsed || { exists: false };
+  const legacyIgnored = record?.ignored === true;
+  const integrityWarnings = () => [
+    legacyIgnored ? '⚠️ unowned artifact ignored' : null,
+    record?.primaryInvalid ? '⚠️ malformed modern artifact ignored before legacy fallback' : null,
+  ].filter(Boolean).map(warning => ` · ${warning}`).join('');
+  if (!parsed.exists) return `- ${label}: absent${integrityWarnings()}`;
+  if (parsed.errorCode) return `- ${label}: ⚠️ unreadable (\`${parsed.errorCode}\`)${integrityWarnings()}`;
   if (parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
-    return `- ${label}: ⚠️ present but not parseable JSON${legacyIgnoredLabel()}`;
+    return `- ${label}: ⚠️ present but not parseable JSON${integrityWarnings()}`;
   }
   const snapshot = parsed.value;
   const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : 0;
@@ -532,9 +935,32 @@ function snapshotRecoveryLine(label, filePath, legacyFilePath, canvasFilePath, c
     : `${scoreReady} score-ready job(s)`)
     + (jobs !== scoreReady ? ` · ${jobs} retained for preference re-evaluation` : '');
   const recoveryJobs = Array.isArray(snapshot.descriptionRecoveryJobs) ? snapshot.descriptionRecoveryJobs.length : 0;
-  const nodeId = snapshot.sourceHubId || snapshot.nodeId || null;
+  const nodeId = snapshotOwnerId(snapshot);
   const recordedCanvas = snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath || null;
-  return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobCountLabel} · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshot.runId || 'not recorded'}\` · ${recoveryHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${legacyIgnoredLabel()}`;
+  return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobCountLabel} · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshotRunIdentifier(snapshot.runId)}\` · ${recoveryHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${integrityWarnings()}`;
+}
+
+function ownedSnapshotLines(label, canvasFilePath, currentNodeIds, currentJobHubIds, kind) {
+  const records = ownedSnapshotRecords(canvasFilePath, currentJobHubIds, kind);
+  // Do not turn every unrelated canvas node into a noisy “absent” row. More
+  // importantly, a legacy canvas-wide artifact is physically the same file
+  // for every live hub. Once it is positively attributed to one hub, its
+  // intentional mismatch for sibling hubs is not evidence of five extra
+  // absent bundles. Owner-specific primaries still get their own row.
+  let shown = records.filter(record => record.state !== 'absent' || record.primaryObserved);
+  if (shown.length === 0) {
+    // Preserve a single integrity warning when the only thing found was an
+    // unowned shared legacy artifact, but never duplicate it per hub.
+    const sharedArtifact = records.find(record => record.observed || record.ignored);
+    shown = sharedArtifact ? [sharedArtifact] : [];
+  }
+  if (shown.length === 0) return [snapshotRecoveryLine(label, { state: 'absent', parsed: { exists: false } }, canvasFilePath, currentNodeIds)];
+  if (shown.length === 1) return [snapshotRecoveryLine(label, shown[0], canvasFilePath, currentNodeIds)];
+  const lines = [`- ${label}s: ${shown.length} owner-scoped bundle(s) retained; each is independently ownership-verified.`];
+  for (const [index, record] of shown.entries()) {
+    lines.push(snapshotRecoveryLine(`${label} ${index + 1}/${shown.length}`, record, canvasFilePath, currentNodeIds));
+  }
+  return lines;
 }
 
 const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_ROWS = 8;
@@ -552,12 +978,18 @@ function descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds) {
   const ownershipMismatch = Math.max(0, Math.floor(Number(ignored.ownershipMismatch) || 0));
   const pathMismatch = Math.max(0, Math.floor(Number(ignored.pathMismatch) || 0));
   const metadataInvalid = Math.max(0, Math.floor(Number(ignored.metadataInvalid) || 0));
+  const oversized = Math.max(0, Math.floor(Number(ignored.oversized) || 0));
+  const unsafe = Math.max(0, Math.floor(Number(ignored.unsafe) || 0));
+  const discoveryBounded = listed?.scanTruncated === true || listed?.candidateLimitReached === true;
   const lines = [];
   if (checkpoints.length === 0) {
     lines.push('- Description-recovery checkpoints: none valid for this canvas.');
   } else {
     const shown = checkpoints.slice(0, MAX_DESCRIPTION_RECOVERY_CHECKPOINT_ROWS);
-    lines.push(`- Description-recovery checkpoints: ${checkpoints.length} parseable, ownership-verified checkpoint(s)${checkpoints.length > shown.length ? `; newest ${shown.length} shown` : ''}.`);
+    const displayLimit = checkpoints.length > shown.length
+      ? (discoveryBounded ? `; ${shown.length} shown from a bounded discovery sample` : `; newest ${shown.length} shown`)
+      : '';
+    lines.push(`- Description-recovery checkpoints: ${checkpoints.length} parseable, ownership-verified checkpoint(s)${displayLimit}.`);
     for (const checkpoint of shown) {
       // Defense in depth: listDescriptionRecoveryCheckpointsSync already
       // whitelists these opaque identifiers, but never interpolate a future or
@@ -575,9 +1007,17 @@ function descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds) {
     ownershipMismatch ? `${ownershipMismatch} ownership-invalid` : null,
     pathMismatch ? `${pathMismatch} path-invalid` : null,
     metadataInvalid ? `${metadataInvalid} unsafe metadata` : null,
+    oversized ? `${oversized} over the safe metadata-read limit` : null,
+    unsafe ? `${unsafe} unsafe file type/read` : null,
   ].filter(Boolean);
   if (ignoredBits.length > 0) {
     lines.push(`- ⚠️ Ignored checkpoint file(s): ${ignoredBits.join(', ')}. Names, paths, and contents are withheld.`);
+  }
+  if (listed?.candidateLimitReached === true) {
+    lines.push('- ⚠️ Checkpoint discovery stopped after its safe matching-file limit; additional matching sidecars were not inspected.');
+  }
+  if (listed?.scanTruncated === true) {
+    lines.push('- ⚠️ Checkpoint directory discovery reached its safe entry limit; later directory entries were not inspected.');
   }
   return lines;
 }
@@ -729,13 +1169,19 @@ function isZipRecruiterTotalShortfall(sourceId, total, gathered, stopReasons) {
 // section: a legacy directory-scoped snapshot is usable only when it names the
 // current canvas, and no job body ever crosses this boundary.
 function currentSavedSnapshotFact(canvasFilePath, currentNodeIds) {
-  const paths = recoveryPathsForCanvas(canvasFilePath);
-  if (!paths) return { state: 'unavailable' };
-  let parsed = parseRecoveryJson(paths.currentSnapshot);
-  if ((parsed.exists === false || parsed.parseError) && paths.legacyCurrentSnapshot) {
-    const legacy = parseRecoveryJson(paths.legacyCurrentSnapshot);
-    if (legacy.value && snapshotOwnedByCanvas(legacy.value, canvasFilePath)) parsed = { ...legacy, legacyOwned: true };
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return { state: 'unavailable' };
+  const records = ownedSnapshotRecords(canvasFilePath, currentNodeIds, 'current');
+  const valid = records.filter(record => record.state === 'parseable');
+  // Completion reconciliation is intentionally about one run. When several
+  // hubs have durable snapshots, picking the newest filesystem entry would
+  // make the verdict nondeterministic and could pair hub A's receipt with hub
+  // B's score-ready counts. Keep the compact verdict indeterminate instead;
+  // Job Recovery Diagnostics lists every owner bundle separately.
+  if (valid.length > 1) return { state: 'multiple-owned-snapshots', count: valid.length };
+  if (valid.length === 0) {
+    return records.some(record => record.state === 'invalid') ? { state: 'invalid' } : { state: 'absent' };
   }
+  const parsed = valid[0].parsed;
   if (!parsed.exists) return { state: 'absent' };
   if (parsed.errorCode || parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
     return { state: 'invalid' };
@@ -791,6 +1237,101 @@ function hasDurableCompletedOutput(receipt, snapshot) {
     && snapshot.jobs === receiptScoreReady;
 }
 
+function formatRecoveryManifest(manifest, currentNodeIds, label, absentNote = '', artifact = null) {
+  if (!manifest?.exists) return [`- ${label}: absent${absentNote}`];
+  if (manifest.errorCode) return [`- ${label}: ⚠️ unreadable (\`${manifest.errorCode}\`)`];
+  if (manifest.parseError || !manifest.value || typeof manifest.value !== 'object' || Array.isArray(manifest.value)) {
+    return [`- ${label}: ⚠️ present but not parseable JSON`];
+  }
+  const run = manifest.value;
+  const recordedOwner = receiptIdentifier(run.inputs?.nodeId, '');
+  if (artifact && !artifact.legacy && !artifactScopeMatchesOwner(artifact, recordedOwner)) {
+    return [`- ${label}: ⚠️ ignored because its manifest owner does not match the scoped artifact filename.`];
+  }
+  const sourceEntries = Object.entries(run.sources || {});
+  const sourceSummary = sourceEntries
+    .slice(0, 20)
+    .map(([sourceId, source]) => `\`${receiptIdentifier(sourceId, 'unknown')}\`=${receiptIdentifier(source?.status, 'unknown')}`)
+    .join(', ');
+  const extraSources = sourceEntries.length > 20 ? ` · ${sourceEntries.length - 20} more` : '';
+  return [
+    `- ${label}: parseable · stage **${receiptIdentifier(run.stage, 'unknown')}** · run \`${receiptIdentifier(run.runId)}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${recoveryHubCorrelation(recordedOwner, currentNodeIds)} · canvas is this report`,
+    `- Sources (${sourceEntries.length}): ${sourceSummary || '(none recorded)'}${extraSources}`,
+  ];
+}
+
+function formatRecoveryStaging(staging, label, absentNote = '') {
+  if (!staging?.exists) return [`- ${label}: absent${absentNote}`];
+  if (staging.errorCode) return [`- ${label}: ⚠️ unreadable (\`${staging.errorCode}\`)`];
+  const rows = staging.text.split(/\r?\n/);
+  // The last fragment is incomplete when the file exceeded the report read
+  // limit. It is not a torn JSONL row on disk, merely a deliberately omitted
+  // continuation, so exclude it from the integrity count.
+  if (staging.truncated) rows.pop();
+  let parsedRows = 0;
+  let tornRows = 0;
+  for (const row of rows) {
+    if (!row.trim()) continue;
+    try { JSON.parse(row); parsedRows += 1; } catch { tornRows += 1; }
+  }
+  const bounded = staging.truncated
+    ? ` · first ${MAX_RECOVERY_STAGING_BYTES / 1024} KiB inspected; ${staging.omittedBytes} later byte(s) omitted`
+    : '';
+  return [`- ${label}: present · ${parsedRows} parseable row(s) · ${tornRows} torn/unparseable row(s)${bounded}`];
+}
+
+function manifestMatchesArtifactScope(manifest, artifact) {
+  if (artifact?.legacy) return true;
+  const recordedOwner = receiptIdentifier(manifest?.value?.inputs?.nodeId, '');
+  return !!artifact
+    && !!manifest?.exists
+    && !manifest?.errorCode
+    && !manifest?.parseError
+    && manifest?.value
+    && typeof manifest.value === 'object'
+    && !Array.isArray(manifest.value)
+    && artifactScopeMatchesOwner(artifact, recordedOwner);
+}
+
+function readRecoveryStagingSummary(filePath) {
+  return boundedRegularFileRead(filePath, MAX_RECOVERY_STAGING_BYTES);
+}
+
+function formatRecoverySidecars(artifacts, currentNodeIds, { absentNote, durableCleanFinish, cleanFinish }) {
+  // Preserve the established one-run wording so existing support workflows and
+  // historic reports stay easy to compare. Once several hubs have sidecars,
+  // number the records without exposing filename-derived owner strings.
+  if (artifacts.length === 0) {
+    const stagingAbsentNote = durableCleanFinish
+      ? `${absentNote} (see above)`
+      : cleanFinish
+        ? ' — expected after a clean finish (see above)'
+        : absentNote;
+    return [
+      ...formatRecoveryManifest({ exists: false }, currentNodeIds, 'Run manifest', absentNote),
+      ...formatRecoveryStaging({ exists: false }, 'Staging ledger', stagingAbsentNote),
+    ];
+  }
+
+  const multi = artifacts.length > 1;
+  const lines = multi
+    ? [`- Recovery sidecars: ${artifacts.length} independently owned ledger scope(s) retained; each is listed separately.`]
+    : [];
+  for (const [index, artifact] of artifacts.entries()) {
+    const suffix = multi ? ` ${index + 1}/${artifacts.length}` : '';
+    const manifest = artifact.manifest ? parseRecoveryJson(artifact.manifest) : { exists: false };
+    const staging = artifact.staging ? readRecoveryStagingSummary(artifact.staging) : { exists: false };
+    // An absent half of a present pair means an interrupted/partially-cleaned
+    // individual hub, never a global clean finish.
+    lines.push(...formatRecoveryManifest(manifest, currentNodeIds, `Run manifest${suffix}`, '', artifact));
+    const stagingScopeWarning = manifestMatchesArtifactScope(manifest, artifact)
+      ? ''
+      : ' — ⚠️ owner scope is unverified; staging is not attributed to a Job Search hub';
+    lines.push(...formatRecoveryStaging(staging, `Staging ledger${suffix}`, stagingScopeWarning));
+  }
+  return lines;
+}
+
 function recoveryMergeNet(telemetry) {
   let total = 0;
   for (const resolve of Object.values(telemetry?.resolves || {})) {
@@ -824,17 +1365,29 @@ function recoveryMergeNet(telemetry) {
  * terminal receipt, and owned saved snapshot. Any missing or conflicting fact
  * is INDETERMINATE rather than a green completion claim.
  */
-export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = new Set(), jobBoardStates = [], jobBoardStateCount = null) {
+export function buildJobCompletionAssessment(
+  canvasFilePath,
+  currentNodeIds = new Set(),
+  jobBoardStates = [],
+  jobBoardStateCount = null,
+  currentJobHubIds = currentNodeIds,
+  reportWindowId = null,
+) {
   const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
+  const hubIds = currentJobHubIds instanceof Set ? currentJobHubIds : new Set(currentJobHubIds || []);
   let telemetry = null;
-  try { telemetry = getJobsTelemetry() || null; } catch { /* report absence below */ }
+  try { telemetry = getJobsTelemetryForReport(hubIds, reportWindowId) || null; } catch { /* report absence below */ }
   // The telemetry singleton is process-global. Do not attribute a different
   // canvas's run to this report simply because its saved snapshot is readable.
   if (telemetry?.nodeId && !ids.has(telemetry.nodeId)) telemetry = null;
 
-  const receiptState = canvasFilePath ? readLastRunReceiptSnapshot(canvasFilePath) : { exists: false };
+  const receiptState = canvasFilePath
+    ? readReceiptForCurrentHubs(canvasFilePath, hubIds, telemetry?.nodeId)
+    : { exists: false };
   const receipt = receiptState?.receipt || null;
-  const snapshot = currentSavedSnapshotFact(canvasFilePath, ids);
+  // Snapshot ownership is hub-specific; generic canvas nodes remain relevant
+  // only to telemetry/receipt presence correlation above.
+  const snapshot = currentSavedSnapshotFact(canvasFilePath, hubIds);
   const searchKept = nonnegativeCount(telemetry?.search?.kept);
   const recovered = telemetry ? recoveryMergeNet(telemetry) : null;
   const expected = searchKept == null ? null : searchKept + recovered;
@@ -1468,7 +2021,7 @@ export function buildJobCompletionAssessment(canvasFilePath, currentNodeIds = ne
       ? '- Terminal receipt: present but invalid.'
       : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''}${receiptRecovery != null ? ` · recovery net ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}.`;
   const snapshotLine = snapshot.state === 'parseable'
-    ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshot.runId || 'not recorded'}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
+    ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshotRunIdentifier(snapshot.runId)}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
     : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
   // State the other run as a fact of its own instead of letting its phase and
   // its error masquerade as this run's. Observations only — a stopped run is
@@ -1598,8 +2151,8 @@ ${coverageLine}
  * this is strictly metadata/counts required to establish whether a restart can
  * recover an interrupted collection/scoring handoff.
  */
-export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Set()) {
-  const paths = recoveryPathsForCanvas(canvasFilePath);
+export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Set(), currentJobHubIds = currentNodeIds, reportWindowId = null) {
+  const paths = recoveryPathsForCanvas(canvasFilePath, currentJobHubIds);
   if (!paths) {
     return `
 ## Job Recovery Diagnostics
@@ -1609,9 +2162,17 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
 `;
   }
 
-  const manifest = parseRecoveryJson(paths.manifest);
-  const staging = readRecoveryText(paths.staging);
-  const lastReceipt = readLastRunReceiptSnapshot(canvasFilePath);
+  const artifactListing = paths.recoveryArtifacts;
+  const artifacts = artifactListing.artifacts;
+  const sidecarArtifacts = artifacts.filter(artifact => artifact.manifest || artifact.staging);
+  const receiptArtifacts = artifacts.filter(artifact => artifact.receipt);
+  // A single sidecar receipt remains compatible with the historical completion
+  // reconciliation. Several receipts are intentionally not collapsed into one:
+  // selecting one would reintroduce the cross-hub attribution bug this report
+  // is meant to make visible. Each is rendered below instead.
+  const lastReceipt = receiptArtifacts.length === 1
+    ? readArtifactReceiptSnapshot(receiptArtifacts[0])
+    : readLastRunReceiptSnapshot(canvasFilePath);
   // There is no 'done' stage: a clean finish DELETES both sidecars, so "absent"
   // is the expected success state. Printed bare, it is indistinguishable from
   // "staging silently never ran" — the reading that sends the next investigation
@@ -1619,7 +2180,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
   // disambiguating fact (the pipeline's own phase); say which case this is.
   let livePipeline = null;
   try {
-    const telemetry = getJobsTelemetry();
+    const telemetry = getJobsTelemetryForReport(currentJobHubIds, reportWindowId);
     // jobsTelemetry is process-global. Attribute it only when its owning hub is
     // present in this canvas; another window's completed run must not turn this
     // canvas's absent sidecars into a claimed clean finish.
@@ -1628,7 +2189,7 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
     }
   } catch { /* telemetry may not be ready */ }
   const lastRunPhase = livePipeline?.phase || null;
-  const durableSnapshot = currentSavedSnapshotFact(canvasFilePath, currentNodeIds);
+  const durableSnapshot = currentSavedSnapshotFact(canvasFilePath, currentJobHubIds);
   const durableCleanFinish = hasDurableCompletedOutput(lastReceipt?.receipt, durableSnapshot);
   const cleanFinish = lastRunPhase === 'completed' || durableCleanFinish;
   const absentNote = durableCleanFinish
@@ -1643,45 +2204,21 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
   // The receipt is the sole durable answer for a prior-process run; render it
   // before the transient recovery artifacts so a reader does not mistake their
   // absence for either success or failure.
-  lines.push(formatLastRunReceipt(lastReceipt, currentNodeIds, livePipeline));
-  if (!manifest.exists) {
-    lines.push(`- Run manifest: absent${absentNote}`);
-  } else if (manifest.errorCode) {
-    lines.push(`- Run manifest: ⚠️ unreadable (\`${manifest.errorCode}\`)`);
-  } else if (manifest.parseError || !manifest.value || typeof manifest.value !== 'object' || Array.isArray(manifest.value)) {
-    lines.push('- Run manifest: ⚠️ present but not parseable JSON');
-  } else {
-    const run = manifest.value;
-    const sourceEntries = Object.entries(run.sources || {});
-    const sourceSummary = sourceEntries
-      .slice(0, 20)
-      .map(([sourceId, source]) => `\`${sourceId}\`=${source?.status || 'unknown'}`)
-      .join(', ');
-    const extraSources = sourceEntries.length > 20 ? ` · ${sourceEntries.length - 20} more` : '';
-    lines.push(`- Run manifest: parseable · stage **${String(run.stage || 'unknown').replace(/`/g, "'")}** · run \`${run.runId || 'not recorded'}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${recoveryHubCorrelation(run.inputs?.nodeId, currentNodeIds)} · canvas is this report`);
-    lines.push(`- Sources (${sourceEntries.length}): ${sourceSummary || '(none recorded)'}${extraSources}`);
+  lines.push(...formatArtifactReceipts(artifacts, currentNodeIds, livePipeline));
+  lines.push(...formatRecoverySidecars(sidecarArtifacts, currentNodeIds, {
+    absentNote,
+    durableCleanFinish,
+    cleanFinish,
+  }));
+  if (artifactListing.omittedCount > 0) {
+    lines.push(`- ⚠️ ${artifactListing.omittedCount} additional recovery ledger scope(s) were not inspected (report safety limit).`);
+  }
+  if (artifactListing.scanTruncated) {
+    lines.push(`- ⚠️ Recovery-directory discovery stopped after ${MAX_RECOVERY_DIRECTORY_ENTRIES} entries; additional artifacts may not be counted (report safety limit).`);
   }
 
-  if (!staging.exists) {
-    lines.push(`- Staging ledger: absent${durableCleanFinish
-      ? `${absentNote} (see above)`
-      : cleanFinish
-        ? ' — expected after a clean finish (see above)'
-        : absentNote}`);
-  } else if (staging.errorCode) {
-    lines.push(`- Staging ledger: ⚠️ unreadable (\`${staging.errorCode}\`)`);
-  } else {
-    const rows = staging.text.split(/\r?\n/).filter(line => line.trim());
-    let parsedRows = 0;
-    let tornRows = 0;
-    for (const row of rows) {
-      try { JSON.parse(row); parsedRows += 1; } catch { tornRows += 1; }
-    }
-    lines.push(`- Staging ledger: present · ${parsedRows} parseable row(s) · ${tornRows} torn/unparseable row(s)`);
-  }
-
-  lines.push(snapshotRecoveryLine('Current saved scrape', paths.currentSnapshot, paths.legacyCurrentSnapshot, canvasFilePath, currentNodeIds));
-  lines.push(snapshotRecoveryLine('Last successful saved scrape', paths.lastSuccessSnapshot, paths.legacyLastSuccessSnapshot, canvasFilePath, currentNodeIds));
+  lines.push(...ownedSnapshotLines('Current saved scrape', canvasFilePath, currentNodeIds, currentJobHubIds, 'current'));
+  lines.push(...ownedSnapshotLines('Last successful saved scrape', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success'));
   lines.push(...descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds));
   return `
 ## Job Recovery Diagnostics
@@ -2015,9 +2552,13 @@ function historyDropEvidenceLines(samples, totalDropped, indent = '') {
 // and the deferred-listing samples — into a one-line marker each. It never touches the funnel numbers,
 // stop reasons, warnings, or per-source outcomes that surround them: those are
 // exactly what a reader debugging a filtered job report still needs.
-export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false) {
+export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds) {
   let t;
-  try { t = getJobsTelemetry(); } catch { return ''; }
+  // Older direct callers/tests do not have the renderer's typed hub index.
+  // Only an explicit sixth argument may narrow telemetry to typed Job Search
+  // owners; otherwise preserve the historic node-set diagnostic seam.
+  const telemetryOwners = arguments.length >= 6 ? currentJobHubIds : currentNodeIds;
+  try { t = getJobsTelemetryForReport(telemetryOwners, reportWindowId); } catch { return ''; }
   // Local AI card state is renderer-owned and can be diagnostically useful
   // even before the job-search telemetry store has recorded a pipeline run.
   if (!t) t = {};
@@ -2195,6 +2736,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const runOriginLabel = {
         initial: 'Initial career-file run',
         'rerun-button': 'Re-run Search button',
+        'job-board-scan': 'Job Board scan',
         'crash-resume': 'Crash-recovery Resume',
         unknown: 'Unknown/legacy caller',
       }[p.runOrigin] || String(p.runOrigin || 'Unknown/legacy caller');
@@ -3018,38 +3560,63 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // Also runs field-quality checks for salary/posted to catch selector
     // regressions (e.g. salary="Monday to Friday", posted all-empty).
     try {
-      const analysisPaths = getJobAnalysisPaths(
-        canvasFilePath,
-        path.join(app.getPath('userData'), 'job-search'),
-      );
+      const currentHubId = receiptIdentifier(t.nodeId, '') || null;
+      // Field-quality evidence is run-scoped. The old canvas-only lookup
+      // silently missed every modern owner-specific snapshot, and accepting a
+      // generic fallback here could instead inspect another hub's scrape.
+      if (!currentHubId) throw new Error('No safe Job Search hub owner for saved snapshot');
       let snapData;
-      try {
-        snapData = JSON.parse(fs.readFileSync(analysisPaths.jsonPath, 'utf8'));
-      } catch (primaryError) {
-        // Old artifacts shared one directory filename. Use one only after its
-        // JSON proves ownership; otherwise a same-folder canvas can never
-        // contaminate live field-quality diagnostics.
-        if (!canvasFilePath || !analysisPaths.legacyJsonPath) throw primaryError;
-        const legacyData = JSON.parse(fs.readFileSync(analysisPaths.legacyJsonPath, 'utf8'));
-        if (!snapshotOwnedByCanvas(legacyData, canvasFilePath)) throw primaryError;
-        snapData = legacyData;
+      if (canvasFilePath) {
+        const snapshotRecord = ownedSnapshotRecord(
+          canvasFilePath,
+          path.join(app.getPath('userData'), 'job-search'),
+          currentHubId,
+          'current',
+        );
+        if (snapshotRecord.state !== 'parseable') throw new Error('No ownership-verified saved snapshot');
+        snapData = snapshotRecord.parsed.value;
+      } else {
+        // The request bridge carries the renderer's private session scope
+        // without exposing it to report code. That preserves unsaved
+        // field-quality diagnostics without falling back to another window's
+        // historical singleton bundle.
+        const currentPaths = getCurrentRequestJobAnalysisPaths(null, currentHubId);
+        let current = parseRecoveryJson(currentPaths?.jsonPath);
+        let currentOwner = receiptIdentifier(current.value?.sourceHubId || current.value?.nodeId, '');
+        const currentUsable = !current.errorCode && !current.parseError && current.value
+          && typeof current.value === 'object' && !Array.isArray(current.value)
+          && (!currentOwner || currentOwner === currentHubId);
+        // A contextless unit/helper call has no session identity to protect,
+        // so retain the pre-session singleton solely as a migration fallback.
+        // A real report's sender-scoped request must never take this branch.
+        if (!currentUsable && !currentPaths?.requestScopedUnsaved) {
+          current = parseRecoveryJson(getJobAnalysisPaths(
+            null,
+            path.join(app.getPath('userData'), 'job-search'),
+          ).jsonPath);
+          currentOwner = receiptIdentifier(current.value?.sourceHubId || current.value?.nodeId, '');
+        }
+        if (!currentUsable && (current.errorCode || current.parseError || !current.value || typeof current.value !== 'object'
+          || Array.isArray(current.value) || (currentOwner && currentOwner !== currentHubId))) {
+          throw new Error('No compatible unsaved snapshot');
+        }
+        snapData = current.value;
       }
       const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
       const recoveryJobs = Array.isArray(snapData?.descriptionRecoveryJobs)
         ? snapData.descriptionRecoveryJobs
         : [];
-      const currentRunId = t.search?.runId || null;
-      const snapshotRunId = snapData?.runId || null;
-      const currentHubId = t.nodeId || null;
-      const snapshotHubId = snapData?.sourceHubId || snapData?.nodeId || null;
+      const currentRunId = recordedRunToken(t.search?.runId);
+      const snapshotRunId = recordedRunToken(snapData?.runId);
+      const snapshotHubId = receiptIdentifier(snapData?.sourceHubId || snapData?.nodeId, '') || null;
       // A modern current run must have an exact snapshot token. Older snapshots
       // did not carry one, so only enforce the token when the live funnel has
       // it; the hub identity remains a useful guard for all versions.
       const runMatches = !currentRunId || snapshotRunId === currentRunId;
       const hubMatches = !currentHubId || !snapshotHubId || snapshotHubId === currentHubId;
       if (!runMatches || !hubMatches) {
-        const currentLabel = currentRunId || currentHubId || '(unknown current run)';
-        const snapshotLabel = snapshotRunId || snapshotHubId || '(legacy snapshot without run ID)';
+        const currentLabel = receiptIdentifier(currentRunId || currentHubId, 'unknown current run');
+        const snapshotLabel = receiptIdentifier(snapshotRunId || snapshotHubId, 'legacy snapshot without run ID');
         lines.push(`- ⚠️ Saved scrape snapshot does not match the current search run (current: \`${currentLabel}\`; snapshot: \`${snapshotLabel}\`). Snippet, salary, and field-quality checks were skipped to avoid stale evidence.`);
       } else if (snapJobs.length === 0) {
         savedSnapshotJobs = snapJobs;

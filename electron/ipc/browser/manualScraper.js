@@ -16,14 +16,14 @@
  *   Array<{ id, sourceId, success, data, pagesWalked, stopReason, warning }>
  */
 
-import puppeteer from 'puppeteer-extra';
 import {
-  closeStealthBrowser, getUserDataDir, findChromePath,
+  closeOwnedBrowserProcess, closeStealthBrowser, getUserDataDir, findChromePath, launchWithProfileLockRetry,
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay as paintOverlay } from './scraperOverlay.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
+import { isProfileLockCollision } from '../browserLaunchTelemetry.js';
 import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
@@ -606,7 +606,7 @@ export function getManualScraperTelemetry() {
 // wait minutes for the user to solve the challenge anyway.
 
 // Static description of how the manual-scrape browser is launched. Keep in sync
-// with the puppeteer.launch() call in scrapeManualSources(). The point: a reader
+// with the launchWithProfileLockRetry() call in scrapeManualSources(). The point: a reader
 // instantly sees we're already headful with the standard evasions, so the block
 // is NOT "we forgot to run headful".
 const BROWSER_LAUNCH_PROFILE =
@@ -5782,7 +5782,7 @@ async function applyStealthMask(page) {
  * @returns {{ browser:object, page:object, navStatusRef:{last:number|null}, isClosed:()=>boolean, teardown:()=>Promise<void> }}
  */
 async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash }) {
-  const browser = await puppeteer.launch(prepareBackgroundScrapeLaunchOptions({
+  const browser = await launchWithProfileLockRetry(prepareBackgroundScrapeLaunchOptions({
     headless: false,
     executablePath,
     userDataDir,
@@ -5798,7 +5798,10 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     ],
     defaultViewport: null,
     ignoreHTTPSErrors: true,
-  }));
+    // Do not let a Chromium launch wait forever while holding the FIFO. This is
+    // Puppeteer's normal default made explicit so the bound is reviewable.
+    timeout: 30_000,
+  }), 'manual-browser-scrape');
 
   // Everything below, up to the overlay injection, runs against the browser we
   // just launched. The caller's `platform` bundle isn't assigned until this
@@ -5868,7 +5871,7 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     // Inject overlay on every new document so it survives navigations
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
   } catch (err) {
-    await browser.close().catch(() => {});
+    await closeOwnedBrowserProcess(browser, { label: 'Manual browser setup', gracefulMs: 3_500 });
     throw err;
   }
 
@@ -5913,17 +5916,27 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     teardown: async () => {
       intentional = true; // suppress onCrash for our own close
       clearInterval(overlayKeepAlive);
-      if (!closed) await browser.close().catch(() => {});
+      // `disconnected` only means the CDP socket dropped; Chrome can still own
+      // SingletonLock. Always run the owned-process close/wait path even if the
+      // event handler already set `closed`.
+      const closeResult = await closeOwnedBrowserProcess(browser, {
+        label: 'Manual browser teardown', gracefulMs: 3_500,
+      });
       closed = true;
       // Set here as well as in the 'disconnected' handler. The report claims the
       // shared profile lock is HELD while this reads running, so it must not
       // depend on an event that a failed/forced close might not deliver —
       // over-reporting a live browser would send a reader after a phantom lock.
-      if (manualScraperTelemetry.browser?.running) {
-        manualScraperTelemetry.browser = { ...manualScraperTelemetry.browser, running: false, closedAt: Date.now() };
+      if (manualScraperTelemetry.browser) {
+        manualScraperTelemetry.browser = {
+          ...manualScraperTelemetry.browser,
+          running: false,
+          closedAt: Date.now(),
+          processExitObserved: closeResult.exited,
+          forcedTermination: closeResult.disposition === 'sigterm-exit' ? 'SIGTERM'
+            : closeResult.disposition === 'sigkill-fallback' ? 'SIGKILL' : null,
+        };
       }
-      // Let Chrome release the shared-profile SingletonLock before the next launch.
-      await new Promise(r => setTimeout(r, 600));
     },
   };
 }
@@ -6112,15 +6125,47 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // later distinguish a real end marker from a no-growth plateau.
       const revealOutcomes         = [];
 
-      // Fresh, fully-isolated Chrome for THIS platform (torn down before the next).
-      platform = await launchScrapePlatformBrowser({
-        userDataDir, executablePath, sandboxArgs,
-        onCrash: () => { earlyExit = true; },
-      });
-      const { page, navStatusRef } = platform;
-
       const displayIndex = sourceIndexBase + si + 1;
       const displayTotal = sourceTotal || sourceList.length;
+      // Fresh, fully-isolated Chrome for THIS platform (torn down before the
+      // next). A shared-profile collision is a source-level, retryable block,
+      // not a reason to discard already-collected sibling sources or abort the
+      // entire Job Search pipeline with Puppeteer's raw Code: 0 text.
+      try {
+        platform = await launchScrapePlatformBrowser({
+          userDataDir, executablePath, sandboxArgs,
+          onCrash: () => { earlyExit = true; },
+        });
+      } catch (error) {
+        const evidence = String(error?.message || error);
+        const profileLocked = isProfileLockCollision(error)
+          || /shared browser profile lock|Opening in existing browser session|browser is already running for/i.test(evidence);
+        logger.warn(`[BrowserScraper] ${srcName} Chrome launch failed; marking this source retryable and continuing: ${evidence}`);
+        const result = {
+          id: `${sourceId}-0`, sourceId, success: false,
+          data: [], pagesWalked: 0, stopReason: 'browser-launch-failed',
+          warning: {
+            code: profileLocked ? 'browser-profile-locked' : 'browser-launch-failed', severity: 'block',
+            evidence: evidence.slice(0, 500),
+            actionTitle: profileLocked
+              ? `Retry ${srcName} after the shared Chrome profile is free`
+              : `${srcName} browser could not start`,
+            suggestion: profileLocked
+              ? 'Close any open login or verification window, then click Solve to retry this source.'
+              : 'Check that Chrome can open normally and any macOS permission prompt is resolved, then click Solve to retry this source.',
+          },
+        };
+        results.push(result);
+        onResult?.(result);
+        recordManualScraperTelemetry({
+          phase: 'source-launch-failed', sourceId, srcName,
+          sourceIndex: displayIndex, sourceTotal: displayTotal,
+          stopReason: result.stopReason, error: evidence.slice(0, 300),
+        });
+        continue;
+      }
+      const { page, navStatusRef } = platform;
+
       logger.info(`[BrowserScraper] Starting ${displayIndex}/${displayTotal}: ${srcName} (${sourceTasks.length} queries) — fresh isolated browser launched`);
       recordManualScraperTelemetry({
         phase: 'source-start',

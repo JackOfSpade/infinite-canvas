@@ -10,6 +10,7 @@ export function ModuleRunQueueProvider({ children }) {
     acquireModuleRun: queue.acquireModuleRun,
     runExclusive: queue.runExclusive,
     cancelQueuedRunsForNode: queue.cancelQueuedRunsForNode,
+    cancelQueuedRunsOwnedByNode: queue.cancelQueuedRunsOwnedByNode,
     getSnapshot: queue.getSnapshot,
     snapshot,
   }), [queue, snapshot]);

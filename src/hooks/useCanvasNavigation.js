@@ -5,6 +5,7 @@ import { getNodeDims, getNodesBounds } from '../utils/constants';
 import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements, collectNodesDeep } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
+import { hasActiveExternalRunState } from '../utils/undoNonRestorableState';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -93,6 +94,10 @@ export function useCanvasNavigation({
    */
   const diveIn = useCallback((nodeId) => {
     if (!canMutateCanvas() || isNavigatingRef.current) return;
+    if (hasActiveExternalRunState(nodesRef.current, { recursive: false })) {
+      EventLogger.log(`canvas dive-in blocked id=${nodeId} reason=external-run-active`);
+      return;
+    }
     isNavigatingRef.current = true;
 
     // Fast fail if node doesn't exist
@@ -189,6 +194,10 @@ export function useCanvasNavigation({
   const jumpTo = useCallback((targetIndex) => {
     const currentStack = stackRef.current;
     if (!canMutateCanvas() || isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
+    if (hasActiveExternalRunState(nodesRef.current, { recursive: false })) {
+      EventLogger.log(`canvas dive-out blocked target=${targetIndex} reason=external-run-active`);
+      return;
+    }
     isNavigatingRef.current = true;
 
     EventLogger.log(`canvas dive-out → depth ${targetIndex} (was ${currentStack.length})`);
@@ -288,6 +297,10 @@ export function useCanvasNavigation({
    */
   const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
     if (!canMutateCanvas() || isNavigatingRef.current || stackRef.current.length === 0) return;
+    if (hasActiveExternalRunState(nodesRef.current, { recursive: false })) {
+      EventLogger.log('canvas extract blocked reason=external-run-active');
+      return;
+    }
 
     const targetIndex = explicitTargetIndex !== undefined ? explicitTargetIndex : stackRef.current.length - 1;
     // Don't extract if the target is the current level or deeper than available stack

@@ -1,7 +1,8 @@
-import { __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
+import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests } from '../../electron/ipc/jobs.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __recordResumeAttemptForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
@@ -210,11 +211,149 @@ export default [
     },
   },
   {
+    name: 'job analysis paths isolate each hub and retain both earlier path generations',
+    run: () => {
+      const root = path.join('/tmp', `ic-owner-analysis-paths-${process.pid}-${Date.now()}`);
+      const canvas = path.join(root, 'shared-canvas.json');
+      const fallback = path.join(root, 'unsaved');
+      const priorCanvasPaths = getJobAnalysisPaths(canvas, fallback);
+      const hubAPaths = getJobAnalysisPaths(canvas, fallback, 'job-hub-a');
+      const hubBPaths = getJobAnalysisPaths(canvas, fallback, 'job-hub-b');
+      const unsavedAPaths = getJobAnalysisPaths(null, fallback, 'job-hub-a');
+      const unsavedBPaths = getJobAnalysisPaths(null, fallback, 'job-hub-b');
+      const unsavedScopeA = 'renderer_session_scope_A_1234';
+      const unsavedScopeB = 'renderer_session_scope_B_5678';
+      const clonedUnsavedA = getJobAnalysisPaths(null, fallback, 'cloned-hub', unsavedScopeA);
+      const clonedUnsavedB = getJobAnalysisPaths(null, fallback, 'cloned-hub', unsavedScopeB);
+      assert(hubAPaths.jsonPath !== hubBPaths.jsonPath
+        && hubAPaths.lastSuccessJsonPath !== hubBPaths.lastSuccessJsonPath
+        && hubAPaths.promptPath !== hubBPaths.promptPath
+        && !path.basename(hubAPaths.jsonPath).includes('job-hub-a'),
+      'two Job Search hubs on one canvas receive separate non-sensitive current, last-success, and prompt artifact paths');
+      assert(hubAPaths.legacyCanvasJsonPath === priorCanvasPaths.jsonPath
+        && hubAPaths.legacyCanvasLastSuccessJsonPath === priorCanvasPaths.lastSuccessJsonPath
+        && hubAPaths.legacyCanvasPromptPath === priorCanvasPaths.promptPath
+        && hubAPaths.legacyJsonPath === path.join(root, 'job-search-last-scrape.json')
+        && hubAPaths.legacyLastSuccessJsonPath === path.join(root, 'job-search-last-successful-scrape.json')
+        && hubAPaths.legacyPromptPath === path.join(root, 'job-search-scoring-AI-prompt.txt'),
+      'owner-scoped callers can discover both prior canvas-scoped hashes and pre-namespace directory files as separate legacy generations');
+      assert(priorCanvasPaths.ownerNamespace === null
+        && priorCanvasPaths.legacyCanvasJsonPath === null
+        && priorCanvasPaths.jsonPath === getJobAnalysisPaths(canvas, fallback, '  ').jsonPath,
+      'the two-argument API and an invalid owner keep their exact historical primary canvas path during the migration');
+      assert(unsavedAPaths.jsonPath !== unsavedBPaths.jsonPath
+        && unsavedAPaths.legacyCanvasJsonPath === path.join(fallback, 'job-search-last-scrape.json')
+        && unsavedAPaths.legacyJsonPath === null,
+      'unsaved canvases also isolate hubs while exposing their former shared fallback bundle exactly once');
+      assert(clonedUnsavedA.jsonPath !== clonedUnsavedB.jsonPath
+        && clonedUnsavedA.promptPath !== clonedUnsavedB.promptPath
+        && getJobDescriptionRecoveryCheckpointPath(null, 'same-run', fallback, unsavedScopeA)
+          !== getJobDescriptionRecoveryCheckpointPath(null, 'same-run', fallback, unsavedScopeB)
+        && getJobAnalysisPaths(null, fallback, 'cloned-hub').jsonPath
+          === getJobAnalysisPaths(null, fallback, 'cloned-hub').jsonPath,
+      'renderer-session scopes isolate duplicate unsaved hub IDs and exact run checkpoints, while omitted scopes preserve internal legacy compatibility');
+      return { ownerNamespace: hubAPaths.ownerNamespace, legacyCanvas: path.basename(hubAPaths.legacyCanvasJsonPath) };
+    },
+  },
+  {
+    name: 'retired batch sidecars are canvas-scoped and directory-global legacy entries fail closed',
+    run: () => {
+      const root = path.join('/tmp', `ic-batch-sidecar-scope-${process.pid}-${Date.now()}`);
+      const canvasA = path.join(root, 'canvas-a.json');
+      const canvasB = path.join(root, 'canvas-b.json');
+      const pathsA = __jobBatchPathsForTests(canvasA);
+      const pathsB = __jobBatchPathsForTests(canvasB);
+      assert(pathsA.current !== pathsB.current
+        && pathsA.legacy === pathsB.legacy
+        && __legacyBatchEntryOwnedByCanvasForTests({ canvasFilePath: canvasA }, canvasA)
+        && !__legacyBatchEntryOwnedByCanvasForTests({ canvasFilePath: canvasA }, canvasB)
+        && !__legacyBatchEntryOwnedByCanvasForTests({ nodeId: 'same-cloned-hub' }, canvasA),
+      'modern retired-batch paths are per canvas, and a directory-global legacy entry cannot be replayed or deleted without exact embedded canvas ownership');
+      return { current: path.basename(pathsA.current), legacy: path.basename(pathsA.legacy) };
+    },
+  },
+  {
+    name: 'owner-scoped snapshot recovery reads only its hub then migrates safely through both legacy bundles',
+    run: async () => {
+      const root = path.join('/tmp', `ic-owner-snapshot-recovery-${process.pid}-${Date.now()}`);
+      const canvas = path.join(root, 'canvas.json');
+      const fallback = path.join(root, 'unsaved');
+      const hubAPaths = getJobAnalysisPaths(canvas, fallback, 'hub-a');
+      const hubBPaths = getJobAnalysisPaths(canvas, fallback, 'hub-b');
+      const snapshot = (nodeId, runId, title) => ({
+        canvasFilePath: canvas,
+        sourceHubId: nodeId,
+        nodeId,
+        runId,
+        createdAt: '2026-09-08T19:25:57.108Z',
+        gatheredJobCount: 1,
+        cachedPrefix: `evidence ${title}`,
+        previewBatches: [],
+        jobs: [{ title }],
+      });
+      const hubA = snapshot('hub-a', 'run-a', 'Hub A');
+      const hubB = snapshot('hub-b', 'run-b', 'Hub B');
+      try {
+        await fs.promises.mkdir(root, { recursive: true });
+        await __saveJobAnalysisSnapshotForTests(hubA);
+        await __saveJobAnalysisSnapshotForTests(hubB);
+        let loaded = await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a');
+        assert(loaded.origin === 'current' && loaded.snapshot.jobs[0].title === 'Hub A'
+          && loaded.paths.jsonPath === hubAPaths.jsonPath
+          && (await fs.promises.readFile(hubBPaths.jsonPath, 'utf8')).includes('Hub B'),
+        'the owner-aware writer and reader keep simultaneous hubs on one canvas in separate current bundles');
+
+        await fs.promises.rm(hubAPaths.jsonPath);
+        await fs.promises.rm(hubAPaths.lastSuccessJsonPath);
+        await fs.promises.writeFile(hubAPaths.legacyCanvasJsonPath, JSON.stringify(hubA));
+        loaded = await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a');
+        assert(loaded.origin === 'legacy-canvas-current' && loaded.paths.jsonPath === hubAPaths.legacyCanvasJsonPath,
+          'a missing owner bundle falls back first to the earlier canvas-hashed bundle after exact hub and canvas validation');
+
+        await fs.promises.rm(hubAPaths.legacyCanvasJsonPath);
+        await fs.promises.writeFile(hubAPaths.legacyJsonPath, JSON.stringify(hubA));
+        loaded = await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a');
+        assert(loaded.origin === 'legacy-current' && loaded.paths.jsonPath === hubAPaths.legacyJsonPath,
+          'the pre-namespace directory bundle remains available only after the canvas-hash migration fallback is exhausted');
+
+        await fs.promises.writeFile(hubAPaths.legacyJsonPath, JSON.stringify(hubB));
+        let rejected = false;
+        try { await __loadJobAnalysisSnapshotForTests(canvas, 'hub-a', 'run-a'); } catch (error) { rejected = error?.code === 'ENOENT'; }
+        assert(rejected,
+          'a foreign owner or run token in either legacy generation is never returned to this hub');
+        return { ownerPath: path.basename(hubAPaths.jsonPath), legacyOrigin: loaded.origin };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'unsaved analysis paths retain the initiating WebContents scope through async IPC context',
+    run: async () => {
+      const senderA = { id: 1001 };
+      const senderB = { id: 1002 };
+      const inSender = (sender, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId: 'cloned-hub', channel: 'save-job-analysis-snapshot' }, callback,
+      );
+      const [a, b] = await Promise.all([
+        inSender(senderA, async () => { await Promise.resolve(); return __analysisPathsForCurrentRequestForTests(null, 'cloned-hub'); }),
+        inSender(senderB, async () => { await Promise.resolve(); return __analysisPathsForCurrentRequestForTests(null, 'cloned-hub'); }),
+      ]);
+      assert(a.jsonPath !== b.jsonPath && a.promptPath !== b.promptPath
+        && a.jsonPath.includes('job-search-unsaved-') && b.jsonPath.includes('job-search-unsaved-'),
+      'two renderer senders with a cloned unsaved hub ID retain distinct owner artifact paths after an async boundary');
+      assert(a.legacyCanvasJsonPath === null && b.legacyCanvasJsonPath === null
+        && a.legacyCanvasPromptPath === null && b.legacyCanvasPromptPath === null,
+      'a sender-scoped unsaved bundle cannot fall back to the historical shared recovery/prompt files');
+      return { distinct: true };
+    },
+  },
+  {
     name: 'career clear discards only the exact hub-owned analysis bundle and retires its run',
     run: async () => {
       const root = path.join('/tmp', `ic-analysis-clear-${process.pid}-${Date.now()}`);
       const canvas = path.join(root, 'canvas.json');
-      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'));
+      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'), 'hub-a');
       const exists = async (filePath) => {
         try { await fs.promises.access(filePath); return true; } catch { return false; }
       };
@@ -234,7 +373,7 @@ export default [
       try {
         await fs.promises.mkdir(root, { recursive: true });
         const beforeFirstCanvas = path.join(root, 'before-first.json');
-        const beforeFirstPaths = getJobAnalysisPaths(beforeFirstCanvas, path.join(root, 'unused'));
+        const beforeFirstPaths = getJobAnalysisPaths(beforeFirstCanvas, path.join(root, 'unused'), 'hub-a');
         const beforeFirstClear = await __discardJobAnalysisSnapshotForTests(beforeFirstCanvas, 'hub-a', {
           runId: 'run-before-first-snapshot',
         });
@@ -267,7 +406,7 @@ export default [
         'a clear captured before the first snapshot tombstones its exact valid run without blocking a future run on the same hub');
 
         const invalidCreatedAtCanvas = path.join(root, 'invalid-created-at.json');
-        const invalidCreatedAtPaths = getJobAnalysisPaths(invalidCreatedAtCanvas, path.join(root, 'unused-invalid-created-at'));
+        const invalidCreatedAtPaths = getJobAnalysisPaths(invalidCreatedAtCanvas, path.join(root, 'unused-invalid-created-at'), 'hub-a');
         const invalidCreatedAtSnapshot = {
           ...snapshot('hub-a', 'run-invalid-created-at', 'invalid-created-at', invalidCreatedAtCanvas),
           createdAt: Number.MAX_SAFE_INTEGER,
@@ -285,7 +424,7 @@ export default [
         'the exact requested run is cleared even when its embedded timestamp is invalid and cannot classify its age');
 
         const differentInvalidCreatedAtCanvas = path.join(root, 'different-invalid-created-at.json');
-        const differentInvalidCreatedAtPaths = getJobAnalysisPaths(differentInvalidCreatedAtCanvas, path.join(root, 'unused-different-invalid-created-at'));
+        const differentInvalidCreatedAtPaths = getJobAnalysisPaths(differentInvalidCreatedAtCanvas, path.join(root, 'unused-different-invalid-created-at'), 'hub-a');
         const differentInvalidCreatedAtSnapshot = {
           ...snapshot('hub-a', 'run-new-invalid-created-at', 'different-invalid-created-at', differentInvalidCreatedAtCanvas),
           createdAt: Number.MAX_SAFE_INTEGER,
@@ -327,7 +466,7 @@ export default [
         'the cleared run is tombstoned against a late write while a new run on the same hub remains writable');
 
         const boundaryCanvas = path.join(root, 'clear-boundary.json');
-        const boundaryPaths = getJobAnalysisPaths(boundaryCanvas, path.join(root, 'unused-boundary'));
+        const boundaryPaths = getJobAnalysisPaths(boundaryCanvas, path.join(root, 'unused-boundary'), 'hub-a');
         const boundaryAt = 2_000;
         const staleBoundary = { ...snapshot('hub-a', 'run-a-boundary', 'old-boundary', boundaryCanvas), createdAt: new Date(1_999).toISOString() };
         const postBoundary = { ...snapshot('hub-a', 'run-b-boundary', 'new-boundary', boundaryCanvas), createdAt: new Date(2_001).toISOString() };
@@ -383,7 +522,7 @@ export default [
         'sequential clears with an equal or non-monotonic IPC timestamp advance the retired boundary, tombstone both cleared runs, and still admit a later run');
 
         const presentSecondRunCanvas = path.join(root, 'present-second-run-boundary.json');
-        const presentSecondRunPaths = getJobAnalysisPaths(presentSecondRunCanvas, path.join(root, 'unused-present-second-run'));
+        const presentSecondRunPaths = getJobAnalysisPaths(presentSecondRunCanvas, path.join(root, 'unused-present-second-run'), 'hub-a');
         const presentBoundary = 4_000;
         await __discardJobAnalysisSnapshotForTests(presentSecondRunCanvas, 'hub-a', {
           runId: 'run-first-present-boundary', clearedAt: presentBoundary,
@@ -406,13 +545,13 @@ export default [
         'an exact requested run cannot survive its clear merely because its artifact timestamp is newer than both the raw and effective clear boundaries');
 
         const currentLastOnlyCanvas = path.join(root, 'last-success-only.json');
-        const currentLastOnlyPaths = getJobAnalysisPaths(currentLastOnlyCanvas, path.join(root, 'unused-last-only'));
+        const currentLastOnlyPaths = getJobAnalysisPaths(currentLastOnlyCanvas, path.join(root, 'unused-last-only'), 'hub-a');
         const currentLastOnly = snapshot('hub-a', 'run-last-success-only', 'last-success-only', currentLastOnlyCanvas);
         await fs.promises.writeFile(currentLastOnlyPaths.lastSuccessJsonPath, JSON.stringify(currentLastOnly));
         await fs.promises.writeFile(currentLastOnlyPaths.promptPath, __formatJobAnalysisPromptForTests(currentLastOnly));
         const currentLastOnlyClear = await __discardJobAnalysisSnapshotForTests(currentLastOnlyCanvas, 'hub-a');
         const legacyLastOnlyCanvas = path.join(root, 'legacy-last-success-only.json');
-        const legacyLastOnlyPaths = getJobAnalysisPaths(legacyLastOnlyCanvas, path.join(root, 'unused-legacy-last-only'));
+        const legacyLastOnlyPaths = getJobAnalysisPaths(legacyLastOnlyCanvas, path.join(root, 'unused-legacy-last-only'), 'hub-a');
         const legacyLastOnly = snapshot('hub-a', 'run-legacy-last-success-only', 'legacy-last-success-only', legacyLastOnlyCanvas);
         await fs.promises.writeFile(legacyLastOnlyPaths.legacyLastSuccessJsonPath, JSON.stringify(legacyLastOnly));
         await fs.promises.writeFile(legacyLastOnlyPaths.legacyPromptPath, __formatJobAnalysisPromptForTests(legacyLastOnly));
@@ -455,7 +594,7 @@ export default [
         'an ENOENT after an ownership read is a verified already-removed no-op, while non-ENOENT verification failures remain warnings');
 
         const invalidFallbackDir = path.join(root, 'invalid-unsaved-fallback');
-        const invalidFallbackPaths = getJobAnalysisPaths(null, invalidFallbackDir);
+        const invalidFallbackPaths = getJobAnalysisPaths(null, invalidFallbackDir, 'hub-a');
         const invalidFallback = snapshot('hub-a', 'run-invalid-fallback', 'invalid-fallback', null);
         await fs.promises.mkdir(invalidFallbackDir, { recursive: true });
         await fs.promises.writeFile(invalidFallbackPaths.jsonPath, JSON.stringify(invalidFallback));
@@ -492,15 +631,23 @@ export default [
         'retirement storage stays bounded to one advancing boundary per canvas/hub while old delayed snapshots remain fenced and a future run writes');
 
         const foreign = snapshot('hub-b', 'run-foreign', 'foreign');
+        const foreignPaths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'), 'hub-b');
+        await fs.promises.rm(paths.jsonPath, { force: true });
+        await fs.promises.rm(paths.lastSuccessJsonPath, { force: true });
+        await fs.promises.rm(paths.promptPath, { force: true });
         await __saveJobAnalysisSnapshotForTests(foreign);
         const foreignClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
         assert(foreignClear.ok && foreignClear.reason == null
-          && foreignClear.artifacts.current.state === 'ownership-mismatch'
-          && foreignClear.artifacts.lastSuccess.state === 'ownership-mismatch'
-          && await exists(paths.jsonPath) && await exists(paths.lastSuccessJsonPath) && await exists(paths.promptPath),
-        'a same-canvas snapshot consistently owned by another hub is left intact as an expected preserved no-op');
+          && foreignClear.artifacts.current.state === 'missing'
+          && foreignClear.artifacts.lastSuccess.state === 'missing'
+          && await exists(foreignPaths.jsonPath) && await exists(foreignPaths.lastSuccessJsonPath) && await exists(foreignPaths.promptPath),
+        'clearing hub A cannot even discover, much less remove, hub B’s separate same-canvas bundle');
 
         const mixedTarget = snapshot('hub-a', 'run-mixed-target', 'mixed-target');
+        // A corrupt/misrouted artifact can still be placed at hub A's path;
+        // cleanup must retain that foreign record while removing the owned
+        // last-success companion.
+        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(foreign));
         await fs.promises.writeFile(paths.lastSuccessJsonPath, JSON.stringify(mixedTarget));
         await fs.promises.writeFile(paths.promptPath, __formatJobAnalysisPromptForTests(mixedTarget));
         const mixedClear = await __discardJobAnalysisSnapshotForTests(canvas, 'hub-a');
@@ -600,7 +747,7 @@ export default [
         'legacy artifacts are cleared only after their embedded canvas and hub ownership both match, including a verified paired prompt');
 
         const unsavedDir = path.join(root, 'unsaved-analysis');
-        const unsavedPaths = getJobAnalysisPaths(null, unsavedDir);
+        const unsavedPaths = getJobAnalysisPaths(null, unsavedDir, 'hub-a');
         const unsaved = snapshot('hub-a', 'unsaved-run', 'unsaved', null);
         await fs.promises.mkdir(unsavedDir, { recursive: true });
         await fs.promises.writeFile(unsavedPaths.jsonPath, JSON.stringify(unsaved));
@@ -659,7 +806,7 @@ export default [
 
       const root = path.join('/tmp', `ic-recovery-cas-${process.pid}-${Date.now()}`);
       const canvas = path.join(root, 'canvas.json');
-      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'));
+      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'), 'hub');
       const runA = { canvasFilePath: canvas, sourceHubId: 'hub', nodeId: 'hub', runId: 'run-a', jobs: [], gatheredJobCount: 0, marker: 'A' };
       const runB = { ...runA, runId: 'run-b', marker: 'B' };
       try {
@@ -776,37 +923,104 @@ export default [
           && !clearCanvasDiscards.some(discard => discard.nodeId === 'locked-hub'),
         'Clear Canvas excludes its top-level locked root before handing the actually removed roots to shared analysis cleanup');
         const deletionHook = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
+        const deletionLifecycle = fs.readFileSync(path.resolve('src/utils/nodeDeletionLifecycle.js'), 'utf8');
         const canvas = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
         const canvasActions = fs.readFileSync(path.resolve('src/hooks/useCanvasActions.js'), 'utf8');
-        const finalizeStart = deletionHook.indexOf('const finalizeNodeDeletion = () => {');
-        const promptStart = deletionHook.indexOf('if (osPaths.length > 0 && window.electronAPI)', finalizeStart);
-        const promptEnd = deletionHook.indexOf('}, [requestConfirm, undo, canvasFilePath, addToast, enumerateAllNodes]);', promptStart);
-        const deletionPrompt = deletionHook.slice(promptStart, promptEnd);
-        assert(deletionHook.includes('discardDeletedJobRuns(deletedNodes, canvasFilePath')
-          && canvas.includes('const { onNodesDelete } = useCanvasOSDeletion({')
-          && canvas.includes('canvasFilePath: currentFile,')
+        const promptStart = deletionHook.indexOf('if (osPaths.length > 0 && window.electronAPI)');
+        const abortResolve = deletionHook.indexOf("onAbort: () => resolve('abort')", promptStart);
+        const abortReturn = deletionHook.indexOf("if (diskChoice === 'abort') return rejectDeletion();", abortResolve);
+        const deletionTextSettle = deletionHook.indexOf('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)', abortReturn);
+        const boardCancellation = deletionHook.indexOf('await Promise.all(boardCancellations);', deletionTextSettle);
+        const manualRetirement = deletionHook.indexOf('await retireDeletedManualAiRuns(cleanupDeletedNodes);', boardCancellation);
+        const activeBoardReferences = deletionLifecycle.indexOf('function getActiveJobBoardSearchReferenceIds(board)');
+        const cleanupOnlyReferenceExclusion = deletionLifecycle.indexOf('manual?.retirementPending === true', activeBoardReferences);
+        const edgeConnectedBoardGuard = deletionLifecycle.indexOf('(edge?.source === node.id && deletedSearchIds.has(edge?.target))', activeBoardReferences);
+        const affectedBoardElection = deletionHook.indexOf('collectJobBoardsAffectedByDeletion(', deletionTextSettle);
+        const nullRunCancellation = deletionHook.indexOf('boardRunId: null,', affectedBoardElection);
+        const safeIdleNone = deletionHook.indexOf("if (result?.status === 'none')", nullRunCancellation);
+        const staleBoardRejected = deletionHook.indexOf("result?.status === 'stale'", safeIdleNone);
+        const unavailableIdleBoard = deletionHook.indexOf('!boardWillBeDeleted && jobBoardHasCancellableRecovery(board)', staleBoardRejected);
+        const staleChildRejected = deletionHook.indexOf("result?.status === 'stale'", unavailableIdleBoard);
+        const deletionCommit = deletionHook.indexOf('const commitLevelNodes = getNodes?.() ?? cleanupSnapshotNodes;', manualRetirement);
+        const queuedDeletionCommit = deletionHook.indexOf('const pendingCommits = committedTransactionsRef.current.get(transactionKey) || [];', deletionCommit);
+        const postCommit = deletionHook.indexOf('const onNodesDelete = useCallback((committedNodes) => {', deletionCommit);
+        const consumeQueuedDeletionCommit = deletionHook.indexOf('const transaction = pendingCommits?.shift();', postCommit);
+        const postCommitRunDiscard = deletionHook.indexOf('discardDeletedJobRuns(deletedNodes, canvasFilePath', postCommit);
+        const clearStart = canvasActions.indexOf('const doClear = useCallback(async () =>');
+        const clearLifecycleMark = canvasActions.indexOf('markJobWorkflowDeletionPending(removedNodes)', clearStart);
+        const clearBoardElection = canvasActions.indexOf('collectJobBoardsAffectedByDeletion(', clearLifecycleMark);
+        const clearBoardCancellation = canvasActions.indexOf('jobSearchCoordinator.cancelBoardModule(board.id', clearBoardElection);
+        const clearNullRunCancellation = canvasActions.indexOf('boardRunId: null,', clearBoardCancellation);
+        const clearManualRetirement = canvasActions.indexOf('await retireDeletedManualAiRuns(removedNodes);', clearStart);
+        const clearFence = canvasActions.indexOf('const clearGraphStayedStable = isClearCanvasDeletionFenceIntact(', clearManualRetirement);
+        const clearLivePartition = canvasActions.indexOf('commitRetainedNodes = getClearCanvasRetainedNodes(liveNodesBeforeCommit);', clearFence);
+        const clearConcurrentPartition = canvasActions.indexOf('removedIds.has(node.id) || removedWorkflowIds.has(node.data?.hubId)', clearLivePartition);
+        const clearAbortLifecycleSettlement = canvasActions.indexOf('settlePendingLifecycle();', clearManualRetirement);
+        const clearRawCancellation = canvasActions.indexOf('cancelNodeTasksRecursively(commitRemovedNodes || removedNodes);', clearManualRetirement);
+        const clearSnapshot = canvasActions.indexOf('takeSnapshot();', clearRawCancellation);
+        const clearVisualCommit = canvasActions.indexOf('setNodes(commitRetainedNodes);', clearSnapshot);
+        const clearPreflight = canvasActions.indexOf('const preflightClear = useCallback(async () =>', clearVisualCommit);
+        const clearPreflightPartition = canvasActions.indexOf('getClearCanvasRetainedNodes(allNodes).map(node => node.id)', clearPreflight);
+        const clearTextSettle = canvasActions.indexOf('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)', clearPreflight);
+        const clearInvoke = canvasActions.indexOf('await doClear();', clearTextSettle);
+        assert(canvas.includes('const { onBeforeDelete, onNodesDelete } = useCanvasOSDeletion({')
+          && canvas.includes('canvasFilePath: currentFile,\n    addToast,')
           && canvas.includes('enumerateAllNodes: navigation.enumerateAllNodes,')
-          && canvasActions.includes("allNodes.filter(node => !lockedIds.has(node.id))")
+          && canvas.includes('getNodes,\n    getEdges,\n    setNodes,')
+          && canvas.includes('onBeforeDelete={onBeforeDelete}')
+          && promptStart >= 0 && abortResolve > promptStart && abortReturn > abortResolve
+          && deletionTextSettle > abortReturn
+          && boardCancellation > deletionTextSettle
+          && manualRetirement > boardCancellation
+          && activeBoardReferences >= 0
+          && cleanupOnlyReferenceExclusion > activeBoardReferences
+          && edgeConnectedBoardGuard > activeBoardReferences
+          && affectedBoardElection > deletionTextSettle
+          && nullRunCancellation > affectedBoardElection
+          && safeIdleNone > nullRunCancellation
+          && deletionHook.includes('if (!latestBoard || !jobBoardHasCancellableRecovery(latestBoard)) return;')
+          && staleBoardRejected > safeIdleNone
+          && unavailableIdleBoard > staleBoardRejected
+          && staleChildRejected > unavailableIdleBoard
+          && deletionHook.includes('The affected Job Board changed while deletion was pending. Try deleting again.')
+          && deletionHook.includes('active Search changed while deletion was pending. Try deleting again.')
+          && deletionCommit > manualRetirement
+          && queuedDeletionCommit > deletionCommit
+          && deletionHook.includes('return rejectDeletion(\n        error?.manualAiRetirementReceipts,\n        cleanupSnapshotNodes,\n        cleanupWorkflowIds,')
+          && postCommit > deletionCommit
+          && consumeQueuedDeletionCommit > postCommit
+          && postCommitRunDiscard > postCommit
+          && deletionHook.includes('discardDeletedJobAnalysisSnapshots(deletedNodes, canvasFilePath')
+          && deletionHook.includes('Hub deleted with a warning')
+          && clearStart >= 0
+          && clearLifecycleMark > clearStart
+          && clearBoardElection > clearLifecycleMark
+          && clearBoardCancellation > clearBoardElection
+          && clearNullRunCancellation > clearBoardCancellation
+          && clearManualRetirement > clearStart
+          && clearManualRetirement > clearNullRunCancellation
+          && clearFence > clearManualRetirement
+          && clearLivePartition > clearFence
+          && clearConcurrentPartition > clearLivePartition
+          && clearAbortLifecycleSettlement > clearManualRetirement
+          && clearRawCancellation > clearManualRetirement
+          && clearSnapshot > clearRawCancellation
+          && clearVisualCommit > clearSnapshot
+          && canvasActions.includes('error.manualAiRetirementReceipts')
+          && canvasActions.includes('restoreJobWorkflowSnapshots(')
+          && canvasActions.includes('setTimeout(settlePendingLifecycle, 0);')
+          && canvasActions.includes('const retainedNodes = getClearCanvasRetainedNodes(allNodes);')
+          && canvasActions.includes('Clear Canvas preserved nodes added or rewired during acknowledged cleanup.')
+          && canvasActions.includes('(e) => commitRetainedIds.has(e.source) && commitRetainedIds.has(e.target)')
           && canvasActions.includes('discardDeletedJobRuns(')
           && canvasActions.includes('discardDeletedJobAnalysisSnapshots(')
           && canvasActions.includes('Canvas cleared with a warning')
-          && canvasActions.includes('let analysisCleanupWarningShown = false;')
-          && canvasActions.includes('const showJobCleanupWarning = () =>')
-          && canvasActions.includes('const preflightClear = useCallback(async () =>')
-          && canvasActions.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
-          && deletionHook.includes('discardDeletedJobAnalysisSnapshots(deletedNodes, canvasFilePath')
-          && deletionHook.includes('Hub deleted with a warning')
-          && deletionHook.includes('let analysisCleanupWarningShown = false;')
-          && canvas.includes('const { onNodesDelete } = useCanvasOSDeletion({')
-          && canvas.includes('canvasFilePath: currentFile,\n    addToast,')
-          && finalizeStart >= 0 && promptStart > finalizeStart
-          && deletionHook.includes('const settleOrphanTextDocuments = async () =>')
-          && deletionHook.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
-          && deletionPrompt.includes('onConfirm: async () => {\n          if (!await settleOrphanTextDocuments()) return;\n          finalizeNodeDeletion();')
-          && deletionPrompt.includes('onCancel: async () => {\n          if (!await settleOrphanTextDocuments()) return;\n          finalizeNodeDeletion();')
-          && deletionPrompt.includes('onAbort: undo ? () => undo() : undefined')
-          && deletionPrompt.includes('} else {\n      void (async () => {\n        if (!await settleOrphanTextDocuments()) return;\n        finalizeNodeDeletion();'),
-        'interactive deletion and programmatic Clear Canvas settle the last text draft before exact cleanup, while an OS-dialog Abort restores the hub without first discarding its run');
+          && clearPreflight > clearVisualCommit
+          && clearPreflightPartition > clearPreflight
+          && clearTextSettle > clearPreflightPartition
+          && clearTextSettle > clearPreflight
+          && clearInvoke > clearTextSettle,
+        'interactive deletion and Clear Canvas settle text first, acknowledge Board/Search cancellation and durable manual-AI retirement before visual removal, revalidate stale Board ownership without treating cleanup-only receipts as input reservations, restore exact retry receipts on failure, and discard run sidecars only after commit');
         const priorWindow = globalThis.window;
         const cleanupFailures = [];
         try {

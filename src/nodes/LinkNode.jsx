@@ -5,12 +5,14 @@ import { Dialog } from '../components/Dialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
-import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
+import { useToast } from '../components/ToastProvider';
 import { pasteAsPlainText, blurOnEscape } from './_shared/textEditingHandlers';
 
 const URL_LIKE = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i;
 
 export const LinkNode = React.memo(function LinkNode({ id, data }) {
+  const { addToast } = useToast();
   const [showDialog, setShowDialog] = useState(null); // 'url' | null
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
@@ -78,14 +80,21 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [data.url, data.label, updateGlobal, id]);
 
-  const openLink = useCallback(() => {
+  const openLink = useCallback(async () => {
     const target = (data.url || inputRef.current?.innerText || '').trim();
-    if (!target) return;
-    const url = normalizeExternalHttpUrl(target);
-    if (!url) return;
-    if (window.electronAPI?.openExternal) window.electronAPI.openExternal(url);
-    else window.open(url, '_blank');
-  }, [data.url]);
+    const opened = await openExternalUrl(target, {
+      dispatcher: window.electronAPI?.openExternal,
+      fallback: window.open,
+    });
+    if (!opened.ok) {
+      addToast({
+        title: 'Cannot Open Link',
+        description: openExternalFailureMessage(opened),
+        type: 'error',
+        dedupeKey: `link-open-external:${id}`,
+      });
+    }
+  }, [addToast, data.url, id]);
 
   // Single click: open the link, but defer so a follow-up dblclick can cancel.
   const handleClick = useCallback((e) => {

@@ -16,6 +16,7 @@ import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/aut
 import { shouldUseNativeRead, readHubUrlsViaNativeChrome } from './browser/nativeChromeReader.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from './marketplaceBrowserLock.js';
+import { withSharedProfileLock } from './sharedProfileLock.js';
 import { createAggregatingProgress } from './compProgressAggregator.js';
 import { getStatusCacheSync, isConfirmedDisconnectedVerdict, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
@@ -998,7 +999,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     // `comps` = the PRIMARY item (back-compat for any single-comps reader);
     // `items` is the per-item breakdown the renderer prices individually.
     return { items: perItem, comps: perItem[0].comps, scrapeWarnings };
-    }, signal);   // end withMarketplaceBrowserLock — releases the shared browser
+    }, signal, `marketplace price scrape:${nodeId || 'unknown'}`);   // end withMarketplaceBrowserLock — releases the shared browser
     } finally {
       // Bulletproof the hub's "waiting behind N" banner: if this op was aborted
       // while still queued, the in-callback queuedBehind:0 never fired — emit it
@@ -1559,7 +1560,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       warningCount: warning ? 1 : 0,
     };
     return normalizedResult;
-    }, signal);   // end withMarketplaceBrowserLock
+    }, signal, `marketplace source rescrape:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
   });
 
   // ── Resolve captcha / anti-bot challenge that blocked a comp scrape ───────
@@ -1659,7 +1660,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       via: 'inline',
     };
     return { ...result, category, warning: inlineWarning };
-    }, signal);   // end withMarketplaceBrowserLock
+    }, signal, `marketplace captcha resolve:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
   });
 
   // ── Assess platform fit (which marketplaces suit this specific item) ──────
@@ -1808,7 +1809,11 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           if (cached && cached.connected === false) {
             gateReason = cached.lastReason || '';
           } else if (monitorConfig) {
-            const verdict = await verifySellMonitorLogin(platformId).catch(() => null);
+            const verdict = await withSharedProfileLock(
+              () => verifySellMonitorLogin(platformId),
+              signal,
+              `marketplace status verify:${platformId}`,
+            ).catch(() => null);
             // A transient/inconclusive verifier failure is not proof of logout.
             // Continue into the actual hub reads, which report their own transport
             // outcome, instead of poisoning the cache with a false needs-login.
@@ -1857,7 +1862,14 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           urlSpecs = watchUrls.map((url) => ({
             url,
             urlLabel: 'hub',
-            fetcher: (u, sig) => fetchHtmlAuthed(u, { signal: sig }),
+            // Lock only this browser reader, not scanSellerHubPages' later LLM
+            // analysis. Native reads own their own lock above, so never wrap
+            // that branch here or the FIFO would reject nested acquisition.
+            fetcher: (u, sig) => withSharedProfileLock(
+              () => fetchHtmlAuthed(u, { signal: sig }),
+              sig,
+              `marketplace status fetch:${platformId}`,
+            ),
           }));
           logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
         }

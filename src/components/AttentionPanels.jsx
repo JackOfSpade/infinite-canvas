@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight, AlertTriangle, Info, ExternalLink } from 'lucide-react';
-import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
+import { useToast } from './ToastProvider';
 
 /**
  * AttentionPanels — splits AI-surfaced items into two lanes so the visual
@@ -18,6 +19,7 @@ import { normalizeExternalHttpUrl } from '../utils/urlSafety';
  * the per-listing card check.
  */
 export function AttentionPanels({ items }) {
+  const { addToast } = useToast();
   if (!Array.isArray(items) || items.length === 0) return null;
   const urgent = items.filter(i => i.urgency === 'high');
   const info   = items.filter(i => i.urgency !== 'high');
@@ -34,6 +36,7 @@ export function AttentionPanels({ items }) {
             item:  'bg-red-500/10 border-red-500/30',
             text:  'text-red-200',
           }}
+          addToast={addToast}
         />
       )}
       {info.length > 0 && (
@@ -46,13 +49,14 @@ export function AttentionPanels({ items }) {
             item:  'bg-sky-500/[0.07] border-sky-500/20',
             text:  'text-sky-100',
           }}
+          addToast={addToast}
         />
       )}
     </div>
   );
 }
 
-function AttentionLane({ items, label, icon, accent, defaultOpen = false }) {
+function AttentionLane({ items, label, icon, accent, defaultOpen = false, addToast }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div>
@@ -87,9 +91,19 @@ function AttentionLane({ items, label, icon, accent, defaultOpen = false }) {
               )}
               {item.sourceUrl && (
                 <button
-                  onClick={() => {
-                    const url = normalizeExternalHttpUrl(item.sourceUrl);
-                    if (url) window.electronAPI?.openExternal?.(url);
+                  onClick={async () => {
+                    const opened = await openExternalUrl(item.sourceUrl, {
+                      dispatcher: window.electronAPI?.openExternal,
+                      fallback: window.open,
+                    });
+                    if (!opened.ok) {
+                      addToast({
+                        title: 'Cannot Open Page',
+                        description: openExternalFailureMessage(opened),
+                        type: 'error',
+                        dedupeKey: 'attention-open-external',
+                      });
+                    }
                   }}
                   onPointerDown={(e) => e.stopPropagation()}
                   className="nodrag mt-1 flex items-center gap-1 px-1.5 py-0.5 rounded border border-white/15 bg-white/5 hover:bg-white/15 text-white/70 text-[9px] font-medium transition-colors"

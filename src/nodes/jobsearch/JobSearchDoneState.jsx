@@ -31,8 +31,11 @@ export function JobSearchDoneState({
   platformsVerifying = false,
   verifyDone = 0,
   verifyTotal = 0,
+  // A connected Job Board owns fresh-search admission and queueing. This card
+  // remains the editor for its source/search settings and saved results.
+  managedByJobBoard = false,
   // Action props
-  onRerun,
+  onRerun = null,
   // Reassesses the saved listings only; it does not scrape or run the
   // duplicate/seen-job search path again.
   onReanalyze = null,
@@ -187,7 +190,9 @@ export function JobSearchDoneState({
         <div className="flex items-start gap-1.5 mt-2 px-2 py-1.5 rounded-md bg-indigo-500/10 border border-indigo-500/15 w-full">
           <LayoutGrid size={11} className="text-indigo-300/70 shrink-0 mt-0.5" />
           <p className="text-indigo-200/70 text-[10px] leading-snug">
-            Connect a <span className="font-medium">Job Board Module</span> to view & merge these results.
+            {managedByJobBoard
+              ? <>Use the connected <span className="font-medium">Job Board Module</span> to refresh and merge results.</>
+              : <>Connect a <span className="font-medium">Job Board Module</span> to view & merge these results.</>}
           </p>
         </div>
       )}
@@ -216,20 +221,26 @@ export function JobSearchDoneState({
               Re-evaluate Saved Jobs
             </button>
           )}
-          <button
-            onClick={onRerun}
-            onPointerDown={(e) => e.stopPropagation()}
-            disabled={platformsVerifying}
-            className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15 disabled:cursor-wait disabled:opacity-50"
-            title={platformsVerifying
-              ? 'Waiting for the selected job platform connection check'
-              : 'Clear old results and re-run the search with the same resume'}
-          >
-            <RefreshCw size={9} className={platformsVerifying ? 'animate-spin' : ''} />
-            {platformsVerifying
-              ? `Checking connections${verifyTotal > 0 ? ` (${verifyDone}/${verifyTotal})` : ''}…`
-              : 'Re-run Search'}
-          </button>
+          {managedByJobBoard ? (
+            <p className="px-2 py-1 text-center text-[10px] leading-snug text-blue-200/55">
+              Fresh searches are queued from the connected Job Board.
+            </p>
+          ) : onRerun ? (
+            <button
+              onClick={onRerun}
+              onPointerDown={(e) => e.stopPropagation()}
+              disabled={platformsVerifying}
+              className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15 disabled:cursor-wait disabled:opacity-50"
+              title={platformsVerifying
+                ? 'Waiting for the selected job platform connection check'
+                : 'Clear old results and re-run the search with the same resume'}
+            >
+              <RefreshCw size={9} className={platformsVerifying ? 'animate-spin' : ''} />
+              {platformsVerifying
+                ? `Checking connections${verifyTotal > 0 ? ` (${verifyDone}/${verifyTotal})` : ''}…`
+                : 'Re-run Search'}
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -246,7 +257,7 @@ export function JobSearchDoneState({
         </button>
       )}
 
-      {/* Target role + Look back — both feed the next Re-run Search */}
+      {/* Target role + Look back — both feed the next coordinated search. */}
       {!locked && (
         <div className="nodrag w-full mt-2 flex flex-col items-stretch gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
           <label className="flex flex-col gap-1 text-[10px] text-white/40">
@@ -260,7 +271,7 @@ export function JobSearchDoneState({
               aria-describedby={targetRoleHelpId}
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
             />
-            <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role on the next re-run.</span>
+            <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role on the next {managedByJobBoard ? 'Board scan' : 're-run'}.</span>
           </label>
           <label className="flex flex-col gap-1 text-[10px] text-white/40">
             <span>Job Preferences <span className="text-white/25">(optional)</span></span>
@@ -275,7 +286,7 @@ export function JobSearchDoneState({
               className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25 leading-snug"
             />
             <span id={preferencesHelpId} className="text-[9px] leading-snug text-white/25">
-              Applies on the next re-run and saved-job re-evaluation. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
+              Applies on the next {managedByJobBoard ? 'Board scan' : 're-run'} and saved-job re-evaluation. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
             </span>
           </label>
           <JobSearchLocationFields

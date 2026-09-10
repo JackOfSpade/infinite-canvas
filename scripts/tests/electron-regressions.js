@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
 import {
   abortNodeTasks,
+  abortNodeTasksAndWait,
   assert,
   assertDeleteTargetNotRepresented,
   atomicWriteFile,
@@ -878,6 +879,40 @@ export default [
       assert(result.success === false && result.error === 'Node deleted',
         `node deletion must return its own reason, got ${JSON.stringify(result)}`);
       return { error: result.error };
+    },
+  },
+  {
+    name: 'IPC safe handler: acknowledged cancellation waits for the exact handler cleanup boundary',
+    run: async () => {
+      electronPkg.ipcMain.__clearInvokeHandlers();
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      handleSafe('test:acknowledged-node-cancel', async () => {
+        await gate;
+        return { data: 'must not escape after abort' };
+      });
+      const event = senderEvent();
+      const handler = electronPkg.ipcMain.__getInvokeHandler('test:acknowledged-node-cancel');
+      const pending = handler(event, { nodeId: 'transactional-node' });
+      await Promise.resolve();
+
+      let acknowledgementSettled = false;
+      const acknowledgementPromise = abortNodeTasksAndWait('transactional-node', event.sender, undefined, 1_000)
+        .then((value) => {
+          acknowledgementSettled = true;
+          return value;
+        });
+      await Promise.resolve();
+      assert(!acknowledgementSettled,
+        'acknowledged cancellation must not resolve merely because the AbortSignal fired while the handler is still draining');
+
+      release();
+      const [acknowledgement, result] = await Promise.all([acknowledgementPromise, pending]);
+      assert(acknowledgement.abortedCount === 1 && acknowledgement.settled === true
+        && result.success === false && result.error === 'Node deleted'
+        && snapshotActiveNodeTasks(event.sender.id).length === 0,
+      `acknowledgement must follow handleSafe finally and leave no retained task, got ${JSON.stringify({ acknowledgement, result })}`);
+      return { acknowledgedAfterFinally: true };
     },
   },
   {

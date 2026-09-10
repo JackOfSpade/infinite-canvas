@@ -16,6 +16,7 @@ import { getClaudeCacheTelemetry } from './claudeCacheTelemetry.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
 import { getStatusCheckQueueDepth } from './statusCheckLock.js';
+import { getSharedProfileLockSnapshot } from './sharedProfileLock.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
@@ -1698,9 +1699,16 @@ function buildAuthWindowMarkdown() {
         // scrape; report the scraper's own process instead of inferring.
         const ms = getManualScraperTelemetry?.() || {};
         const scrapeChrome = ms.browser?.running ? ms.browser : null;
+        const profileLock = getSharedProfileLockSnapshot?.() || {};
+        const activeProfileWorkflow = profileLock.active || null;
+        const fifoNote = activeProfileWorkflow
+          ? ` · app FIFO active: \`${truncateDiagnosticText(String(activeProfileWorkflow.label || 'unnamed workflow').replace(/`/g, "'"), 120)}\` for ${Number.isFinite(activeProfileWorkflow.since) ? `${Math.max(0, Math.round((Date.now() - activeProfileWorkflow.since) / 1000))}s` : 'an unknown duration'}${Number.isFinite(profileLock.queueDepth) ? ` (queue depth ${profileLock.queueDepth})` : ''}`
+          : '';
         const lockNote = scrapeChrome
-          ? `⚪ singleton not running — but the job scraper's OWN Chrome is 🟢 running (pid ${scrapeChrome.pid ?? '—'}, launched ${scrapeChrome.launchedAt ? `${Math.round((Date.now() - scrapeChrome.launchedAt) / 1000)}s ago` : '—'}) on the shared profile, so the profile lock is **held**`
-          : '⚪ not running (no scrape browser of either kind — profile lock free)';
+          ? `⚪ singleton not running — but the job scraper's OWN Chrome is 🟢 running (pid ${scrapeChrome.pid ?? '—'}, launched ${scrapeChrome.launchedAt ? `${Math.round((Date.now() - scrapeChrome.launchedAt) / 1000)}s ago` : '—'}) on the shared profile, so the profile lock is **held**${fifoNote}`
+          : activeProfileWorkflow
+            ? `⚪ no owned Chrome process is currently reported; app FIFO ownership is active${fifoNote}`
+            : '⚪ no owned Chrome process is currently reported (profile availability not independently verified)';
         stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : lockNote}\n`;
       } catch { /* ignore */ }
       // A visible login/captcha window may reserve the profile before Chrome is
@@ -2243,6 +2251,30 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     }
   };
   collectCurrentNodeIds(nodes);
+  // Snapshot discovery is more specific than presence correlation: only a
+  // Job Search hub can own an analysis bundle. Prefer the deep renderer index
+  // (which survives filtered reports), then recover it from unfiltered nodes.
+  const currentJobHubIds = new Set();
+  for (const nodeId of Array.isArray(payload?.filterStats?.currentJobHubIds)
+    ? payload.filterStats.currentJobHubIds
+    : []) {
+    if (typeof nodeId === 'string' && nodeId) currentJobHubIds.add(nodeId);
+  }
+  const collectCurrentJobHubIds = (items) => {
+    for (const node of Array.isArray(items) ? items : []) {
+      if (node?.type === 'jobhub' && typeof node.id === 'string' && node.id) currentJobHubIds.add(node.id);
+      collectCurrentJobHubIds(node?.data?.canvasData?.nodes);
+    }
+  };
+  collectCurrentJobHubIds(nodes);
+  // Older renderer builds did not send the typed index. Retain their recovery
+  // visibility when the filter says this is a job canvas; current builds always
+  // supply `currentJobHubIds`, which is the ownership-safe path above.
+  if (currentJobHubIds.size === 0
+    && !Array.isArray(payload?.filterStats?.currentJobHubIds)
+    && payload?.filterStats?.hasJobNodes) {
+    for (const nodeId of currentNodeIds) currentJobHubIds.add(nodeId);
+  }
   // Local AI status is persisted on job cards rather than the main-process
   // telemetry singleton. Include it in HANDOFF/FULL so a validation rejection
   // after a Local AI rewrite is not mistaken for a missed file poll.
@@ -2272,7 +2304,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // it exists purely as this marker.
   const omitJobAudit = sectionOmitted('jobAuditDetail');
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications, omitJobAudit, currentJobHubIds); }
   catch { /* never break the report on diagnostic failure */ }
 
   // Its own top-level section, deliberately ordered before the Job Search
@@ -2299,7 +2331,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // This remains useful even when the live pipeline section self-gates to ''.
   let jobRecoveryMarkdown = '';
   if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE')) {
-    try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds); }
+    try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds, currentJobHubIds, reportWindowId); }
     catch { jobRecoveryMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Diagnostics', new Error('could not inspect recovery sidecars')); }
   }
 
@@ -2355,6 +2387,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         currentNodeIds,
         jobBoardStates,
         payload.filterStats?.jobBoardStateCount,
+        currentJobHubIds,
+        reportWindowId,
       );
     }
     catch { jobCompletionAssessmentMarkdown = diagnosticRenderFailureMarkdown('Job Completion Assessment', new Error('could not reconcile job completion facts')); }

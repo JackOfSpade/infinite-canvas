@@ -21,8 +21,9 @@
 // Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
 // in the plain-node test runner.
 //
-// Implementation shared with marketplaceBrowserLock.js / statusCheckLock.js —
-// see asyncMutex.js for the FIFO + reentrancy-guard mechanics.
+// Marketplace work uses THIS same mutex too: it drives the same profile even
+// though it normally uses the retained browser rather than a fresh process.
+// See asyncMutex.js for the FIFO + reentrancy-guard mechanics.
 import { createFifoLock } from './asyncMutex.js';
 
 // Browser work may sit behind a long-running visible login or scrape. Make
@@ -44,6 +45,11 @@ const lock = createFifoLock({ name: 'sharedProfileLock', supportsAbort: true });
  * @param {AbortSignal|null} [signal] - optional cancellation while queued
  * @returns {Promise<T>}
  */
-export function withSharedProfileLock(fn, signal = null) {
-  return lock.withLock(fn, signal);
+export function withSharedProfileLock(fn, signal = null, label = 'job/shared-profile workflow') {
+  return lock.withLock(fn, signal, { label });
+}
+
+/** Bounded diagnostic-only state for reports and collision logs. */
+export function getSharedProfileLockSnapshot() {
+  return lock.getSnapshot();
 }

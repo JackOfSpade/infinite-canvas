@@ -15,12 +15,14 @@
 // false block). The user's symptom for the un-serialized version: "queue went
 // next before the previous price check was completely done."
 //
-// DELIBERATELY separate from the other two browser queues:
+// DELIBERATELY separate from the status-check queue:
 //   - statusCheckLock (buy-side listing status checks) settles on bounded fetch
 //     timeouts and must NOT wait behind an indefinite captcha-wait — see
 //     statusCheckLock.js for exactly why those two were kept apart.
-//   - withSharedProfileLock guards job scrapers that own a separate Chrome
-//     PROCESS; sell-side ops share the one persistent stealth browser via tabs.
+// Marketplace and job work DO share the profile FIFO below. Job scrapers own a
+// fresh Chrome PROCESS while marketplace work uses the retained browser, but
+// both touch the same userDataDir and either can close/release it for a visible
+// challenge window.
 //
 // Unlike statusCheckLock, THIS queue CAN be held across an indefinite captcha
 // wait (a resolve window the user hasn't solved/closed). That is acceptable —
@@ -34,11 +36,7 @@
 // Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
 // in the plain-node test runner.
 //
-// Implementation shared with sharedProfileLock.js / statusCheckLock.js — see
-// asyncMutex.js for the FIFO + reentrancy-guard mechanics.
-import { createFifoLock } from './asyncMutex.js';
-
-const lock = createFifoLock({ name: 'marketplaceBrowserLock', supportsAbort: true });
+import { getSharedProfileLockSnapshot, withSharedProfileLock } from './sharedProfileLock.js';
 
 /**
  * Run `fn` exclusively with respect to all other withMarketplaceBrowserLock
@@ -53,8 +51,11 @@ const lock = createFifoLock({ name: 'marketplaceBrowserLock', supportsAbort: tru
  *   check that queued behind a long captcha-resolve drop out without scraping.
  * @returns {Promise<T>}
  */
-export function withMarketplaceBrowserLock(fn, signal = null) {
-  return lock.withLock(fn, signal);
+export function withMarketplaceBrowserLock(fn, signal = null, label = 'marketplace browser workflow') {
+  // This is intentionally a thin alias rather than a second lock. Nesting it
+  // under withSharedProfileLock (or vice versa) is detected by the one lock's
+  // existing reentrancy guard instead of silently deadlocking.
+  return withSharedProfileLock(fn, signal, label);
 }
 
 /**
@@ -64,5 +65,5 @@ export function withMarketplaceBrowserLock(fn, signal = null) {
  * @returns {number}
  */
 export function getMarketplaceBrowserQueueDepth() {
-  return lock.getQueueDepth();
+  return getSharedProfileLockSnapshot().queueDepth;
 }

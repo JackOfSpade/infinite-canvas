@@ -16,6 +16,12 @@ export function getCurrentIpcRequestContext() {
   return ipcRequestContext.getStore() || null;
 }
 
+// Test seam for exercising main-process helpers that rely on the same request
+// context as handleSafe, without registering a real Electron IPC handler.
+export function __runWithIpcRequestContextForTests(context, callback) {
+  return ipcRequestContext.run(context || null, callback);
+}
+
 // ── Node Task Registry ──────────────────────────────────────────────────────
 // WebContents -> Map<nodeId, Map<AbortController, { registeredAt, channel }>>.
 // Node IDs are unique only inside one canvas. Keying this registry globally by
@@ -24,22 +30,83 @@ export function getCurrentIpcRequestContext() {
 // diagnostics take an app-wide snapshot.
 const nodeTasks = new Map();
 const taskRegistrySenders = new WeakSet();
+// Aborted controllers remain registered until their handleSafe `finally` runs.
+// That makes repeated acknowledged cancellation join the same cleanup barrier
+// instead of falsely reporting success merely because an earlier raw abort
+// removed the registry row first.
+const nodeTaskSettlements = new WeakMap();
+// A renderer can crash after acknowledged cancellation returns its manual-AI
+// run ids but before it copies them into canvas recovery state. Keep that exact
+// acknowledgement in the main process until durable handoff completion confirms
+// each id. Scope by WebContents as well as node id: canvas-local node ids may
+// collide across windows. Refuse overflow instead of evicting an uncompleted id.
+const acknowledgedManualAiRunIds = new WeakMap();
+const MAX_ACKNOWLEDGED_MANUAL_AI_RUNS_PER_NODE = 256;
+const MAX_ACKNOWLEDGED_MANUAL_AI_RUNS_PER_SENDER = 2_048;
+
+function normalizedManualAiRunIds(runIds) {
+  return [...new Set((Array.isArray(runIds) ? runIds : [])
+    .filter(runId => typeof runId === 'string' && runId && runId.length <= 160))];
+}
+
+function retainAcknowledgedManualAiRunIds(sender, nodeId, runIds) {
+  const discovered = normalizedManualAiRunIds(runIds);
+  if (!sender || !nodeId) return discovered;
+  ensureSenderRegistryCleanup(sender);
+  let byNode = acknowledgedManualAiRunIds.get(sender);
+  if (!byNode && discovered.length === 0) return [];
+  if (!byNode) {
+    byNode = new Map();
+    acknowledgedManualAiRunIds.set(sender, byNode);
+  }
+  const existing = byNode.get(nodeId) || new Set();
+  const additions = discovered.filter(runId => !existing.has(runId));
+  const senderTotal = [...byNode.values()].reduce((sum, ids) => sum + ids.size, 0);
+  if (
+    existing.size + additions.length > MAX_ACKNOWLEDGED_MANUAL_AI_RUNS_PER_NODE
+    || senderTotal + additions.length > MAX_ACKNOWLEDGED_MANUAL_AI_RUNS_PER_SENDER
+  ) {
+    const error = new Error('Too many acknowledged manual-AI runs are awaiting durable cleanup.');
+    error.code = 'MANUAL_AI_ACKNOWLEDGEMENT_CAPACITY';
+    throw error;
+  }
+  for (const runId of additions) existing.add(runId);
+  if (existing.size > 0) byNode.set(nodeId, existing);
+  return [...existing];
+}
+
+export function releaseAcknowledgedManualAiRunIds(sender, runIds) {
+  const completed = new Set(normalizedManualAiRunIds(runIds));
+  const byNode = sender ? acknowledgedManualAiRunIds.get(sender) : null;
+  if (!byNode || completed.size === 0) return 0;
+  let released = 0;
+  for (const [nodeId, ids] of byNode) {
+    for (const runId of completed) {
+      if (ids.delete(runId)) released += 1;
+    }
+    if (ids.size === 0) byNode.delete(nodeId);
+  }
+  if (byNode.size === 0) acknowledgedManualAiRunIds.delete(sender);
+  return released;
+}
 
 function ensureSenderRegistryCleanup(sender) {
   if (!sender || taskRegistrySenders.has(sender)) return;
   taskRegistrySenders.add(sender);
   sender.once('destroyed', () => {
     const tasks = nodeTasks.get(sender);
-    if (!tasks) return;
-    for (const controllers of tasks.values()) {
-      for (const ac of controllers.keys()) {
-        if (!ac.signal.aborted) ac.abort(new Error('Sender destroyed'));
+    if (tasks) {
+      for (const controllers of tasks.values()) {
+        for (const ac of controllers.keys()) {
+          if (!ac.signal.aborted) ac.abort(new Error('Sender destroyed'));
+        }
       }
     }
     // A handler is expected to settle cooperatively, but a broken dependency
     // can ignore AbortSignal forever. Do not retain the destroyed WebContents
     // in diagnostics/registry state while waiting for that detached promise.
     nodeTasks.delete(sender);
+    acknowledgedManualAiRunIds.delete(sender);
   });
 }
 
@@ -56,14 +123,23 @@ function senderTaskMap(sender, create = false) {
  * Register an AbortController for a specific node.
  * Allows cancelling background tasks (e.g. search, analysis) when the node is deleted.
  */
-function registerNodeTask(sender, nodeId, ac, channel) {
+function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null) {
   if (!sender || !nodeId) return;
   ensureSenderRegistryCleanup(sender);
   const tasks = senderTaskMap(sender, true);
   if (!tasks.has(nodeId)) {
     tasks.set(nodeId, new Map());
   }
-  tasks.get(nodeId).set(ac, { registeredAt: Date.now(), channel: channel || null });
+  let resolveSettled;
+  const settled = new Promise(resolve => { resolveSettled = resolve; });
+  nodeTaskSettlements.set(ac, { settled, resolveSettled });
+  tasks.get(nodeId).set(ac, {
+    registeredAt: Date.now(),
+    channel: channel || null,
+    manualAiRunId: typeof manualAiRunId === 'string' && manualAiRunId
+      ? manualAiRunId
+      : null,
+  });
   logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId}`);
 }
 
@@ -78,6 +154,9 @@ function unregisterNodeTask(sender, nodeId, ac) {
     if (set.size === 0) tasks.delete(nodeId);
     if (tasks.size === 0) nodeTasks.delete(sender);
   }
+  const settlement = nodeTaskSettlements.get(ac);
+  settlement?.resolveSettled?.();
+  nodeTaskSettlements.delete(ac);
 }
 
 /**
@@ -115,9 +194,52 @@ export function abortNodeTasks(nodeId, sender = null, reason = nodeCancellationE
     for (const ac of set.keys()) {
       ac.abort(reason);
     }
-    tasks.delete(nodeId);
-    if (tasks.size === 0) nodeTasks.delete(owner);
   }
+}
+
+/**
+ * Abort one sender's node-scoped handlers and wait until their `handleSafe`
+ * finally blocks have run. The bounded wait reports failure rather than claiming
+ * cancellation completed while a non-cooperative handler is still draining.
+ */
+export async function abortNodeTasksAndWait(
+  nodeId,
+  sender,
+  reason = nodeCancellationError(),
+  timeoutMs = 30_000,
+) {
+  const tasks = senderTaskMap(sender);
+  const entries = [...(tasks?.get(nodeId)?.entries() || [])];
+  const controllers = entries.map(([controller]) => controller);
+  const activeManualAiRunIds = [...new Set(
+    entries.map(([, meta]) => meta?.manualAiRunId).filter(Boolean),
+  )];
+  // Retain before firing AbortSignal. A cooperative handler can unregister in
+  // the same turn; later retries must still recover these ids even after that
+  // active registry row has disappeared.
+  const manualAiRunIds = retainAcknowledgedManualAiRunIds(
+    sender,
+    nodeId,
+    activeManualAiRunIds,
+  );
+  const settlements = controllers
+    .map(controller => nodeTaskSettlements.get(controller)?.settled)
+    .filter(Boolean);
+  abortNodeTasks(nodeId, sender, reason);
+  if (settlements.length === 0) {
+    return { abortedCount: controllers.length, settled: true, manualAiRunIds };
+  }
+
+  let timeoutId = null;
+  const timeout = new Promise(resolve => {
+    timeoutId = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs) || 30_000));
+  });
+  const settled = await Promise.race([
+    Promise.allSettled(settlements).then(() => true),
+    timeout,
+  ]);
+  if (timeoutId) clearTimeout(timeoutId);
+  return { abortedCount: controllers.length, settled, manualAiRunIds };
 }
 
 /**
@@ -236,7 +358,13 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
     const nodeId = args?.nodeId;
     
     if (nodeId) {
-      registerNodeTask(event.sender, nodeId, ac, channel);
+      registerNodeTask(
+        event.sender,
+        nodeId,
+        ac,
+        channel,
+        typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
+      );
     }
 
     try {

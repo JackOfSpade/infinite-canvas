@@ -2,6 +2,7 @@ import { getNodeDims } from './constants.js';
 import { createdAtMsFromCardId } from './priceDropReminder.js';
 import {
   getJobSearchTransientKeysForSave,
+  JOBBOARD_TRANSIENT_KEYS,
   SELLHUB_TRANSIENT_KEYS,
   TRANSIENT_PROCESSING_HUB_STATES,
 } from './persistenceTransientState.js';
@@ -444,12 +445,23 @@ export function sanitizeNodesForSave(nodes) {
     }
 
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.
-    // Also strip all transient data fields (isDropTarget, _hmr) from this group node.
+    // Also strip all transient data fields from this group node. The rollback
+    // receipt is renderer-only state used to rehydrate a source card's local
+    // run guard; persisting it would make a later reload look like a rollback.
     if (n.type === 'group' && n.data?.canvasData) {
       const innerNodes = n.data.canvasData.nodes || [];
       const sanitizedInner = sanitizeNodesForSave(innerNodes);
-      const { isDropTarget: _idt, _hmr: _h, ...cleanData } = n.data || {};
-      const hasTransientData = n.data && ('isDropTarget' in n.data || '_hmr' in n.data);
+      const {
+        isDropTarget: _idt,
+        _hmr: _h,
+        _boardRollbackProgressRestore: _rollbackProgressRestore,
+        ...cleanData
+      } = n.data || {};
+      const hasTransientData = n.data && (
+        'isDropTarget' in n.data
+        || '_hmr' in n.data
+        || '_boardRollbackProgressRestore' in n.data
+      );
       if (hasTransientData || sanitizedInner !== n.data.canvasData.nodes) {
         changed = true;
         out.push({
@@ -468,8 +480,14 @@ export function sanitizeNodesForSave(nodes) {
     // For all node types: strip transient display state in a single pass.
     // - isDropTarget: drag-hover highlight set by DnD handlers, never saved.
     // - _hmr: HMR invalidation token set by the dev-only HMR hook, never saved.
+    // - _boardRollbackProgressRestore: in-memory receipt used to restore a
+    //   source card's local progress generation after Board cancellation.
     // - style.opacity (jobcard only): set transiently by toggleSourceFilter.
-    const hasTransientData = n.data && ('isDropTarget' in n.data || '_hmr' in n.data);
+    const hasTransientData = n.data && (
+      'isDropTarget' in n.data
+      || '_hmr' in n.data
+      || '_boardRollbackProgressRestore' in n.data
+    );
     const hasTransientOpacity = n.type === 'jobcard' && n.style?.opacity !== undefined;
 
     // Reset stuck *processing* states so hubs auto-restart gracefully on reload.
@@ -479,6 +497,7 @@ export function sanitizeNodesForSave(nodes) {
     // can resume. Its recovery buffers (pendingJobs / scrapeWarnings) are kept
     // by the conditional key list below; only the error banner is stripped.
     const isJobSearch = n.type === 'jobhub';
+    const isJobBoard = n.type === 'jobboard';
     const isSellHub = n.type === 'sellhub';
     const isHub = isJobSearch || isSellHub;
     const hasTransientHubState = isHub && n.data && TRANSIENT_PROCESSING_HUB_STATES.includes(n.data.hubState);
@@ -516,21 +535,30 @@ export function sanitizeNodesForSave(nodes) {
     // the pending flag is stripped, so a reloaded priced hub renders its verdicts
     // immediately (or, if none were saved, the unfiltered list).
     const hasSellHubTransient = isSellHub && n.data && SELLHUB_TRANSIENT_KEYS.some(k => k in n.data);
+    const hasJobBoardTransient = isJobBoard && n.data && JOBBOARD_TRANSIENT_KEYS.some(k => k in n.data);
 
-    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobSearchTransient && !hasSellHubTransient) {
+    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobSearchTransient && !hasSellHubTransient && !hasJobBoardTransient) {
       out.push(n);
       continue;
     }
 
     let result = n;
-    if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient) {
-      const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
+    if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient || hasJobBoardTransient) {
+      const {
+        isDropTarget: _idt,
+        _hmr: _h,
+        _boardRollbackProgressRestore: _rollbackProgressRestore,
+        ...cleanData
+      } = result.data || {};
       if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';
       if (hasJobSearchTransient) {
         for (const k of JOBSEARCH_TRANSIENT_KEYS) delete cleanData[k];
       }
       if (hasSellHubTransient) {
         for (const k of SELLHUB_TRANSIENT_KEYS) delete cleanData[k];
+      }
+      if (hasJobBoardTransient) {
+        for (const k of JOBBOARD_TRANSIENT_KEYS) delete cleanData[k];
       }
       result = { ...result, data: cleanData };
     }

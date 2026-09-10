@@ -95,6 +95,7 @@ export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAn
     preferenceCandidatePool: null,
     canonicalLocation: null,
     locationSnapshot: null,
+    terminalFinalizationRecovery: null,
     // Kept separately from career identity because it fences a canvas-scoped
     // sidecar that might otherwise arrive after this hub is cleared.
     jobAnalysisClearedAt,
@@ -120,6 +121,11 @@ export function getHubDropLockReason(hub) {
 
   const data = hub.data || {};
   if (data.locked) return 'locked';
+  if (hub.type === 'jobhub' && (
+    data.manualAiResume?.retirementPending
+    || (Array.isArray(data.manualAiCleanupReceipts)
+      && data.manualAiCleanupReceipts.some(receipt => receipt?.cancellationPending === true))
+  )) return 'busy';
 
   const hubState = data.hubState || 'empty';
   if (ACTIVE_INPUT_STATES.has(hubState)) return 'busy';

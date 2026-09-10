@@ -39,6 +39,7 @@ import job_run_staging from './tests/job-run-staging.js';
 import job_api_probe from './tests/job-api-probe.js';
 import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
 import packaging_integrity from './tests/packaging-integrity.js';
+import solve_ipc_failure from './tests/solve-ipc-failure.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -83,6 +84,7 @@ const testGroups = [
   ['job-api-probe.js', job_api_probe],
   ['application-pdf-reconcile.js', application_pdf_reconcile],
   ['packaging-integrity.js', packaging_integrity],
+  ['solve-ipc-failure.js', solve_ipc_failure],
 ];
 
 function validateTestRegistry(groups) {

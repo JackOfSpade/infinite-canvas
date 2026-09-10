@@ -23,6 +23,7 @@ import { isLoginUrlPath } from './browser/authWindows.js';
 import { logger } from '../logger.js';
 import { MARKETPLACE_HUB_SCAN_SCHEMA } from './aiSchemas.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
+import { withSharedProfileLock } from './sharedProfileLock.js';
 
 // Structural thresholds (absolute by design — not page-baseline candidates):
 //   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
@@ -34,9 +35,13 @@ const MIN_CONTENT_CHARS    = 200;
 // and share its verdict — otherwise we'd race four `fetchHtmlClean` calls
 // against each other and against any in-flight Settings re-verify.
 const _inFlightVerifies = new Map(); // platformId → Promise<verdict>
-function verifyPlatformOnce(platformId) {
+function verifyPlatformOnce(platformId, signal = null) {
   if (_inFlightVerifies.has(platformId)) return _inFlightVerifies.get(platformId);
-  const p = verifySellMonitorLogin(platformId).finally(() => {
+  const p = withSharedProfileLock(
+    () => verifySellMonitorLogin(platformId, { signal }),
+    signal,
+    `marketplace status disambiguate:${platformId}`,
+  ).finally(() => {
     _inFlightVerifies.delete(platformId);
   });
   _inFlightVerifies.set(platformId, p);
@@ -62,7 +67,7 @@ function verifyPlatformOnce(platformId) {
  *
  * Returns `{ status, message, warning? }` matching the existing result shape.
  */
-async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlLabel }) {
+async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlLabel, signal = null }) {
   const finalLower = String(finalUrl || url).toLowerCase();
   const onLoginUrl = isLoginUrlPath(finalLower);
 
@@ -83,8 +88,12 @@ async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlL
   // logged-in user to "log in via Settings" (the exact contradiction reported).
   let verdict;
   try {
-    verdict = await verifyPlatformOnce(platformId);
+    verdict = await verifyPlatformOnce(platformId, signal);
   } catch (e) {
+    // A cancelled status scan must remain cancelled all the way to its handler;
+    // converting the lock's AbortError into "needs login" would both poison the
+    // visible result and make a deleted node look like an auth failure.
+    if (signal?.aborted || e?.name === 'AbortError') throw e;
     logger.warn(`[ListingStatusCheck] verifier threw for ${platformId} (assuming auth wall):`, e?.message || String(e));
     return needsLogin();
   }
@@ -420,7 +429,7 @@ export async function scanSellerHubPages({ urlSpecs, platformId, signal, llmText
     }
     const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url, html: r.html, platformId });
     if (authWallSignal) {
-      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel });
+      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel, signal });
       return {
         spec,
         terminal: {

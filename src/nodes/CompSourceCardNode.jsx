@@ -1,11 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
-import { mergeSourceProgress } from '../utils/sourceProgress';
+import { isTerminalSourceStatus, mergeSourceProgress } from '../utils/sourceProgress';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { useToast } from '../components/ToastProvider';
+import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage, warningForSolveIpcFailure } from '../utils/solveIpcFailure';
+import { EventLogger } from '../utils/EventLogger';
 
 /**
  * CompSourceCardNode — ephemeral card spawned by SellHubNode during price
@@ -44,7 +47,16 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
   // warn-severity Retry button so a second Retry greys out + reads "Queued…"
   // instead of firing a duplicate rescrape.
   const [resolveState, setResolveState] = useState('idle');
+  // A failure may return after a newer backend progress event. Keep the card
+  // on that newer truth rather than restoring the snapshot from this click.
+  const progressRevisionRef = useRef(0);
+  const resolveAttemptRef = useRef(0);
+  // React state is not synchronous within a double-click. This ref closes the
+  // gap before `resolving` re-renders so one gesture cannot queue two visible
+  // Chrome windows on the shared profile.
+  const resolveInFlightRef = useRef(false);
   const { deleteElements, updateNodeData } = useReactFlow();
+  const { addToast } = useToast();
 
   // The card can be dismissed by the hub's grace timer while a Solve/Retry IPC
   // is still in flight; guard the finally setState so it doesn't run after
@@ -70,6 +82,7 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
       // Filter twice — by hub (multi-hub safety) and by source (only my row).
       if (payload?.nodeId && payload.nodeId !== data.hubId) return;
       if (payload?.sourceId !== data.sourceId) return;
+      progressRevisionRef.current += 1;
       // Carry warning + url forward across events — see mergeSourceProgress
       // for the rationale (per-source completion events sometimes omit fields
       // the earlier scrape-progress event carried).
@@ -157,15 +170,54 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
     // a second Solve click can fire once `resolving` flips back to false but the hub's
     // drain of the first solve is still mid-flight, opening a redundant shared-profile
     // browser window whose result gets silently discarded by enqueueUniqueSourceResolve.
-    if (resolving || hubLocked || resolveState !== 'idle' || !progress?.url || !window.electronAPI?.resolveCaptcha) return;
+    if (resolving || resolveInFlightRef.current || hubLocked || resolveState !== 'idle' || !progress?.url || !window.electronAPI?.resolveCaptcha) return;
+    resolveInFlightRef.current = true;
+    const previousProgress = progress;
+    const progressRevision = progressRevisionRef.current;
+    const attempt = ++resolveAttemptRef.current;
     setQueuedAhead(0);
     setResolving(true);
+    const showSolveFailure = (result) => {
+      if (isSolveIpcCancellation(result)) {
+        EventLogger.log(`[CompSource][${data.hubId}/${data.sourceId}] Solve cancelled by lifecycle`);
+        return;
+      }
+      const message = solveIpcFailureMessage(result);
+      if (!isMountedRef.current || resolveAttemptRef.current !== attempt
+        || progressRevisionRef.current !== progressRevision) return;
+      EventLogger.error(`[CompSource][${data.hubId}/${data.sourceId}] Solve IPC failed:`, result?.error || message);
+      setProgress(prev => {
+        // A later terminal/progress event belongs to a newer backend fact. Do
+        // not replace it with the pre-click warning merely because this older
+        // IPC invocation eventually failed.
+        if (progressRevisionRef.current !== progressRevision
+          || (prev?.jobRunId && previousProgress?.jobRunId && prev.jobRunId !== previousProgress.jobRunId)
+          || (prev !== previousProgress && isTerminalSourceStatus(prev?.status))) return prev;
+        return prev ? {
+          ...previousProgress,
+          status: 'error',
+          warning: warningForSolveIpcFailure(previousProgress?.warning, result),
+        } : prev;
+      });
+      addToast({
+        title: 'Solve could not open',
+        description: message,
+        type: 'error',
+        dedupeKey: `comp-solve-failed:${data.hubId}:${data.sourceId}`,
+      });
+    };
     try {
       const result = await window.electronAPI.resolveCaptcha({
         url: progress.url,
         sourceId: data.sourceId,
         nodeId: data.hubId,
       });
+      // `handleSafe` resolves failures rather than rejecting. Treat a failed
+      // launch/navigation as a failed Solve, not an ordinary unresolved result.
+      if (isSolveIpcFailure(result)) {
+        showSolveFailure(result);
+        return;
+      }
       if (result?.resolved) {
         // Pass through items extracted inline in the visible browser. The
         // hub listener will merge them directly and skip the headless
@@ -187,7 +239,14 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
           },
         }));
       }
+    } catch (error) {
+      // Electron normally returns handleSafe envelopes, but a destroyed
+      // preload/webContents can reject. Preserve AbortError's name: lifecycle
+      // cancellation is intentionally silent, whereas a real rejected launch
+      // must restore the actionable warning through showSolveFailure.
+      showSolveFailure({ success: false, name: error?.name, error: error?.message || String(error) });
     } finally {
+      resolveInFlightRef.current = false;
       if (isMountedRef.current) { setResolving(false); setQueuedAhead(0); }
     }
   };

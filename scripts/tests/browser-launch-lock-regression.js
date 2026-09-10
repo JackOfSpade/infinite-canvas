@@ -1,4 +1,6 @@
-import { PLATFORM_AUTH_COOKIES, _resetLaunchCollisions, assert, clearAllSessionStatusCache, fs, generateMarkdown, getLaunchCollisions, getStatusCacheSync, path, recordLaunchCollision, reserveSharedProfile, writeStatusCache } from '../test-dependencies.js';
+import { PLATFORM_AUTH_COOKIES, _resetLaunchCollisions, assert, clearAllSessionStatusCache, closeOwnedBrowserProcess, fs, generateMarkdown, getLaunchCollisions, getStatusCacheSync, path, recordLaunchCollision, reserveSharedProfile, toPuppeteerExtraAbortSignal, writeStatusCache } from '../test-dependencies.js';
+import { EventEmitter } from 'node:events';
+import merge from 'deepmerge';
 import { formatAuthAttemptStatus } from '../../electron/ipc/bugReport.js';
 
 // These tests pin the fix for: "Chrome launch blocked by the shared browser
@@ -23,8 +25,156 @@ const stealthBrowserSource = fs.readFileSync(path.resolve('electron/ipc/stealthB
 const accountsSource = fs.readFileSync(path.resolve('electron/ipc/accounts.js'), 'utf8');
 const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
 const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+const manualScraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+const backgroundScrapeSource = fs.readFileSync(path.resolve('electron/ipc/browser/backgroundScrapeBrowser.js'), 'utf8');
+const authWindowsSource = fs.readFileSync(path.resolve('electron/ipc/browser/authWindows.js'), 'utf8');
 
 export default [
+  {
+    name: 'puppeteer-extra launch abort signal survives its deepmerge with live event methods intact',
+    run: () => {
+      const controller = new AbortController();
+      const bridge = toPuppeteerExtraAbortSignal(controller.signal);
+      // This is the exact merge puppeteer-extra applies before it calls
+      // puppeteer-core. Native AbortSignal becomes a method-less object here;
+      // a function-shaped bridge must stay atomic and retain its live surface.
+      const merged = merge({ args: [] }, { signal: bridge });
+      assert(merged.signal === bridge, 'puppeteer-extra deepmerge must retain the bridge identity instead of cloning it');
+      assert(typeof merged.signal.addEventListener === 'function' && typeof merged.signal.removeEventListener === 'function',
+        'merged launch signal must retain addEventListener/removeEventListener for @puppeteer/browsers');
+      assert(merged.signal.aborted === false, 'a fresh merged launch signal must be un-aborted');
+
+      let abortEvents = 0;
+      const listener = () => { abortEvents += 1; };
+      merged.signal.addEventListener('abort', listener, { once: true });
+      const reason = new Error('test launch cancellation');
+      controller.abort(reason);
+      assert(abortEvents === 1, 'the merged signal must forward native abort events exactly once');
+      assert(merged.signal.aborted === true && merged.signal.reason === reason,
+        'the merged bridge must expose live aborted/reason values after construction');
+      merged.signal.removeEventListener('abort', listener);
+
+      const preAborted = new AbortController();
+      preAborted.abort('already cancelled');
+      const preMerged = merge({ args: [] }, { signal: toPuppeteerExtraAbortSignal(preAborted.signal) });
+      assert(preMerged.signal.aborted === true && preMerged.signal.reason === 'already cancelled',
+        'a pre-aborted launch signal must remain observably aborted through puppeteer-extra deepmerge');
+      return { identityPreserved: true, abortForwarded: true, preAbortVisible: true };
+    },
+  },
+  {
+    name: 'closeOwnedBrowserProcess waits for the owned Chrome child exit before resolving profile release',
+    run: async () => {
+      const proc = new EventEmitter();
+      proc.exitCode = null;
+      proc.signalCode = null;
+      const signals = [];
+      proc.kill = (signal) => { signals.push(signal); return true; };
+      const browser = {
+        process: () => proc,
+        close: async () => {
+          // Emit while close() is settling: the regression was subscribing
+          // afterwards and missing this healthy exit.
+          proc.exitCode = 0;
+          proc.emit('exit', 0, null);
+        },
+      };
+      const outcome = await closeOwnedBrowserProcess(browser, { label: 'test owned browser', gracefulMs: 5 });
+      assert(outcome.exited === true && outcome.disposition === 'graceful-exit', `normal close must observe child exit — got ${JSON.stringify(outcome)}`);
+      assert(signals.length === 0, `normal observed exit must not signal the child — got ${signals}`);
+      return outcome;
+    },
+  },
+  {
+    name: 'closeOwnedBrowserProcess remains bounded when browser.close hangs and escalates the owned child',
+    run: async () => {
+      const proc = new EventEmitter();
+      proc.exitCode = null;
+      proc.signalCode = null;
+      const signals = [];
+      proc.kill = (signal) => {
+        signals.push(signal);
+        if (signal === 'SIGTERM') {
+          proc.signalCode = signal;
+          proc.emit('exit', null, signal);
+        }
+        return true;
+      };
+      const browser = {
+        process: () => proc,
+        // This promise never settles: completion must be governed by the
+        // process deadline rather than a wedged CDP close promise.
+        close: () => new Promise(() => {}),
+      };
+      const outcome = await closeOwnedBrowserProcess(browser, { label: 'hung close test', gracefulMs: 5 });
+      assert(outcome.exited === true && outcome.disposition === 'sigterm-exit', `hung close must escalate and resolve — got ${JSON.stringify(outcome)}`);
+      assert(signals.join(',') === 'SIGTERM', `hung close must send SIGTERM before any kill fallback — got ${signals}`);
+      return outcome;
+    },
+  },
+  {
+    name: 'manual platform browsers use the profile-lock retry helper, suppress startup about:blank handoffs, and downgrade launch failure per source',
+    run: () => {
+      const launchStart = manualScraperSource.indexOf('async function launchScrapePlatformBrowser');
+      const launchEnd = manualScraperSource.indexOf('// Clears the per-run browser diagnostic buffers', launchStart);
+      assert(launchStart >= 0 && launchEnd > launchStart, 'manual platform launcher must be bounded before telemetry reset helpers');
+      const launcher = manualScraperSource.slice(launchStart, launchEnd);
+      assert(/launchWithProfileLockRetry\(prepareBackgroundScrapeLaunchOptions\(/.test(launcher),
+        'manual platform launch must use the shared retry/diagnostic helper instead of raw puppeteer.launch');
+      assert(!/puppeteer\.launch\(/.test(launcher), 'manual platform launcher must not bypass profile-lock retry with a raw Puppeteer launch');
+      assert(/timeout:\s*30_000/.test(launcher), 'manual platform launch must have a bounded Puppeteer timeout');
+      assert(/closeOwnedBrowserProcess\(browser,\s*\{\s*label: 'Manual browser teardown'/.test(launcher),
+        'manual teardown must wait through owned-process close/escalation before yielding the profile');
+      assert(/--no-startup-window/.test(backgroundScrapeSource) && /ignoreDefaultArgs/.test(backgroundScrapeSource),
+        'background manual launches must retain macOS no-startup-window/about:blank suppression');
+
+      const sourceLoop = manualScraperSource.slice(manualScraperSource.indexOf('for (let si = 0;'), manualScraperSource.indexOf('  } finally {', manualScraperSource.indexOf('for (let si = 0;')));
+      assert(/stopReason: 'browser-launch-failed'/.test(sourceLoop)
+        && /isProfileLockCollision\(error\)/.test(sourceLoop)
+        && /code: profileLocked \? 'browser-profile-locked' : 'browser-launch-failed'/.test(sourceLoop)
+        && /continue;/.test(sourceLoop),
+      'manual source launch failures must distinguish profile locks from generic launch errors and continue sibling sources');
+      return { launcher: 'retry+timeout', teardown: 'process-exit', failure: 'source-block' };
+    },
+  },
+  {
+    name: 'all profile launches share the bounded late-result cleanup and disconnected singleton teardown uses it',
+    run: () => {
+      const retryStart = stealthBrowserSource.indexOf('export async function launchWithProfileLockRetry');
+      const retryEnd = stealthBrowserSource.indexOf('export async function getStealthBrowser', retryStart);
+      const retry = stealthBrowserSource.slice(retryStart, retryEnd);
+      assert(retry.includes('CHROME_LAUNCH_DEADLINE_MS') && retry.includes('late launch cleanup')
+        && retry.includes('closeOwnedBrowserProcess(browser')
+        && retry.includes('signal: toPuppeteerExtraAbortSignal(launchSignal)')
+        && retry.includes('launchDeadline.abort(error)')
+        && retry.includes('waitForProfileReleaseAfterLaunchAbort(launchOptions.userDataDir)'),
+      'profile launch retry must give Puppeteer a deepmerge-safe deadline signal, observe profile-lock release, and close a late browser result');
+      assert(retry.includes('let callerAborted = false;')
+        && retry.includes("callerSignal?.addEventListener?.('abort', onCallerAbort, { once: true })")
+        && retry.includes('timedOut || callerAborted || callerSignal?.aborted')
+        && retry.includes("callerSignal?.removeEventListener?.('abort', onCallerAbort)"),
+      'caller cancellation must mark a launch abandoned, close any late Browser, and wait for profile release before the FIFO can advance');
+      const browserStart = stealthBrowserSource.indexOf('export async function getStealthBrowser');
+      const browserEnd = stealthBrowserSource.indexOf('export async function createStealthPage', browserStart);
+      const singleton = stealthBrowserSource.slice(browserStart, browserEnd);
+      assert(singleton.includes("label: 'Disconnected shared browser process'")
+        && singleton.includes('closeOwnedBrowserProcess(deadInstance'),
+      'a disconnected singleton must use bounded owned-process cleanup, not SIGTERM plus a fixed sleep');
+      return { launchDeadline: 'canonical', orphanCleanup: 'bounded' };
+    },
+  },
+  {
+    name: 'captcha setup failure closes its owned Chrome before releasing profile admission guards',
+    run: () => {
+      const marker = authWindowsSource.indexOf('// Same robust close as openLoginWindow');
+      const close = authWindowsSource.indexOf("await closeLoginBrowserSafely(captchaBrowser, 'Captcha-resolve window')", marker);
+      const releaseProfile = authWindowsSource.indexOf('releaseProfileReservation?.();', marker);
+      const releasePool = authWindowsSource.indexOf('releaseBrowserPoolPause?.();', marker);
+      assert(marker >= 0 && close > marker && releaseProfile > close && releasePool > close,
+        'captcha setup failure must retain both admission guards until the owned Chrome close/process-exit path settles');
+      return { closeBeforeProfileRelease: true, closeBeforePoolRelease: true };
+    },
+  },
   {
     name: 'auth-gated work waits for its platform startup verification instead of reading a transient false cache',
     run: () => {

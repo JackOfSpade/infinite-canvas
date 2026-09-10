@@ -601,12 +601,15 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
-  const { onNodesDelete } = useCanvasOSDeletion({
+  const { onBeforeDelete, onNodesDelete } = useCanvasOSDeletion({
     requestConfirm,
-    undo,
     canvasFilePath: currentFile,
     addToast,
     enumerateAllNodes: navigation.enumerateAllNodes,
+    getNodes,
+    getEdges,
+    setNodes,
+    setEdges,
   });
 
   const { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes } = useCanvasActions({
@@ -750,13 +753,6 @@ export function Canvas() {
   const handleReportBugClick = useCallback(() => setIsIssueReporterOpen(true), []);
   const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
   const handleCloseIssueReporter = useCallback(() => setIsIssueReporterOpen(false), []);
-
-  const onNodesDeleteGuarded = useCallback((deleted) => {
-    if (navigation.isAnimating) return;
-    // Ensure locked nodes are NEVER deleted even if RF logic is bypassed
-    const onlyDeletable = deleted.filter(n => !n.data?.locked);
-    onNodesDelete(onlyDeletable);
-  }, [navigation.isAnimating, onNodesDelete]);
 
   // ── Main canvas pointer guards ───────────────────────────────────────────
   // These wrap the drawing-mode handlers with animation/menu guards so that
@@ -916,7 +912,8 @@ export function Canvas() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onNodesDelete={onNodesDeleteGuarded}
+            onBeforeDelete={onBeforeDelete}
+            onNodesDelete={onNodesDelete}
             onNodeDragStart={onNodeDragStart}
             onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}

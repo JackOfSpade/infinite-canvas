@@ -6,12 +6,12 @@
  * quit / power-loss mid-run loses the whole scrape. This module persists two
  * sidecars next to the canvas JSON, surviving an app restart:
  *
- *   <canvas>.jobs-staging.jsonl   append-only, ONE job per line, flushed per page
+ *   <canvas>.jobs-staging.<hub>.jsonl   append-only, ONE job per line, flushed per page
  *                                  as each source/query/page completes. Holds the
  *                                  RAW gathered jobs (pre dedup/score) so a resume
  *                                  recovers them without re-scraping finished pages.
  *
- *   <canvas>.jobs-run.json        the run manifest / ledger — the "did it finish?"
+ *   <canvas>.jobs-run.<hub>.json  the run manifest / ledger — the "did it finish?"
  *                                  signal + where each (source,query) got to:
  *     {
  *       version, runId, startedAt, lastUpdated,
@@ -38,15 +38,13 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 
 const MANIFEST_VERSION = 2;
-const STAGING_SUFFIX = '.jobs-staging.jsonl';
-const MANIFEST_SUFFIX = '.jobs-run.json';
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
-const LAST_RUN_RECEIPT_SUFFIX = '.jobs-last-run.json';
 // Version 3 adds the redacted, run-scoped post-search recovery delta alongside
 // scoring and safe source-cap coverage. Readers remain compatible because every
 // added field is optional.
@@ -56,22 +54,93 @@ const JOB_RUN_RECEIPT_VERSION = 3;
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Sidecar paths for a canvas file, or null when the canvas was never saved. */
-function runFilesForCanvas(canvasFilePath) {
+function normalizeNodeId(nodeIdOrOptions) {
+  const nodeId = typeof nodeIdOrOptions === 'object' && nodeIdOrOptions !== null
+    ? nodeIdOrOptions.nodeId
+    : nodeIdOrOptions;
+  return typeof nodeId === 'string' && nodeId.trim() ? nodeId.trim() : null;
+}
+
+function pathHash(value, length = 24) {
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, length);
+}
+
+function resolvedCanvasPath(canvasFilePath) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
-  const dir = path.dirname(canvasFilePath);
-  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
+  try { return path.resolve(canvasFilePath); } catch { return null; }
+}
+
+// A fixed-size full-path canvas hash prevents `project` and `project.json`
+// from sharing sidecars. A fixed owner hash also makes imported malformed IDs
+// unable to exceed filesystem NAME_MAX. The manifest remains the authority
+// for the human-readable owner id.
+export function jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions = null) {
+  const canvasPath = resolvedCanvasPath(canvasFilePath);
+  if (!canvasPath) return null;
+  const nodeId = normalizeNodeId(nodeIdOrOptions);
   return {
-    staging:  path.join(dir, `${base}${STAGING_SUFFIX}`),
-    manifest: path.join(dir, `${base}${MANIFEST_SUFFIX}`),
+    canvasPath,
+    dir: path.dirname(canvasPath),
+    base: path.basename(canvasPath).replace(/\.json$/i, ''),
+    canvasHash: pathHash(canvasPath),
+    nodeId,
+    ownerHash: nodeId ? pathHash(nodeId) : null,
+  };
+}
+
+// Baseline singleton filenames are deliberately retained for migration. The
+// prior node-scoped generation used an escaped owner ID and is readable only
+// after exact owner verification and a basename-collision check.
+function runFilesForCanvas(canvasFilePath, nodeIdOrOptions = null) {
+  const scope = jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions);
+  if (!scope) return null;
+  const { dir, base, canvasHash, nodeId, ownerHash } = scope;
+  const scoped = nodeId ? `.${canvasHash}.${ownerHash}` : '';
+  return {
+    staging:  path.join(dir, `${base}.jobs-staging${scoped}.jsonl`),
+    manifest: path.join(dir, `${base}.jobs-run${scoped}.json`),
+    nodeId,
+    legacy: !nodeId,
+  };
+}
+
+function priorScopedRunFilesForCanvas(canvasFilePath, nodeIdOrOptions = null) {
+  const scope = jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions);
+  if (!scope?.nodeId) return null;
+  const escaped = encodeURIComponent(scope.nodeId);
+  return {
+    staging: path.join(scope.dir, `${scope.base}.jobs-staging.${escaped}.jsonl`),
+    manifest: path.join(scope.dir, `${scope.base}.jobs-run.${escaped}.json`),
+    nodeId: scope.nodeId,
+    legacy: false,
+    priorScoped: true,
   };
 }
 
 /** Durable, redacted terminal receipt path for a saved canvas. */
-export function lastRunReceiptPathForCanvas(canvasFilePath) {
-  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
-  const dir = path.dirname(canvasFilePath);
-  const base = path.basename(canvasFilePath).replace(/\.json$/i, '');
-  return path.join(dir, `${base}${LAST_RUN_RECEIPT_SUFFIX}`);
+export function lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions = null) {
+  const scope = jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions);
+  if (!scope) return null;
+  return path.join(scope.dir, `${scope.base}.jobs-last-run${scope.nodeId ? `.${scope.canvasHash}.${scope.ownerHash}` : ''}.json`);
+}
+
+function priorScopedLastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions = null) {
+  const scope = jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions);
+  if (!scope?.nodeId) return null;
+  return path.join(scope.dir, `${scope.base}.jobs-last-run.${encodeURIComponent(scope.nodeId)}.json`);
+}
+
+// A legacy basename sidecar carries no full canvas identity. It is safe only
+// when the sibling spelling that shares this basename does not exist.
+async function hasBasenameCanvasCollision(canvasFilePath) {
+  const scope = jobRunPathScopeForCanvas(canvasFilePath);
+  if (!scope) return true;
+  for (const candidate of [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]) {
+    if (candidate === scope.canvasPath) continue;
+    const stat = await fs.promises.stat(candidate).catch(() => null);
+    if (stat?.isFile()) return true;
+  }
+  return false;
 }
 
 let _tmpSeq = 0;
@@ -374,35 +443,128 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   };
 }
 
-export async function readLastRunReceipt(canvasFilePath) {
-  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+async function readLegacyReceiptForNode(canvasFilePath, nodeId) {
+  if (await hasBasenameCanvasCollision(canvasFilePath)) return null;
+  const priorScopedPath = priorScopedLastRunReceiptPathForCanvas(canvasFilePath, nodeId);
+  if (priorScopedPath) {
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(priorScopedPath, 'utf8'));
+      if (normalizeNodeId(parsed?.nodeId) === nodeId) return parsed;
+    } catch { /* fall through to baseline singleton */ }
+  }
+  const legacyPath = lastRunReceiptPathForCanvas(canvasFilePath);
+  if (!legacyPath) return null;
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(legacyPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const recordedOwner = normalizeNodeId(parsed.nodeId);
+    return !recordedOwner || recordedOwner === nodeId ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLegacyReceiptForNodeSync(canvasFilePath, nodeId) {
+  // Synchronous report assembly cannot await the collision check. Refuse the
+  // old basename fallback whenever both spellings exist; current hashed paths
+  // are read before this helper.
+  const scope = jobRunPathScopeForCanvas(canvasFilePath);
+  if (!scope) return null;
+  for (const candidate of [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]) {
+    if (candidate !== scope.canvasPath && fs.existsSync(candidate)) return null;
+  }
+  const priorScopedPath = priorScopedLastRunReceiptPathForCanvas(canvasFilePath, nodeId);
+  if (priorScopedPath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(priorScopedPath, 'utf8'));
+      if (normalizeNodeId(parsed?.nodeId) === nodeId) return parsed;
+    } catch { /* fall through to baseline singleton */ }
+  }
+  const legacyPath = lastRunReceiptPathForCanvas(canvasFilePath);
+  if (!legacyPath) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const recordedOwner = normalizeNodeId(parsed.nodeId);
+    return !recordedOwner || recordedOwner === nodeId ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function readLastRunReceipt(canvasFilePath, nodeIdOrOptions = null) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions);
   if (!filePath) return null;
   try {
+    if (!normalizeNodeId(nodeIdOrOptions) && await hasBasenameCanvasCollision(canvasFilePath)) {
+      throw new Error('ambiguous-basename-legacy-receipt');
+    }
     const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const nodeId = normalizeNodeId(nodeIdOrOptions);
+    return !nodeId || normalizeNodeId(parsed.nodeId) === nodeId ? parsed : null;
   } catch {
+    // Receipts used to be canvas-singleton. A scoped caller can consult ONLY
+    // that legacy singleton when it was unowned or belonged to this hub; it
+    // must never fall through to another modern hub's receipt.
+    const nodeId = normalizeNodeId(nodeIdOrOptions);
+    if (nodeId) return readLegacyReceiptForNode(canvasFilePath, nodeId);
+    // As with manifests, a legacy caller can safely consume exactly one modern
+    // receipt while it migrates to nodeId-aware reads. Multiple receipts are
+    // intentionally ambiguous and therefore never selected implicitly.
+    try {
+      const scope = jobRunPathScopeForCanvas(canvasFilePath);
+      if (!scope) return null;
+      const names = await fs.promises.readdir(scope.dir);
+      const matches = names.filter(name => name.startsWith(`${scope.base}.jobs-last-run.${scope.canvasHash}.`) && name.endsWith('.json'));
+      if (matches.length === 1) {
+        const parsed = JSON.parse(await fs.promises.readFile(path.join(scope.dir, matches[0]), 'utf8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+      }
+    } catch { /* no usable unambiguous receipt */ }
     return null;
   }
 }
 
 /** Synchronous companion for bug-report assembly, which is intentionally sync. */
-export function readLastRunReceiptSync(canvasFilePath) {
-  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+export function readLastRunReceiptSync(canvasFilePath, nodeIdOrOptions = null) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions);
   if (!filePath) return null;
   try {
+    if (!normalizeNodeId(nodeIdOrOptions)) {
+      const scope = jobRunPathScopeForCanvas(canvasFilePath);
+      if (scope && [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]
+        .some(candidate => candidate !== scope.canvasPath && fs.existsSync(candidate))) {
+        throw new Error('ambiguous-basename-legacy-receipt');
+      }
+    }
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const nodeId = normalizeNodeId(nodeIdOrOptions);
+    return !nodeId || normalizeNodeId(parsed.nodeId) === nodeId ? parsed : null;
   } catch {
+    const nodeId = normalizeNodeId(nodeIdOrOptions);
+    if (nodeId) return readLegacyReceiptForNodeSync(canvasFilePath, nodeId);
+    try {
+      const scope = jobRunPathScopeForCanvas(canvasFilePath);
+      if (!scope) return null;
+      const matches = fs.readdirSync(scope.dir)
+        .filter(name => name.startsWith(`${scope.base}.jobs-last-run.${scope.canvasHash}.`) && name.endsWith('.json'));
+      if (matches.length === 1) {
+        const parsed = JSON.parse(fs.readFileSync(path.join(scope.dir, matches[0]), 'utf8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+      }
+    } catch { /* no usable unambiguous receipt */ }
     return null;
   }
 }
 
 /** Direct, token-guarded receipt write for focused tests/support tooling. */
-export async function writeLastRunReceipt(canvasFilePath, receipt, { expectedRunId = null } = {}) {
-  const filePath = lastRunReceiptPathForCanvas(canvasFilePath);
+export async function writeLastRunReceipt(canvasFilePath, receipt, { expectedRunId = null, nodeId = null } = {}) {
+  const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeId || receipt?.nodeId || null);
   if (!filePath) return { written: false, receipt: null };
   return withReceiptLock(filePath, async () => {
-    const current = await readLastRunReceipt(canvasFilePath);
+    const current = await readLastRunReceipt(canvasFilePath, nodeId || receipt?.nodeId || null);
     if (expectedRunId != null && current?.runId !== expectedRunId) {
       return { written: false, receipt: current, tokenMismatch: true };
     }
@@ -418,8 +580,7 @@ export async function writeLastRunReceipt(canvasFilePath, receipt, { expectedRun
   });
 }
 
-async function readManifest(canvasFilePath) {
-  const files = runFilesForCanvas(canvasFilePath);
+async function readManifestFromFiles(files) {
   if (!files) return null;
   try {
     const raw = await fs.promises.readFile(files.manifest, 'utf8');
@@ -442,6 +603,67 @@ async function readManifest(canvasFilePath) {
   } catch {
     return null; // missing or corrupt → treated as "no run"
   }
+}
+
+// Locate one hub's ledger. A node-scoped ledger always wins. If it has not
+// been created yet, a legacy singleton may be resumed by its recorded owner
+// (or deliberately handled as owner-unknown); it is never moved or replaced as
+// an incidental side effect of opening another hub.
+async function locateRun(canvasFilePath, nodeIdOrOptions = null) {
+  const nodeId = normalizeNodeId(nodeIdOrOptions);
+  const files = runFilesForCanvas(canvasFilePath, nodeId);
+  if (!files) return { files: null, manifest: null };
+  const manifest = !nodeId && await hasBasenameCanvasCollision(canvasFilePath)
+    ? null
+    : await readManifestFromFiles(files);
+  if (manifest) {
+    // Filename hashes are routing hints, never ownership authority. A corrupt
+    // or deliberately planted file at this path must not pair another hub's
+    // manifest with this hub's staging ledger.
+    if (!nodeId || normalizeNodeId(manifest.inputs?.nodeId) === nodeId) return { files, manifest, legacy: false };
+    return { files, manifest: null, legacy: false };
+  }
+  if (!nodeId) {
+    // Preserve incremental callers from the singleton era when the canvas has
+    // exactly one modern hub ledger. Ambiguity is intentionally a miss: callers
+    // that could otherwise cross hubs must pass a nodeId.
+    try {
+      const scope = jobRunPathScopeForCanvas(canvasFilePath);
+      if (!scope) return { files, manifest: null, legacy: false };
+      const names = await fs.promises.readdir(scope.dir);
+      const matches = names.filter(name => name.startsWith(`${scope.base}.jobs-run.${scope.canvasHash}.`) && name.endsWith('.json'));
+      const candidates = [];
+      for (const name of matches) {
+        const candidateFiles = {
+          staging: path.join(scope.dir, name.replace(/\.jobs-run\.(.+)\.json$/, '.jobs-staging.$1.jsonl')),
+          manifest: path.join(scope.dir, name),
+          nodeId: null,
+          legacy: false,
+        };
+        const candidate = await readManifestFromFiles(candidateFiles);
+        const candidateNodeId = normalizeNodeId(candidate?.inputs?.nodeId);
+        if (!candidate || !candidateNodeId) continue;
+        candidates.push({ files: { ...candidateFiles, nodeId: candidateNodeId }, manifest: candidate });
+      }
+      if (candidates.length === 1) return { ...candidates[0], legacy: false };
+    } catch { /* missing/unreadable canvas directory behaves as no run */ }
+    return { files, manifest: null, legacy: false };
+  }
+
+  const collision = await hasBasenameCanvasCollision(canvasFilePath);
+  const priorScopedFiles = priorScopedRunFilesForCanvas(canvasFilePath, nodeId);
+  const priorScopedManifest = !collision ? await readManifestFromFiles(priorScopedFiles) : null;
+  const priorScopedOwner = normalizeNodeId(priorScopedManifest?.inputs?.nodeId);
+  if (priorScopedManifest && priorScopedOwner === nodeId) {
+    return { files: priorScopedFiles, manifest: priorScopedManifest, legacy: true };
+  }
+  const legacyFiles = runFilesForCanvas(canvasFilePath);
+  const legacyManifest = !collision ? await readManifestFromFiles(legacyFiles) : null;
+  const legacyOwner = normalizeNodeId(legacyManifest?.inputs?.nodeId);
+  if (legacyManifest && (!legacyOwner || legacyOwner === nodeId)) {
+    return { files: legacyFiles, manifest: legacyManifest, legacy: true };
+  }
+  return { files, manifest: null, legacy: false };
 }
 
 // The preference plan comes from model output, but becomes durable recovery
@@ -528,7 +750,8 @@ export function sanitizeJobPreferences(value) {
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
 export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
-  const files = runFilesForCanvas(canvasFilePath);
+  const ownerNodeId = normalizeNodeId(nodeId);
+  const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
   const sources = {};
   for (const id of sourceIds) sources[id] = { status: 'pending', queries: {} };
@@ -545,18 +768,17 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
       canonicalLocation,
       maxAgeDays,
       collectionLimits,
-      nodeId,
+      nodeId: ownerNodeId,
     },
     sources,
   };
   const result = await withManifestLock(files.manifest, async () => {
-    // A canvas has one staging ledger. A fresh run from another hub cannot
-    // safely replace it: doing so truncates the first hub's recoverable pages
-    // and lets its late completion race the successor. Same-hub reruns retain
-    // the established replacement behaviour.
-    const existing = await readManifest(canvasFilePath);
-    const existingNodeId = existing?.inputs?.nodeId || null;
-    if (existing && nodeId && existingNodeId !== nodeId) {
+    // Each hub owns its own staging ledger. This lock only serializes one
+    // hub's replacement, so another hub can continue its recoverable search
+    // independently while same-hub reruns retain the established fencing.
+    const existing = await readManifestFromFiles(files);
+    const existingNodeId = normalizeNodeId(existing?.inputs?.nodeId);
+    if (existing && ownerNodeId && existingNodeId !== ownerNodeId) {
       // A legacy manifest without node ownership is still a real unfinished
       // recovery record. Treat its owner as unknown rather than overwriting it
       // from a different modern hub and losing its staged pages. An explicit
@@ -567,6 +789,38 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
         ownerUnknown: !existingNodeId,
         ownerRunId: existing.runId || null,
       };
+    }
+    // A legacy singleton belongs to no scoped filename. Never let a new run
+    // silently hide it behind this hub's new sidecar: its recorded owner (or an
+    // unknown legacy owner) must Resume/Discard it explicitly first. A legacy
+    // run owned by another hub does not block this hub because the new files do
+    // not overwrite or mutate it.
+    if (!existing && ownerNodeId) {
+      const collision = await hasBasenameCanvasCollision(canvasFilePath);
+      const priorScopedFiles = priorScopedRunFilesForCanvas(canvasFilePath, ownerNodeId);
+      const priorScoped = !collision ? await readManifestFromFiles(priorScopedFiles) : null;
+      const priorOwner = normalizeNodeId(priorScoped?.inputs?.nodeId);
+      if (priorScoped && priorOwner === ownerNodeId) {
+        return {
+          conflict: true,
+          ownerNodeId: priorOwner,
+          ownerUnknown: false,
+          ownerRunId: priorScoped.runId || null,
+          legacy: true,
+        };
+      }
+      const legacyFiles = runFilesForCanvas(canvasFilePath);
+      const legacy = !collision ? await readManifestFromFiles(legacyFiles) : null;
+      const legacyOwner = normalizeNodeId(legacy?.inputs?.nodeId);
+      if (legacy && (!legacyOwner || legacyOwner === ownerNodeId)) {
+        return {
+          conflict: true,
+          ownerNodeId: legacyOwner,
+          ownerUnknown: !legacyOwner,
+          ownerRunId: legacy.runId || null,
+          legacy: true,
+        };
+      }
     }
     // Do not truncate the prior recovery file until the replacement manifest
     // has committed. A manifest write can fail (read-only volume, a path that
@@ -619,15 +873,16 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
  * a cancelled predecessor a no-op after a fresh run has replaced the manifest.
  * No-op when there is no canvas/manifest.
  */
-export async function recordSourcePage(canvasFilePath, { sourceId, query = '', page = 0, jobs = [], now, expectedRunId = null }) {
-  const files = runFilesForCanvas(canvasFilePath);
+export async function recordSourcePage(canvasFilePath, { sourceId, query = '', page = 0, jobs = [], now, expectedRunId = null, nodeId = null }) {
+  const located = await locateRun(canvasFilePath, nodeId);
+  const { files } = located;
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
     try {
       // Check the token BEFORE appending: a manifest write is atomic, whereas
       // staging is append-only and cannot be rolled back after an old run has
       // leaked rows into its successor's file.
-      const manifest = await readManifest(canvasFilePath);
+      const manifest = await readManifestFromFiles(files);
       if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
       if (Array.isArray(jobs) && jobs.length > 0) {
         const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
@@ -647,11 +902,12 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
 }
 
 /** Set a source's terminal status ('done' | 'blocked') for the expected run. */
-export async function markSourceStatus(canvasFilePath, sourceId, status, now, { expectedRunId = null } = {}) {
-  const files = runFilesForCanvas(canvasFilePath);
+export async function markSourceStatus(canvasFilePath, sourceId, status, now, { expectedRunId = null, nodeId = null } = {}) {
+  const located = await locateRun(canvasFilePath, nodeId);
+  const { files } = located;
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifest(canvasFilePath);
+    const manifest = await readManifestFromFiles(files);
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
@@ -662,11 +918,12 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now, { 
 }
 
 /** Advance the pipeline stage ('searching'→'gathered'; see the header). */
-export async function setStage(canvasFilePath, stage, now, { expectedRunId = null } = {}) {
-  const files = runFilesForCanvas(canvasFilePath);
+export async function setStage(canvasFilePath, stage, now, { expectedRunId = null, nodeId = null } = {}) {
+  const located = await locateRun(canvasFilePath, nodeId);
+  const { files } = located;
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
-    const manifest = await readManifest(canvasFilePath);
+    const manifest = await readManifestFromFiles(files);
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     manifest.stage = stage;
     manifest.lastUpdated = now ?? manifest.lastUpdated;
@@ -675,9 +932,8 @@ export async function setStage(canvasFilePath, stage, now, { expectedRunId = nul
   });
 }
 
-/** Parse the staging JSONL, skipping any torn/garbage lines. Returns [] on miss. */
-export async function readStagedJobs(canvasFilePath) {
-  const files = runFilesForCanvas(canvasFilePath);
+/** Parse one resolved staging JSONL, skipping torn/garbage lines. */
+async function readStagedJobsFromFiles(files) {
   if (!files) return [];
   let raw;
   try { raw = await fs.promises.readFile(files.staging, 'utf8'); }
@@ -691,13 +947,20 @@ export async function readStagedJobs(canvasFilePath) {
   return out;
 }
 
+/** Parse the staging JSONL, skipping any torn/garbage lines. Returns [] on miss. */
+export async function readStagedJobs(canvasFilePath, nodeIdOrOptions = null) {
+  const { files } = await locateRun(canvasFilePath, nodeIdOrOptions);
+  return readStagedJobsFromFiles(files);
+}
+
 /**
  * Read the full run state for resume detection. Returns null when there is no
  * (parseable) manifest. `resumable` is true when the run did not finish AND is
  * recent enough to auto-offer (within RESUMABLE_MAX_AGE_MS of `now`).
  */
-export async function readRunState(canvasFilePath, now = null) {
-  const manifest = await readManifest(canvasFilePath);
+export async function readRunState(canvasFilePath, now = null, nodeIdOrOptions = null) {
+  const located = await locateRun(canvasFilePath, nodeIdOrOptions);
+  const { manifest } = located;
   if (!manifest) return null;
   // A manifest on disk IS an unfinished run — clean finishes delete the
   // sidecars (see header). `incomplete` is kept on the return shape for the
@@ -707,8 +970,11 @@ export async function readRunState(canvasFilePath, now = null) {
     ? now - manifest.lastUpdated
     : null;
   const recent = ageMs == null ? true : ageMs <= RESUMABLE_MAX_AGE_MS;
-  const stagedJobs = await readStagedJobs(canvasFilePath);
-  return { manifest, stagedJobs, incomplete, ageMs, resumable: incomplete && recent };
+  // Reuse the exact ledger locateRun selected. Re-locating by its nullable
+  // `files.nodeId` would make an owned legacy manifest accidentally read the
+  // sole modern hub's staging file during a migration.
+  const stagedJobs = await readStagedJobsFromFiles(located.files);
+  return { manifest, stagedJobs, incomplete, ageMs, resumable: incomplete && recent, legacy: located.legacy === true };
 }
 
 /**
@@ -746,39 +1012,50 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
  *   function is INJECTED, not imported, so this module stays electron-free and
  *   unit-testable in the plain-node runner.
  */
-export async function clearRun(canvasFilePath, { trashItem = null, expectedRunId = null, expectedNodeId = null, expectedOwnerUnknown = false } = {}) {
-  const files = runFilesForCanvas(canvasFilePath);
-  if (!files) return false;
+export async function clearRunWithResult(canvasFilePath, { trashItem = null, expectedRunId = null, expectedNodeId = null, expectedOwnerUnknown = false } = {}) {
+  const located = await locateRun(canvasFilePath, expectedNodeId);
+  const { files } = located;
+  if (!files) return { ok: true, cleared: false, absent: true, reason: 'missing-canvas' };
   return withManifestLock(files.manifest, async () => {
     // Completion is renderer-driven and may arrive after the user has already
     // started another search on this canvas. Compare under the same manifest
     // lock as startRun so an old completion can never delete a newer run.
     if (expectedRunId != null || expectedNodeId != null || expectedOwnerUnknown) {
-      const manifest = await readManifest(canvasFilePath);
-      if (!manifest
-        || (expectedRunId != null && manifest.runId !== expectedRunId)
+      const manifest = await readManifestFromFiles(files);
+      if (!manifest) return { ok: true, cleared: false, absent: true, reason: 'run-absent' };
+      if ((expectedRunId != null && manifest.runId !== expectedRunId)
         || (expectedNodeId != null && manifest.inputs?.nodeId !== expectedNodeId)
-        || (expectedOwnerUnknown && manifest.inputs?.nodeId)) return false;
+        || (expectedOwnerUnknown && manifest.inputs?.nodeId)) {
+        return { ok: true, cleared: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+      }
     }
-    return clearRunFiles(files, trashItem);
+    const cleared = await clearRunFiles(files, trashItem);
+    return {
+      ok: cleared,
+      cleared,
+      reason: cleared ? null : 'cleanup-failed',
+    };
   });
 }
 
+export async function clearRun(canvasFilePath, options = {}) {
+  const result = await clearRunWithResult(canvasFilePath, options);
+  return result.cleared === true;
+}
+
 async function clearRunFiles(files, trashItem = null) {
-  let cleared = true;
-  for (const p of [files.staging, files.manifest]) {
+  const removeAndVerify = async (p) => {
     // Skip a sidecar that isn't there (a run may have only one, or it was
     // already cleared) so trashItem doesn't error on a missing path.
     try {
       await fs.promises.access(p);
     } catch (error) {
-      if (error?.code === 'ENOENT') continue;
+      if (error?.code === 'ENOENT') return true;
       // An access failure does not prove absence. Keep the aggregate cleanup
       // verdict false rather than issuing a terminal receipt that claims an
       // unreadable or temporarily unavailable sidecar was removed.
-      cleared = false;
       logger.warn(`[JobRunStaging] Could not inspect ${p} before cleanup: ${error?.message || error}`);
-      continue;
+      return false;
     }
     if (trashItem) {
       try {
@@ -795,17 +1072,26 @@ async function clearRunFiles(files, trashItem = null) {
     }
     try {
       await fs.promises.access(p);
-      cleared = false;
+      return false;
     } catch (error) {
       // Only a definite missing-path result verifies deletion. Permission,
       // device, and other I/O failures leave cleanup unconfirmed.
       if (error?.code !== 'ENOENT') {
-        cleared = false;
         logger.warn(`[JobRunStaging] Could not verify cleanup of ${p}: ${error?.message || error}`);
+        return false;
       }
+      return true;
     }
-  }
-  return cleared;
+  };
+
+  // The manifest is the discoverability/ownership record for the staged rows.
+  // Never remove it while staging still exists: doing so leaves private job data
+  // orphaned and makes an exact cleanup retry impossible. Deleting staging first
+  // can still leave a manifest-only partial state, but that state is safe and
+  // intentionally finalized by retrying the exact terminal receipt.
+  const stagingCleared = await removeAndVerify(files.staging);
+  if (!stagingCleared) return false;
+  return removeAndVerify(files.manifest);
 }
 
 /**
@@ -815,33 +1101,62 @@ async function clearRunFiles(files, trashItem = null) {
  * an older hub run cannot overwrite a newer run's receipt or delete its files.
  */
 export async function completeRunWithReceipt(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null } = {}) {
-  const files = runFilesForCanvas(canvasFilePath);
-  const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath);
+  const located = await locateRun(canvasFilePath, expectedNodeId || receipt?.nodeId || null);
+  const { files } = located;
+  const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath, files?.nodeId);
   const expectedRunId = String(receipt?.runId || '');
   if (!files || !receiptPath || !expectedRunId) {
     return { ok: false, cleared: false, receipt: null, reason: 'missing-canvas-or-run-token' };
   }
   return withManifestLock(files.manifest, async () => withReceiptLock(receiptPath, async () => {
-    const manifest = await readManifest(canvasFilePath);
-    if (!manifest || manifest.runId !== expectedRunId
-      || (expectedNodeId != null && manifest.inputs?.nodeId !== expectedNodeId)) {
+    const manifest = await readManifestFromFiles(files);
+    let existingReceipt = null;
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(receiptPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        existingReceipt = sanitizeLastRunReceipt(parsed);
+      }
+    } catch { /* a first completion legitimately has no prior receipt */ }
+    const expectedOwner = normalizeNodeId(expectedNodeId || receipt?.nodeId);
+    const exactExistingReceipt = !!existingReceipt?.runId
+      && existingReceipt.runId === expectedRunId
+      && (!expectedOwner || normalizeNodeId(existingReceipt.nodeId) === expectedOwner);
+
+    if (manifest && (
+      manifest.runId !== expectedRunId
+      || (expectedOwner != null && normalizeNodeId(manifest.inputs?.nodeId) !== expectedOwner)
+    )) {
       return { ok: false, cleared: false, receipt: null, tokenMismatch: true };
     }
-    const initial = sanitizeLastRunReceipt({
-      ...receipt,
-      // Do not use process-global telemetry as a fallback here. The manifest is
-      // this run's durable owner and safely fills identity/timing only when the
-      // receipt builder could not match an in-memory search token.
-      nodeId: receipt?.nodeId || manifest.inputs?.nodeId || null,
-      startedAt: receipt?.startedAt ?? manifest.startedAt,
-      stagingStarted: true,
-      cleanup: { attempted: false, cleared: null },
-    });
-    try {
-      await atomicWriteJson(receiptPath, initial);
-    } catch (error) {
-      logger.warn(`[JobRunStaging] completion receipt write failed: ${error?.message || error}`);
-      return { ok: false, cleared: false, receipt: null, receiptWriteFailed: true };
+
+    // A prior completion can have removed the manifest and staging successfully,
+    // then failed only while updating the receipt, or it can have left a single
+    // residual sidecar. The exact durable receipt is sufficient authority to
+    // finish that cleanup idempotently; never reinterpret this as a scrape to
+    // resume. Without either an exact manifest or exact receipt, fail closed.
+    if (!manifest && !exactExistingReceipt) {
+      return { ok: false, cleared: false, receipt: existingReceipt, tokenMismatch: true };
+    }
+
+    const initial = exactExistingReceipt
+      ? existingReceipt
+      : sanitizeLastRunReceipt({
+          ...receipt,
+          // Do not use process-global telemetry as a fallback here. The manifest
+          // is this run's durable owner and safely fills identity/timing only
+          // when the receipt builder could not match in-memory telemetry.
+          nodeId: receipt?.nodeId || manifest?.inputs?.nodeId || null,
+          startedAt: receipt?.startedAt ?? manifest?.startedAt,
+          stagingStarted: true,
+          cleanup: { attempted: false, cleared: null },
+        });
+    if (!exactExistingReceipt) {
+      try {
+        await atomicWriteJson(receiptPath, initial);
+      } catch (error) {
+        logger.warn(`[JobRunStaging] completion receipt write failed: ${error?.message || error}`);
+        return { ok: false, cleared: false, receipt: null, receiptWriteFailed: true };
+      }
     }
 
     const cleared = await clearRunFiles(files, trashItem);

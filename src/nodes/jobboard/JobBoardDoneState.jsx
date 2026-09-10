@@ -3,11 +3,10 @@ import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 import { SlidersHorizontal, X, RefreshCw, Trash2, Layers, AlertTriangle } from 'lucide-react';
 
 /**
- * Done-state UI for the Job Board Module — the display half that used to live on
- * the Job Search Module. Shows the combined result count + the cascade filter
- * controls (score slider, per-source pills) plus Re-combine / Clear. Search-only
- * controls (résumé, location, look-back, re-run) deliberately live on the Job
- * Search Module, not here.
+ * Done-state summary and cascade filters for the Job Board Module. Search-run
+ * selection and queue controls are rendered by the board directly above this
+ * summary; source-specific résumé/location/platform settings remain on each
+ * connected Job Search module.
  */
 export function JobBoardDoneState({
   resultCount = 0,
@@ -106,22 +105,24 @@ export function JobBoardDoneState({
 
       {!locked && (
         <div className="flex gap-1 mt-2 w-full">
-          <button
-            onClick={onRecombine}
-            onPointerDown={(e) => e.stopPropagation()}
-            disabled={combining}
-            className={`nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full disabled:opacity-50 text-[10px] transition-colors border ${
-              stale
-                ? 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border-amber-500/30'
-                : 'bg-indigo-500/15 text-indigo-300/90 hover:bg-indigo-500/25 border-indigo-500/15'
-            }`}
-            title={canReplaceWithEmpty
-              ? 'Replace the hidden previous results with the completed searches’ empty result'
-              : 'Re-pull all connected Job Search modules and rebuild the combined board'}
-          >
-            <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
-            {combining ? 'Combining…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}
-          </button>
+          {typeof onRecombine === 'function' && (
+            <button
+              onClick={onRecombine}
+              onPointerDown={(e) => e.stopPropagation()}
+              disabled={combining}
+              className={`nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full disabled:opacity-50 text-[10px] transition-colors border ${
+                stale
+                  ? 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border-amber-500/30'
+                  : 'bg-indigo-500/15 text-indigo-300/90 hover:bg-indigo-500/25 border-indigo-500/15'
+              }`}
+              title={canReplaceWithEmpty
+                ? 'Replace the hidden previous results with the completed searches’ empty result'
+                : 'Re-pull all connected Job Search modules and rebuild the combined board'}
+            >
+              <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
+              {combining ? 'Combining…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}
+            </button>
+          )}
           <button
             onClick={onClear}
             onPointerDown={(e) => e.stopPropagation()}

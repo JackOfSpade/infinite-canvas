@@ -23,7 +23,8 @@ import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useRenderStorm } from '../hooks/useRenderStorm';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
+import { useToast } from '../components/ToastProvider';
 
 /**
  * MarketplaceCardNode — one persistent canvas node per marketplace the user is
@@ -95,6 +96,7 @@ function MarketplaceNotesTextarea({ value, onChange, locked }) {
 }
 
 export const MarketplaceCardNode = React.memo(function MarketplaceCardNode({ id, data }) {
+  const { addToast } = useToast();
   // Surface runaway re-render bursts in bug reports (see useRenderStorm).
   useRenderStorm(`marketplacecard ${String(id).slice(0, 8)}`);
   const { updateNodeData } = useReactFlow();
@@ -245,13 +247,22 @@ export const MarketplaceCardNode = React.memo(function MarketplaceCardNode({ id,
     document.dispatchEvent(new CustomEvent('open-multi-customize', { detail: { ids: [id] } }));
   }, [id, navigation?.isAnimating]);
 
-  const openInBrowser = useCallback(() => {
+  const openInBrowser = useCallback(async () => {
     // No listing URL yet → open the marketplace's "create listing" page so the
     // user can post manually. Once they have a URL pasted, open that instead.
-    const target = normalizeExternalHttpUrl(url || platform?.postUrl);
-    if (!target) return;
-    window.electronAPI?.openExternal?.(target);
-  }, [url, platform]);
+    const opened = await openExternalUrl(url || platform?.postUrl, {
+      dispatcher: window.electronAPI?.openExternal,
+      fallback: window.open,
+    });
+    if (!opened.ok) {
+      addToast({
+        title: 'Cannot Open Marketplace',
+        description: openExternalFailureMessage(opened),
+        type: 'error',
+        dedupeKey: `marketplace-open-external:${id}`,
+      });
+    }
+  }, [addToast, id, url, platform]);
 
   if (!platform) {
     // Defensive: a saved card whose platformId disappeared from constants.

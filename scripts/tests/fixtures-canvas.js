@@ -1,4 +1,5 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
@@ -947,9 +948,11 @@ export default [
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('researching'), 'Transient state constants: missing researching');
       assert(SELLHUB_TRANSIENT_KEYS.includes('platformFitPending'), 'Transient state constants: missing platformFitPending');
       assert(SELLHUB_TRANSIENT_KEYS.includes('queuedModuleRun'), 'Transient state constants: missing queuedModuleRun');
+      assert(JOBBOARD_TRANSIENT_KEYS.includes('queuedModuleRun'), 'Transient state constants: Job Board queuedModuleRun must never be durable');
       return {
         transientStates: TRANSIENT_PROCESSING_HUB_STATES.length,
         sellhubKeys: SELLHUB_TRANSIENT_KEYS.length,
+        jobboardKeys: JOBBOARD_TRANSIENT_KEYS.length,
       };
     },
   },
@@ -959,6 +962,24 @@ export default [
       const nodes = [
         { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old', rerunOutcome: 'no-new-results', rerunNotice: 'old notice', manualAiResume: { runId: 'resume-run', task: 'job-scoring' } } },
         { id: 'reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 3 }, data: { hubState: 'scoring', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], scoredJobs: [{ title: 'Saved result' }], resultCount: 1 } },
+        {
+          id: 'job-board', type: 'jobboard', position: { x: 0, y: 4 },
+          data: {
+            hubState: 'done', resultCount: 2,
+            combineSignature: '6:durable-board-signature',
+            selectedSearchModuleIds: [],
+            queuedModuleRun: { label: 'Scan Job Search', position: 1 },
+            manualAiResume: { runId: 'board-manual-run', task: 'job-taxonomy' },
+            boardScanResume: {
+              version: 1,
+              boardRunId: 'board-scan-run',
+              selectedSearchModuleIds: ['search-a', 'search-b'],
+              completedSourceRuns: { 'search-a': { runId: 'search-a-run', resultDisposition: 'positive-complete' } },
+              activeSourceId: 'search-b',
+              phase: 'searches',
+            },
+          },
+        },
         // Job Preferences are asynchronous pipeline phases too. A crash in
         // either phase must not reload an empty hub with an old frozen plan.
         { id: 'interpreting-preferences-hub', type: 'jobhub', position: { x: 0, y: 5 }, data: { hubState: 'interpreting-preferences', activeJobPreferences: 'Avoid web development', pendingJobPreferences: 'Avoid web development', pendingJobPreferencePlan: { version: 1 }, pendingJobPreferencesInterpretation: { version: 1 } } },
@@ -970,11 +991,11 @@ export default [
         // Warned cards persist ONLY when their hub keeps its run context across
         // the reload: a mid-run hub resets to 'empty' (its warned cards would
         // orphan Solve buttons), and a deleted hub leaves nothing to act on.
-        { id: 'paused-blocked-source', type: 'jobsourcecard', position: { x: 5, y: 5 }, data: { hubId: 'paused-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        { id: 'paused-blocked-source', type: 'jobsourcecard', position: { x: 5, y: 5 }, data: { hubId: 'paused-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } }, _boardRollbackProgressRestore: { nonce: 'renderer-only', retiredJobRunId: 'old-run' } } },
         { id: 'midrun-blocked-source', type: 'jobsourcecard', position: { x: 6, y: 6 }, data: { hubId: 'hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
         { id: 'orphan-blocked-source', type: 'jobsourcecard', position: { x: 7, y: 7 }, data: { hubId: 'deleted-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
         { id: 'marketplace-note', type: 'marketplacecard', position: { x: 8, y: 8 }, data: { platformId: 'ebay', notes: 'Lower price on Monday' } },
-        { id: 'group', type: 'group', position: { x: 4, y: 4 }, data: { isDropTarget: true, canvasData: { nodes: [
+        { id: 'group', type: 'group', position: { x: 4, y: 4 }, data: { isDropTarget: true, _boardRollbackProgressRestore: { nonce: 'nested-renderer-only' }, canvasData: { nodes: [
           { id: 'inner-job', type: 'jobcard', position: { x: 0, y: 0 }, style: { opacity: 0.1 }, data: { title: 'Inner' } },
           { id: 'inner-reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 2 }, data: { hubState: 'scoring', pendingJobs: [1], scoredJobs: [{ title: 'Nested saved result' }] } },
         ], edges: [], drawings: [] } } },
@@ -982,6 +1003,7 @@ export default [
       const sanitized = sanitizeNodesForSave(nodes);
       const hub = sanitized.find(n => n.id === 'hub');
       const reanalyzingHub = sanitized.find(n => n.id === 'reanalyzing-hub');
+      const jobBoard = sanitized.find(n => n.id === 'job-board');
       const interpretingPreferencesHub = sanitized.find(n => n.id === 'interpreting-preferences-hub');
       const evaluatingPreferencesHub = sanitized.find(n => n.id === 'evaluating-preferences-hub');
       const job = sanitized.find(n => n.id === 'job');
@@ -992,6 +1014,16 @@ export default [
       assert(reanalyzingHub.data.hubState === 'done' && reanalyzingHub.data.scoredJobs.length === 1
         && !('pendingJobs' in reanalyzingHub.data) && !('scrapeWarnings' in reanalyzingHub.data) && !('queuedModuleRun' in reanalyzingHub.data),
       'Serialization restores interrupted re-analysis to done while stripping its transient buffers');
+      assert(!('queuedModuleRun' in jobBoard.data)
+        && Array.isArray(jobBoard.data.selectedSearchModuleIds)
+        && jobBoard.data.selectedSearchModuleIds.length === 0
+        && jobBoard.data.manualAiResume?.runId === 'board-manual-run'
+        && jobBoard.data.boardScanResume?.boardRunId === 'board-scan-run'
+        && jobBoard.data.boardScanResume?.activeSourceId === 'search-b'
+        && jobBoard.data.hubState === 'done'
+        && jobBoard.data.resultCount === 2
+        && jobBoard.data.combineSignature === '6:durable-board-signature',
+      'Serialization strips the Job Board queue marker while preserving explicit selection, completed results, and exact manual/parent scan recovery markers');
       for (const preferenceHub of [interpretingPreferencesHub, evaluatingPreferencesHub]) {
         assert(preferenceHub.data.hubState === 'empty'
           && !('activeJobPreferences' in preferenceHub.data)
@@ -1004,14 +1036,18 @@ export default [
       assert(!('isDropTarget' in job.data) && job.style.opacity === undefined && job.style.width === 180, 'Serialization sanitizes transient state: node transient UI state should be stripped');
       assert(!sanitized.some(n => n.id === 'clean-source'), 'Serialization sanitizes transient state: clean source card should be dropped');
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
-      assert(sanitized.some(n => n.id === 'paused-blocked-source'), 'Serialization: warned card of a sources-ready hub persists (Solve/Skip recovery)');
+      const pausedBlockedSource = sanitized.find(n => n.id === 'paused-blocked-source');
+      assert(pausedBlockedSource && !('_boardRollbackProgressRestore' in pausedBlockedSource.data), 'Serialization: warned card of a sources-ready hub persists without its renderer-only Board rollback receipt');
       assert(!sanitized.some(n => n.id === 'midrun-blocked-source'), 'Serialization: warned card of a mid-run hub (resets to empty) is dropped, not orphaned');
       assert(!sanitized.some(n => n.id === 'orphan-blocked-source'), 'Serialization: warned card whose hub is gone is dropped');
       const pausedHub = sanitized.find(n => n.id === 'paused-hub');
       assert(pausedHub.data.hubState === 'sources-ready' && Array.isArray(pausedHub.data.pendingJobs), 'Serialization: sources-ready hub keeps its paused run context');
       assert(sanitized.find(n => n.id === 'marketplace-note').data.notes === 'Lower price on Monday', 'Serialization: marketplace listing notes should persist');
-      assert(sanitized.find(n => n.id === 'group').data.canvasData.nodes[0].style === undefined, 'Serialization sanitizes transient state: nested nodes should be sanitized');
-      const nestedReanalyzingHub = sanitized.find(n => n.id === 'group').data.canvasData.nodes.find(n => n.id === 'inner-reanalyzing-hub');
+      const sanitizedGroup = sanitized.find(n => n.id === 'group');
+      assert(sanitizedGroup.data.canvasData.nodes[0].style === undefined
+        && !('_boardRollbackProgressRestore' in sanitizedGroup.data),
+      'Serialization sanitizes transient state: nested nodes and group-level renderer receipts should be sanitized');
+      const nestedReanalyzingHub = sanitizedGroup.data.canvasData.nodes.find(n => n.id === 'inner-reanalyzing-hub');
       assert(nestedReanalyzingHub.data.hubState === 'done' && nestedReanalyzingHub.data.scoredJobs.length === 1 && !('pendingJobs' in nestedReanalyzingHub.data),
         'Serialization restores interrupted re-analysis in nested canvases too');
       const edges = sanitizeEdgesForSave([
@@ -1133,6 +1169,46 @@ export default [
       assert(queue.getSnapshot().active === null && queue.getSnapshot().queued.length === 0, 'queue drains after all releases');
       return { starts, queued: positionEvents.length };
   },
+},
+{
+    name: 'Job Search queue lanes run different hubs concurrently and serialize each hub',
+    run: async () => {
+      const queue = createModuleRunQueue();
+      const starts = [];
+      const positions = [];
+      const acquire = (nodeId, label) => queue.acquireModuleRun({
+        nodeId,
+        kind: 'jobsearch',
+        lane: `job-search:${nodeId}`,
+        label,
+        onStart: ({ lane }) => starts.push(`${label}@${lane}`),
+        onQueued: ({ lane, position }) => positions.push(`${label}:${lane}:${position}`),
+        onQueueUpdate: ({ lane, position }) => positions.push(`${label}:update:${lane}:${position}`),
+      });
+
+      const hubA = await acquire('hub-a', 'A1');
+      const hubB = await acquire('hub-b', 'B1');
+      const hubASecondPromise = acquire('hub-a', 'A2');
+      const hubBSecondPromise = acquire('hub-b', 'B2');
+
+      const initial = queue.getSnapshot();
+      assert(starts.join(',') === 'A1@job-search:hub-a,B1@job-search:hub-b', `separate hubs begin concurrently (${starts.join(',')})`);
+      assert(initial.activeRuns.length === 2 && initial.lanes['job-search:hub-a']?.active?.nodeId === 'hub-a' && initial.lanes['job-search:hub-b']?.active?.nodeId === 'hub-b', 'snapshot exposes both active job-search lanes');
+      assert(initial.queued.map(entry => `${entry.nodeId}:${entry.position}`).join(',') === 'hub-a:1,hub-b:1', `each hub has its own queue position (${initial.queued.map(entry => `${entry.nodeId}:${entry.position}`).join(',')})`);
+      assert(positions.includes('A2:job-search:hub-a:1') && positions.includes('B2:job-search:hub-b:1'), `queue callbacks include their lane (${positions.join(',')})`);
+
+      hubA.release();
+      const hubASecond = await hubASecondPromise;
+      assert(starts.join(',') === 'A1@job-search:hub-a,B1@job-search:hub-b,A2@job-search:hub-a', 'releasing one hub starts only its next job-search action');
+      assert(queue.getSnapshot().lanes['job-search:hub-b']?.active?.label === 'B1', 'the other hub remains active while its own lane is waiting');
+
+      hubB.release();
+      const hubBSecond = await hubBSecondPromise;
+      hubASecond.release();
+      hubBSecond.release();
+      assert(queue.getSnapshot().active === null && queue.getSnapshot().queued.length === 0 && queue.getSnapshot().activeRuns.length === 0, 'all lanes cleanly drain after their final releases');
+      return { starts, positions };
+    },
 },
 {
     // Application generation uses the same renderer-side queue as the other
@@ -1426,6 +1502,231 @@ export default [
       assert(restored[0].data.status === 'live' && restored[0].data.lastChecked === checked.data.lastChecked, 'Undo restore should preserve live status fields');
       assert(restored[0].data.lastCheckTrace.checked === 2, 'Undo restore should preserve live status trace');
       return { ok: true };
+    },
+  },
+{
+    name: 'Undo restores Job Search settings without rolling back its live run and result identity',
+    run: () => {
+      const historical = {
+        id: 'search-undo',
+        type: 'jobhub',
+        position: { x: 10, y: 20 },
+        data: {
+          targetRole: 'Historical role',
+          jobPreferences: 'Historical preferences',
+          searchLocation: { city: 'Ottawa', country: 'Canada' },
+          preferredLocation: 'Ottawa, Canada',
+          remoteResidences: { canada: { city: 'Ottawa', country: 'Canada' } },
+          maxAgeDays: 14,
+          collectionLimits: { jobsPerPlatform: 25, pagesPerPlatform: 2 },
+          enabledSourceIds: ['indeed'],
+          locked: false,
+          hubState: 'searching',
+          careerData: 'historical career data',
+          resumeProfile: { name: 'Historical profile' },
+          scoredJobs: [{ title: 'Historical result' }],
+          jobRunId: 'historical-run',
+          resultDisposition: 'replaced',
+          pendingJobs: [{ title: 'Historical pending result' }],
+          pendingBatch: { batchId: 'historical-batch' },
+          manualAiResume: { runId: 'historical-manual-run' },
+        },
+      };
+      const live = {
+        ...historical,
+        position: { x: 80, y: 90 },
+        data: {
+          targetRole: 'Live role',
+          jobPreferences: 'Live preferences',
+          searchLocation: { city: 'Toronto', country: 'Canada' },
+          preferredLocation: 'Toronto, Canada',
+          remoteResidences: { canada: { city: 'Toronto', country: 'Canada' } },
+          maxAgeDays: 30,
+          collectionLimits: { jobsPerPlatform: 100, pagesPerPlatform: 8 },
+          enabledSourceIds: ['linkedin', 'indeed'],
+          locked: true,
+          hubState: 'done',
+          careerData: 'live career data',
+          resumeProfile: { name: 'Live profile' },
+          scoredJobs: [{ title: 'Live result' }],
+          finalSourceCounts: { indeed: 1 },
+          resultCount: 1,
+          jobRunId: 'live-run',
+          resultDisposition: 'replaced',
+          pendingJobs: null,
+          pendingBatch: null,
+          queryCacheKey: 'live-query-cache',
+          _boardRollbackSourceProgressFence: { retiredJobRunId: 'retired-run' },
+        },
+      };
+
+      const restored = mergeNonRestorableNodeDataFromLive([historical], [live])[0];
+      assert(restored.position.x === historical.position.x && restored.position.y === historical.position.y,
+        'Job Search undo must still restore node-level canvas properties');
+      for (const field of ['targetRole', 'jobPreferences', 'searchLocation', 'preferredLocation', 'remoteResidences', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'locked']) {
+        assert(JSON.stringify(restored.data[field]) === JSON.stringify(historical.data[field]),
+          `Job Search undo must restore the historical user setting ${field}`);
+      }
+      assert(restored.data.hubState === 'done'
+        && restored.data.careerData === 'live career data'
+        && restored.data.resumeProfile.name === 'Live profile'
+        && restored.data.scoredJobs[0].title === 'Live result'
+        && restored.data.jobRunId === 'live-run'
+        && restored.data.resultCount === 1
+        && restored.data.queryCacheKey === 'live-query-cache'
+        && restored.data._boardRollbackSourceProgressFence.retiredJobRunId === 'retired-run'
+        && !Object.prototype.hasOwnProperty.call(restored.data, 'manualAiResume'),
+      'Job Search undo must keep the complete live run/result/career tuple and must not resurrect an absent historical recovery marker');
+
+      const historicalRuntimeOnly = { ...historical, data: { ...historical.data, hubState: 'done', jobRunId: 'another-run', scoredJobs: [] } };
+      const historicalSettingEdit = { ...historical, data: { ...historical.data, targetRole: 'A different setting' } };
+      assert(fingerprint({ nodes: [historical], edges: [], drawings: [] })
+          === fingerprint({ nodes: [historicalRuntimeOnly], edges: [], drawings: [] })
+        && fingerprint({ nodes: [historical], edges: [], drawings: [] })
+          !== fingerprint({ nodes: [historicalSettingEdit], edges: [], drawings: [] }),
+      'Job Search fingerprints must ignore external run data while retaining user settings as undoable state');
+      assert(hasActiveExternalRunState([{ id: 'paused', type: 'jobhub', data: { hubState: 'sources-ready' } }])
+        && hasActiveExternalRunState([{ id: 'pending', type: 'jobhub', data: { hubState: 'done', pendingJobs: [{ title: 'Pending' }] } }])
+        && !hasActiveExternalRunState([{ id: 'settled', type: 'jobhub', data: { hubState: 'done', pendingJobs: null } }]),
+      'paused and pending Search transactions must remain protected from snapshot, undo, and navigation even outside a processing hubState');
+      return { settingsRestored: 9, liveRunPreserved: true, pausedRunGuarded: true };
+    },
+  },
+{
+    name: 'Deletion restore retains every Job Search manual-AI cleanup receipt',
+    run: () => {
+      const [restored] = applyManualAiRetirementReceiptsToNodes([{
+        id: 'search-receipts',
+        type: 'jobhub',
+        data: {
+          manualAiResume: {
+            runId: 'current-run',
+            task: 'job-scoring',
+            stepKey: 'batch-2',
+          },
+          manualAiCleanupReceipts: [{
+            runId: 'existing-old-run',
+            retirementPending: true,
+            note: 'preserve-me',
+          }],
+        },
+      }], [
+        { nodeId: 'search-receipts', runId: 'current-run', cancellationPending: false },
+        { nodeId: 'search-receipts', runId: 'older-run-a', cancellationPending: true },
+        { nodeId: 'search-receipts', runId: 'older-run-b', cancellationPending: false },
+      ]);
+      const cleanupByRunId = new Map(
+        restored.data.manualAiCleanupReceipts.map(receipt => [receipt.runId, receipt]),
+      );
+      assert(restored.data.manualAiResume.runId === 'current-run'
+        && restored.data.manualAiResume.task === 'job-scoring'
+        && restored.data.manualAiResume.stepKey === 'batch-2'
+        && restored.data.manualAiResume.retirementPending === true,
+      'the matching current Search marker must retain its recovery descriptor while becoming a deletion-cleanup receipt');
+      assert(cleanupByRunId.size === 3
+        && cleanupByRunId.get('existing-old-run')?.note === 'preserve-me'
+        && cleanupByRunId.get('older-run-a')?.cancellationPending === true
+        && cleanupByRunId.get('older-run-b')?.cancellationPending === false
+        && !cleanupByRunId.has('current-run'),
+      'every additional Search run must remain independently retryable without duplicating the primary marker');
+
+      const [newerOwnerRestored] = applyManualAiRetirementReceiptsToNodes([{
+        id: 'search-newer-owner',
+        type: 'jobhub',
+        data: {
+          manualAiResume: { runId: 'newer-run', task: 'job-preference' },
+        },
+      }], [
+        { nodeId: 'search-newer-owner', runId: 'older-run-a', cancellationPending: false },
+        { nodeId: 'search-newer-owner', runId: 'older-run-b', cancellationPending: true },
+      ]);
+      assert(newerOwnerRestored.data.manualAiResume.runId === 'newer-run'
+        && newerOwnerRestored.data.manualAiResume.task === 'job-preference'
+        && !newerOwnerRestored.data.manualAiResume.retirementPending,
+      'deletion rollback must not replace an unrelated newer Search recovery owner');
+      assert(newerOwnerRestored.data.manualAiCleanupReceipts
+        .map(receipt => receipt.runId).sort().join(',') === 'older-run-a,older-run-b',
+      'all deletion receipts must fan out beside an unrelated current Search marker');
+
+      const [markerlessRestored] = applyManualAiRetirementReceiptsToNodes([{
+        id: 'search-markerless',
+        type: 'jobhub',
+        data: {},
+      }], [
+        { nodeId: 'search-markerless', runId: 'primary-run', cancellationPending: false },
+        { nodeId: 'search-markerless', runId: 'additional-run', cancellationPending: false },
+      ]);
+      assert(markerlessRestored.data.manualAiResume?.runId === 'primary-run'
+        && markerlessRestored.data.manualAiCleanupReceipts?.[0]?.runId === 'additional-run',
+      'a markerless restored Search must keep the legacy primary marker and retain every additional receipt');
+      return { primaryPreserved: true, additionalReceipts: 3, newerOwnerPreserved: true };
+    },
+  },
+{
+    name: 'Undo preserves live Job Search source-card membership, progress, and structural edges',
+    run: () => {
+      const historicalNodes = [
+        { id: 'search-topology', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', targetRole: 'Historical role', jobRunId: 'old-run' } },
+        { id: 'source-kept', type: 'jobsourcecard', position: { x: 10, y: 10 }, data: { hubId: 'search-topology', sourceId: 'indeed', persistedProgress: { status: 'warning', count: 2 } } },
+        { id: 'source-retired', type: 'jobsourcecard', position: { x: 20, y: 20 }, data: { hubId: 'search-topology', sourceId: 'linkedin', persistedProgress: { status: 'done', count: 3 } } },
+        { id: 'note', type: 'text', position: { x: 30, y: 30 }, data: { text: 'Historical note' } },
+      ];
+      const liveNodes = [
+        { id: 'search-topology', type: 'jobhub', position: { x: 5, y: 5 }, data: { hubState: 'done', targetRole: 'Live role', jobRunId: 'live-run', scoredJobs: [{ title: 'Live' }] } },
+        { id: 'source-kept', type: 'jobsourcecard', position: { x: 60, y: 60 }, data: { hubId: 'search-topology', sourceId: 'indeed', persistedProgress: { status: 'done', count: 8 }, _boardRollbackProgressRestore: { nonce: 'live-receipt' } } },
+        { id: 'source-new', type: 'jobsourcecard', position: { x: 70, y: 70 }, data: { hubId: 'search-topology', sourceId: 'glassdoor', persistedProgress: { status: 'warning', count: 1 } } },
+        { id: 'note', type: 'text', position: { x: 35, y: 35 }, data: { text: 'Live note' } },
+      ];
+      const historicalEdges = [
+        { id: 'edge-kept-old', source: 'search-topology', target: 'source-kept' },
+        { id: 'edge-retired', source: 'search-topology', target: 'source-retired' },
+        { id: 'edge-note', source: 'note', target: 'search-topology' },
+      ];
+      const liveEdges = [
+        { id: 'edge-kept-live', source: 'search-topology', target: 'source-kept' },
+        { id: 'edge-new-live', source: 'search-topology', target: 'source-new' },
+        { id: 'edge-note-live', source: 'note', target: 'search-topology' },
+      ];
+
+      const restoredNodes = mergeNonRestorableNodeDataFromLive(historicalNodes, liveNodes);
+      const restoredEdges = mergeNonRestorableEdgesFromLive(historicalEdges, liveEdges, restoredNodes, liveNodes);
+      const nodeById = new Map(restoredNodes.map(node => [node.id, node]));
+      const edgeIds = restoredEdges.map(edge => edge.id).sort();
+      assert(nodeById.has('source-kept') && nodeById.has('source-new') && !nodeById.has('source-retired'),
+        'undo must keep exactly the live source-card membership for a surviving Search');
+      assert(nodeById.get('source-kept').position.x === 10
+        && nodeById.get('source-kept').data.persistedProgress.count === 8
+        && nodeById.get('source-kept').data._boardRollbackProgressRestore.nonce === 'live-receipt'
+        && nodeById.get('source-new').position.x === 70,
+      'a surviving source card keeps its historical canvas position but live progress fence, while a newly-live card keeps its complete live node');
+      assert(JSON.stringify(edgeIds) === JSON.stringify(['edge-kept-live', 'edge-new-live', 'edge-note']),
+        `undo must replace source-card incident edges with the exact live topology while restoring unrelated edges, got ${edgeIds.join(',')}`);
+
+      const historicalGroup = {
+        id: 'nested-group', type: 'group', position: { x: 0, y: 0 },
+        data: { canvasData: { nodes: historicalNodes.slice(0, 3), edges: historicalEdges.slice(0, 2), drawings: [] } },
+      };
+      const liveGroup = {
+        ...historicalGroup,
+        data: { canvasData: { nodes: liveNodes.slice(0, 3), edges: liveEdges.slice(0, 2), drawings: [] } },
+      };
+      const nested = mergeNonRestorableNodeDataFromLive([historicalGroup], [liveGroup])[0].data.canvasData;
+      assert(nested.nodes.some(node => node.id === 'source-new')
+        && !nested.nodes.some(node => node.id === 'source-retired')
+        && nested.edges.some(edge => edge.id === 'edge-kept-live')
+        && nested.edges.some(edge => edge.id === 'edge-new-live')
+        && !nested.edges.some(edge => edge.id === 'edge-retired'),
+      'the same live source topology isolation must recurse into duplicated/nested canvases');
+
+      const undoSource = fs.readFileSync(new URL('../../src/hooks/useUndoRedo.js', import.meta.url), 'utf8');
+      assert((undoSource.match(/edges: restoredEdges,/g) || []).length === 2,
+        'undo and redo must fingerprint the live-merged edge set they actually commit so topology preservation does not immediately clear redo');
+      const undoRestore = undoSource.slice(undoSource.indexOf('const undo = useCallback'), undoSource.indexOf('const redo = useCallback'));
+      const redoRestore = undoSource.slice(undoSource.indexOf('const redo = useCallback'), undoSource.indexOf('const modalCount'));
+      assert(undoRestore.includes('isStateDirtyRef.current = false;')
+        && redoRestore.includes('isStateDirtyRef.current = false;'),
+      'undo and redo must clear both dirty-state representations so the next pre-debounce user edit is immediately undoable');
+      return { liveCards: ['source-kept', 'source-new'], liveEdges: ['edge-kept-live', 'edge-new-live'], nested: true };
     },
   },
 {
@@ -3665,13 +3966,23 @@ export default [
         && boundary.includes('A write already sent to the app cannot be recalled.')
         && boundary.includes('window.location.reload();'),
       'the error fallback must settle document drafts when possible and provide an explicit destructive escape when the normal conflict UI is unavailable');
+      const deletionAbort = deletion.indexOf("if (diskChoice === 'abort') return rejectDeletion();");
+      const deletionTextSettle = deletion.indexOf('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)');
+      const deletionManualRetirement = deletion.indexOf('await retireDeletedManualAiRuns(cleanupDeletedNodes);');
+      const clearPreflight = actions.indexOf('const preflightClear = useCallback(async () =>');
+      const clearTextSettle = actions.indexOf('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)', clearPreflight);
+      const clearCommit = actions.indexOf('await doClear();', clearPreflight);
       assert(canvasSource.includes('const resolveConfirmDialog = useCallback(async (actionName, eventName) =>')
         && canvasSource.includes('await action?.();')
-        && deletion.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)')
-        && deletion.includes('undo?.();')
-        && actions.includes('const preflightClear = useCallback(async () =>')
-        && actions.includes('textDocumentSessions.flushAndSettlePaths(orphanTextPaths)'),
-      'last-reference deletion and Clear Canvas must settle only their orphan text paths while the confirmation remains resolving, then restore rather than discard a failed draft');
+        && deletion.includes("onAbort: () => resolve('abort')")
+        && deletionAbort >= 0
+        && deletionTextSettle > deletionAbort
+        && deletionManualRetirement > deletionTextSettle
+        && deletion.includes('return rejectDeletion(\n        error?.manualAiRetirementReceipts,')
+        && clearPreflight >= 0
+        && clearTextSettle > clearPreflight
+        && clearCommit > clearTextSettle,
+      'last-reference deletion and Clear Canvas must settle only their orphan text paths before acknowledged workflow cleanup; an OS-dialog Abort or failed draft rejects the pending deletion without retiring recovery');
       assert(main.includes('let rendererHandshakeRequestId = 0;')
         && main.includes("safeMenuSend(win, 'quit-request', { requestId })")
         && main.includes('responseRequestId !== requestId')
@@ -3832,6 +4143,39 @@ export default [
       assert(clone.data.locked === false && clone.draggable === undefined && clone.deletable === undefined, 'Node factory clone safety: clone should unlock');
       assert(clone.data.hubState === 'empty' && clone.data.isNew === false && !clone.data.queuedModuleRun, 'Node factory clone safety: active state/new flag should be sanitized');
 
+      const boardClone = cloneNode({
+        id: 'board-original',
+        type: 'jobboard',
+        position: { x: 0, y: 0 },
+        data: {
+          hubState: 'done',
+          resultCount: 2,
+          combineSignature: '6:durable-board-signature',
+          selectedSearchModuleIds: ['search-a'],
+          queuedModuleRun: { label: 'Scan Job Search', position: 1 },
+          manualAiResume: { runId: 'board-original-run', task: 'job-taxonomy' },
+          boardScanResume: { boardRunId: 'board-original-run', selectedSearchModuleIds: ['search-a'] },
+        },
+      }, 0, 0);
+      assert(!('selectedSearchModuleIds' in boardClone.data)
+        && JOBBOARD_TRANSIENT_KEYS.every(key => !(key in boardClone.data))
+        && !('manualAiResume' in boardClone.data)
+        && !('boardScanResume' in boardClone.data)
+        && boardClone.data.hubState === 'done'
+        && boardClone.data.resultCount === 2
+        && boardClone.data.combineSignature === '6:durable-board-signature',
+      'Node factory clone safety: standalone Boards clear connection-specific selection and every in-flight run marker while retaining completed result metadata');
+
+      const scanNoneBoardClone = cloneNode({
+        id: 'board-scan-none',
+        type: 'jobboard',
+        position: { x: 0, y: 0 },
+        data: { hubState: 'empty', selectedSearchModuleIds: [] },
+      }, 0, 0);
+      assert(Array.isArray(scanNoneBoardClone.data.selectedSearchModuleIds)
+        && scanNoneBoardClone.data.selectedSearchModuleIds.length === 0,
+      'Node factory clone safety: standalone Boards retain an explicit scan-none choice instead of converting it to default-all when connected later');
+
       const documentSource = {
         id: 'document-original', type: 'document', position: { x: 3, y: 7 },
         data: { filePath: '/documents/Work Experience.md', filename: 'Work Experience.md', editorFontSize: 14 },
@@ -3851,6 +4195,7 @@ export default [
           pendingJobPreferences: 'Free lunch required', pendingJobPreferencePlan: { version: 1 },
           pendingJobPreferencesInterpretation: { version: 1 }, pendingJobs: [{ title: 'Stale run job' }],
           queuedModuleRun: { position: 1 }, errorMessage: 'stale error', scrapeWarnings: [{ sourceId: 'indeed' }],
+          manualAiResume: { runId: 'original-preference-run', task: 'job-preference' },
         },
       }, 0, 0);
       assert(preferenceRunClone.data.hubState === 'empty' && !preferenceRunClone.data.inputLocked
@@ -3859,7 +4204,8 @@ export default [
         && !('pendingJobPreferencePlan' in preferenceRunClone.data)
         && !('pendingJobPreferencesInterpretation' in preferenceRunClone.data)
         && !('pendingJobs' in preferenceRunClone.data)
-        && !('queuedModuleRun' in preferenceRunClone.data),
+        && !('queuedModuleRun' in preferenceRunClone.data)
+        && !('manualAiResume' in preferenceRunClone.data),
       'Node factory clone safety: a copied preference-evaluation run must not retain another hub’s manual/IPC state or become input-locked without career data');
 
       const pausedClone = cloneNode({
@@ -3871,10 +4217,11 @@ export default [
 
       const reanalysisClone = cloneNode({
         id: 'reanalysis-running', type: 'jobhub', position: { x: 0, y: 0 },
-        data: { hubState: 'evaluating-preferences', scoredJobs: [{ title: 'Saved result' }], activeJobPreferences: 'Prefer remote' },
+        data: { hubState: 'evaluating-preferences', scoredJobs: [{ title: 'Saved result' }], activeJobPreferences: 'Prefer remote', manualAiResume: { runId: 'original-reanalysis-run', task: 'job-scoring' } },
       }, 0, 0);
       assert(reanalysisClone.data.hubState === 'done' && reanalysisClone.data.scoredJobs.length === 1
-        && !('activeJobPreferences' in reanalysisClone.data),
+        && !('activeJobPreferences' in reanalysisClone.data)
+        && !('manualAiResume' in reanalysisClone.data),
       'Node factory clone safety: an interrupted re-analysis preserves completed results but returns the clone to a terminal state');
 
       const group = {
@@ -3883,18 +4230,77 @@ export default [
         position: { x: 0, y: 0 },
         data: {
           canvasData: {
-            nodes: [{ id: 'child-a', type: 'text', position: { x: 1, y: 1 }, data: {} }],
-            edges: [{ id: 'edge-a', source: 'child-a', target: 'child-a' }],
+            nodes: [
+              {
+                id: 'nested-board', type: 'jobboard', position: { x: 1, y: 1 },
+                data: {
+                  hubState: 'done', selectedSearchModuleIds: ['nested-search-b'],
+                  queuedModuleRun: { label: 'Scan Job Search', position: 1 },
+                  manualAiResume: { runId: 'nested-board-run', task: 'job-taxonomy' },
+                  boardScanResume: { boardRunId: 'nested-board-run', selectedSearchModuleIds: ['nested-search-b'] },
+                },
+              },
+              { id: 'nested-search-a', type: 'jobhub', position: { x: 2, y: 2 }, data: { hubState: 'done', targetRole: 'Role A' } },
+              { id: 'nested-search-b', type: 'jobhub', position: { x: 3, y: 3 }, data: { hubState: 'done', targetRole: 'Role B' } },
+              {
+                id: 'nested-job-group', type: 'jobgroup', position: { x: 4, y: 4 },
+                data: { hubId: 'nested-board', childIds: ['nested-job-card', 'missing-job-card'] },
+              },
+              {
+                id: 'nested-job-card', type: 'jobcard', position: { x: 5, y: 5 },
+                data: { hubId: 'nested-board', originHubId: 'nested-search-b', title: 'Copied role' },
+              },
+              {
+                id: 'nested-source-card', type: 'jobsourcecard', position: { x: 6, y: 6 },
+                data: { hubId: 'nested-search-b', sourceId: 'indeed' },
+              },
+              { id: 'child-a', type: 'text', position: { x: 4, y: 4 }, data: {} },
+            ],
+            edges: [
+              { id: 'edge-a', source: 'child-a', target: 'child-a' },
+              { id: 'edge-board-a', source: 'nested-board', target: 'nested-search-a' },
+              { id: 'edge-board-b', source: 'nested-board', target: 'nested-search-b' },
+              { id: 'edge-board-group', source: 'nested-board', target: 'nested-job-group' },
+              { id: 'edge-group-card', source: 'nested-job-group', target: 'nested-job-card' },
+              { id: 'edge-search-source', source: 'nested-search-b', target: 'nested-source-card' },
+            ],
             drawings: [{ id: 'draw-a', points: [] }],
           },
         },
       };
       const reassigned = reassignCanvasDataIDs(group);
-      const childId = reassigned.data.canvasData.nodes[0].id;
+      const reassignedNodes = reassigned.data.canvasData.nodes;
+      const childId = reassignedNodes.find(node => node.type === 'text').id;
+      const nestedBoard = reassignedNodes.find(node => node.type === 'jobboard');
+      const nestedSearchA = reassignedNodes.find(node => node.data?.targetRole === 'Role A');
+      const nestedSearchB = reassignedNodes.find(node => node.data?.targetRole === 'Role B');
+      const nestedJobGroup = reassignedNodes.find(node => node.type === 'jobgroup');
+      const nestedJobCard = reassignedNodes.find(node => node.type === 'jobcard');
+      const nestedSourceCard = reassignedNodes.find(node => node.type === 'jobsourcecard');
+      const selfEdge = reassigned.data.canvasData.edges.find(edge => edge.id !== 'edge-a'
+        && edge.source === childId && edge.target === childId);
       assert(childId !== 'child-a', 'Node factory clone safety: nested child id should be reassigned');
-      assert(reassigned.data.canvasData.edges[0].source === childId && reassigned.data.canvasData.edges[0].target === childId, 'Node factory clone safety: nested edge endpoints should be remapped consistently');
+      assert(selfEdge, 'Node factory clone safety: nested edge endpoints should be remapped consistently');
+      assert(Array.isArray(nestedBoard.data.selectedSearchModuleIds)
+        && nestedBoard.data.selectedSearchModuleIds.length === 1
+        && nestedBoard.data.selectedSearchModuleIds[0] === nestedSearchB.id
+        && nestedBoard.data.selectedSearchModuleIds[0] !== nestedSearchA.id
+        && !('manualAiResume' in nestedBoard.data)
+        && !('boardScanResume' in nestedBoard.data)
+        && JOBBOARD_TRANSIENT_KEYS.every(key => !(key in nestedBoard.data)),
+      'Node factory clone safety: a Board inside a duplicated group must remap its exact selected-search subset while dropping the original run state');
+      assert(nestedJobGroup.data.hubId === nestedBoard.id
+        && nestedJobCard.data.hubId === nestedBoard.id
+        && nestedSourceCard.data.hubId === nestedSearchB.id
+        && nestedJobCard.data.originHubId === nestedSearchB.id
+        && JSON.stringify(nestedJobGroup.data.childIds) === JSON.stringify([nestedJobCard.id]),
+      'Node factory clone safety: nested Board/Search children, group-tree references, and copied Search provenance must all use reassigned ids');
+      assert(reassigned.data.canvasData.edges.some(edge => edge.source === nestedBoard.id && edge.target === nestedJobGroup.id)
+        && reassigned.data.canvasData.edges.some(edge => edge.source === nestedJobGroup.id && edge.target === nestedJobCard.id)
+        && reassigned.data.canvasData.edges.some(edge => edge.source === nestedSearchB.id && edge.target === nestedSourceCard.id),
+      'Node factory clone safety: nested module graph edges must use the same reassigned ids as ownership backlinks');
       assert(reassigned.data.canvasData.drawings[0].id !== 'draw-a', 'Node factory clone safety: drawing ids should be reassigned');
-      return { cloneIdChanged: clone.id !== source.id, childId };
+      return { cloneIdChanged: clone.id !== source.id, boardSelectionCleared: true, nestedBoardSelectionRemapped: true, nestedOwnershipRemapped: true, childId };
     },
   },
 {
@@ -4067,7 +4473,7 @@ export default [
         ['nextJobAnalysisClearWatermark(priorClearAt)', 'a second clear in the same millisecond could retain the first run token and misclassify the second run'],
         ['discardJobBatch', 'an abandoned batch sidecar would keep billing and could report results onto a cleared hub'],
         ['discardJobRun', 'the staged run sidecar would linger and re-offer a resume for career files that are gone'],
-        ['discardJobAnalysisSnapshot', 'the canvas-scoped saved scrape would remain resumable after this hub cleared its career files'],
+        ['discardJobAnalysisSnapshot', 'the hub-scoped saved scrape would remain resumable after this hub cleared its career files'],
         ['setSavedAnalysisMeta(null)', 'the stale saved-scrape affordance could remain visible until the asynchronous sidecar cleanup returns'],
         ['setResumeOffer(null)', 'the resume banner would stay up offering to continue the very run this clear just discarded'],
         ['epoch.bump()', 'a late-settling parse would write the old profile straight back onto the cleared hub'],
@@ -4098,19 +4504,30 @@ export default [
         && !/\blastCompletedRunAt\s*:/.test(clearPatch),
       'clearing career files must retain lastCompletedRunAt as module history; it is not career-derived state to wipe');
 
-      // peekJobRun/discardJobRun are keyed by canvasFilePath ALONE — one staged
-      // run per canvas — so the banner this hub happens to be showing may be
-      // another job hub's recoverable run.
+      // Modern peekJobRun/discardJobRun calls are keyed by canvas + hub. A
+      // node-less legacy manifest remains deliberately owner-unknown.
       assert(clear.includes('resumeOffer?.runId === runId'),
         'the resume banner must only be dismissed when the offered run is the one this hub just discarded with its own token');
       assert(!clear.includes('runId: resumeOffer'),
-        'clearing this hub must never discard the offered run by its own id: the offer is canvas-scoped, so that trashes a DIFFERENT hub\'s recoverable run');
+        'clearing this hub must use its captured run token rather than an asynchronously refreshed offer');
+      assert(clear.includes('const ownedResumeOfferRunId = resumeOffer?.nodeId === id')
+        && clear.includes('|| ownedResumeOfferRunId || null'),
+      'an empty persisted hub still discards a recovery manifest only when peekJobRun proved that offer belongs to this exact hub');
+      assert(source.includes('const careerClearWatermarkRef = useRef(normalizeJobAnalysisClearWatermark(data.jobAnalysisClearedAt))')
+        && source.includes('careerClearWatermarkRef.current = jobAnalysisClearedAt')
+        && source.includes('const staleClearedOwnedRun = info?.found')
+        && source.includes('info?.nodeId === id')
+        && source.includes('startedAt <= clearedAt')
+        && source.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: info.runId })')
+        && source.includes("[canvasFilePath, id, data.jobAnalysisClearedAt]"),
+      'startup recovery quietly retires only an exact owned manifest older than the persisted clear boundary, including a peek that settles just after Clear');
 
       // With the offer left standing, the Resume button is the only thing left
       // to degrade — and handleResumeRun DESTROYS the staged run when either the
       // profile or the run's queries are missing, so the button must not be
       // offered without both.
       assert(source.includes('const resumeRunActionable = canResumeOffer')
+        && source.includes('peekJobRun({ canvasFilePath, nodeId: id })')
         && source.includes('resumeOffer?.nodeId === id')
         && source.includes('(info?.nodeId === id || !info?.nodeId)')
         && source.includes('const legacyUnknownOwner = !resumeOffer?.nodeId;')
@@ -4124,7 +4541,7 @@ export default [
         'the Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer');
       assert(source.includes(' Start fresh — this run cannot be resumed from this module.')
         && !source.includes('this hub no longer has career files'),
-      'the banner must report the observation (this run cannot be resumed here) rather than asserting a history a virgin hub never had — the offer is canvas-scoped and may come from another module entirely');
+      'the banner must report the observation (this run cannot be resumed here) rather than asserting a history a virgin hub never had — the only cross-hub case is an owner-unknown legacy offer');
       return { guardedBehaviours: guarded.length };
     },
   },
@@ -4171,7 +4588,7 @@ export default [
     },
   },
 {
-    name: 'Job Search cancellation keeps retained-profile rerun reachable and stale cleanup cannot unlock a newer run',
+    name: 'Job Search cancellation keeps retained input runnable and stale cleanup cannot unlock a newer run',
     run: () => {
       const guard = createRunOwnershipGuard();
       const first = guard.start();
@@ -4193,19 +4610,19 @@ export default [
       const emptyState = source.slice(emptyStateStart, processingStateStart);
       assert(emptyState.includes('Career files retained')
         && emptyState.includes('Re-run Search')
-        && emptyState.includes('hasReusableCareerProfile && !data.locked')
+        && emptyState.includes('hasRunnableCareerInput && !controlsLocked')
         && emptyState.includes('handleRerun();'),
-      'only a locked empty hub with a retained profile exposes the existing rerun path');
+      'an idle, unlocked empty hub with a retained profile or retained file paths exposes the rerun path');
       assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
         && emptyState.includes('Re-run with these files, or clear them to search with different ones')
         && emptyState.includes('Clear career files')
         && emptyState.includes('handleClearCareerFiles(e);'),
       'a hub holding career files must offer the clear action, and a hub holding none must not claim files are retained');
-      // Both empty-state branches hide their actions while data.locked, so both
+      // Both empty-state branches hide their actions while controlsLocked, so both
       // must say so instead of naming buttons that aren't rendered or inviting a
       // drop that handleDrop silently refuses.
       assert(emptyState.includes('Unlock this module to re-run it or change its files'),
-        'a locked retained-files hub still tells the user to re-run or clear, but both buttons are hidden behind !data.locked — the instruction points at nothing');
+        'a locked retained-files hub still tells the user to re-run or clear, but both buttons are hidden behind !controlsLocked — the instruction points at nothing');
       assert(emptyState.includes('Module locked')
         && emptyState.includes('Unlock it to drop career files'),
       'a locked virgin hub falls through to the drop copy and invites a drop that handleDrop refuses without a word');
@@ -4253,7 +4670,8 @@ export default [
         source.indexOf('const [savedAnalysisMeta', source.indexOf('const completeJobRun = useCallback')),
       );
       assert(completionWriter.includes('normalizeCompletionTimestamp(result?.receipt?.completedAt)')
-        && completionWriter.includes('updateGlobal(id, { lastCompletedRunAt: completedAt })')
+        && completionWriter.includes('updateGlobal(id, () => canPublish() ? { lastCompletedRunAt: completedAt } : null)')
+        && completionWriter.includes('if (!canPublish()) return result;')
         && !completionWriter.includes('Number(result?.receipt?.completedAt)'),
       'only a strictly valid backend completion timestamp may be persisted; null and booleans must never become epoch zero');
 
@@ -4301,16 +4719,16 @@ export default [
       assert(reset.includes('processingRunsRef.current.cancel()')
         && /pendingJobs:\s*null/.test(reset)
         && /scrapeWarnings:\s*\[\]/.test(reset)
-        && reset.includes('const retainedCareerData = hasReusableCareerProfile')
+        && reset.includes('const retainedCareerData = resetHasReusableCareerProfile')
         && reset.includes('buildJobHubCareerClearPatch({')
         && reset.includes('...retainedCareerData')
-        && reset.includes('initialDropAcceptedRef.current = hasReusableCareerProfile')
-        && reset.includes('const resetRunId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || null')
+        && reset.includes('initialDropAcceptedRef.current = resetHasReusableCareerProfile')
+        && reset.includes('const resetRunId = resetData.pendingBatch?.jobRunId || jobRunIdRef.current || resetData.jobRunId || null')
         && reset.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: resetRunId })'),
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
       // The presence checks above hold for either arm of the ternary; pin the
       // DIRECTION separately.
-      assert(/hasReusableCareerProfile\s*\?\s*\{\}\s*:\s*buildJobHubCareerClearPatch\(\{/.test(reset),
+      assert(/resetHasReusableCareerProfile\s*\?\s*\{\}\s*:\s*buildJobHubCareerClearPatch\(\{/.test(reset),
         'the cancel ternary is inverted: applying the clear patch when hasReusableCareerProfile is TRUE wipes the parsed profile exactly when it must be retained, leaving a cancelled hub with no career data and no rerun path');
 
       assert(canHubAcceptInitialDrop({
@@ -4379,7 +4797,9 @@ export default [
       assert(autoStart.includes("const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
         && autoStart.includes('autoStartedFilePathRef.current === autoStartPath')
         && autoStart.includes('autoStartedFilePathRef.current = autoStartPath')
-        && autoStart.includes('startProcessing(autoStartPath);'),
+        && autoStart.includes('Promise.resolve(startProcessing(autoStartPath))')
+        && autoStart.includes('blockedByDeletion')
+        && autoStart.includes('claimedByBoard'),
       'auto-start must launch each exact persisted path once, while allowing a genuinely changed path to launch');
 
       const rerunStart = source.indexOf('const handleRerun = useCallback');

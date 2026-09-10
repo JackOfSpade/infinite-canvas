@@ -1,5 +1,5 @@
 import { logger } from '../../logger.js';
-import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile } from '../stealthBrowser.js';
+import { closeOwnedBrowserProcess, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
@@ -18,6 +18,10 @@ import { isBackgroundE2E, backgroundE2EDisabledError } from '../../utils/backgro
 const LOGIN_POLL_INTERVAL_MS    = 500;           // login-window auto-close poll cadence
 const AUTH_WINDOW_AUTO_CLOSE_MS = 5 * 60 * 1000; // max time a hidden auth/captcha window stays open
 const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic heartbeat interval
+// A visible Chrome starts on about:blank. Do not leave a person staring at it
+// for the five-minute human-auth timeout when its first navigation never lands.
+const VISIBLE_WINDOW_STARTUP_DEADLINE_MS = 3_000;
+const VISIBLE_WINDOW_FALLBACK_TIMEOUT_MS = 4_000;
 const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
 // ── Native-window cookie checkpoint ─────────────────────────────────────────
 // Chromium does NOT write a cookie straight through to the profile's SQLite
@@ -43,9 +47,116 @@ const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies re
 const NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS = 34_000;
 const NATIVE_LOGIN_COOKIE_COMMIT_POLL_MS = 500;
 const LOGIN_BROWSER_GRACEFUL_EXIT_MS = 12_000;   // successful auth must get a real profile checkpoint
-const LOGIN_BROWSER_TERM_EXIT_MS = 3_000;
-const LOGIN_BROWSER_KILL_EXIT_MS = 2_000;
+// Native Chrome windows are spawned child processes, not Puppeteer browsers;
+// their manual close paths still need their own child-exit bounds.
+const NATIVE_BROWSER_TERM_EXIT_MS = 3_000;
+const NATIVE_BROWSER_KILL_EXIT_MS = 2_000;
 const execFile = promisify(execFileCb);
+
+function abortErrorFromSignal(signal, fallback = 'Browser window cancelled') {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error(typeof signal?.reason === 'string' && signal.reason ? signal.reason : fallback);
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfSignalAborted(signal, fallback) {
+  if (signal?.aborted) throw abortErrorFromSignal(signal, fallback);
+}
+
+/**
+ * Validate the only kind of URL a visible auth/captcha window may navigate to.
+ * Kept pure so the launch boundary is pinned without starting Chrome in tests.
+ */
+export function validateVisibleWindowUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return { ok: false, url: null, error: `Visible browser URL must use http(s), got ${url.protocol}` };
+    }
+    return { ok: true, url: url.href, error: null };
+  } catch {
+    return { ok: false, url: null, error: 'Visible browser URL is invalid' };
+  }
+}
+
+/** Pure classification for the bounded visible-window startup handshake. */
+export function classifyVisibleWindowNavigation({ requestedUrl, actualUrl, assignmentError = null, fallbackAttempted = false, fallbackError = null } = {}) {
+  const requested = validateVisibleWindowUrl(requestedUrl);
+  if (!requested.ok) return { ok: false, result: 'navigation-error', requestedUrl: null, actualUrl: String(actualUrl || ''), error: requested.error, fallbackAttempted: false };
+  const actual = String(actualUrl || '');
+  const actualValidation = validateVisibleWindowUrl(actual);
+  if (actualValidation.ok) return { ok: true, result: 'navigated', requestedUrl: requested.url, actualUrl: actual, assignmentError: assignmentError ? String(assignmentError) : null, fallbackAttempted: !!fallbackAttempted, fallbackError: fallbackError ? String(fallbackError) : null, error: null };
+  const cause = fallbackError || assignmentError || (actual && actual !== 'about:blank'
+    ? `Visible browser landed on an unsafe/non-http(s) URL: ${actual}`
+    : 'Visible browser stayed at about:blank after startup navigation');
+  return { ok: false, result: 'navigation-error', requestedUrl: requested.url, actualUrl: actual || 'about:blank', assignmentError: assignmentError ? String(assignmentError) : null, fallbackAttempted: !!fallbackAttempted, fallbackError: fallbackError ? String(fallbackError) : null, error: String(cause) };
+}
+
+/**
+ * Puppeteer otherwise asks Chrome to open its default startup page before we
+ * own a Page. During a shared-profile collision Chrome hands that request to
+ * the holder process, creating one about:blank tab per retry. We always create
+ * and navigate our own page below, so suppress that side effect completely.
+ */
+export function visibleWindowLaunchOptions(options = {}) {
+  const args = Array.isArray(options.args) ? options.args : [];
+  const ignoreDefaultArgs = options.ignoreDefaultArgs === true
+    ? true
+    : [...new Set([
+        ...(Array.isArray(options.ignoreDefaultArgs) ? options.ignoreDefaultArgs : []),
+        // Puppeteer's ChromeLauncher appends this positional URL whenever all
+        // caller args are flags. Filtering it means a profile-lock rendezvous
+        // has no URL to forward into the already-running Chrome process.
+        'about:blank',
+      ])];
+  return {
+    ...options,
+    ignoreDefaultArgs,
+    waitForInitialPage: false,
+    args: args.includes('--no-startup-window') ? args : [...args, '--no-startup-window'],
+  };
+}
+
+const waitForVisibleWindowNavigation = (page, timeoutMs) => new Promise(resolve => {
+  const startedAt = Date.now();
+  const poll = () => {
+    const currentUrl = (() => { try { return page.url(); } catch { return ''; } })();
+    if (currentUrl && currentUrl !== 'about:blank') return resolve(currentUrl);
+    if (Date.now() - startedAt >= timeoutMs) return resolve(currentUrl || 'about:blank');
+    setTimeout(poll, 100);
+  };
+  poll();
+});
+
+/**
+ * Start a user-visible page without letting a rejected JS assignment strand it.
+ * A single bounded `goto` fallback is deliberately reserved for this failure
+ * case; normal navigation keeps the native-looking location assignment.
+ */
+export async function navigateVisibleWindow(page, requestedUrl) {
+  const valid = validateVisibleWindowUrl(requestedUrl);
+  if (!valid.ok) return classifyVisibleWindowNavigation({ requestedUrl, actualUrl: 'about:blank', assignmentError: valid.error });
+  let assignmentError = null;
+  try {
+    await page.evaluate((targetUrl) => { window.location.href = targetUrl; }, valid.url);
+  } catch (error) {
+    assignmentError = error?.message || String(error);
+  }
+  let actualUrl = await waitForVisibleWindowNavigation(page, VISIBLE_WINDOW_STARTUP_DEADLINE_MS);
+  if (actualUrl && actualUrl !== 'about:blank') {
+    return classifyVisibleWindowNavigation({ requestedUrl: valid.url, actualUrl, assignmentError });
+  }
+
+  let fallbackError = null;
+  try {
+    await page.goto(valid.url, { waitUntil: 'domcontentloaded', timeout: VISIBLE_WINDOW_FALLBACK_TIMEOUT_MS });
+  } catch (error) {
+    fallbackError = error?.message || String(error);
+  }
+  actualUrl = await waitForVisibleWindowNavigation(page, 250);
+  return classifyVisibleWindowNavigation({ requestedUrl: valid.url, actualUrl, assignmentError, fallbackAttempted: true, fallbackError });
+}
 
 // Shared by the visible captcha resolver and deterministic regression tests.
 // Keep this at module scope so Cloudflare variants cannot silently diverge from
@@ -1002,7 +1113,6 @@ export function waitForBrowserProcessExit(proc, timeoutMs) {
 }
 
 async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false } = {}) {
-  const proc = browser.process?.();
   const cookieFlushMs = loginConfirmed ? NATIVE_LOGIN_COOKIE_FLUSH_MS : 0;
   if (cookieFlushMs > 0) {
     logger.info(`[StealthBrowser] ${label} login confirmed — waiting ${cookieFlushMs}ms for the auth cookie/profile checkpoint before closing`);
@@ -1014,25 +1124,15 @@ async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false 
       p.evaluate(() => { window.onbeforeunload = null; }).catch(() => {})
     ));
   } catch { /* best effort — page may be navigating/closed */ }
-  // Subscribe BEFORE browser.close(): Chrome commonly exits while close() is
-  // still resolving. The old post-close subscription missed that event, waited
-  // three seconds, and logged/attempted a bogus SIGKILL on every healthy close.
-  const gracefulExit = waitForBrowserProcessExit(proc, LOGIN_BROWSER_GRACEFUL_EXIT_MS);
-  await browser.close().catch(() => {});
-  if (await gracefulExit) {
-    return { closeDisposition: 'graceful-exit', cookieFlushMs, processExitObserved: true };
-  }
-
-  logger.warn(`[StealthBrowser] ${label} login window did NOT terminate within ${LOGIN_BROWSER_GRACEFUL_EXIT_MS / 1000}s of close() — sending SIGTERM before the final kill fallback.`);
-  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
-  if (await waitForBrowserProcessExit(proc, LOGIN_BROWSER_TERM_EXIT_MS)) {
-    return { closeDisposition: 'sigterm-exit', cookieFlushMs, processExitObserved: true };
-  }
-
-  logger.warn(`[StealthBrowser] ${label} login window ignored graceful close and SIGTERM — force-killing as the final fallback.`);
-  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
-  const killedExit = await waitForBrowserProcessExit(proc, LOGIN_BROWSER_KILL_EXIT_MS);
-  return { closeDisposition: 'sigkill-fallback', cookieFlushMs, processExitObserved: killedExit };
+  const outcome = await closeOwnedBrowserProcess(browser, {
+    label: `${label} login window`,
+    gracefulMs: LOGIN_BROWSER_GRACEFUL_EXIT_MS,
+  });
+  return {
+    closeDisposition: outcome.disposition === 'already-closed' ? 'graceful-exit' : outcome.disposition,
+    cookieFlushMs,
+    processExitObserved: outcome.exited,
+  };
 }
 
 /**
@@ -1043,13 +1143,24 @@ async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false 
  * Hardening: Monitors the IPC sender; if the sender is destroyed (e.g. window closed),
  * the login browser is closed immediately to prevent process leaks.
  */
-export async function openLoginWindow(platformId, sender = null) {
+export async function openLoginWindow(platformId, sender = null, signal = null) {
   if (isBackgroundE2E()) throw backgroundE2EDisabledError('Login window');
+  throwIfSignalAborted(signal, 'Login window cancelled');
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
-  const releaseProfileReservation = reserveSharedProfile(`login-window:${platformId}`);
+  const validUrl = validateVisibleWindowUrl(url);
+  if (!validUrl.ok) {
+    updateAuthWindowDiagnostic(platformId, { mode: 'puppeteer-visible', requestedUrl: url, result: 'navigation-error', navigationError: validUrl.error });
+    finishAuthWindowDiagnostic(platformId, { result: 'navigation-error', requestedUrl: url, navigationError: validUrl.error });
+    throw new Error(validUrl.error);
+  }
+  let releaseProfileReservation = null;
+  let loginBrowser = null;
 
   try {
+    // Reservation itself can throw. Keep it inside this diagnostic/cleanup
+    // boundary so a failed handoff never becomes an invisible leaked state.
+    releaseProfileReservation = reserveSharedProfile(`login-window:${platformId}`);
     // For native-login platforms (e.g. Indeed) the login window and the scraper
     // MUST use the same Chrome executable. On macOS, Chrome derives its cookie
     // encryption key from the app's bundle ID via the system Keychain. Playwright's
@@ -1074,9 +1185,10 @@ export async function openLoginWindow(platformId, sender = null) {
     // logged-out even after a successful prior login, and post-login cookies
     // didn't always reach disk in time for verifySellMonitorLogin.
     await closeStealthBrowser();
+    throwIfSignalAborted(signal, 'Login window cancelled before launch');
 
     if (NATIVE_LOGIN_PLATFORMS.has(platformId)) {
-      return await openNativeLoginWindow({ platformId, url, executablePath, sender });
+      return await openNativeLoginWindow({ platformId, url, executablePath, sender, signal });
     }
 
   // Launch a SEPARATE visible browser for login (now has exclusive access to userDataDir).
@@ -1086,7 +1198,8 @@ export async function openLoginWindow(platformId, sender = null) {
   // puppeteer and return a blank page. --disable-blink-features=AutomationControlled
   // already removes navigator.webdriver; stripping --enable-automation makes the
   // login window indistinguishable from a regular Chrome session.
-  const loginBrowser = await launchWithProfileLockRetry({
+  loginBrowser = await launchVisibleWindow(`Login window (${platformId})`, url, visibleWindowLaunchOptions({
+    signal,
     headless: false,
     executablePath,
     userDataDir: await getUserDataDir(),
@@ -1101,7 +1214,7 @@ export async function openLoginWindow(platformId, sender = null) {
     ],
     defaultViewport: null,
     ignoreHTTPSErrors: true,
-  }, 'login-window', url);
+  }), 'login-window');
 
   // pages()/newPage() and everything through the navigate below can throw
   // (transient CDP protocol error right after launch) while loginBrowser is
@@ -1111,6 +1224,7 @@ export async function openLoginWindow(platformId, sender = null) {
   // guard as openCaptchaResolveWindow's setup-error path.
   let page;
   try {
+    throwIfSignalAborted(signal, 'Login window cancelled during launch');
     const pages = await loginBrowser.pages();
     page = pages[0] || await loginBrowser.newPage();
     updateAuthWindowDiagnostic(platformId, {
@@ -1157,14 +1271,36 @@ export async function openLoginWindow(platformId, sender = null) {
     // Cloudflare serves the page normally. The evaluate() resolves as soon as
     // the assignment executes; page-context destruction mid-navigate is expected
     // and caught below.
-    await page.evaluate((targetUrl) => {
-      window.location.href = targetUrl;
-    }, url).catch((err) => {
-      logger.warn(`[StealthBrowser] Login window navigate ${url} failed: ${err?.message || String(err)}`);
+    const navigation = await navigateVisibleWindow(page, validUrl.url);
+    updateAuthWindowDiagnostic(platformId, {
+      requestedUrl: navigation.requestedUrl,
+      currentUrl: navigation.actualUrl,
+      navigationResult: navigation.result,
+      navigationFallbackAttempted: navigation.fallbackAttempted,
+      navigationAssignmentError: navigation.assignmentError || null,
+      navigationFallbackError: navigation.fallbackError || null,
     });
+    if (!navigation.ok) {
+      const error = new Error(`Login window could not navigate to ${validUrl.url}: ${navigation.error}`);
+      error.code = 'VISIBLE_WINDOW_NAVIGATION_FAILED';
+      error.navigation = navigation;
+      throw error;
+    }
   } catch (err) {
-    finishAuthWindowDiagnostic(platformId, { result: 'setup-error', error: err?.message || String(err) });
-    await closeLoginBrowserSafely(loginBrowser, platformId).catch(() => {});
+    const navigation = err?.navigation || null;
+    finishAuthWindowDiagnostic(platformId, {
+      result: err?.code === 'VISIBLE_WINDOW_NAVIGATION_FAILED' ? 'navigation-error' : 'setup-error',
+      error: err?.message || String(err),
+      ...(navigation ? {
+        requestedUrl: navigation.requestedUrl,
+        currentUrl: navigation.actualUrl,
+        navigationResult: navigation.result,
+        navigationFallbackAttempted: navigation.fallbackAttempted,
+        navigationAssignmentError: navigation.assignmentError || null,
+        navigationFallbackError: navigation.fallbackError || null,
+      } : {}),
+    });
+    if (loginBrowser) await closeLoginBrowserSafely(loginBrowser, platformId).catch(() => {});
     throw err;
   }
 
@@ -1381,6 +1517,7 @@ export async function openLoginWindow(platformId, sender = null) {
       if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (sender) sender.removeListener('destroyed', cleanup);
+      if (signal) signal.removeEventListener?.('abort', onAbort);
       unregisterShutdownCloser();
       try {
         await requestLoginBrowserClose();
@@ -1397,7 +1534,7 @@ export async function openLoginWindow(platformId, sender = null) {
       // just closed without detection — the discriminator for "I logged in but it
       // says logged out" in the bug report's login-attempt history.
       finishAuthWindowDiagnostic(platformId, {
-        result: autoDetectedLoginUrl ? 'auto-detected' : 'closed',
+        result: autoDetectedLoginUrl ? 'auto-detected' : signal?.aborted ? 'aborted' : 'closed',
         loginDetected: !!autoDetectedLoginUrl,
         loginSignal: autoDetectedLoginSignal,
         currentUrl: autoDetectedLoginUrl || undefined,
@@ -1407,6 +1544,7 @@ export async function openLoginWindow(platformId, sender = null) {
       resolve({
         success: true,
         platform: platformId,
+        result: autoDetectedLoginUrl ? 'auto-detected' : signal?.aborted ? 'aborted' : 'closed',
         closedByApp: sender?.isDestroyed?.(),
         loginDetected: !!autoDetectedLoginUrl,
         loginUrl: autoDetectedLoginUrl,
@@ -1415,6 +1553,7 @@ export async function openLoginWindow(platformId, sender = null) {
         ...(loginBrowserCloseOutcome || {}),
       });
     };
+    const onAbort = () => { void cleanup(); };
 
     if (sender) {
       if (sender.isDestroyed()) {
@@ -1425,13 +1564,18 @@ export async function openLoginWindow(platformId, sender = null) {
     }
 
     loginBrowser.on('disconnected', cleanup);
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
   } finally {
-    releaseProfileReservation();
+    releaseProfileReservation?.();
   }
 }
 
-async function openNativeLoginWindow({ platformId, url, executablePath, sender = null }) {
+async function openNativeLoginWindow({ platformId, url, executablePath, sender = null, signal = null }) {
+  throwIfSignalAborted(signal, 'Native login window cancelled');
   const userDataDir = await getUserDataDir();
   const nativeExecutablePath = await findGoogleSafeChromePath(executablePath);
   logger.info(`[StealthBrowser] Opening native Chrome login window for ${platformId} (no CDP automation, executable: ${nativeExecutablePath}, profile: ${userDataDir})`);
@@ -1460,6 +1604,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
   ];
   updateAuthWindowDiagnostic(platformId, { chromeArgs });
 
+  throwIfSignalAborted(signal, 'Native login window cancelled before launch');
   const child = spawn(nativeExecutablePath, chromeArgs, {
     stdio: 'ignore',
     detached: false,
@@ -1481,6 +1626,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       if (poll) clearInterval(poll);
       if (timeout) clearTimeout(timeout);
       if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+      if (signal) signal.removeEventListener?.('abort', onAbort);
       unregisterShutdownCloser();
       finishAuthWindowDiagnostic(platformId, result);
       resolve({
@@ -1509,18 +1655,19 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         : result;
       pendingSuccessResult = closing;
       try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already closed */ }
-      let exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_TERM_EXIT_MS);
+      let exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_TERM_EXIT_MS);
       let disposition = 'sigterm-exit';
       if (!exited) {
         disposition = 'sigkill-fallback';
         logger.warn(`[StealthBrowser] Native ${platformId} Chrome ignored SIGTERM — using final SIGKILL fallback`);
         try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already closed */ }
-        exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_KILL_EXIT_MS);
+        exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_KILL_EXIT_MS);
       }
       await settle({ ...closing, closeDisposition: disposition, processExitObserved: exited });
     };
 
     const onSenderDestroyed = () => requestNativeClose({ result: 'app-window-destroyed', closedByApp: true });
+    const onAbort = () => requestNativeClose({ result: 'aborted' });
     unregisterShutdownCloser = registerAuthWindowCloser(`native-login:${platformId}`, onSenderDestroyed);
 
     child.once('error', (error) => {
@@ -1535,6 +1682,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
       if (poll) { clearInterval(poll); poll = null; }
       if (timeout) clearTimeout(timeout);
       if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+      if (signal) signal.removeEventListener?.('abort', onAbort);
       unregisterShutdownCloser();
       finishAuthWindowDiagnostic(platformId, { result: 'launch-error', error: error?.message || String(error) });
       reject(error);
@@ -1628,6 +1776,10 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         return;
       }
       sender.once('destroyed', onSenderDestroyed);
+    }
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
@@ -1908,12 +2060,12 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         if (settled || nativeCloseInFlight || childExitObserved) return;
         nativeCloseInFlight = true;
         try { if (!isBrowserProcessExited(child)) child.kill('SIGTERM'); } catch { /* already gone */ }
-        let exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_TERM_EXIT_MS);
+        let exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_TERM_EXIT_MS);
         let disposition = 'sigterm-exit';
         if (!exited) {
           disposition = 'sigkill-fallback';
           try { if (!isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already gone */ }
-          exited = await waitForBrowserProcessExit(child, LOGIN_BROWSER_KILL_EXIT_MS);
+          exited = await waitForBrowserProcessExit(child, NATIVE_BROWSER_KILL_EXIT_MS);
         }
         await settle({ ...result, closeDisposition: disposition, processExitObserved: exited });
       };
@@ -2096,35 +2248,14 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
  * The timeout converts that silent hang into a surfaced, LOGGED error; the
  * success/failure logs make the window-open outcome visible in every bug report.
  */
-async function launchVisibleWindow(label, url, launchOpts) {
-  const LAUNCH_TIMEOUT_MS = 30000;
-  // launchWithProfileLockRetry transparently rides out a shared-profile lock
-  // collision (e.g. another captcha-resolve window still owns the userDataDir
-  // for its grace/solve window) by waiting + retrying, instead of failing with
-  // the cryptic "Opening in existing browser session" that forced the user to
-  // click Solve a second time. Its ~11s retry budget fits inside LAUNCH_TIMEOUT_MS.
-  const context = label === 'Captcha-resolve window' ? 'captcha-resolve-window' : 'visible-window';
-  const launchP = launchWithProfileLockRetry(launchOpts, context, url);
-  let timer = null;
-  let timedOut = false;
-  // If the launch resolves AFTER we've given up, close the orphan so a slow
-  // Chrome doesn't leak a process the caller no longer holds a handle to.
-  launchP.then((b) => { if (timedOut) b.close().catch(() => {}); }, () => {});
+async function launchVisibleWindow(label, url, launchOpts, context = 'visible-window') {
+  // launchWithProfileLockRetry owns the canonical deadline and late-result
+  // cleanup for visible, manual, and singleton Chrome launches alike.
   try {
-    const browser = await Promise.race([
-      launchP,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          timedOut = true;
-          reject(new Error(`${label} launch did not complete within ${LAUNCH_TIMEOUT_MS / 1000}s — Chrome may be blocked on a macOS permission prompt, or the userDataDir is still locked by an active scrape browser (url: ${url})`));
-        }, LAUNCH_TIMEOUT_MS);
-      }),
-    ]);
-    clearTimeout(timer);
+    const browser = await launchWithProfileLockRetry(launchOpts, context, url);
     logger.info(`[StealthBrowser] ${label} Chrome launched (url: ${url})`);
     return browser;
   } catch (err) {
-    clearTimeout(timer);
     logger.error(`[StealthBrowser] ${label} launch FAILED: ${err?.message || String(err)}`);
     throw err;
   }
@@ -2143,26 +2274,33 @@ async function launchVisibleWindow(label, url, launchOpts) {
  */
 export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null, secondTabUrl = null, inlineItemsPostprocessor = null) {
   if (isBackgroundE2E()) throw backgroundE2EDisabledError('Captcha resolve window');
-  if (!url) throw new Error('openCaptchaResolveWindow requires a url');
-
-  const executablePath = process.env.CHROME_PATH || await findChromePath();
-  logger.info(`[StealthBrowser] Opening captcha-resolve window for ${url} (executable: ${executablePath})`);
+  const validUrl = validateVisibleWindowUrl(url);
+  if (!validUrl.ok) throw new Error(`openCaptchaResolveWindow requires an http(s) url: ${validUrl.error}`);
+  url = validUrl.url;
 
   // Register with the auth-window diagnostic tracker BEFORE the launch so a hung
   // launch is captured as an in-flight entry in the bug report (it was previously
   // invisible — only login windows registered, so "window not opening" had no
   // trace). Keyed by host so it doesn't collide with platform login entries.
   const diagKey = `captcha:${(() => { try { return new URL(url).host; } catch { return 'unknown'; } })()}`;
-  updateAuthWindowDiagnostic(diagKey, { mode: 'captcha-resolve', loginUrl: url, currentUrl: url, title: '', result: 'launching' });
-  const releaseProfileReservation = reserveSharedProfile(`captcha-resolve:${diagKey}`);
+  updateAuthWindowDiagnostic(diagKey, { mode: 'captcha-resolve', loginUrl: url, requestedUrl: url, currentUrl: 'about:blank', title: '', result: 'launching' });
+  let releaseProfileReservation = null;
 
   // Same userDataDir-lock dance as openLoginWindow — Chrome won't let the
   // visible browser launch on a dir the headless scraper still holds. Bracketed
   // with logs so a hang HERE (waiting on the scrape browser to exit) is
   // distinguishable in the bug report from a hang in the launch below.
-  const releaseBrowserPoolPause = pauseBrowserPool(`captcha-resolve:${diagKey}`);
+  let releaseBrowserPoolPause = null;
   let captchaBrowser;
+  let executablePath = null;
   try {
+    // Keep both resource reservations within the try. Either helper may throw
+    // before Chrome launches; previously that bypassed diagnostics and leaked
+    // whichever reservation had already succeeded.
+    releaseProfileReservation = reserveSharedProfile(`captcha-resolve:${diagKey}`);
+    releaseBrowserPoolPause = pauseBrowserPool(`captcha-resolve:${diagKey}`);
+    executablePath = process.env.CHROME_PATH || await findChromePath();
+    logger.info(`[StealthBrowser] Opening captcha-resolve window for ${url} (executable: ${executablePath})`);
     logger.info('[StealthBrowser] Captcha window: closing stealth browser to release the profile lock…');
     // Stamp the handoff BEFORE the close so a concurrent scrape that loses its
     // pages to this close can attribute the detach (see getLastCaptchaHandoffAt).
@@ -2170,7 +2308,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     await closeStealthBrowser();
     logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
 
-    captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, {
+    captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, visibleWindowLaunchOptions({
+      signal,
       headless: false,
       executablePath,
       userDataDir: await getUserDataDir(),
@@ -2185,11 +2324,11 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       ],
       defaultViewport: null,
       ignoreHTTPSErrors: true,
-    });
+    }), 'captcha-resolve-window');
   } catch (err) {
-    releaseProfileReservation();
-    releaseBrowserPoolPause();
-    finishAuthWindowDiagnostic(diagKey, { result: 'launch-error', error: err?.message || String(err) });
+    releaseProfileReservation?.();
+    releaseBrowserPoolPause?.();
+    finishAuthWindowDiagnostic(diagKey, { result: 'launch-error', requestedUrl: url, currentUrl: 'about:blank', error: err?.message || String(err) });
     throw err;
   }
   updateAuthWindowDiagnostic(diagKey, { result: 'open' });
@@ -2197,6 +2336,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   let page;
   let originalHost;
   try {
+    throwIfSignalAborted(signal, 'Captcha-resolve window cancelled during launch');
     const pages = await captchaBrowser.pages();
     page = pages[0] || await captchaBrowser.newPage();
     // Capture the original host so a user wandering off to another site doesn't
@@ -2210,11 +2350,21 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // Page.navigate fingerprint that Cloudflare silently hangs. The evaluate()
     // resolves immediately after the assignment; the probe poll handles about:blank
     // gracefully by skipping it until the navigation completes.
-    await page.evaluate((targetUrl) => {
-      window.location.href = targetUrl;
-    }, url).catch((err) => {
-      logger.warn(`[StealthBrowser] Captcha window navigate ${url} failed: ${err?.message || String(err)}`);
+    const navigation = await navigateVisibleWindow(page, url);
+    updateAuthWindowDiagnostic(diagKey, {
+      requestedUrl: navigation.requestedUrl,
+      currentUrl: navigation.actualUrl,
+      navigationResult: navigation.result,
+      navigationFallbackAttempted: navigation.fallbackAttempted,
+      navigationAssignmentError: navigation.assignmentError || null,
+      navigationFallbackError: navigation.fallbackError || null,
     });
+    if (!navigation.ok) {
+      const error = new Error(`Captcha-resolve window could not navigate to ${url}: ${navigation.error}`);
+      error.code = 'VISIBLE_WINDOW_NAVIGATION_FAILED';
+      error.navigation = navigation;
+      throw error;
+    }
 
     // When the caller needs the user to act on a separate page (e.g. Glassdoor
     // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
@@ -2225,7 +2375,13 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // (persists across SPA navigations within the tab) + an immediate evaluate call
     // (catches the already-loaded initial page). The banners orient the user so they
     // don't accidentally write the review on the polling tab.
-    if (secondTabUrl) {
+    const validSecondTab = secondTabUrl ? validateVisibleWindowUrl(secondTabUrl) : null;
+    if (secondTabUrl && !validSecondTab?.ok) {
+      const reason = String(validSecondTab?.error || 'invalid URL');
+      logger.warn(`[StealthBrowser] Captcha-resolve secondary tab ignored: ${reason}`);
+      updateAuthWindowDiagnostic(diagKey, { secondTabNavigation: `ignored: ${reason}` });
+    }
+    if (validSecondTab?.ok) {
       // Helper: inject once on every new document load in a tab.
       // evaluateOnNewDocument args are serialized, so text/bg must be primitives.
       const injectBanner = async (p, text, bg) => {
@@ -2263,16 +2419,43 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         '✏️  Tab 2 · Complete your review or salary entry here — then switch to Tab 1 and refresh it',
         '#2563eb',
       );
-      await tab2.evaluate((u) => { window.location.href = u; }, secondTabUrl).catch(() => {});
+      const secondNavigation = await navigateVisibleWindow(tab2, validSecondTab.url);
+      updateAuthWindowDiagnostic(diagKey, {
+        secondTabNavigation: secondNavigation.result,
+        secondTabRequestedUrl: secondNavigation.requestedUrl,
+        secondTabCurrentUrl: secondNavigation.actualUrl,
+        secondTabNavigationError: secondNavigation.error || null,
+      });
+      if (!secondNavigation.ok) {
+        const error = new Error(`Captcha-resolve secondary tab could not navigate to ${validSecondTab.url}: ${secondNavigation.error}`);
+        error.code = 'VISIBLE_WINDOW_NAVIGATION_FAILED';
+        error.navigation = secondNavigation;
+        throw error;
+      }
     }
   } catch (err) {
-    releaseProfileReservation();
-    releaseBrowserPoolPause();
-    finishAuthWindowDiagnostic(diagKey, { result: 'setup-error', error: err?.message || String(err) });
+    const navigation = err?.navigation || null;
+    finishAuthWindowDiagnostic(diagKey, {
+      result: err?.code === 'VISIBLE_WINDOW_NAVIGATION_FAILED' ? 'navigation-error' : 'setup-error',
+      error: err?.message || String(err),
+      ...(navigation ? {
+        requestedUrl: navigation.requestedUrl,
+        currentUrl: navigation.actualUrl,
+        navigationResult: navigation.result,
+        navigationFallbackAttempted: navigation.fallbackAttempted,
+        navigationAssignmentError: navigation.assignmentError || null,
+        navigationFallbackError: navigation.fallbackError || null,
+      } : {}),
+    });
     // Same robust close as openLoginWindow — a beforeunload prompt or hung
     // renderer on this early failure path shouldn't leave a stuck visible
     // Chrome window behind (the same "wheel of death" login windows hit).
     if (captchaBrowser) await closeLoginBrowserSafely(captchaBrowser, 'Captcha-resolve window').catch(() => {});
+    // Keep both admission guards held until the owned Chrome process has
+    // actually exited. Releasing either one first lets a queued scrape observe
+    // the profile as available while this failed setup still owns SingletonLock.
+    releaseProfileReservation?.();
+    releaseBrowserPoolPause?.();
     throw err;
   }
 
@@ -2778,8 +2961,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       if (sender) sender.removeListener('destroyed', cleanup);
       unregisterShutdownCloser();
       await requestCaptchaBrowserClose().catch(() => {});
-      releaseProfileReservation();
-      releaseBrowserPoolPause();
+      releaseProfileReservation?.();
+      releaseBrowserPoolPause?.();
       // `items` is the inline-extracted comp data captured from the visible
       // session before close — when present, caller skips the headless rescrape
       // (which would re-trigger the same bot wall).

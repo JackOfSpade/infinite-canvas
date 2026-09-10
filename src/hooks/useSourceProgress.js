@@ -30,16 +30,36 @@ import { createSourceProgressRunGuard, mergeSourceProgress } from '../utils/sour
  *   lastActive  — the sourceId most recently emitted with status='searching'
  *   reset       — clears the map (e.g. before a fresh re-run)
  */
-export function useSourceProgress(subscribe, hubId, { tokenAware = false } = {}) {
+export function useSourceProgress(subscribe, hubId, {
+  tokenAware = false,
+  rejectReceipt = null,
+} = {}) {
   const [progress, setProgress] = useState({});
   const [lastActive, setLastActive] = useState(null);
   const runGuardRef = useRef(createSourceProgressRunGuard());
+  // A Board rollback can happen before the backend emits the first token for
+  // the abandoned child run. In that window the token guard has nothing to
+  // retire, so its first late event would otherwise be adopted as a new run.
+  // Keep a separate closed gate until an explicit fresh-run reset reopens it.
+  const rejectReceiptNonce = rejectReceipt?.nonce || null;
+  const appliedRejectReceiptRef = useRef(rejectReceiptNonce);
+  const rejectUntilResetRef = useRef(!!rejectReceiptNonce);
+
+  useEffect(() => {
+    if (!rejectReceiptNonce || appliedRejectReceiptRef.current === rejectReceiptNonce) return;
+    appliedRejectReceiptRef.current = rejectReceiptNonce;
+    rejectUntilResetRef.current = true;
+    if (tokenAware) runGuardRef.current.retireActive();
+    setProgress({});
+    setLastActive(null);
+  }, [rejectReceiptNonce, tokenAware]);
 
   useEffect(() => {
     if (!subscribe) return undefined;
     const cleanup = subscribe((payload) => {
       const { nodeId, sourceId, status } = payload;
       if (nodeId && nodeId !== hubId) return; // multi-hub safety
+      if (rejectUntilResetRef.current) return;
       if (tokenAware && !runGuardRef.current.accepts(payload?.jobRunId)) return;
       setProgress(prev => ({
         ...prev,
@@ -50,8 +70,9 @@ export function useSourceProgress(subscribe, hubId, { tokenAware = false } = {})
     return () => cleanup?.();
   }, [subscribe, hubId, tokenAware]);
 
-  const reset = useCallback(() => {
+  const reset = useCallback(({ rejectUntilNextReset = false } = {}) => {
     if (tokenAware) runGuardRef.current.retireActive();
+    rejectUntilResetRef.current = !!rejectUntilNextReset;
     setProgress({});
     setLastActive(null);
   }, [tokenAware]);

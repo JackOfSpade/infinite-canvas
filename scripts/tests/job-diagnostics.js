@@ -28,19 +28,22 @@ import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { handoffElapsed, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
-import { authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
 import { isTerminalSourceStatus } from '../test-dependencies.js';
 import { clipReportText } from '../test-dependencies.js';
 import { composeDetailBlockReprobeResult, didDetailBlockReprobeRecover } from '../test-dependencies.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { jobRunPathScopeForCanvas } from '../../electron/ipc/jobRunStaging.js';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../../src/utils/jobBoardProvenance.js';
+import os from 'node:os';
+import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 
 export default [
   {
     name: 'manual scraper: cooldown re-probe treats confirmed unavailable rows as recovery and preserves their counters',
-    run: () => {
+    run: async () => {
       // Mock the exact shape `expandDescriptions` returns when every probe
       // listing reaches a confirmed closed/not-found detail page. No full
       // description was expanded, but this is positive terminal evidence that
@@ -142,9 +145,8 @@ export default [
           && recovery.includes('1 parseable row(s) · 1 torn/unparseable row(s)')
           && recovery.includes('1 score-ready job(s) · 1 recovery-pool job(s)')
           && recovery.includes('hub `recovery-hub` is present in this canvas')
-          && recovery.includes('⚠️ hub `deleted-hub` is not present in this canvas')
-          && recovery.includes('⚠️ canvas differs from this report'),
-        'recovery diagnostics retain stage, source/staging counts, and hub/canvas correlation after restart');
+          && recovery.includes('Last successful saved scrape: absent · ⚠️ unowned artifact ignored'),
+        'recovery diagnostics retain owned stage/source/snapshot counts and reject a legacy snapshot for another hub or canvas after restart');
         assert(!recovery.includes('must never appear') && !recovery.includes('also private'),
           'recovery diagnostics never export raw job content or Job Preferences');
         assert(!recovery.includes('manual AI prompt') && !recovery.includes('manual AI response'),
@@ -177,6 +179,284 @@ export default [
       }
   },
 },
+{
+    name: 'job recovery diagnostics enumerate independently scoped hub ledgers and terminal receipts',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-scoped-job-recovery-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubA = 'scoped-recovery-hub-a';
+      const hubB = 'scoped-recovery-hub-b';
+      const runPath = (kind, hubId, suffix) => {
+        const scope = jobRunPathScopeForCanvas(canvas, hubId);
+        return path.join(dir, `canvas.${kind}.${scope.canvasHash}.${scope.ownerHash}.${suffix}`);
+      };
+      const receipt = (runId, nodeId, status = 'completed') => ({
+        runId, nodeId,
+        startedAt: 1_700_000_000_000, completedAt: 1_700_000_001_000,
+        terminal: { status, outcome: status === 'completed' ? 'populated' : 'incomplete', scoreReadyCount: 1 },
+        stagingStarted: true, cleanup: { attempted: status === 'completed', cleared: status === 'completed' },
+        sources: { google: { count: 1, providerGathered: 1, relevanceDropped: 0 } },
+        prompt: 'PRIVATE SCOPED RECEIPT PROMPT', response: 'PRIVATE SCOPED RECEIPT RESPONSE',
+      });
+      try {
+        fs.writeFileSync(runPath('jobs-run', hubA, 'json'), JSON.stringify({
+          runId: 'scoped-run-a', stage: 'gathered', lastUpdated: 1_700_000_000_500,
+          inputs: { nodeId: hubA, jobPreferences: 'PRIVATE SCOPED PREFERENCES' },
+          sources: { google: { status: 'done' } },
+        }), 'utf8');
+        fs.writeFileSync(runPath('jobs-staging', hubA, 'jsonl'),
+          `${JSON.stringify({ sourceId: 'google', job: { title: 'PRIVATE SCOPED JOB' } })}\n{torn`, 'utf8');
+        fs.writeFileSync(runPath('jobs-run', hubB, 'json'), JSON.stringify({
+          runId: 'scoped-run-b', stage: 'sources-ready', lastUpdated: 1_700_000_000_700,
+          inputs: { nodeId: hubB }, sources: { linkedin: { status: 'blocked' } },
+        }), 'utf8');
+        fs.writeFileSync(runPath('jobs-last-run', hubA, 'json'), JSON.stringify(receipt('scoped-run-a', hubA)), 'utf8');
+        fs.writeFileSync(runPath('jobs-last-run', hubB, 'json'), JSON.stringify(receipt('scoped-run-b', hubB, 'aborted')), 'utf8');
+        const analysisA = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubA);
+        const analysisB = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubB);
+        fs.writeFileSync(analysisA.jsonPath, JSON.stringify({
+          runId: 'scoped-run-a', sourceHubId: hubA, canvasFilePath: canvas, createdAt: 1_700_000_000_800,
+          gatheredJobCount: 1, jobs: [{ title: 'PRIVATE SCOPED SNAPSHOT A' }], profile: { skills: ['x'] },
+        }), 'utf8');
+        fs.writeFileSync(analysisB.jsonPath, JSON.stringify({
+          runId: 'scoped-run-b', sourceHubId: hubB, canvasFilePath: canvas, createdAt: 1_700_000_000_900,
+          gatheredJobCount: 1, jobs: [{ title: 'PRIVATE SCOPED SNAPSHOT B' }], profile: { skills: ['y'] },
+        }), 'utf8');
+        fs.writeFileSync(analysisA.lastSuccessJsonPath, JSON.stringify({
+          runId: 'scoped-success-a', sourceHubId: hubA, canvasFilePath: canvas, createdAt: 1_700_000_001_000,
+          jobs: [{}], profile: {},
+        }), 'utf8');
+        fs.writeFileSync(analysisB.lastSuccessJsonPath, JSON.stringify({
+          runId: 'scoped-success-b', sourceHubId: hubB, canvasFilePath: canvas, createdAt: 1_700_000_001_100,
+          jobs: [{}], profile: {},
+        }), 'utf8');
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
+        assert(recovery.includes('Recovery sidecars: 2 independently owned ledger scope(s) retained')
+          && recovery.includes('Run manifest 1/2: parseable · stage **gathered** · run `scoped-run-a`')
+          && recovery.includes('Run manifest 2/2: parseable · stage **sources-ready** · run `scoped-run-b`')
+          && recovery.includes('Staging ledger 1/2: present · 1 parseable row(s) · 1 torn/unparseable row(s)')
+          && recovery.includes('Staging ledger 2/2: absent'),
+        'recovery diagnostics list each scoped manifest/staging pair instead of selecting one canvas-wide owner');
+        assert(recovery.includes('Terminal run receipts: 2 retained across independently recoverable Job Search hubs.')
+          && recovery.includes('Terminal run receipt 1/2: ✅ completed')
+          && recovery.includes('Terminal run receipt 2/2: ⏹️ aborted')
+          && recovery.includes('hub `scoped-recovery-hub-a` is present in this canvas')
+          && recovery.includes('hub `scoped-recovery-hub-b` is present in this canvas'),
+        'recovery diagnostics retain each hub-scoped terminal receipt independently');
+        assert(recovery.includes('Current saved scrapes: 2 owner-scoped bundle(s) retained; each is independently ownership-verified.')
+          && recovery.includes('Current saved scrape 1/2: parseable')
+          && recovery.includes('Current saved scrape 2/2: parseable')
+          && recovery.includes('Last successful saved scrapes: 2 owner-scoped bundle(s) retained; each is independently ownership-verified.')
+          && recovery.includes('Last successful saved scrape 1/2: parseable')
+          && recovery.includes('Last successful saved scrape 2/2: parseable'),
+        'recovery diagnostics enumerate each current hub’s owner-scoped current and last-success analysis metadata');
+        const assessment = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]));
+        assert(assessment.includes('Saved score-ready snapshot: multiple-owned-snapshots.')
+          && !assessment.includes('DURABLE OUTPUT COMPLETE'),
+        'completion assessment leaves concurrent owner snapshots uncollapsed rather than pairing an arbitrary hub snapshot with a receipt');
+
+        fs.writeFileSync(analysisA.jsonPath, JSON.stringify({
+          runId: 'conflicting-owner-run', sourceHubId: hubA, nodeId: hubB,
+          canvasFilePath: canvas, jobs: [{ title: 'PRIVATE CONFLICTING OWNER' }],
+        }), 'utf8');
+        const conflictingOwner = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
+        assert(conflictingOwner.includes('⚠️ unowned artifact ignored')
+          && !conflictingOwner.includes('conflicting-owner-run')
+          && !conflictingOwner.includes('PRIVATE CONFLICTING OWNER'),
+        'a snapshot with disagreeing root owner fields is ignored rather than attributed to either hub');
+
+        fs.writeFileSync(analysisA.jsonPath, '{malformed modern snapshot', 'utf8');
+        fs.writeFileSync(analysisA.legacyCanvasJsonPath, JSON.stringify({
+          runId: 'legacy-fallback-a', sourceHubId: hubA, canvasFilePath: canvas, jobs: [{}], profile: {},
+        }), 'utf8');
+        const malformedPrimary = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
+        assert(malformedPrimary.includes('run `legacy-fallback-a`')
+          && malformedPrimary.includes('⚠️ malformed modern artifact ignored before legacy fallback'),
+        'a malformed owner-scoped primary can use an exact legacy fallback only with an explicit integrity warning');
+
+        fs.writeFileSync(analysisB.jsonPath, JSON.stringify({
+          runId: 'conflicting-canvas-run', sourceHubId: hubB, nodeId: hubB,
+          canvasFilePath: canvas,
+          snapshotContext: { canvasFilePath: path.join(dir, 'other-canvas.json'), sourceHubId: hubB, nodeId: hubB },
+          jobs: [{ title: 'PRIVATE CONFLICTING CANVAS' }],
+        }), 'utf8');
+        const conflictingCanvas = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
+        assert(conflictingCanvas.includes('⚠️ unowned artifact ignored')
+          && !conflictingCanvas.includes('conflicting-canvas-run')
+          && !conflictingCanvas.includes('PRIVATE CONFLICTING CANVAS'),
+        'a snapshot with disagreeing root/context canvas fields is ignored rather than reported as a current hub bundle');
+        for (const secret of ['PRIVATE SCOPED JOB', 'PRIVATE SCOPED PREFERENCES', 'PRIVATE SCOPED RECEIPT PROMPT', 'PRIVATE SCOPED RECEIPT RESPONSE', 'PRIVATE SCOPED SNAPSHOT A', 'PRIVATE SCOPED SNAPSHOT B']) {
+          assert(!recovery.includes(secret), `scoped recovery report must redact ${secret}`);
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { hubs: 2, receipts: 2 };
+    },
+  },
+  {
+    name: 'job recovery diagnostics inspect a shared legacy snapshot once across current Job Search hubs',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-legacy-job-recovery-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubs = ['legacy-owner-a', 'legacy-owner-b', 'legacy-owner-c', 'legacy-owner-d', 'legacy-owner-e', 'legacy-owner-f'];
+      try {
+        const paths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubs[0]);
+        // This path predates per-hub analysis sidecars, so every hub derives
+        // the same candidate filename. Only A may own the embedded metadata.
+        fs.writeFileSync(paths.legacyCanvasJsonPath, JSON.stringify({
+          runId: 'legacy-owned-run', sourceHubId: hubs[0], canvasFilePath: canvas,
+          createdAt: 1_700_000_000_000, gatheredJobCount: 1, jobs: [{}], profile: {},
+        }), 'utf8');
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([...hubs, 'job-board', 'document-card']), new Set(hubs));
+        const currentRows = recovery.match(/Current saved scrape(?: \d+\/\d+)?:/g) || [];
+        assert(currentRows.length === 1
+          && recovery.includes('Current saved scrape: parseable (legacy ownership verified)')
+          && !recovery.includes('Current saved scrapes:')
+          && !recovery.includes('⚠️ unowned artifact ignored'),
+        'one verified legacy artifact is attributed only to its owner, not rendered as six sibling absent/unowned bundles');
+        const report = generateMarkdown({
+          description: 'legacy recovery sidecar attribution', filterCode: 'FULL',
+          nodes: [
+            ...hubs.map(id => ({ id, type: 'jobhub', data: {} })),
+            { id: 'job-board', type: 'jobboard', data: {} },
+            { id: 'document-card', type: 'document', data: {} },
+          ],
+          edges: [], drawings: [], nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+          frontEndState: { currentFile: canvas },
+        }).markdown;
+        const reportRows = report.match(/Current saved scrape(?: \d+\/\d+)?:/g) || [];
+        assert(reportRows.length === 1
+          && !report.includes('Current saved scrapes:')
+          && !report.includes('⚠️ unowned artifact ignored'),
+        'the report entry point passes only typed Job Search owners to both recovery and completion diagnostics');
+        return { hubCount: hubs.length, renderedCurrentRows: currentRows.length };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
+    name: 'job recovery diagnostics bound sidecar inspection and redact hostile snapshot run metadata',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-bounded-job-recovery-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'bounded-recovery-hub';
+      const secret = 'PRIVATE SNAPSHOT RUN https://example.test/secret\nnext-line';
+      try {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({
+          runId: secret, sourceHubId: hubId, canvasFilePath: canvas,
+          createdAt: '2026-09-08T22:00:00.000Z', gatheredJobCount: 1, jobs: [{}], profile: {},
+        }), 'utf8');
+        // The current cap is intentionally exceeded by one ledger scope. Keep
+        // the large JSONL on a retained scope so the report must take its
+        // bounded-read path rather than merely omit the whole file.
+        const stagingRows = `${JSON.stringify({ sourceId: 'google', job: { title: secret } })}\n`;
+        for (let index = 0; index < 13; index++) {
+          const scope = `bounded-scope-${String(index).padStart(2, '0')}`;
+          const manifestPath = path.join(dir, `canvas.jobs-run.${scope}.json`);
+          const stagingPath = path.join(dir, `canvas.jobs-staging.${scope}.jsonl`);
+          fs.writeFileSync(manifestPath, JSON.stringify({
+            runId: `bounded-run-${index}`, stage: 'gathered', inputs: { nodeId: hubId }, sources: {},
+          }), 'utf8');
+          // Newest retained stale scope wins after active hubs, so place the
+          // oversized ledger on the newest scope rather than relying on a
+          // lexicographic scan order. Set the timestamps explicitly because
+          // Docker overlay filesystems can give rapid sequential writes the
+          // same mtime, which would legitimately invoke the lexical tie-break.
+          if (index === 12) fs.writeFileSync(stagingPath, stagingRows.repeat(6_000), 'utf8');
+          const mtime = new Date(1_700_000_000_000 + (index * 1_000));
+          fs.utimesSync(manifestPath, mtime, mtime);
+          if (index === 12) fs.utimesSync(stagingPath, mtime, mtime);
+        }
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(recovery.includes('run `not recorded`')
+          && !recovery.includes(secret)
+          && !recovery.includes('https://example.test/secret'),
+        'snapshot run metadata is allowlisted before report rendering, so a modified sidecar cannot leak prompt/URL/newline content');
+        assert(recovery.includes('Recovery sidecars: 12 independently owned ledger scope(s) retained')
+          && recovery.includes('1 additional recovery ledger scope(s) were not inspected (report safety limit)')
+          && recovery.includes('first 256 KiB inspected;')
+          && recovery.includes('later byte(s) omitted'),
+        'recovery reporting caps scoped ledger rows and bounds a large JSONL inspection while disclosing both limits');
+
+        const injectedOwner = 'HOSTILE MANIFEST OWNER\n## injected report heading';
+        fs.writeFileSync(path.join(dir, `canvas.jobs-run.${hubId}.json`), JSON.stringify({
+          runId: 'safe-run', stage: 'gathered', inputs: { nodeId: injectedOwner }, sources: {},
+        }), 'utf8');
+        fs.writeFileSync(path.join(dir, `canvas.jobs-last-run.${hubId}.json`), JSON.stringify({
+          runId: 'safe-receipt', nodeId: 'different-hub', startedAt: 1_700_000_000_000, completedAt: 1_700_000_001_000,
+          terminal: { status: 'completed', outcome: 'populated' }, cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        const hostile = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(!hostile.includes(injectedOwner)
+          && !hostile.includes('injected report heading')
+          && hostile.includes('manifest owner does not match the scoped artifact filename')
+          && hostile.includes('receipt owner does not match the scoped artifact filename'),
+        'manifest and receipt scope ownership are verified before rendering, so corrupt metadata cannot inject Markdown or impersonate another hub');
+
+        fs.writeFileSync(path.join(dir, `canvas.jobs-run.${hubId}.json`), 'x'.repeat(600_000), 'utf8');
+        const oversized = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(oversized.includes('⚠️ unreadable (`TOO_LARGE`)'),
+          'JSON sidecars use the same bounded regular-file reader as JSONL staging instead of synchronously parsing an unbounded manifest');
+
+        const outside = path.join(dir, 'outside-private-data.txt');
+        fs.writeFileSync(outside, 'PRIVATE SYMLINK TARGET', 'utf8');
+        fs.symlinkSync(outside, path.join(dir, `canvas.jobs-staging.${hubId}.jsonl`));
+        const linked = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(!linked.includes('PRIVATE SYMLINK TARGET')
+          && linked.includes('Staging ledger 1/12: absent'),
+        'recovery discovery rejects symlinked sidecars before a report can follow an external file or block on a special file');
+        return { retainedScopes: 12, omittedScopes: 1 };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job recovery diagnostics accept ordinary owner-scoped snapshots above the staging preview cap without exposing their job payload',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-normal-large-job-snapshot-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'normal-large-snapshot-hub';
+      const secret = 'PRIVATE NORMAL LARGE SNAPSHOT JOB PAYLOAD';
+      try {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubId);
+        const snapshot = {
+          version: 2,
+          createdAt: '2026-09-09T00:00:00.000Z',
+          nodeId: hubId,
+          sourceHubId: hubId,
+          runId: 'normal-large-snapshot-run',
+          canvasFilePath: canvas,
+          gatheredJobCount: 12,
+          sourceGatheredCount: 12,
+          profile: {},
+          jobs: [{ title: secret, description: 'x'.repeat(300 * 1024) }],
+        };
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify(snapshot), 'utf8');
+        const bytes = fs.statSync(analysis.jsonPath).size;
+        assert(bytes > 256 * 1024 && bytes <= 512 * 1024,
+          `fixture must exercise the raised bounded metadata window, got ${bytes} bytes`);
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(recovery.includes('Current saved scrape: parseable')
+          && recovery.includes('run `normal-large-snapshot-run`')
+          && recovery.includes(`hub \`${hubId}\` is present in this canvas`)
+          && !recovery.includes('TOO_LARGE')
+          && !recovery.includes('⚠️ unowned artifact ignored'),
+        'a normal owner-scoped snapshot above 256 KiB remains parseable and ownership-verified under the bounded metadata reader');
+        assert(!recovery.includes(secret)
+          && !recovery.includes('x'.repeat(120)),
+        'large snapshot job content remains redacted even when the metadata reader parses it for safe counts and ownership');
+        return { bytes, parseable: true, payloadRedacted: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
 {
     name: 'job recovery diagnostics list bounded metadata-only description-recovery checkpoints by hub and run',
     run: () => {
@@ -265,6 +545,64 @@ export default [
     },
 },
 {
+    name: 'job recovery diagnostics bound checkpoint discovery and reject unsafe or oversized checkpoint sidecars',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-description-recovery-safe-listing-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'checkpoint-safe-hub';
+      const secret = 'PRIVATE CHECKPOINT SYMLINK TARGET';
+      const writeCheckpoint = (runId, createdAt = '2026-09-08T20:00:00.000Z') => {
+        const checkpointPath = getJobDescriptionRecoveryCheckpointPath(canvas, runId, path.join(dir, 'unsaved-analysis'));
+        fs.writeFileSync(checkpointPath, JSON.stringify({
+          canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId, runId, createdAt,
+          jobs: [], descriptionRecoveryJobs: [],
+        }), 'utf8');
+        return checkpointPath;
+      };
+      try {
+        const secretPath = path.join(dir, 'checkpoint-secret.json');
+        fs.writeFileSync(secretPath, JSON.stringify({ secret }), 'utf8');
+        const unsafePath = getJobDescriptionRecoveryCheckpointPath(canvas, 'checkpoint-unsafe-run', path.join(dir, 'unsaved-analysis'));
+        fs.symlinkSync(secretPath, unsafePath);
+        const oversizedPath = getJobDescriptionRecoveryCheckpointPath(canvas, 'checkpoint-oversized-run', path.join(dir, 'unsaved-analysis'));
+        fs.writeFileSync(oversizedPath, 'x'.repeat(513 * 1024), 'utf8');
+
+        const unsafeListed = listDescriptionRecoveryCheckpointsSync(canvas);
+        assert(unsafeListed.ignored.unsafe === 1
+          && unsafeListed.ignored.oversized === 1
+          && !JSON.stringify(unsafeListed).includes(secret),
+        'checkpoint diagnostics only read bounded regular files without exposing symlink targets');
+        const unsafeRecovery = buildJobRecoverySnapshot(canvas, new Set([hubId]));
+        assert(unsafeRecovery.includes('1 over the safe metadata-read limit')
+          && unsafeRecovery.includes('1 unsafe file type/read')
+          && !unsafeRecovery.includes(secret),
+        'the recovery report discloses unsafe/oversized checkpoint omissions without exposing a filename or private target content');
+        const asyncUnsafe = await __listDescriptionRecoveryCheckpointsForTests(canvas);
+        assert(asyncUnsafe.length === 0 && !JSON.stringify(asyncUnsafe).includes(secret),
+          'the ordinary async recovery IPC listing applies the same no-follow and bounded-read policy as report diagnostics');
+
+        fs.unlinkSync(unsafePath);
+        fs.unlinkSync(oversizedPath);
+        for (let index = 0; index < 50; index++) writeCheckpoint(`checkpoint-bounded-${index}`);
+        const listed = listDescriptionRecoveryCheckpointsSync(canvas);
+        const asyncListed = await __listDescriptionRecoveryCheckpointsForTests(canvas);
+        assert(listed.ignored.unsafe === 0
+          && listed.ignored.oversized === 0
+          && listed.candidateLimitReached === true
+          && listed.checkpoints.length <= 48
+          && asyncListed.length <= 48,
+        'checkpoint diagnostics cap matching sidecars before an abandoned recovery folder can make report assembly unbounded');
+
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]));
+        assert(recovery.includes('safe matching-file limit'),
+          'the recovery report discloses matching-checkpoint discovery truncation rather than silently claiming a complete listing');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { matchingLimit: 48, unsafe: 1, oversized: 1 };
+    },
+},
+{
     name: 'durable terminal receipt proves saved output after restart without claiming live stages',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -277,8 +615,9 @@ export default [
       const canvas = path.join(dir, 'canvas.json');
       const nodeId = 'durable-restart-hub';
       const runId = 'durable-restart-run';
-      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'));
-      const receiptPath = path.join(dir, 'canvas.jobs-last-run.json');
+      const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), nodeId);
+      const runScope = jobRunPathScopeForCanvas(canvas, nodeId);
+      const receiptPath = path.join(dir, `canvas.jobs-last-run.${runScope.canvasHash}.${runScope.ownerHash}.json`);
       try {
         fs.writeFileSync(analysisPaths.jsonPath, JSON.stringify({
           runId, sourceHubId: nodeId, canvasFilePath: canvas, createdAt: Date.now(),
@@ -3499,11 +3838,15 @@ export default [
       const { snapshot: legacy } = buildJobAnalysisSnapshot({
         jobs: [], profile: { titles: ['Software Engineer'] }, nodeId: 'legacy-profile-fixture', snapshotContext: {},
       });
+      const { snapshot: bounded } = buildJobAnalysisSnapshot({
+        jobs: [], profile: { titles: ['Software Engineer'] }, careerData: 'x'.repeat(80_001),
+        nodeId: 'bounded-career-data-fixture', snapshotContext: {},
+      });
       const scoreProperties = JOB_SCORING_SCHEMA.properties.scores.items.properties;
       const assessment = scoreProperties.requirementAssessments.items;
       const gap = scoreProperties.materialGaps.items;
       assert([
-        'CANDIDATE CAREER EVIDENCE (primary citation source)', careerData,
+        'CANDIDATE CAREER EVIDENCE (primary evidence text', careerData,
         'requirementAssessments', 'materialGaps must include EVERY scored required or important professional requirement', 'total professional tenure separate',
         'valid workHistory roleIds',
         'comparative professional fit score', 'NOT a statistically calibrated prediction',
@@ -3514,12 +3857,18 @@ export default [
         'contradicted requires verbatim candidate evidence',
         'never infer contradiction from absence',
       ].every(fragment => grounded.cachedPrefix.includes(fragment))
+        && !grounded.cachedPrefix.includes('primary citation source')
         && grounded.cachedPrefix.includes('"materialGaps": [{')
         && !grounded.cachedPrefix.includes('"experienceAssessment": {')
         && grounded.careerData === careerData,
       'scoring prompt treats concise career data as bounded evidence, requires evidence-qualified gap coverage, and persists it for saved-scrape re-scores');
-      assert(legacy.cachedPrefix.includes('only candidate evidence available for this legacy request'),
-        'legacy direct score calls retain profile-only grounding instead of failing when career data is absent');
+      assert(legacy.cachedPrefix.includes('only candidate evidence available for this legacy request')
+        && legacy.cachedPrefix.includes('When using candidate evidence, quote this profile exactly')
+        && !legacy.cachedPrefix.includes('When citing candidate evidence'),
+      'legacy direct score calls retain profile-only grounding without prompting the chat application to produce a citation');
+      assert(bounded.cachedPrefix.includes('text beyond that boundary is unavailable for quoting')
+        && !bounded.cachedPrefix.includes('unavailable for citation'),
+      'bounded career evidence describes unavailable source text as quote material rather than inviting an attachment citation');
       assert(JOB_SCORING_SCHEMA.properties.scores.items.required.includes('requirementAssessments')
         && JOB_SCORING_SCHEMA.properties.scores.items.required.includes('materialGaps')
         && !JOB_SCORING_SCHEMA.properties.scores.items.required.includes('experienceAssessment')
@@ -3601,12 +3950,30 @@ export default [
       const rejected = calibratedScoreForJob(emptyAssessment, job, options);
       const prepared = prepareLiveScoringResults([emptyAssessment], [job], options);
       const accepted = calibratedScoreForJob(validAssessment, job, options);
+      const blankCandidateEvidence = calibratedScoreForJob({
+        ...validAssessment,
+        requirementAssessments: validAssessment.requirementAssessments.map(row => ({ ...row, candidateEvidence: '  ' })),
+      }, job, options);
+      const blankJobEvidence = calibratedScoreForJob({
+        ...validAssessment,
+        requirementAssessments: validAssessment.requirementAssessments.map(row => ({ ...row, jobEvidence: '' })),
+      }, job, options);
+      const blankContradictionEvidence = calibratedScoreForJob({
+        ...validAssessment,
+        materialGaps: [{
+          requirementText: 'React experience', priority: 'required',
+          jobEvidence: 'Required: React experience.', status: 'contradicted',
+          candidateEvidence: '', impact: 'The supplied evidence conflicts.',
+        }],
+      }, job, options);
       assert(rejected === null && prepared.scores[0] === null
         && prepared.placeholderCount === 1 && prepared.ungroundedScoreCount === 1 && prepared.allNull,
       'a fresh empty/legacy-shaped model response cannot retain its raw 95 and increments placeholder telemetry');
       assert(accepted?.matchScore === 95 && accepted.fitAssessment?.auditStatus === 'audited',
         'a fresh response with a grounded material requirement remains eligible for live scoring');
-      return { placeholders: prepared.placeholderCount, ungrounded: prepared.ungroundedScoreCount };
+      assert(blankCandidateEvidence === null && blankJobEvidence === null && blankContradictionEvidence === null,
+        'a file-card copy loss cannot silently turn required job, match, or contradiction evidence into an accepted blank string');
+      return { placeholders: prepared.placeholderCount, ungrounded: prepared.ungroundedScoreCount, blankEvidenceRejected: true };
     },
   },
   {
@@ -4654,6 +5021,73 @@ export default [
     },
   },
 {
+    name: 'jobs history: reads wait for an already-admitted append before opening the sidecar',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-read-barrier-'));
+      const canvasPath = path.join(base, 'job-search.json');
+      const historyPath = path.join(base, 'job-search.jobs-history.csv');
+      const originalRename = fs.promises.rename;
+      const originalReadFile = fs.promises.readFile;
+      let releaseRename;
+      let signalRenameEntered;
+      let appendPromise = null;
+      let readPromise = null;
+      const renameGate = new Promise(resolve => { releaseRename = resolve; });
+      const renameEntered = new Promise(resolve => { signalRenameEntered = resolve; });
+
+      try {
+        await appendJobsHistory(canvasPath, [{
+          source: 'indeed', company: 'Baseline Co', title: 'Baseline role', location: 'Toronto',
+          url: 'https://ca.indeed.com/rc/clk?jk=history-barrier-baseline',
+        }]);
+
+        fs.promises.rename = async (from, to) => {
+          if (to === historyPath) {
+            signalRenameEntered();
+            await renameGate;
+          }
+          return originalRename(from, to);
+        };
+        appendPromise = appendJobsHistory(canvasPath, [{
+          source: 'indeed', company: 'Pending Co', title: 'Pending role', location: 'Toronto',
+          url: 'https://ca.indeed.com/rc/clk?jk=history-barrier-pending',
+        }]);
+
+        let gateTimer;
+        const reachedPendingRename = await Promise.race([
+          renameEntered.then(() => true),
+          new Promise(resolve => { gateTimer = setTimeout(() => resolve(false), 1000); }),
+        ]);
+        clearTimeout(gateTimer);
+        assert(reachedPendingRename, 'the controlled append must reach its pending atomic rename');
+
+        let historyReadStarted = false;
+        fs.promises.readFile = (...args) => {
+          if (args[0] === historyPath) historyReadStarted = true;
+          return originalReadFile(...args);
+        };
+        readPromise = loadJobsHistory(canvasPath);
+        assert(!historyReadStarted,
+          'a history read admitted behind an in-flight append must wait on the path tail before opening the old sidecar');
+
+        releaseRename();
+        const [appendResult, rows] = await Promise.all([appendPromise, readPromise]);
+        appendPromise = null;
+        readPromise = null;
+        assert(historyReadStarted && appendResult.written === 1
+          && rows.length === 2 && rows.some(row => row.title === 'Pending role'),
+        `the released read must observe the pending append, got ${JSON.stringify({ historyReadStarted, appendResult, rows })}`);
+        return { waited: true, rows: rows.length };
+      } finally {
+        releaseRename?.();
+        await Promise.allSettled([appendPromise, readPromise].filter(Boolean));
+        fs.promises.rename = originalRename;
+        fs.promises.readFile = originalReadFile;
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+{
     name: 'Job search: all country-inapplicable selections fail before mutating prior results',
     run: () => {
       const backend = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
@@ -4726,7 +5160,7 @@ export default [
       const resumeScoringPath = renderer.slice(resumeScoringStart, resumeScoringEnd);
       assert(pausedPath.includes('gatheredCountRef.current = gatheredCount ?? foundJobs.length')
         && pausedPath.includes('gatheredCount: gatheredCount ?? foundJobs.length')
-        && resumeScoringPath.includes('const pausedGatheredCount = gatheredCountRef.current')
+        && resumeScoringPath.includes('pausedGatheredCount = gatheredCountRef.current')
         && resumeScoringPath.includes('gatheredCount: pausedGatheredCount'),
       'a sources-ready pause preserves the source-card-aligned total through same-tick Solve/Skip into resumed scoring');
       assert((pausedPath.match(/if \(saved && !saved\.saved\)/g) || []).length === 1
@@ -4778,10 +5212,16 @@ export default [
       const pipelineStart = renderer.indexOf('const runPipeline = useCallback');
       const pipelineEnd = renderer.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipelinePath = renderer.slice(pipelineStart, pipelineEnd);
+      const queueAcquireAt = pipelinePath.indexOf('lease = await moduleRunQueue.acquireModuleRun');
+      const queuedOwnershipAt = pipelinePath.indexOf('if (standaloneBecameBoardManaged)', queueAcquireAt);
+      const processingStartAt = pipelinePath.indexOf('processingToken = processingRunsRef.current.start();', queuedOwnershipAt);
+      const processingBusyAt = pipelinePath.indexOf("return searchRunOutcome('busy'", processingStartAt);
+      const gatheredResetAt = pipelinePath.indexOf('gatheredCountRef.current = 0', processingBusyAt);
       assert(!backgroundPath.includes('gatheredCountRef.current = 0')
-        && pipelinePath.includes('const processingToken = processingRunsRef.current.start();\n    if (!processingToken) return;\n    // This is a new top-level search')
-        && pipelinePath.includes('gatheredCountRef.current = 0'),
-      'a post-run USAJobs append preserves the aggregate gathered counter, while a newly owned top-level pipeline resets it');
+        && queueAcquireAt >= 0 && queuedOwnershipAt > queueAcquireAt
+        && processingStartAt > queuedOwnershipAt && processingBusyAt > processingStartAt
+        && gatheredResetAt > processingBusyAt,
+      'a post-run USAJobs append preserves the aggregate gathered counter, while a top-level pipeline resets it only after queue admission, the live Board-ownership refusal, and its processing-token gate');
       assert(preferenceEvaluationStart >= 0 && preferenceEvaluationStart < backgroundStart
         && backgroundPath.includes('evaluatePreferencesForRun'),
       'the background USAJobs callback may depend on Job Preferences evaluation only after that callback has initialized, avoiding a render-time temporal-dead-zone crash');
@@ -4895,8 +5335,9 @@ export default [
       const resumeStart = searchRenderer.indexOf('const resumeScoring = useCallback');
       const resumeEnd = searchRenderer.indexOf('const handleDiscardResume', resumeStart);
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
-      assert(resumePath.includes('const activeJobRunId = jobRunIdRef.current || data.jobRunId || null')
-        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero')")
+      assert(resumePath.includes('const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null')
+        && resumePath.includes('activeJobRunId = continuationRunId;')
+        && resumePath.includes("completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled)")
         && resumePath.includes('jobRunId: activeJobRunId'),
       'same-tick source resolution scopes both empty completion and resumed scoring to the live run ref');
 
@@ -5619,7 +6060,8 @@ export default [
       const usaJobsEnd = jobSearchRenderer.indexOf('const handleJobsSettingsChange = useCallback', usaJobsStart);
       const usaJobsBackground = jobSearchRenderer.slice(usaJobsStart, usaJobsEnd);
       assert(usaJobsBackground.includes('searchJobsSingleSource({')
-        && usaJobsBackground.includes('jobRunId: jobRunIdRef.current || data.jobRunId || null'),
+        && usaJobsBackground.includes('jobRunId: refreshGenerationRunId')
+        && usaJobsBackground.includes('refreshData = getNode(currentId)?.data || null'),
       'USAJobs background progress is attached to its completed search generation and is not dropped by the JobSearch run guard');
       return { terminal, advanced, cleared };
     },
@@ -5701,11 +6143,22 @@ export default [
         .every(isJobSourceResolveBusyHubState)
         && !isJobSourceResolveBusyHubState('sources-ready'),
       'Solve stays disabled through every gathering/checkpointing state and re-enables only once the source checkpoint is ready');
-      assert(sourceCard.includes('const sourceActionDisabled = hubLocked || resolving;')
+      assert(sourceCard.includes('function hasBlockingJobSearchCleanup(data)')
+        && sourceCard.includes('data?.manualAiResume?.retirementPending === true')
+        && sourceCard.includes("data.manualAiCleanupReceipts.some(receipt => receipt?.cancellationPending === true)")
+        && sourceCard.includes('const hubCleanupBlocked = useStore(')
+        && sourceCard.includes('const hubBoardRecoveryOwned = useStore(')
+        && sourceCard.includes('const resolverActionDisabled = resolving || hubLocked || hubCleanupBlocked\n    || hubBoardRecoveryOwned || resolverBusy;')
+        && sourceCard.includes('const sourceActionDisabled = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned || resolving;')
+        && sourceCard.includes('if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) return;')
+        && sourceCard.includes('|| hasBlockingJobSearchCleanup(hubData)')
+        && sourceCard.includes('|| hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)')
+        && sourceCard.includes('|| isJobWorkflowDeletionPending(data.hubId)')
+        && sourceCard.includes('disabled={sourceActionDisabled}')
         && !sourceCard.includes('const sourceActionDisabled = hubLocked || hubBusy;'),
-      'Skip remains available during an ordinary in-flight search but is disabled while this card resolver is queued/running');
+      'Solve and Skip must block for both primary and receipt-backed cancellation cleanup, including live rechecks after queue admission, while Skip remains available during an unrelated in-flight search');
       assert(sourceCard.includes("kind: 'job-source-resolve'")
-        && sourceCard.includes('await moduleRunQueue.acquireModuleRun({')
+        && sourceCard.includes('await acquireModuleRun({')
         && sourceCard.includes('(hubData.jobRunId || null) !== (jobRunId || null)')
         && sourceCard.includes('onCancel: () => {')
         && sourceCard.includes('Resolve queue cancelled before start')
@@ -5736,7 +6189,7 @@ export default [
         && postSearch.includes('saved?.recoveryCheckpointSaved === true')
         && postSearch.includes('saved?.meta?.runId === jobRunId')
         && postSearch.includes('saveDescriptionRecoveryCheckpoint: true')
-        && postSearch.includes('if (cancelled()) return { shouldScore: false, warnings };')
+        && postSearch.includes("outcome: searchRunOutcome('cancelled', { runId: jobRunId })")
         && postSearch.includes('reconcileJobSourceWarnings(')
         && postSearch.includes('descriptionRecoveryCheckpointWriteFailureWarning(warning)')
         && postSearch.includes('return { shouldScore: true, warnings: latestWarnings };')
@@ -5879,7 +6332,7 @@ export default [
       assert(freshCareerWindow.includes("activeCareerData = parseResult.careerData || ''")
         && interpretation.includes('careerData: activeCareerData'),
       'a fresh career-file parse must pass its newly extracted career data to Job Preferences interpretation instead of waiting for React state to commit');
-      assert(search.includes('const careerData = snapshot?.careerData || data.careerData || \'\';')
+      assert(search.includes('const careerData = snapshot?.careerData || laneTurnData.careerData || \'\';')
         && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
         && /careerData,\s+activeTargetRole/.test(search)
@@ -5887,12 +6340,14 @@ export default [
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
       assert(search.includes('function isSavedAnalysisForCurrentHub')
         && search.includes('isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
-        && search.includes('isSavedAnalysisForCurrentHub(snapshot, res?.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)')
+        && /isSavedAnalysisForCurrentHub\(\s*snapshot,\s*res\?\.meta,\s*id,\s*canvasFilePath,\s*laneTurnData\.jobAnalysisClearedAt,\s*laneTurnData\.jobAnalysisClearedRunId,?\s*\)/.test(search)
         && search.includes('isJobAnalysisSnapshotAfterClear(snapshot, meta, jobAnalysisClearedAt, jobAnalysisClearedRunId)')
         && !search.includes('if (!SKIP_AI_FOR_TESTING) return;'),
       'saved-scrape recovery is available for production manual-AI runs only when both the source hub and canvas match');
       assert(search.includes('jobRunId: snapshot.runId || null')
-        && search.includes('completeRun: !!snapshot.runId'),
+        && search.includes('let completeSnapshotRun = false;')
+        && search.includes('completeSnapshotRun = runInfo?.found === true')
+        && search.includes('completeRun: completeSnapshotRun'),
       'saved-scrape scoring completes only its matching staged search run and never clears a tokenless re-analysis snapshot');
       const normalScoreStart = search.indexOf('const runScoringAndSpawn = useCallback');
       const normalScoreEnd = search.indexOf('// ── Legacy Batch-API recovery', normalScoreStart);
@@ -5956,7 +6411,8 @@ export default [
         && doneState.includes('Re-evaluate Saved Jobs')
         && /!locked\s*&&/.test(doneState),
       'done hubs expose Re-evaluate Saved Jobs only when the module is unlocked');
-      assert(search.includes('onReanalyze={handleReanalyze}'),
+      assert(search.includes('onReanalyze={data.terminalFinalizationRecovery ? null : handleReanalyze}')
+        && handler.includes('getNode(id)?.data?.terminalFinalizationRecovery'),
         'the completed search hub wires its re-analysis action into the done state');
       assert(search.includes("val.slice(0, 4000)")
         && (search.match(/maxLength=\{4000\}/g) || []).length >= 1
@@ -5967,11 +6423,27 @@ export default [
       // The saved cards are the scoring input. A re-analysis must never call a
       // search endpoint or the board-owned seen-history writer; otherwise the
       // original cards can be history-suppressed before their fit is refreshed.
-      assert(/existingScoredJobs\s*=\s*Array\.isArray\((?:data|liveData)\.scoredJobs\)/.test(handler)
-        && /jobsToReanalyze/.test(handler)
+      const requestedDataAt = handler.indexOf('const requestedData = safeClone(getNode(id)?.data || data);');
+      const requestedFingerprintAt = handler.indexOf('const requestedFingerprint = reanalysisInputFingerprint(requestedData);', requestedDataAt);
+      const displayedJobsAt = handler.indexOf('const existingScoredJobs = Array.isArray(requestedData.scoredJobs)', requestedFingerprintAt);
+      const savedPoolAt = handler.indexOf('const savedPool = Array.isArray(requestedData.preferenceCandidatePool)', displayedJobsAt);
+      const savedUnionAt = handler.indexOf('dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])', savedPoolAt);
+      const preparedJobsAt = handler.indexOf('const jobsToReanalyze = savedCandidatePool.map', savedUnionAt);
+      const leaseAt = handler.indexOf('lease = await moduleRunQueue.acquireModuleRun', preparedJobsAt);
+      const liveDataAt = handler.indexOf('runData = getNode(currentId)?.data || requestedData;', leaseAt);
+      const liveFingerprintAt = handler.indexOf('if (reanalysisInputFingerprint(runData) !== requestedFingerprint)', liveDataAt);
+      const processingAt = handler.indexOf('processingToken = processingRunsRef.current.start();', liveFingerprintAt);
+      const preferenceAt = handler.indexOf('const preferenceResult = await evaluatePreferencesForRun({', processingAt);
+      const scoreAt = handler.indexOf('const scoreResult = await window.electronAPI.scoreJobs({', preferenceAt);
+      assert(requestedDataAt >= 0 && requestedFingerprintAt > requestedDataAt
+        && displayedJobsAt > requestedFingerprintAt && savedPoolAt > displayedJobsAt
+        && savedUnionAt > savedPoolAt && preparedJobsAt > savedUnionAt
+        && leaseAt > preparedJobsAt && liveDataAt > leaseAt
+        && liveFingerprintAt > liveDataAt && processingAt > liveFingerprintAt
+        && preferenceAt > processingAt && scoreAt > preferenceAt
         && /evaluatePreferencesForRun\(\{[\s\S]*?jobs:\s*jobsToReanalyze/.test(handler)
         && /scoreJobs\(\{[\s\S]*?jobs:\s*preferenceResult\.jobs/.test(handler),
-      're-analysis submits a prepared copy of the currently displayed scored jobs directly to scoreJobs');
+      're-analysis freezes and unions the displayed/preserved candidate pool, then revalidates its live fingerprint after queue admission before submitting clean copies through preferences and scoreJobs');
       const scoreCallAt = handler.indexOf('window.electronAPI.scoreJobs({');
       assert(scoreCallAt >= 0, 're-analysis reaches scoreJobs from inside the handler');
       const preparation = handler.slice(0, scoreCallAt);
@@ -7392,6 +7864,75 @@ export default [
       assert(fresh.consoleLogs.length === 0 && fresh.networkErrors.length === 0,
         'a new run has no inherited browser console/network diagnostics');
       return { ok: true };
+  },
+},
+{
+    name: 'manualScraper telemetry: a queued job run cannot reset the shared browser owner',
+    run: async () => {
+      let releaseFirst;
+      let firstOwnsLock;
+      const firstEntered = new Promise((resolve) => { firstOwnsLock = resolve; });
+      const firstCanFinish = new Promise((resolve) => { releaseFirst = resolve; });
+
+      const firstRun = withFreshManualScraperTelemetry(async () => {
+        recordManualScraperTelemetry({
+          phase: 'page-extract', sourceId: 'google', srcName: 'Google for Jobs', count: 41,
+        });
+        firstOwnsLock();
+        await firstCanFinish;
+      });
+      await firstEntered;
+
+      // This represents another hub that has started but is waiting on the
+      // shared Chrome profile. Its fresh-generation reset must stay queued too.
+      const secondRun = withFreshManualScraperTelemetry(() => undefined);
+      await Promise.resolve();
+      const whileQueued = getManualScraperTelemetry();
+      assert(whileQueued.active?.sourceId === 'google'
+        && whileQueued.active?.phase === 'page-extract'
+        && whileQueued.events.length === 1,
+      `queued run erased the lock owner's diagnostics: ${JSON.stringify(whileQueued)}`);
+
+      releaseFirst();
+      await firstRun;
+      await secondRun;
+      const afterSecondOwns = getManualScraperTelemetry();
+      assert(afterSecondOwns.active === null && afterSecondOwns.events.length === 0,
+        'the next run must reset diagnostics once it actually owns the profile lock');
+      return { ownerSource: whileQueued.active.sourceId };
+  },
+},
+{
+    name: 'LinkedIn enrichment: separate job runs cannot use the shared browser concurrently',
+    run: async () => {
+      let releaseFirst;
+      let firstEntered;
+      const entered = new Promise((resolve) => { firstEntered = resolve; });
+      const mayFinish = new Promise((resolve) => { releaseFirst = resolve; });
+      let active = 0;
+      let peak = 0;
+
+      const first = __withLockedLinkedInEnrichmentForTests(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        firstEntered();
+        await mayFinish;
+        active -= 1;
+      });
+      await entered;
+
+      const second = __withLockedLinkedInEnrichmentForTests(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        active -= 1;
+      });
+      await Promise.resolve();
+      assert(peak === 1, 'a second LinkedIn browser pass must wait for the first shared-profile owner');
+
+      releaseFirst();
+      await Promise.all([first, second]);
+      assert(peak === 1 && active === 0, 'LinkedIn browser passes must settle sequentially without leaking a lock owner');
+      return { peak };
     },
   },
 {
@@ -8637,7 +9178,29 @@ export default [
       } }];
       assert(moduleFingerprint(assessed) !== moduleFingerprint(reassessed),
         'fingerprint: compensation verdict/explanation changes invalidate a board');
-      assert(moduleFingerprint(null).startsWith('6:0:'), 'fingerprint: nullish → v6 empty fingerprint');
+      assert(moduleFingerprint(null).startsWith('7:0:'), 'fingerprint: nullish → v7 empty fingerprint');
+      const semanticBase = [{
+        matchScore: 90,
+        title: 'Platform Engineer',
+        company: 'Acme',
+        googleCardUrl: 'https://google.test/card-a',
+        compensation: '$140k-$160k',
+        currency: 'USD',
+        description: 'Full time, 40 hours per week.',
+        compensationContext: { workMode: 'remote', remoteCountry: 'Canada' },
+        experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 2 }] },
+      }];
+      for (const [label, changed] of [
+        ['fallback listing URL', { googleCardUrl: 'https://google.test/card-b' }],
+        ['fallback compensation', { compensation: '$170k-$190k' }],
+        ['listing currency', { currency: 'CAD' }],
+        ['schedule description', { description: 'Part time, 20 hours per week.' }],
+        ['remote market context', { compensationContext: { workMode: 'remote', remoteCountry: 'United States' } }],
+        ['experience cohort', { experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 12 }] } }],
+      ]) {
+        assert(moduleFingerprint(semanticBase) !== moduleFingerprint([{ ...semanticBase[0], ...changed }]),
+          `fingerprint: ${label} changes invalidate a paused Combine`);
+      }
       // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
       assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
       assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe current baseline');
@@ -8756,7 +9319,7 @@ export default [
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const jobsBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       assert(boardSource.includes('const completedModules = useMemo')
-        && boardSource.includes('() => combineSignature(completedModules)')
+        && boardSource.includes('() => boardInputSignature(completedModules, connectedModules)')
         && boardSource.includes('const allConnectedModulesDone =')
         && boardSource.includes('staleReason(data.combineSignature, completedModules, connectedModules)')
         && boardSource.includes('if (nextStale) hideBoardChildren()')
@@ -8770,7 +9333,8 @@ export default [
         && boardSource.includes('empty replacement confirmation requested')
         && boardSource.includes('empty replacement cancelled')
         && boardSource.includes('confirmed empty replacement')
-        && boardSource.includes("if (!canReplaceWithEmpty)")
+        && boardSource.includes('const liveBlockReason = emptyReplacementIneligibilityReason({')
+        && boardSource.includes('if (liveBlockReason)')
         && boardSource.includes("new CustomEvent('canvas-take-snapshot')")
         && boardSource.includes('const cancelled = epoch.start()')
         && boardSource.includes('if (cancelled() || !getNode(id))')
@@ -8796,7 +9360,7 @@ export default [
         && handleClearSource.includes('combineSourceRuns: null')
         && handleClearSource.includes('clearProvenance')
         && handleClearSource.indexOf("new CustomEvent('canvas-take-snapshot')") < handleClearSource.indexOf('const clearProvenance =')
-        && boardSource.slice(emptyReplacementStart, emptyReplacementEnd).includes('combineSourceRuns: boundedCombinedSourceRuns(completedModules)')
+        && boardSource.slice(emptyReplacementStart, emptyReplacementEnd).includes('combineSourceRuns: boundedCombinedSourceRuns(liveInputs.completed)')
         && boardSource.slice(emptyReplacementStart, emptyReplacementEnd).includes('clearProvenance: null')
         && boardSource.slice(successfulCombineStart, successfulCombineEnd).includes('combineSourceRuns: sourceRunsAtCombine')
         && boardSource.slice(successfulCombineStart, successfulCombineEnd).includes('clearProvenance: null'),
@@ -10563,9 +11127,10 @@ export default [
       assert(jobsSource.includes('CANCEL_CAUSE_LABELS[reason?.cancelCause]')
         && jobsSource.includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'"),
         'the pipeline stage error prefers the stated cause over the shared sentinel');
-      assert(jobSearchSource.includes("cancelNodeTask?.(id, 'user-reset')")
+      assert(/\? 'reanalysis-cancelled'\s*:\s*'user-reset';/.test(jobSearchSource)
+        && jobSearchSource.includes('cancelNodeTask?.(id, cancellationReason)')
         && jobSearchSource.includes("cancelNodeTask?.(id, 'career-files-cleared')"),
-        'Job Search names why it cancelled');
+        'Job Search names why both acknowledged and fire-and-forget cancellations happened');
       // Every cancel site must name a cause, or that hub's aborted run falls
       // back to the shared sentinel and reports a Reset as a deleted node.
       const sellHubSource = fs.readFileSync(path.resolve('src/nodes/SellHubNode.jsx'), 'utf8');

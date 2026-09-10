@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, Check, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
-import { updateModalCount } from './modalStack';
+import { ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
@@ -35,15 +34,29 @@ const requestLabel = (request) => {
 
 const attachmentName = (filePath) => String(filePath || '').split(/[/\\]/).filter(Boolean).pop() || 'Attachment';
 
+// Node ids are opaque persistence keys, not useful labels for a person who
+// returns to several pending Job Search hubs. Give each owner a short,
+// deterministic badge without displaying (or deriving a readable fragment
+// from) that internal identifier.
+const ownerBadgeForNode = (nodeId) => {
+  const value = typeof nodeId === 'string' ? nodeId.trim() : '';
+  if (!value) return null;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  }
+  return `Hub ${((hash >>> 0).toString(36).toUpperCase()).padStart(7, '0')}`;
+};
+
 /**
- * Global manual-AI handoff UI. It deliberately has no close action: closing a
- * prompt would leave its corresponding main-process promise pending. The
- * explicit Cancel task action rejects the matching request and cancels its
- * owning job operation; `non-api-ai-settled` then removes it from this queue.
+ * Global manual-AI handoff dock. A pending request is deliberately never
+ * dismissed: Minimize only collapses this renderer UI, while Cancel task
+ * rejects the matching request and cancels its owning job operation.
  */
 export function NonApiAiDialog() {
   const [requests, setRequests] = useState([]);
   const [selectedRequestId, setSelectedRequestId] = useState(null);
+  const [isExpanded, setIsExpanded] = useState(false);
   const [drafts, setDrafts] = useState({});
   const [errors, setErrors] = useState({});
   const [submittingRequestIds, setSubmittingRequestIds] = useState(() => new Set());
@@ -51,17 +64,14 @@ export function NonApiAiDialog() {
   const [cancellingRequestIds, setCancellingRequestIds] = useState(() => new Set());
   const [acceptedRequestIds, setAcceptedRequestIds] = useState(() => new Set());
   const [copiedRequestId, setCopiedRequestId] = useState(null);
-  const responseRef = useRef(null);
-  const dialogRef = useRef(null);
+  const dockButtonRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const activeRequestIdRef = useRef(null);
   const requestsRef = useRef([]);
-  const previousFocusRef = useRef(null);
   const actionRequestIdsRef = useRef(new Set());
 
   const activeRequest = requests.find(request => request.requestId === selectedRequestId) || requests[0] || null;
   const activeRequestId = activeRequest?.requestId || null;
-  const activeNodeId = activeRequest?.nodeId || null;
   // Async clipboard/IPC completions must never update whichever queued prompt
   // happened to become active while they were in flight.
   activeRequestIdRef.current = activeRequestId;
@@ -211,42 +221,6 @@ export function NonApiAiDialog() {
   }, []);
 
   requestsRef.current = requests;
-
-  const hasPendingRequests = requests.length > 0;
-
-  // Keep all canvas keyboard controls dormant while this non-dismissable
-  // prompt owns the user's typing. Track queue presence rather than the active
-  // request object so a validation retry or a move to the next queued request
-  // cannot briefly drop the modal count to zero.
-  useEffect(() => {
-    if (!hasPendingRequests) return undefined;
-    previousFocusRef.current = document.activeElement;
-    updateModalCount(1);
-    return () => {
-      updateModalCount(-1);
-      const previous = previousFocusRef.current;
-      previousFocusRef.current = null;
-      if (previous?.isConnected && typeof previous.focus === 'function') previous.focus();
-    };
-  }, [hasPendingRequests]);
-
-  useLayoutEffect(() => {
-    if (!activeRequestId || isAccepted) return;
-    responseRef.current?.focus();
-  }, [activeRequestId, isAccepted]);
-
-  // This listener is registered for the life of the app-level dialog, before
-  // transient modal listeners are mounted. Escape must not close a lightbox or
-  // another dialog underneath this non-dismissable handoff.
-  useLayoutEffect(() => {
-    const blockEscape = (event) => {
-      if (event.key !== 'Escape' || !activeRequestIdRef.current) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-    window.addEventListener('keydown', blockEscape, true);
-    return () => window.removeEventListener('keydown', blockEscape, true);
-  }, []);
 
   useEffect(() => () => {
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
@@ -400,6 +374,10 @@ export function NonApiAiDialog() {
     }
 
     const requestId = activeRequestId;
+    // Capture ownership before awaiting: the settled event can change the
+    // selected request while cancellation is in flight.
+    const cancelledNodeId = activeRequest?.nodeId || null;
+    const cancelledRunId = activeRequest?.runId || null;
     actionRequestIdsRef.current.add(requestId);
     setCancellingRequestIds(previous => new Set(previous).add(requestId));
     try {
@@ -409,13 +387,14 @@ export function NonApiAiDialog() {
           ...previous,
           [requestId]: result?.error || 'This task is no longer pending and could not be cancelled.',
         }));
-      } else if (result.nodeCancelled && activeNodeId) {
+      } else if (result.nodeCancelled && cancelledNodeId) {
         // The main process can abort the request immediately, but the owning
         // React component does not otherwise know that the user chose Cancel
-        // in this app-level dialog. Tell it to run its normal reset path so it
-        // clears transient state instead of rendering the abort as an error.
+        // in this app-level dialog. Include the immutable run identity so the
+        // owner can route an active Board child through exact rollback without
+        // letting a late event reset a newer run on the same node.
         document.dispatchEvent(new CustomEvent('non-api-ai-node-cancelled', {
-          detail: { nodeId: activeNodeId },
+          detail: { nodeId: cancelledNodeId, runId: cancelledRunId },
         }));
       }
       // As with accepted responses, wait for the request-specific settled
@@ -434,27 +413,13 @@ export function NonApiAiDialog() {
         return next;
       });
     }
-  }, [activeRequestId, activeNodeId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
+  }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
-  const trapFocus = useCallback((event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const focusable = [...dialog.querySelectorAll(
-      'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-    )].filter(element => element.getClientRects().length > 0);
-    if (!focusable.length) return;
-    const currentIndex = focusable.indexOf(document.activeElement);
-    const nextIndex = event.shiftKey
-      ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
-      : (currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
-    event.preventDefault();
-    focusable[nextIndex]?.focus();
+  const minimize = useCallback(() => {
+    setIsExpanded(false);
+    // Collapsing removes the button that initiated this action. Return focus
+    // to the still-available compact control without making the dock modal.
+    requestAnimationFrame(() => dockButtonRef.current?.focus());
   }, []);
 
   const queueLabel = useMemo(() => {
@@ -462,21 +427,49 @@ export function NonApiAiDialog() {
     return `${requests.length} pending`;
   }, [requests.length]);
 
+  const multipleHubQueue = useMemo(() => {
+    const owners = new Set(requests
+      .map(request => typeof request.nodeId === 'string' ? request.nodeId.trim() : '')
+      .filter(Boolean));
+    return owners.size > 1;
+  }, [requests]);
+
   if (!activeRequest) return null;
+
+  const dockLabel = requests.length === 1 ? '1 handoff waiting' : `${requests.length} handoffs waiting`;
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[11000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      className="pointer-events-none fixed inset-0 z-[11000]"
       role="presentation"
-      onKeyDown={trapFocus}
     >
+      <div className="pointer-events-auto fixed bottom-4 right-4 z-[11001] w-[min(32rem,calc(100vw-2rem))]">
+        {!isExpanded ? (
+          <button
+            ref={dockButtonRef}
+            type="button"
+            onClick={() => setIsExpanded(true)}
+            aria-expanded="false"
+            className="ml-auto flex max-w-full items-center gap-2 rounded-xl border border-violet-400/35 bg-neutral-900/95 px-3.5 py-2.5 text-left text-sm text-white shadow-xl backdrop-blur transition-colors hover:border-violet-300/60 hover:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-violet-400/70"
+          >
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-violet-400/25 bg-violet-500/15">
+              <ClipboardCopy size={14} className="text-violet-200" aria-hidden="true" />
+            </span>
+            <span className="min-w-0">
+              <span className="block font-medium">Pending AI handoffs</span>
+              <span aria-live="polite" aria-atomic="true" className="block text-xs text-white/55">{dockLabel}</span>
+            </span>
+            <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-violet-200">
+              Expand <ChevronUp size={15} aria-hidden="true" />
+            </span>
+          </button>
+        ) : (
       <section
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
+        id="non-api-ai-handoff-panel"
+        role="region"
         aria-labelledby="non-api-ai-dialog-title"
         aria-busy={isSubmitting || isSteppingBack || isCancelling || isAccepted}
-        className="w-full max-w-4xl max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
+        className="max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
       >
         <header className="shrink-0 px-5 py-4 border-b border-white/10">
           <div className="flex items-start gap-3">
@@ -487,9 +480,27 @@ export function NonApiAiDialog() {
               <h2 id="non-api-ai-dialog-title" className="text-sm font-semibold text-white">
                 Non-API AI handoff
               </h2>
-              <p aria-live="polite" aria-atomic="true" className="mt-0.5 text-xs text-white/55 break-words">{requestLabel(activeRequest)}</p>
+              <p aria-live="polite" aria-atomic="true" className="mt-0.5 text-xs text-white/55 break-words">
+                {multipleHubQueue && ownerBadgeForNode(activeRequest.nodeId) && (
+                  <span className="mr-1.5 inline-flex rounded border border-violet-400/25 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-200">
+                    {ownerBadgeForNode(activeRequest.nodeId)}
+                  </span>
+                )}
+                {requestLabel(activeRequest)}
+              </p>
             </div>
-            {queueLabel && <span className="shrink-0 text-[11px] text-white/40">{queueLabel}</span>}
+            <div className="flex shrink-0 items-center gap-2">
+              {queueLabel && <span className="text-[11px] text-white/40">{queueLabel}</span>}
+              <button
+                type="button"
+                onClick={minimize}
+                aria-label="Minimize pending AI handoffs"
+                className="inline-flex items-center gap-1 rounded-md border border-white/15 px-2 py-1.5 text-xs font-medium text-white/70 transition-colors hover:border-violet-300/40 hover:bg-violet-500/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-violet-400/70"
+              >
+                <ChevronDown size={14} aria-hidden="true" />
+                Minimize
+              </button>
+            </div>
           </div>
           {requests.length > 1 && (
             <nav aria-label="Pending AI handoff batches" className="mt-3 -mb-1 overflow-x-auto custom-scrollbar">
@@ -508,19 +519,21 @@ export function NonApiAiDialog() {
                     : request.attemptKind === 'split'
                       ? `Split ${request.batch}${count}`
                       : Number.isFinite(request.batch) ? `Batch ${request.batch}${count}` : `Prompt ${index + 1}${count}`;
+                  const ownerBadge = multipleHubQueue ? ownerBadgeForNode(request.nodeId) : null;
+                  const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;
                   return (
                     <button
                       key={request.requestId}
                       type="button"
                       onClick={() => setSelectedRequestId(request.requestId)}
                       aria-current={selected ? 'page' : undefined}
-                      aria-label={`${label}: ${requestLabel(request)}${hasDraft ? ', response pasted' : ''}${hasError ? ', needs correction' : ''}`}
+                      aria-label={`${chipLabel}: ${requestLabel(request)}${hasDraft ? ', response pasted' : ''}${hasError ? ', needs correction' : ''}`}
                       title={requestLabel(request)}
                       className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors ${selected
                         ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
                         : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
                     >
-                      <span>{label}</span>
+                      <span>{chipLabel}</span>
                       {(hasDraft || isWorking || hasError) && (
                         <span
                           aria-hidden="true"
@@ -592,7 +605,6 @@ export function NonApiAiDialog() {
           <div className="flex flex-col gap-2 min-h-0">
             <label htmlFor="non-api-ai-response" className="text-xs font-medium text-white/65 uppercase tracking-wider">Paste AI response</label>
             <textarea
-              ref={responseRef}
               id="non-api-ai-response"
               value={activeResponse}
               onChange={(event) => setActiveResponse(event.target.value)}
@@ -649,6 +661,8 @@ export function NonApiAiDialog() {
           </div>
         </form>
       </section>
+        )}
+      </div>
     </div>,
     document.body,
   );

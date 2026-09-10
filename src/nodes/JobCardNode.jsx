@@ -13,6 +13,7 @@ import { computeJobTreeView, normalizeCompensationAssessment, shouldReflowMeasur
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter } from '../utils/jobCardFilters';
@@ -378,19 +379,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [id, data, addToast]);
 
   const openResearchSource = useCallback(async (rawUrl) => {
-    const url = normalizeExternalHttpUrl(rawUrl);
-    if (!url || !window.electronAPI?.openExternal) return;
-    // Same handleSafe contract as openJobUrl: the invoke resolves even on
-    // failure, so a resolved { success: false } must be surfaced, not ignored.
-    const result = await window.electronAPI.openExternal(url);
-    if (!result?.success) {
+    const opened = await openExternalUrl(rawUrl, {
+      dispatcher: window.electronAPI?.openExternal,
+      fallback: window.open,
+    });
+    if (!opened.ok) {
       addToast({
         title: 'Cannot Open Link',
-        description: 'Could not open that link. Please try again.',
+        description: openExternalFailureMessage(opened),
         type: 'error',
+        dedupeKey: `job-research-open-external:${id}`,
       });
     }
-  }, [addToast]);
+  }, [addToast, id]);
 
   // Dismiss = delete this card, then re-derive the tree view so the column
   // tightens and the role leaf's pagination window backfills the next matching

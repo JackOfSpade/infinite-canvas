@@ -332,6 +332,41 @@ function waitForOwnedBrowserExit(proc, timeoutMs) {
   });
 }
 
+const OWNED_BROWSER_TERM_EXIT_MS = 1_500;
+const OWNED_BROWSER_KILL_EXIT_MS = 1_500;
+
+// This process was launched by us with the shared userDataDir, so it is safe
+// to escalate only THIS child. `browser.close()` can resolve while Chrome still
+// owns SingletonLock; releasing state at that point lets the next launcher hand
+// an about:blank startup tab to the dying process.
+export async function closeOwnedBrowserProcess(browser, {
+  label = 'Shared browser',
+  gracefulMs = 5_000,
+} = {}) {
+  if (!browser) return { exited: true, disposition: 'already-closed' };
+  const proc = browser.process?.();
+  const gracefulExit = waitForOwnedBrowserExit(proc, gracefulMs);
+  // Do not await this directly: a wedged CDP close used to leave the FIFO
+  // permanently held even though we knew the owned PID and could terminate it.
+  // Keep a rejection handler attached for a late close failure, then let the
+  // process-exit deadline decide when escalation begins.
+  const closePromise = Promise.resolve().then(() => browser.close());
+  void closePromise.catch(() => {});
+  if (await gracefulExit) return { exited: true, disposition: 'graceful-exit' };
+
+  logger.warn(`[StealthBrowser] ${label} did not exit within ${gracefulMs}ms of close(); sending SIGTERM before releasing the shared profile`);
+  try { if (!browserProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
+  if (await waitForOwnedBrowserExit(proc, OWNED_BROWSER_TERM_EXIT_MS)) {
+    return { exited: true, disposition: 'sigterm-exit' };
+  }
+
+  logger.warn(`[StealthBrowser] ${label} ignored SIGTERM; sending SIGKILL before releasing the shared profile`);
+  try { if (!browserProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
+  const exited = await waitForOwnedBrowserExit(proc, OWNED_BROWSER_KILL_EXIT_MS);
+  if (!exited) logger.error(`[StealthBrowser] ${label} did not exit after bounded SIGKILL wait; a later launch will retain profile-lock diagnostics`);
+  return { exited, disposition: 'sigkill-fallback' };
+}
+
 /**
  * Read-only, value-free snapshot of the persistent Chrome profile. This is
  * deliberately synchronous so bug-report generation stays synchronous. Cookie
@@ -375,6 +410,115 @@ export function getBrowserProfileDiagnostics() {
 // it long after the log ring buffer scrolls away. See sharedProfileLock.js for
 // the complementary serialization of the job-scrape launchers.
 const PROFILE_LOCK_RETRY_DELAYS = [700, 1200, 2000, 3000, 4500]; // ms; ~11.4s total
+const CHROME_LAUNCH_DEADLINE_MS = 30_000;
+const LAUNCH_ABORT_SETTLE_MS = 750;
+// Covers the late-browser close bound (5s graceful + 1.5s TERM + 1.5s KILL),
+// the initial abort settle, and the final quiet observation with margin.
+const LAUNCH_ABORT_PROFILE_RELEASE_MS = 10_000;
+const LAUNCH_ABORT_PROFILE_QUIET_MS = 250;
+
+const PROFILE_LOCK_ENTRY_NAMES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+
+async function profileLockEntryPresent(userDataDir) {
+  if (!userDataDir) return false;
+  const states = await Promise.all(PROFILE_LOCK_ENTRY_NAMES.map(async name => {
+    try {
+      // lstat, not access: Chromium's SingletonLock is commonly a symlink whose
+      // target is not a filesystem path, so following it can falsely say the
+      // live lock entry is absent.
+      await fs.promises.lstat(path.join(userDataDir, name));
+      return true;
+    } catch {
+      return false;
+    }
+  }));
+  return states.some(Boolean);
+}
+
+/**
+ * After aborting Puppeteer, do not let the shared-profile FIFO advance merely
+ * because the launch promise rejected. Puppeteer's rejection can precede its
+ * asynchronous browser-process close. Observe a short quiet period with no
+ * Chromium lock entries (or a bounded ceiling) so a late successful launch's
+ * close path cannot overlap the next owner.
+ */
+async function waitForProfileReleaseAfterLaunchAbort(userDataDir) {
+  const startedAt = Date.now();
+  let absentSince = null;
+  while (Date.now() - startedAt < LAUNCH_ABORT_PROFILE_RELEASE_MS) {
+    const present = await profileLockEntryPresent(userDataDir);
+    const now = Date.now();
+    if (present) {
+      absentSince = null;
+    } else {
+      absentSince ??= now;
+      if (now - startedAt >= LAUNCH_ABORT_SETTLE_MS
+        && now - absentSince >= LAUNCH_ABORT_PROFILE_QUIET_MS) return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return !(await profileLockEntryPresent(userDataDir));
+}
+
+function launchSignalFor(callerSignal, deadlineController) {
+  if (!callerSignal) return deadlineController.signal;
+  // Electron's supported Node runtime has AbortSignal.any(); preserve a
+  // caller-provided cancellation signal while adding our owned deadline.
+  if (typeof AbortSignal?.any === 'function') {
+    return AbortSignal.any([callerSignal, deadlineController.signal]);
+  }
+  const combined = new AbortController();
+  const forward = (signal) => () => combined.abort(signal.reason);
+  callerSignal.addEventListener?.('abort', forward(callerSignal), { once: true });
+  deadlineController.signal.addEventListener?.('abort', forward(deadlineController.signal), { once: true });
+  return combined.signal;
+}
+
+/**
+ * Keep AbortSignal intact when launching through puppeteer-extra.
+ *
+ * puppeteer-extra 3.x deep-merges launch options before handing them to
+ * puppeteer-core. Native AbortSignal instances are ordinary mergeable objects
+ * to that library, so a native signal becomes `{}` and @puppeteer/browsers
+ * throws `this[#signal]?.addEventListener is not a function` before Chrome is
+ * spawned. A function is atomic to deepmerge; giving that function enumerable
+ * signal-shaped properties means its identity and dynamic getters survive the
+ * merge while Puppeteer still receives the small AbortSignal surface it uses.
+ *
+ * Do not replace this with a plain object: deepmerge recursively clones one
+ * and loses AbortSignal's prototype methods again. The getters deliberately
+ * remain live so a cancellation between option construction and launch is not
+ * mistaken for a healthy launch.
+ *
+ * @param {AbortSignal} signal
+ * @returns {AbortSignal}
+ */
+export function toPuppeteerExtraAbortSignal(signal) {
+  if (!signal || typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function') {
+    throw new TypeError('toPuppeteerExtraAbortSignal requires an AbortSignal');
+  }
+  // Functions are not recursively merged by puppeteer-extra's deepmerge.
+  const bridge = function puppeteerExtraAbortSignalBridge() {};
+  Object.defineProperties(bridge, {
+    aborted: {
+      enumerable: true,
+      get: () => signal.aborted,
+    },
+    reason: {
+      enumerable: true,
+      get: () => signal.reason,
+    },
+    addEventListener: {
+      enumerable: true,
+      value: signal.addEventListener.bind(signal),
+    },
+    removeEventListener: {
+      enumerable: true,
+      value: signal.removeEventListener.bind(signal),
+    },
+  });
+  return bridge;
+}
 
 // The `context` string getStealthBrowser() passes when it launches the
 // retained singleton THROUGH this very helper (see ~line 419 below). That
@@ -393,7 +537,71 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
   let askedSingletonToYield = false;
   for (let attempt = 0; attempt <= PROFILE_LOCK_RETRY_DELAYS.length; attempt++) {
     try {
-      const browser = await puppeteer.launch(launchOpts);
+      // The single launch deadline for every profile-owning Chrome path. Do
+      // not let a macOS permission prompt or CDP wedge strand a close waiter.
+      let timedOut = false;
+      // A caller abort is just as terminal as our deadline. Puppeteer can reject
+      // its launch promise before the Chrome child it started has released the
+      // profile lock, or (pathologically) resolve a Browser after the caller
+      // abandoned the attempt. Keep the FIFO turn until either case is cleaned
+      // up; otherwise a Reset during login launch can hand browser-data to the
+      // next owner while the cancelled Chrome still owns SingletonLock.
+      let callerAborted = false;
+      let timer = null;
+      const launchDeadline = new AbortController();
+      const { signal: callerSignal = null, ...launchOptions } = launchOpts || {};
+      const onCallerAbort = () => { callerAborted = true; };
+      if (callerSignal?.aborted) callerAborted = true;
+      else callerSignal?.addEventListener?.('abort', onCallerAbort, { once: true });
+      const launchSignal = launchSignalFor(callerSignal, launchDeadline);
+      const rawLaunch = puppeteer.launch({
+        ...launchOptions,
+        // puppeteer-extra deep-merges native AbortSignals into `{}`. Preserve
+        // cancellation and the canonical launch deadline with its compatible
+        // forwarding bridge instead of handing the raw signal to that merge.
+        signal: toPuppeteerExtraAbortSignal(launchSignal),
+      });
+      const observedLaunch = rawLaunch.then(async browser => {
+        // A late success belongs to the abandoned attempt, never to a new
+        // singleton generation. Close it without reviving caller state.
+        if (timedOut || callerAborted || callerSignal?.aborted) await closeOwnedBrowserProcess(browser, {
+          label: `${context} late launch cleanup`, gracefulMs: 5_000,
+        }).catch(() => {});
+        return browser;
+      });
+      let browser;
+      try {
+        browser = await Promise.race([
+          observedLaunch,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              const error = new Error(`Chrome launch did not complete within ${CHROME_LAUNCH_DEADLINE_MS / 1000}s (context: ${context}${url ? `, url: ${url}` : ''})`);
+              // Puppeteer receives this signal synchronously and kills the
+              // owned launch process group instead of leaving a detached raw
+              // launch behind our outer Promise.race.
+              launchDeadline.abort(error);
+              reject(error);
+            }, CHROME_LAUNCH_DEADLINE_MS);
+          }),
+        ]);
+      } catch (error) {
+        // Let the abort request reach Puppeteer and observe SingletonLock's
+        // release before the caller can release the FIFO. `observedLaunch`
+        // remains attached so a pathological late Browser result still enters
+        // closeOwnedBrowserProcess; the lock observation covers that entire
+        // close rather than racing only its first 750ms.
+        if (timedOut || callerAborted || callerSignal?.aborted) {
+          const released = await waitForProfileReleaseAfterLaunchAbort(launchOptions.userDataDir);
+          if (!released) {
+            logger.warn(`[StealthBrowser] ${context} launch abort did not produce an observable shared-profile lock release within ${LAUNCH_ABORT_PROFILE_RELEASE_MS}ms`);
+          }
+        }
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        callerSignal?.removeEventListener?.('abort', onCallerAbort);
+      }
       if (attempt > 0) {
         recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: true, error: lastErr, ts: Date.now(), askedSingletonToYield });
         logger.info(`[StealthBrowser] ${context} launch recovered after ${attempt} retry(ies) — shared profile freed`);
@@ -500,11 +708,9 @@ export async function getStealthBrowser() {
     // resolves, which would then race an OS lock the dying process still
     // holds. Setting browserClosePromise makes a concurrent close piggyback
     // on (i.e. actually wait for) this kill instead of racing past it.
-    browserClosePromise = (async () => {
-      try { deadInstance.process()?.kill('SIGTERM'); } catch { /* already dead */ }
-      // Give the OS a moment to release the profile lock.
-      await new Promise(r => setTimeout(r, 500));
-    })();
+    browserClosePromise = closeOwnedBrowserProcess(deadInstance, {
+      label: 'Disconnected shared browser process', gracefulMs: 5_000,
+    });
     try {
       await browserClosePromise;
     } finally {
@@ -794,21 +1000,17 @@ export async function closeStealthBrowser(forShutdown = false) {
     }
     browserLaunchPromise = null; // Prevent anyone from waiting on a completed/failed launch
     if (browserInstance) {
-      const proc = browserInstance.process();
-      // Subscribe before close() so a normal process exit that occurs while the
-      // CDP close promise is settling cannot be missed.
-      const processExit = waitForOwnedBrowserExit(proc, forShutdown ? 12_000 : 5_000);
-      try {
-        await browserInstance.close();
-      } catch { /* already closed */ }
+      const closingBrowser = browserInstance;
       browserInstance = null;
       // Wait for the Chrome process to fully exit and release the userDataDir
       // lock. Browser.close() only sends the exit signal — the process takes
       // a moment to die. Without this wait, the next puppeteer.launch() on the
       // same profile races the dying process and Chrome falls back to a temp
       // empty profile, causing page.goto() to silently land on about:blank.
-      const exited = await processExit;
-      if (!exited) logger.warn('[StealthBrowser] Shared browser process did not report exit before the profile-release deadline');
+      await closeOwnedBrowserProcess(closingBrowser, {
+        label: 'Shared browser process',
+        gracefulMs: forShutdown ? 12_000 : 5_000,
+      });
     }
   })();
 
@@ -866,11 +1068,7 @@ export function getIndeedSessionResetOrigins() {
 }
 
 async function closeOwnedSessionResetBrowser(browser) {
-  if (!browser) return;
-  const proc = browser.process?.();
-  const processExit = waitForOwnedBrowserExit(proc, 5000);
-  await browser.close().catch(() => {});
-  if (!await processExit) logger.warn('[StealthBrowser] Session-reset browser did not report exit before profile release');
+  await closeOwnedBrowserProcess(browser, { label: 'Session-reset browser' });
 }
 
 /**

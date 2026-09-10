@@ -3,7 +3,11 @@ import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
 import { fingerprint } from '../utils/serializationUtils';
 import { TIMINGS, maxUndoHistory } from '../utils/timings';
-import { mergeNonRestorableNodeDataFromLive } from '../utils/undoNonRestorableState';
+import {
+  hasActiveExternalRunState,
+  mergeNonRestorableEdgesFromLive,
+  mergeNonRestorableNodeDataFromLive,
+} from '../utils/undoNonRestorableState';
 import { isTextEditingTarget, shouldUseNativeTextUndo } from '../utils/nativeTextUndo';
 import { matchesRedoShortcut, matchesShortcut, matchesStandardRedoShortcut } from '../utils/keyboardShortcuts';
 import { useModalStackCount } from '../components/modalStack';
@@ -59,6 +63,10 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const takeSnapshot = useCallback(() => {
     if (isRestoringRef.current) return;
     const snap = deepCloneState();
+    // A running Board/Search owns backend state and a mutable source-card
+    // graph that an undo snapshot cannot restart atomically. Keep the last
+    // stable snapshot until the transaction reaches a terminal state.
+    if (hasActiveExternalRunState(snap.nodes, { recursive: false })) return;
     const fp   = fingerprint(snap);
     if (fp === lastFingerprintRef.current) {
       // Use ref to avoid closing over stale isStateDirty state value
@@ -125,59 +133,105 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   const undo = useCallback(() => {
     if (isAnimatingRef?.current) return;
-    let past = pastRef.current;
+    if (hasActiveExternalRunState(stateRef.current.nodes, { recursive: false })) return;
+    const past = pastRef.current;
     if (past.length === 0) return;
 
     const currentState = deepCloneState();
-    let previous;
-
-    // Is the top snapshot the current state (settled, post-debounce) or a pre-edit
-    // snapshot (canvas dirty, edit not yet auto-snapshotted)? Compare against the
-    // ACTUAL current fingerprint — the cached last-snapshot one goes stale the
-    // instant an edit lands before the debounce fires, which made the first
-    // post-edit undo no-op and rapid undos overshoot by a step.
     const currentFp = fingerprint(currentState);
-    if (fingerprint(past[past.length - 1]) === currentFp) {
-      if (past.length < 2) return;
-      previous        = past[past.length - 2];
-      pastRef.current = past.slice(0, -2);
-    } else {
-      previous        = past[past.length - 1];
-      pastRef.current = past.slice(0, -1);
+    // Skip the settled current snapshot first, then discard every legacy
+    // active-run snapshot until a stable target is found. Checking only the
+    // top before removing current could select [pre-run, active, current]'s
+    // active middle entry and restore its source-card graph without a worker.
+    let targetIndex = past.length - 1;
+    if (fingerprint(past[targetIndex]) === currentFp) targetIndex -= 1;
+    while (
+      targetIndex >= 0
+      && hasActiveExternalRunState(past[targetIndex]?.nodes, { recursive: false })
+    ) {
+      targetIndex -= 1;
     }
+    if (targetIndex < 0) {
+      // Drop unusable active snapshots but retain a matching stable current
+      // entry, if present, as the new history baseline.
+      pastRef.current = fingerprint(past[past.length - 1]) === currentFp
+        ? [past[past.length - 1]]
+        : [];
+      syncHistoryLen();
+      return;
+    }
+    const previous = past[targetIndex];
+    pastRef.current = past.slice(0, targetIndex);
 
     futureRef.current = [...futureRef.current, currentState];
 
     EventLogger.log('undo');
     isRestoringRef.current = true;
     const restoredNodes = mergeNonRestorableNodeDataFromLive(previous.nodes, currentState.nodes);
+    const restoredEdges = mergeNonRestorableEdgesFromLive(
+      previous.edges,
+      currentState.edges,
+      restoredNodes,
+      currentState.nodes,
+    );
     setNodes(restoredNodes);
-    setEdges(previous.edges);
+    setEdges(restoredEdges);
     setDrawings(previous.drawings);
-    lastFingerprintRef.current = fingerprint({ ...previous, nodes: restoredNodes });
+    // Source-card topology is intentionally taken from the live canvas, so the
+    // restored edge set can differ from the historical snapshot. Cache the
+    // fingerprint of what we actually committed or the next render will look
+    // like a new edit and immediately discard this redo entry.
+    lastFingerprintRef.current = fingerprint({
+      ...previous,
+      nodes: restoredNodes,
+      edges: restoredEdges,
+    });
     syncHistoryLen();
+    isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
   const redo = useCallback(() => {
     if (isAnimatingRef?.current) return;
-    const future = futureRef.current;
-    if (future.length === 0) return;
+    if (hasActiveExternalRunState(stateRef.current.nodes, { recursive: false })) return;
+    let future = futureRef.current;
+    while (
+      future.length > 0
+      && hasActiveExternalRunState(future[future.length - 1]?.nodes, { recursive: false })
+    ) {
+      future = future.slice(0, -1);
+    }
+    futureRef.current = future;
+    if (future.length === 0) {
+      syncHistoryLen();
+      return;
+    }
 
     const currentState = deepCloneState();
     const next        = future[future.length - 1];
     futureRef.current = future.slice(0, -1);
     pastRef.current   = [...pastRef.current, currentState];
     const restoredNodes = mergeNonRestorableNodeDataFromLive(next.nodes, currentState.nodes);
+    const restoredEdges = mergeNonRestorableEdgesFromLive(
+      next.edges,
+      currentState.edges,
+      restoredNodes,
+      currentState.nodes,
+    );
 
     EventLogger.log('redo');
     isRestoringRef.current = true;
     setNodes(restoredNodes);
-    setEdges(next.edges);
+    setEdges(restoredEdges);
     setDrawings(next.drawings);
-    lastFingerprintRef.current = fingerprint({ ...next, nodes: restoredNodes });
+    lastFingerprintRef.current = fingerprint({
+      ...next,
+      nodes: restoredNodes,
+      edges: restoredEdges,
+    });
     syncHistoryLen();
+    isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);

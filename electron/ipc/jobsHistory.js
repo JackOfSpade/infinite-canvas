@@ -230,7 +230,7 @@ function isWithinAge(seenDate, maxAgeDays = MAX_AGE_DAYS) {
  * parser had to discard (a legacy row written before csvEscape collapsed
  * newlines split into <5-column fragments). Callers that don't care omit it.
  */
-export async function loadJobsHistory(canvasFilePath, stats = null) {
+async function loadJobsHistoryUnlocked(canvasFilePath, stats = null) {
   const filePath = historyPathForCanvas(canvasFilePath);
   if (!filePath) return [];
   let content;
@@ -292,6 +292,21 @@ function withHistoryLock(filePath, fn) {
 }
 
 /**
+ * Read only after every append already admitted for this canvas has settled.
+ * A Board commits its visible cards before its diagnostic/history IPC drains;
+ * without this barrier the next queued search can read the old file and show
+ * those same cards again. The locked append path calls the raw reader below so
+ * it never waits on its own tail.
+ */
+export async function loadJobsHistory(canvasFilePath, stats = null) {
+  const filePath = historyPathForCanvas(canvasFilePath);
+  if (!filePath) return [];
+  const pendingWrite = _historyTails.get(filePath);
+  if (pendingWrite) await pendingWrite;
+  return loadJobsHistoryUnlocked(canvasFilePath, stats);
+}
+
+/**
  * Atomically replace the private history sidecar without leaving a predictable
  * or world-readable temporary copy beside it. The canvas directory is
  * user-controlled, so a Date.now()-named temp can be pre-created or collided
@@ -332,7 +347,7 @@ export async function appendJobsHistory(canvasFilePath, jobs) {
 async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
   try {
     const readStats = {};
-    const existing = await loadJobsHistory(canvasFilePath, readStats);
+    const existing = await loadJobsHistoryUnlocked(canvasFilePath, readStats);
     const fresh = existing.filter(r => isWithinAge(r.seen_date));
 
     // One normalized URL can occasionally be reused by a broken extractor or

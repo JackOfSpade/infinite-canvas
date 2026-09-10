@@ -182,6 +182,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateNonApiAiDraft,
   flushNonApiAiPersistence,
   completeNonApiAiRun: (runId) => ipcRenderer.invoke('complete-non-api-ai-run', { runId }),
+  completeNonApiAiRuns: (runIds) => ipcRenderer.invoke('complete-non-api-ai-runs', { runIds }),
   stepBackNonApiAiRequest: (requestId) => ipcRenderer.invoke('step-back-non-api-ai-request', { requestId }),
   cancelNonApiAiRequest: (requestId) => ipcRenderer.invoke('cancel-non-api-ai-request', { requestId }),
   revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
@@ -271,4 +272,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Lifecycle Control ────────────────────────────────────────────────────
   cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause),
+  cancelNodeTaskAndWait: (nodeId, cause = null) => ipcRenderer.invoke('cancel-node-task-and-wait', { nodeId, cause }),
 });

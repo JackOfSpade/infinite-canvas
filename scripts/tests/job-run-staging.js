@@ -1,6 +1,113 @@
-import { assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, completeRunWithReceipt, evaluateJobPreferences, fs, getJobsTelemetry, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'job run queue: separate hubs serialize on the shared job-search lane and queued cancellation is isolated',
+    run: async () => {
+      const queue = createModuleRunQueue();
+      const order = [];
+      const first = await queue.acquireModuleRun({
+        nodeId: 'hub-a',
+        lane: 'job-search',
+        onStart: () => order.push('a-start'),
+      });
+      const queued = queue.acquireModuleRun({
+        nodeId: 'hub-b',
+        lane: 'job-search',
+        onQueued: ({ position }) => order.push(`b-queued-${position}`),
+        onStart: () => order.push('b-start'),
+      });
+      const unrelated = await queue.acquireModuleRun({
+        nodeId: 'marketplace-a',
+        lane: 'marketplace',
+        onStart: () => order.push('marketplace-start'),
+      });
+
+      const waiting = queue.getSnapshot().lanes['job-search'];
+      assert(waiting?.active?.nodeId === 'hub-a' && waiting.queued?.[0]?.nodeId === 'hub-b'
+        && !order.includes('b-start') && order.includes('marketplace-start'),
+      `a second hub must wait behind the active shared job-search workflow while unrelated lanes proceed, got ${JSON.stringify({ waiting, order })}`);
+
+      first.release();
+      const second = await queued;
+      assert(order.indexOf('a-start') < order.indexOf('b-queued-1')
+        && order.indexOf('b-queued-1') < order.indexOf('b-start'),
+      `the shared job-search lane must remain FIFO across hubs, got ${JSON.stringify(order)}`);
+      second.release();
+      unrelated.release();
+
+      const active = await queue.acquireModuleRun({ nodeId: 'hub-a', lane: 'job-search' });
+      const cancelled = queue.acquireModuleRun({ nodeId: 'hub-b', lane: 'job-search' })
+        .then(() => null, error => error?.message || String(error));
+      const cancelledCount = queue.cancelQueuedRunsForNode('hub-b', 'Hub reset');
+      const cancelledReason = await cancelled;
+      active.release();
+      assert(cancelledCount === 1 && cancelledReason === 'Hub reset'
+        && queue.getSnapshot().lanes['job-search'] == null,
+      `cancelling a queued hub must remove only its shared-lane entry, got ${JSON.stringify({ cancelledCount, cancelledReason, snapshot: queue.getSnapshot() })}`);
+
+      // A source resolver is executed by its hub in the main process, but the
+      // source-card UI may disappear independently while it waits in the lane.
+      // Its card id must therefore cancel the queued entry without breaking
+      // the hub-id cancellation used by Reset.
+      const sourceActive = await queue.acquireModuleRun({ nodeId: 'resolver-hub', lane: 'job-search' });
+      const sourceQueued = queue.acquireModuleRun({
+        nodeId: 'resolver-hub',
+        cancellationNodeIds: ['source-card-a'],
+        lane: 'job-search',
+      }).then(() => null, error => error?.message || String(error));
+      const sourceCancelled = queue.cancelQueuedRunsForNode('source-card-a', 'Job source card removed');
+      const sourceCancelReason = await sourceQueued;
+      assert(sourceCancelled === 1 && sourceCancelReason === 'Job source card removed'
+        && queue.getSnapshot().lanes['job-search']?.active?.nodeId === 'resolver-hub',
+      `removing a queued source card must not disturb its same-hub active sibling, got ${JSON.stringify({ sourceCancelled, sourceCancelReason, snapshot: queue.getSnapshot() })}`);
+      sourceActive.release();
+
+      // Reset is narrower than deletion: a Board may be queued under its own
+      // id while listing this Search as a cancellation alias. Cancelling work
+      // actually owned by the Search must leave that parent transaction in the
+      // lane.
+      const aliasActive = await queue.acquireModuleRun({ nodeId: 'other-owner', lane: 'job-search' });
+      const boardQueued = queue.acquireModuleRun({
+        nodeId: 'board-owner',
+        cancellationNodeIds: ['hub-reset'],
+        lane: 'job-search',
+      });
+      const searchQueued = queue.acquireModuleRun({
+        nodeId: 'hub-reset',
+        lane: 'job-search',
+      }).then(() => null, error => error?.message || String(error));
+      const ownedCancelled = queue.cancelQueuedRunsOwnedByNode('hub-reset', 'Search reset');
+      const ownedCancelReason = await searchQueued;
+      assert(ownedCancelled === 1 && ownedCancelReason === 'Search reset'
+        && queue.getSnapshot().lanes['job-search']?.queued?.length === 1
+        && queue.getSnapshot().lanes['job-search'].queued[0].nodeId === 'board-owner',
+      `child Reset must preserve a parent queued through its cancellation alias, got ${JSON.stringify({ ownedCancelled, ownedCancelReason, snapshot: queue.getSnapshot() })}`);
+      aliasActive.release();
+      const boardLease = await boardQueued;
+      boardLease.release();
+
+      const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const cleanupStart = sourceCard.indexOf('useEffect(() => () => {');
+      const cleanupEnd = sourceCard.indexOf('\n\n  useEffect(() => {', cleanupStart);
+      const resolverCleanup = sourceCard.slice(cleanupStart, cleanupEnd);
+      const provider = fs.readFileSync(path.resolve('src/contexts/ModuleRunQueueContext.jsx'), 'utf8');
+      assert(sourceCard.includes('const resolveLifecycleRef = useRef(0);')
+        && sourceCard.includes('const resolveStartedRef = useRef(false);')
+        && sourceCard.includes('const { acquireModuleRun, cancelQueuedRunsForNode } = useModuleRunQueue();')
+        && sourceCard.includes("cancellationNodeIds: [id]")
+        && sourceCard.includes("cancelQueuedRunsForNode(id, 'Job source card removed')")
+        && resolverCleanup.includes('if (resolveStartedRef.current) {')
+        && resolverCleanup.includes("cancelNodeTask?.(data.hubId, 'job-source-card-removed')")
+        && resolverCleanup.includes('}, [cancelQueuedRunsForNode, data.hubId, id]);')
+        && !resolverCleanup.includes('moduleRunQueue')
+        && provider.includes('cancelQueuedRunsOwnedByNode: queue.cancelQueuedRunsOwnedByNode')
+        && provider.includes('}), [queue, snapshot]);')
+        && sourceCard.includes('if (!resolverAlive()) return;'),
+      'a deleted source card must retain its queued/active lifecycle boundary despite provider snapshot rerenders, and only cancel its hub task after it owns the active lease');
+      return { sharedLane: true, queuedCancellation: true, ownedResetPreservesParentAlias: true, sameHubActiveSiblingProtected: true, sourceCardLifecycleCancellation: true, snapshotRerenderSafe: true };
+    },
+  },
   {
     name: 'job preferences: every career direction is evaluable and listing provenance is code-owned',
     run: async () => {
@@ -150,13 +257,31 @@ export default [
       'saved/late append recovery must assess only candidates not already represented and merge audits with the candidate pool identity policy');
       assert(renderer.includes('preferenceMatchedDelta: scoreResult.preferenceMatchedCount ?? preferenceMatchedCount')
         && renderer.includes('preferenceCandidatePool: scoreResult.preferenceCandidatePool ?? preferenceCandidatePool')
-        && renderer.includes('gatheredCount: (Number(data.gatheredCount) || 0) + freshJobs.length')
+        && renderer.includes('baseData: appendBaseData,')
+        && renderer.includes('canCommit: appendCanCommit,')
+        && renderer.includes('const appendCommitted = await appendJobsToDoneCanvas({')
+        && renderer.includes("if (!appendCommitted) {")
+        && renderer.includes('let functionalCommitAccepted = false;')
+        && renderer.includes('functionalCommitAccepted = true;')
+        && renderer.includes('await waitForRendererCommitFrame();')
+        && renderer.includes('if (!functionalCommitAccepted || !committed) return false;')
+        && renderer.includes("const recoveryBaseData = getNode(currentId)?.data || null;")
+        && renderer.includes("appendBaseData: resultMode === 'append' ? recoveryBaseData : null")
+        && renderer.includes('const appendBaseFingerprint = moduleFingerprint(recoveryBaseData.scoredJobs);')
+        && renderer.includes('scoredJobs: [],')
+        && renderer.includes('baseData: recoveryBaseData,')
+        && renderer.includes("emptyResultDisposition: 'preference-filtered',")
+        && renderer.includes("? (getNode(currentId)?.data?.resultDisposition || null)")
+        && renderer.includes('canCommit: appendCanCommit,')
+        && renderer.includes('gatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length')
         && renderer.includes('Failed to save preference-filtered USAJobs snapshot')
         && renderer.includes("'preference-filtered'"),
-      'append scoring and all-filtered late sources must retain preference recovery state, an accurate disposition, and source funnel volume');
-      assert(renderer.includes('const activeTargetRole = String(liveData.targetRole || \'\').trim()')
-        && renderer.includes('targetRole: (data.activeTargetRole ?? data.targetRole ?? \'\').trim()')
-        && renderer.includes('data.pendingTargetRole ?? data.activeTargetRole ?? data.targetRole ?? \'\'')
+      'append scoring must merge into and generation-fence an explicit live base (never report a dropped no-base append), while all-filtered late sources retain preference recovery state, disposition, and funnel volume');
+      assert(renderer.includes('const activeTargetRole = String(laneTurnData.targetRole || \'\').trim()')
+        && renderer.includes('targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? \'\').trim()')
+        && renderer.includes('continuationData.pendingTargetRole')
+        && renderer.includes('?? continuationData.activeTargetRole')
+        && renderer.includes('?? continuationData.targetRole')
         && preferences.includes('listingIdentity: listingIdentityForAudit(job)'),
       'a run freezes Target role with its preferences across late and paused paths, and each emitted audit carries a bounded listing identity');
       return { appendCandidateGate: true, listingAwareAudits: true, frozenTargetRole: true };
@@ -538,10 +663,14 @@ export default [
         && search.includes('Leave blank to generate best-fit search variations.')
         && search.includes('aria-describedby={targetRoleHelpId}')
         && search.includes('aria-describedby={jobPreferencesHelpId}')
-        && search.includes('disabled={!!data.locked}')
-        && search.includes('disabled={!!data.locked}\n                    className="w-10')
-        && search.includes('disabled={!!data.locked}\n                />'),
-      'empty Job Preferences controls must name Target role, explain a blank role, describe their help, and disable every editable setting when locked');
+        && search.includes('const cleanupRetirementPending = hasPendingManualAiRetirement(data);')
+        && search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
+        && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;')
+        && search.includes('disabled={controlsLocked}')
+        && search.includes('disabled={controlsLocked}\n                    className="w-10')
+        && search.includes('disabled={controlsLocked}\n                />')
+        && search.includes('locked={errorControlsLocked}'),
+      'empty Job Preferences controls must name Target role, explain a blank role, describe their help, and disable every editable setting while locked, queued, or finishing cancellation cleanup without hiding the cleanup retry action');
       assert(locations.includes('disabled = false')
         && locations.includes('disabled={disabled}'),
       'structured location inputs must honor the parent locked state rather than remaining editable');
@@ -588,7 +717,7 @@ export default [
     },
   },
   {
-    name: 'job run staging: another hub cannot atomically replace an unfinished canvas run',
+    name: 'job run staging: hubs on one canvas retain independent, fenced recovery ledgers',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-hub-conflict-'));
       const canvasPath = path.join(root, 'workspace.json');
@@ -598,13 +727,31 @@ export default [
           startRun(canvasPath, { runId: 'hub-b-run', startedAt: 2, nodeId: 'hub-b', sourceIds: ['dice'] }),
           startRun(canvasPath, { runId: 'hub-c-run', startedAt: 3, nodeId: 'hub-c', sourceIds: ['remoteok'] }),
         ]);
-        const state = await readRunState(canvasPath, 4);
-        assert(first?.runId === 'hub-a-run'
-          && b?.conflict === true && b.ownerNodeId === 'hub-a'
-          && c?.conflict === true && c.ownerNodeId === 'hub-a'
-          && state?.manifest?.runId === 'hub-a-run' && state.manifest.inputs?.nodeId === 'hub-a',
-        'concurrent fresh starts from other hubs return a named conflict and leave the original manifest/staging owner untouched');
-        return { owner: state.manifest.inputs.nodeId };
+        await Promise.all([
+          recordSourcePage(canvasPath, { nodeId: 'hub-a', expectedRunId: 'hub-a-run', sourceId: 'indeed', jobs: [{ title: 'A' }], now: 4 }),
+          recordSourcePage(canvasPath, { nodeId: 'hub-b', expectedRunId: 'hub-b-run', sourceId: 'dice', jobs: [{ title: 'B' }], now: 4 }),
+          recordSourcePage(canvasPath, { nodeId: 'hub-c', expectedRunId: 'hub-c-run', sourceId: 'remoteok', jobs: [{ title: 'C' }], now: 4 }),
+        ]);
+        const [aState, bState, cState] = await Promise.all([
+          readRunState(canvasPath, 5, { nodeId: 'hub-a' }),
+          readRunState(canvasPath, 5, { nodeId: 'hub-b' }),
+          readRunState(canvasPath, 5, { nodeId: 'hub-c' }),
+        ]);
+        const staleWrite = await recordSourcePage(canvasPath, {
+          nodeId: 'hub-a', expectedRunId: 'obsolete-a-run', sourceId: 'indeed', jobs: [{ title: 'stale' }], now: 6,
+        });
+        const replacement = await startRun(canvasPath, { runId: 'hub-a-rerun', startedAt: 7, nodeId: 'hub-a', sourceIds: ['indeed'] });
+        const afterRerun = await readRunState(canvasPath, 8, { nodeId: 'hub-a' });
+        const bAfterAReplaced = await readRunState(canvasPath, 8, { nodeId: 'hub-b' });
+        assert(first?.runId === 'hub-a-run' && b?.runId === 'hub-b-run' && c?.runId === 'hub-c-run'
+          && aState?.stagedJobs?.[0]?.job?.title === 'A'
+          && bState?.stagedJobs?.[0]?.job?.title === 'B'
+          && cState?.stagedJobs?.[0]?.job?.title === 'C'
+          && staleWrite === false
+          && replacement?.runId === 'hub-a-rerun' && afterRerun?.stagedJobs?.length === 0
+          && bAfterAReplaced?.manifest?.runId === 'hub-b-run' && bAfterAReplaced.stagedJobs?.[0]?.job?.title === 'B',
+        'each hub must have isolated jobs + manifest files, while an old token cannot write into a same-hub rerun');
+        return { simultaneous: 3, sameHubRerunFenced: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -634,6 +781,32 @@ export default [
         assert(deliberateLegacyClear === true && next?.runId === 'new-hub-run',
           'the explicit owner-unknown discard is token-bound and clears only a manifest that still has no hub owner, restoring a safe Start fresh path');
         return { runId: state.manifest.runId, rows: rows.length, legacyCleared: deliberateLegacyClear };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: an owned legacy recovery never reads a modern sibling hub staging file',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-legacy-owned-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await fs.promises.writeFile(path.join(root, 'workspace.jobs-run.json'), JSON.stringify({
+          version: 1, runId: 'legacy-a', startedAt: 1, lastUpdated: 2,
+          stage: 'searching', inputs: { nodeId: 'hub-a' }, sources: { indeed: { status: 'pending', queries: {} } },
+        }), 'utf8');
+        await fs.promises.writeFile(path.join(root, 'workspace.jobs-staging.jsonl'), `${JSON.stringify({ sourceId: 'indeed', job: { title: 'Legacy A' } })}\n`, 'utf8');
+        await startRun(canvasPath, { runId: 'modern-b', startedAt: 3, nodeId: 'hub-b', sourceIds: ['dice'] });
+        await recordSourcePage(canvasPath, {
+          nodeId: 'hub-b', expectedRunId: 'modern-b', sourceId: 'dice', jobs: [{ title: 'Modern B' }], now: 4,
+        });
+        const recovered = await readRunState(canvasPath, 5, { nodeId: 'hub-a' });
+        assert(recovered?.manifest?.runId === 'legacy-a'
+          && recovered.stagedJobs?.length === 1
+          && recovered.stagedJobs[0]?.job?.title === 'Legacy A',
+        `an owned legacy hub must read its own selected sidecar, not a sibling's modern ledger, got ${JSON.stringify(recovered)}`);
+        return { runId: recovered.manifest.runId, stagedTitle: recovered.stagedJobs[0].job.title };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -708,8 +881,8 @@ export default [
           jobs: [{ title: 'MUST NOT PERSIST' }], queries: ['MUST NOT PERSIST'], profile: { email: 'MUST NOT PERSIST' },
           stagingStarted: true,
         });
-        const receipt = await readLastRunReceipt(canvasPath);
-        const serialized = await fs.promises.readFile(lastRunReceiptPathForCanvas(canvasPath), 'utf8');
+        const receipt = await readLastRunReceipt(canvasPath, { nodeId: 'hub-1' });
+        const serialized = await fs.promises.readFile(lastRunReceiptPathForCanvas(canvasPath, { nodeId: 'hub-1' }), 'utf8');
         const remaining = await fs.promises.readdir(root);
         assert(completed.ok && completed.cleared && receipt?.cleanup?.attempted && receipt?.cleanup?.cleared,
           `completion must truthfully record cleanup, got ${JSON.stringify(completed)}`);
@@ -725,9 +898,41 @@ export default [
           `receipt must retain safe RemoteOK aggregate facts, got ${JSON.stringify(receipt)}`);
         assert(!serialized.includes('MUST NOT PERSIST') && !('jobs' in receipt) && !('queries' in receipt) && !('profile' in receipt),
           `receipt must redact payload fields, got ${serialized}`);
-        assert(!remaining.includes('workspace.jobs-run.json') && !remaining.includes('workspace.jobs-staging.jsonl'),
+        const scope = jobRunPathScopeForCanvas(canvasPath, 'hub-1');
+        assert(!remaining.includes(`workspace.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`)
+          && !remaining.includes(`workspace.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`),
           `terminal cleanup must remove run sidecars, got ${remaining.join(', ')}`);
         return { outcome: receipt.terminal.outcome, cleared: receipt.cleanup.cleared };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: full canvas and fixed owner hashes prevent filename collisions',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-path-scope-'));
+      const bareCanvas = path.join(root, 'project');
+      const jsonCanvas = path.join(root, 'project.json');
+      const longOwner = `hub-${'x'.repeat(1_000)}`;
+      try {
+        await fs.promises.writeFile(bareCanvas, '{}');
+        await fs.promises.writeFile(jsonCanvas, '{}');
+        const bare = jobRunPathScopeForCanvas(bareCanvas, longOwner);
+        const json = jobRunPathScopeForCanvas(jsonCanvas, longOwner);
+        assert(bare.canvasHash !== json.canvasHash
+          && bare.ownerHash.length === 24
+          && !bare.ownerHash.includes(longOwner)
+          && `project.jobs-run.${bare.canvasHash}.${bare.ownerHash}.json`.length < 255,
+        'modern run sidecars use fixed full-canvas and owner hashes, so basename siblings and pathological IDs cannot collide or exceed NAME_MAX');
+
+        await fs.promises.writeFile(path.join(root, 'project.jobs-run.legacy-owner.json'), JSON.stringify({
+          runId: 'legacy', inputs: { nodeId: 'legacy-owner' }, sources: {}, stage: 'searching', lastUpdated: 1,
+        }));
+        const state = await readRunState(jsonCanvas, 2, { nodeId: 'legacy-owner' });
+        assert(state == null,
+          'a basename-only legacy sidecar fails closed when project and project.json coexist');
+        return { canvasHashLength: bare.canvasHash.length, ownerHashLength: bare.ownerHash.length };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -738,25 +943,19 @@ export default [
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-cleanup-access-'));
       const canvasPath = path.join(root, 'workspace.json');
-      const stagingPath = path.join(root, 'workspace.jobs-staging.jsonl');
-      const manifestPath = path.join(root, 'workspace.jobs-run.json');
+      const scope = jobRunPathScopeForCanvas(canvasPath, 'hub-1');
+      const stagingPath = path.join(root, `workspace.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`);
+      const manifestPath = path.join(root, `workspace.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
       const originalAccess = fs.promises.access;
       try {
         await startRun(canvasPath, {
           runId: 'cleanup-access-fault', startedAt: 100, nodeId: 'hub-1', sourceIds: ['remoteok'],
         });
-        let manifestChecks = 0;
         let completed;
         try {
           fs.promises.access = async (filePath, ...args) => {
             if (path.resolve(filePath) === path.resolve(stagingPath)) {
               throw Object.assign(new Error('injected pre-cleanup access denial'), { code: 'EACCES' });
-            }
-            if (path.resolve(filePath) === path.resolve(manifestPath)) {
-              manifestChecks += 1;
-              if (manifestChecks > 1) {
-                throw Object.assign(new Error('injected post-cleanup I/O failure'), { code: 'EIO' });
-              }
             }
             return originalAccess(filePath, ...args);
           };
@@ -768,17 +967,113 @@ export default [
           fs.promises.access = originalAccess;
         }
 
-        const receipt = await readLastRunReceipt(canvasPath);
+        const receipt = await readLastRunReceipt(canvasPath, { nodeId: 'hub-1' });
         const remaining = await fs.promises.readdir(root);
         assert(completed?.ok && completed.cleared === false
           && receipt?.cleanup?.attempted === true && receipt.cleanup.cleared === false,
         `access errors must leave terminal cleanup explicitly unconfirmed, got ${JSON.stringify({ completed, receipt })}`);
         assert(remaining.includes(path.basename(stagingPath))
-          && !remaining.includes(path.basename(manifestPath)) && manifestChecks === 2,
-        `the fixture must exercise both pre-cleanup EACCES and post-cleanup EIO without certifying absence, got ${JSON.stringify({ remaining, manifestChecks })}`);
-        return { cleared: receipt.cleanup.cleared, stagingPreserved: true, verificationFaultObserved: true };
+          && remaining.includes(path.basename(manifestPath)),
+        `an unverified staging delete must retain the ownership manifest for an exact retry, got ${JSON.stringify({ remaining })}`);
+        return { cleared: receipt.cleanup.cleared, stagingPreserved: true, manifestPreserved: true };
       } finally {
         fs.promises.access = originalAccess;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: a trash no-op cannot erase cleanup authority or report success',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-trash-noop-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const scope = jobRunPathScopeForCanvas(canvasPath, 'hub-1');
+      const stagingPath = path.join(root, `workspace.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`);
+      const manifestPath = path.join(root, `workspace.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
+      try {
+        await startRun(canvasPath, {
+          runId: 'trash-noop-run', startedAt: 100, nodeId: 'hub-1', sourceIds: ['remoteok'],
+        });
+        const result = await clearRunWithResult(canvasPath, {
+          expectedRunId: 'trash-noop-run',
+          expectedNodeId: 'hub-1',
+          trashItem: async () => {},
+        });
+        const remaining = await fs.promises.readdir(root);
+        assert(result.ok === false && result.cleared === false && result.reason === 'cleanup-failed'
+          && remaining.includes(path.basename(stagingPath))
+          && remaining.includes(path.basename(manifestPath)),
+        `a successful-returning trash no-op must fail verification and preserve the manifest, got ${JSON.stringify({ result, remaining })}`);
+        return { verifiedNoopRejected: true, manifestPreserved: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: exact terminal retry resumes partial cleanup without changing its receipt',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-terminal-retry-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const scope = jobRunPathScopeForCanvas(canvasPath, 'hub-1');
+      const stagingPath = path.join(root, `workspace.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`);
+      const manifestPath = path.join(root, `workspace.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
+      try {
+        await startRun(canvasPath, {
+          runId: 'terminal-retry-run', startedAt: 100, nodeId: 'hub-1', sourceIds: ['remoteok'],
+        });
+        const initialReceipt = {
+          runId: 'terminal-retry-run', nodeId: 'hub-1', startedAt: 100, completedAt: 200,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 7 },
+          funnel: { raw: 9, kept: 7 },
+        };
+        const partial = await completeRunWithReceipt(canvasPath, initialReceipt, {
+          expectedNodeId: 'hub-1',
+          trashItem: async (filePath) => {
+            if (path.resolve(filePath) === path.resolve(stagingPath)) await fs.promises.unlink(filePath);
+            // Simulate a Trash implementation that returns without moving the
+            // manifest. Verification must keep it as retry authority.
+          },
+        });
+        let remaining = await fs.promises.readdir(root);
+        assert(partial.ok === true && partial.cleared === false
+          && !remaining.includes(path.basename(stagingPath))
+          && remaining.includes(path.basename(manifestPath)),
+        `partial cleanup must retain a manifest-only exact retry point, got ${JSON.stringify({ partial, remaining })}`);
+
+        const retried = await completeRunWithReceipt(canvasPath, {
+          ...initialReceipt,
+          completedAt: 999,
+          terminal: { status: 'failed', outcome: 'incomplete', scoreReadyCount: 0 },
+          funnel: { raw: 999, kept: 0 },
+        }, { expectedNodeId: 'hub-1' });
+        const receipt = await readLastRunReceipt(canvasPath, { nodeId: 'hub-1' });
+        remaining = await fs.promises.readdir(root);
+        assert(retried.ok === true && retried.cleared === true
+          && !remaining.includes(path.basename(manifestPath))
+          && receipt.completedAt === 200
+          && receipt.terminal?.status === 'completed'
+          && receipt.terminal?.outcome === 'populated'
+          && receipt.terminal?.scoreReadyCount === 7
+          && receipt.funnel?.raw === 9
+          && receipt.cleanup?.attempted === true && receipt.cleanup.cleared === true,
+        `an exact retry must finish cleanup idempotently without rewriting terminal provenance, got ${JSON.stringify({ retried, receipt, remaining })}`);
+
+        // The exact receipt remains sufficient authority if both run sidecars
+        // disappeared before its cleanup flag could be updated.
+        await writeLastRunReceipt(canvasPath, {
+          ...receipt,
+          cleanup: { attempted: false, cleared: null },
+        }, { expectedRunId: 'terminal-retry-run', nodeId: 'hub-1' });
+        const receiptOnlyRetry = await completeRunWithReceipt(canvasPath, initialReceipt, { expectedNodeId: 'hub-1' });
+        const finalReceipt = await readLastRunReceipt(canvasPath, { nodeId: 'hub-1' });
+        assert(receiptOnlyRetry.ok === true && receiptOnlyRetry.cleared === true
+          && finalReceipt.completedAt === 200
+          && finalReceipt.terminal?.outcome === 'populated'
+          && finalReceipt.cleanup?.cleared === true,
+        `an exact receipt-only retry must be idempotent, got ${JSON.stringify({ receiptOnlyRetry, finalReceipt })}`);
+        return { partialRecovered: true, receiptOnlyRecovered: true, completedAt: finalReceipt.completedAt };
+      } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },
@@ -793,17 +1088,63 @@ export default [
         const stale = await completeRunWithReceipt(canvasPath, {
           runId: 'old-run', nodeId: 'old-hub', terminal: { status: 'completed', outcome: 'zero' },
         });
-        const state = await readStagedJobs(canvasPath);
+        const state = await readStagedJobs(canvasPath, { nodeId: 'new-hub' });
         const entries = await fs.promises.readdir(root);
         assert(stale.tokenMismatch && !stale.ok && !entries.includes('workspace.jobs-last-run.json'),
           `a stale completion must not write a receipt, got ${JSON.stringify(stale)} / ${entries.join(', ')}`);
-        assert(entries.includes('workspace.jobs-run.json') && Array.isArray(state),
+        const scope = jobRunPathScopeForCanvas(canvasPath, 'new-hub');
+        assert(entries.includes(`workspace.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`) && Array.isArray(state),
           'a stale completion must preserve the newer run sidecars');
         const direct = await writeLastRunReceipt(canvasPath, { runId: 'receipt-a', terminal: { status: 'completed', outcome: 'zero' } });
         const rejected = await writeLastRunReceipt(canvasPath, { runId: 'receipt-b', terminal: { status: 'completed', outcome: 'zero' } }, { expectedRunId: 'different-token' });
         assert(direct.written && rejected.tokenMismatch && rejected.receipt?.runId === 'receipt-a',
           `direct receipt updates must also reject a wrong expected token, got ${JSON.stringify({ direct, rejected })}`);
         return { staleRejected: true, directTokenGuarded: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: simultaneous hub completions retain separate receipts',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-scoped-receipts-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await Promise.all([
+          startRun(canvasPath, { runId: 'a-run', startedAt: 1, nodeId: 'hub-a', sourceIds: ['indeed'] }),
+          startRun(canvasPath, { runId: 'b-run', startedAt: 2, nodeId: 'hub-b', sourceIds: ['dice'] }),
+        ]);
+        const [a, b] = await Promise.all([
+          completeRunWithReceipt(canvasPath, { runId: 'a-run', nodeId: 'hub-a', terminal: { status: 'completed', outcome: 'zero' } }, { expectedNodeId: 'hub-a' }),
+          completeRunWithReceipt(canvasPath, { runId: 'b-run', nodeId: 'hub-b', terminal: { status: 'completed', outcome: 'zero' } }, { expectedNodeId: 'hub-b' }),
+        ]);
+        const [aReceipt, bReceipt] = await Promise.all([
+          readLastRunReceipt(canvasPath, { nodeId: 'hub-a' }),
+          readLastRunReceipt(canvasPath, { nodeId: 'hub-b' }),
+        ]);
+        assert(a?.ok && b?.ok && aReceipt?.runId === 'a-run' && bReceipt?.runId === 'b-run'
+          && aReceipt?.nodeId === 'hub-a' && bReceipt?.nodeId === 'hub-b',
+        'terminal receipts must be hub-scoped so two completed searches cannot clobber each other');
+        return { independentReceipts: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: a missing hub receipt never resolves to another hub',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-run-receipt-owner-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await writeLastRunReceipt(canvasPath, {
+          runId: 'hub-b-finished', nodeId: 'hub-b', terminal: { status: 'completed', outcome: 'zero' },
+        });
+        const wrongHub = await readLastRunReceipt(canvasPath, { nodeId: 'hub-a' });
+        assert(wrongHub === null,
+          `a scoped receipt read must not fall through to another hub, got ${JSON.stringify(wrongHub)}`);
+        return { crossHubReceiptBlocked: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -841,6 +1182,175 @@ export default [
       assert(preferenceFiltered.terminal.outcome === 'preference-filtered',
         'completion receipts must preserve the Job Preferences all-filtered outcome');
       return { failed: built.terminal.outcome, intentionalSkip: sanitized.terminal.outcome, preferenceFiltered: preferenceFiltered.terminal.outcome };
+    },
+  },
+  {
+    name: 'job telemetry: interleaved hubs retain independent search, scoring, and completion receipts',
+    run: async () => {
+      __resetJobsTelemetryForTests();
+      const sender = { label: 'shared-test-window' };
+      const inHub = (nodeId, channel, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel }, callback,
+      );
+      let releaseHubA;
+      const hubAPaused = new Promise(resolve => { releaseHubA = resolve; });
+      let hubAStarted;
+      const hubAReady = new Promise(resolve => { hubAStarted = resolve; });
+      let receiptA;
+
+      const hubA = inHub('hub-a', 'search-jobs', async () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-a';
+        telemetry.search = {
+          runId: 'run-a', ts: 10, raw: 3, deduped: 3, kept: 3,
+          bySource: { indeed: { count: 3, providerGathered: 3 } },
+        };
+        telemetry.pipeline = { runId: 'run-a', startedAt: 10 };
+        hubAStarted();
+        await hubAPaused;
+        await inHub('hub-a', 'score-jobs', async () => {
+          const scored = getJobsTelemetry();
+          assert(scored.search?.runId === 'run-a' && scored.search?.bySource?.indeed?.count === 3,
+            `a hub's score stage must rejoin its own search funnel, got ${JSON.stringify(scored.search)}`);
+          scored.scoring = {
+            runId: 'run-a', input: 3, selectedForScoring: 3, scored: 3,
+            placeholders: 0, unscored: 0, failedBatches: 0, cappedForBudget: 0, providerCalls: 1,
+          };
+        });
+        receiptA = await inHub('hub-a', 'complete-job-run', () => buildJobRunCompletionReceipt('run-a', 30, {
+          status: 'completed', outcome: 'populated', scoreReadyCount: 3,
+        }));
+      });
+
+      await hubAReady;
+      const receiptB = await inHub('hub-b', 'search-jobs', async () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-b';
+        telemetry.search = {
+          runId: 'run-b', ts: 20, raw: 7, deduped: 7, kept: 7,
+          bySource: { dice: { count: 7, providerGathered: 7 } },
+        };
+        telemetry.pipeline = { runId: 'run-b', startedAt: 20 };
+        await inHub('hub-b', 'score-jobs', () => {
+          const scored = getJobsTelemetry();
+          assert(scored.search?.runId === 'run-b' && scored.search?.bySource?.indeed == null,
+            `a second hub must not inherit the first hub's funnel, got ${JSON.stringify(scored.search)}`);
+          scored.scoring = {
+            runId: 'run-b', input: 7, selectedForScoring: 7, scored: 6,
+            placeholders: 1, unscored: 0, failedBatches: 0, cappedForBudget: 0, providerCalls: 2,
+          };
+        });
+        return inHub('hub-b', 'complete-job-run', () => buildJobRunCompletionReceipt('run-b', 25, {
+          status: 'completed', outcome: 'populated', scoreReadyCount: 6,
+        }));
+      });
+      releaseHubA();
+      await hubA;
+
+      assert(receiptA?.nodeId === 'hub-a' && receiptA?.scoring?.input === 3
+        && receiptA?.sources?.indeed?.count === 3 && receiptA?.sources?.dice == null
+        && receiptB?.nodeId === 'hub-b' && receiptB?.scoring?.input === 7
+        && receiptB?.sources?.dice?.count === 7 && receiptB?.sources?.indeed == null,
+      `interleaved hub receipts must keep their own funnel and scoring aggregates, got ${JSON.stringify({ receiptA, receiptB })}`);
+      return { hubA: receiptA.scoring.input, hubB: receiptB.scoring.input };
+    },
+  },
+  {
+    name: 'job telemetry: sender-local board and report selection never borrow another window',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const senderA = { id: 101 };
+      const senderB = { id: 202 };
+      const run = (sender, nodeId, channel, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel }, callback,
+      );
+      run(senderA, 'hub-a', 'search-jobs', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-a'; telemetry.windowId = senderA.id; telemetry.search = { runId: 'a' };
+      });
+      run(senderB, 'hub-b', 'search-jobs', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-b'; telemetry.windowId = senderB.id; telemetry.search = { runId: 'b' };
+      });
+      const boardA = run(senderA, null, 'bucket-jobs', () => getJobsTelemetry());
+      const reportA = run(senderA, null, 'bug-report', () => __getJobsTelemetryForReportForTests(new Set(['hub-a', 'hub-a-2']), senderA.id));
+      assert(boardA.search?.runId === 'a' && reportA?.search?.runId === 'a',
+        `sender-local legacy board/report selection must remain in window A, got ${JSON.stringify({ boardA, reportA })}`);
+      return { boardRun: boardA.search.runId, reportRun: reportA.search.runId };
+    },
+  },
+  {
+    name: 'job telemetry: a report with two matching hubs fails closed instead of selecting the latest',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 303 };
+      const run = (nodeId, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel: 'search-jobs' }, callback,
+      );
+      run('hub-a', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-a';
+        telemetry.search = { runId: 'run-a' };
+      });
+      run('hub-b', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-b';
+        telemetry.search = { runId: 'run-b' };
+      });
+      const reportForBoth = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => __getJobsTelemetryForReportForTests(new Set(['hub-a', 'hub-b']), sender.id),
+      );
+      const reportForOne = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => __getJobsTelemetryForReportForTests(new Set(['hub-b']), sender.id),
+      );
+      assert(reportForBoth === null && reportForOne?.search?.runId === 'run-b',
+        `a multi-hub report must be indeterminate while a narrowed owner remains readable, got ${JSON.stringify({ reportForBoth, reportForOne })}`);
+      return { multiHub: 'indeterminate', singleHub: reportForOne.search.runId };
+    },
+  },
+  {
+    name: 'job telemetry: a legacy board request stays pinned while another hub becomes latest',
+    run: async () => {
+      __resetJobsTelemetryForTests();
+      const sender = { label: 'shared-test-window' };
+      const inHub = (nodeId, channel, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel }, callback,
+      );
+      const hubATelemetry = await inHub('hub-a', 'search-jobs', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-a';
+        telemetry.search = { runId: 'run-a', bySource: {} };
+        return telemetry;
+      });
+      let releaseBoard;
+      const boardPaused = new Promise(resolve => { releaseBoard = resolve; });
+      let boardStarted;
+      const boardReady = new Promise(resolve => { boardStarted = resolve; });
+      const board = inHub('board-a', 'bucket-jobs', async () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.bucketing = { phase: 'started' };
+        boardStarted();
+        await boardPaused;
+        getJobsTelemetry().bucketing = { phase: 'finished' };
+        return telemetry;
+      });
+      await boardReady;
+      const hubBTelemetry = await inHub('hub-b', 'search-jobs', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-b';
+        telemetry.search = { runId: 'run-b', bySource: {} };
+        return telemetry;
+      });
+      releaseBoard();
+      const boardTelemetry = await board;
+
+      assert(boardTelemetry === hubATelemetry
+        && hubATelemetry.bucketing?.phase === 'finished'
+        && hubBTelemetry.bucketing == null,
+      `a bucket request must retain its first ambient telemetry target across awaits, got ${JSON.stringify({ hubA: hubATelemetry.bucketing, hubB: hubBTelemetry.bucketing })}`);
+      return { boardTarget: hubATelemetry.nodeId, isolatedFrom: hubBTelemetry.nodeId };
     },
   },
   {
@@ -1101,11 +1611,11 @@ export default [
 
       const contracts = [
         ['scored settlement', 'const completion = completeRun && jobRunId', 'updateGlobal(id, {'],
-        ['lost legacy batch', "? await completeJobRun(terminalRunId, 'failed', 'incomplete')", 'updateGlobal(id, live ==='],
-        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp)", 'updateGlobal(currentId, {'],
-        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0)", 'updateGlobal(currentId, {'],
-        ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only')", 'updateGlobal(currentId, {'],
-        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero')", 'updateGlobal(id, {'],
+        ['lost legacy batch', "? await completeJobRun(terminalRunId, 'failed', 'incomplete', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(id, live ==='],
+        ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
+        ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
+        ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
+        ['paused zero', "? await completeJobRun(activeJobRunId, 'completed', 'zero', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(id, {'],
       ];
       for (const [label, awaitMarker, doneMarker] of contracts) {
         const begin = source.indexOf(awaitMarker);
@@ -1113,7 +1623,7 @@ export default [
         assert(begin >= 0 && done > begin,
           `${label} must await the receipt/cleanup transaction before it publishes its terminal hub state`);
         const section = source.slice(begin, done);
-        assert(section.includes('if (cancelled()) return'),
+        assert(section.includes('if (cancelled())'),
           `${label} must discard a stale terminal update when Reset/unmount lands during finalization`);
       }
       assert(source.includes('function terminalFinalizationError(')

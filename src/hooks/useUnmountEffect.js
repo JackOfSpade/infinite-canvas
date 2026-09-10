@@ -10,6 +10,8 @@ import { useEffect, useRef } from 'react';
  */
 export function useUnmountEffect(fn) {
   const ref = useRef(fn);
+  const setupGenerationRef = useRef(0);
+  const cleanedRef = useRef(false);
   // Mirror the latest `fn` into the ref AFTER each render so the unmount
   // cleanup below reads the freshest closure. Doing this inside an effect
   // (rather than during render) satisfies React's "no refs during render"
@@ -19,5 +21,23 @@ export function useUnmountEffect(fn) {
   useEffect(() => {
     ref.current = fn;
   });
-  useEffect(() => () => ref.current(), []);
+  useEffect(() => {
+    const generation = setupGenerationRef.current + 1;
+    setupGenerationRef.current = generation;
+    cleanedRef.current = false;
+    return () => {
+      // React StrictMode deliberately runs effect setup → cleanup → setup on
+      // mount. Defer one microtask so the replay setup can invalidate this
+      // generation; a real unmount has no replacement setup and runs once.
+      Promise.resolve().then(() => {
+        if (
+          setupGenerationRef.current === generation
+          && !cleanedRef.current
+        ) {
+          cleanedRef.current = true;
+          ref.current();
+        }
+      });
+    };
+  }, []);
 }

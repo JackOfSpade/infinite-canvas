@@ -15,7 +15,7 @@ import path from 'node:path';
 import electronPkg from 'electron';
 import { parseAiJson } from './jsonRepair.js';
 import { assertResponseMatchesSchema, canonicalizeResponseSchemaEnums } from './schemaValidation.js';
-import { abortNodeTasks, cancellationError, getCurrentIpcRequestContext } from './ipcUtils.js';
+import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, releaseAcknowledgedManualAiRunIds } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
@@ -65,6 +65,7 @@ const NON_API_AI_HANDLER_CHANNELS = [
   'update-non-api-ai-draft',
   'flush-non-api-ai-persistence',
   'complete-non-api-ai-run',
+  'complete-non-api-ai-runs',
 ];
 
 function cleanRunId(value) {
@@ -103,7 +104,7 @@ async function loadDurableState() {
 }
 
 function writeDurableState() {
-  durableWriteTail = durableWriteTail.then(async () => {
+  const write = durableWriteTail.then(async () => {
     const filePath = durableFilePath();
     if (!filePath) return;
     const state = await loadDurableState();
@@ -115,8 +116,14 @@ function writeDurableState() {
     } finally {
       await fs.promises.unlink(tmp).catch(() => {});
     }
-  }).catch(error => logger.warn(`[Non-API AI] Could not checkpoint handoff: ${error?.message || error}`));
-  return durableWriteTail;
+  });
+  // Keep the serialization chain usable after a failed write, but return the
+  // unrecovered promise to this mutation's caller so an IPC acknowledgement
+  // can never claim durable cleanup that did not reach disk.
+  durableWriteTail = write.catch(error => {
+    logger.warn(`[Non-API AI] Could not checkpoint handoff: ${error?.message || error}`);
+  });
+  return write;
 }
 
 function durableStepKey({ materializedPrompt, task, nodeId, batch, batchTotal, itemCount, attachmentPaths }) {
@@ -174,7 +181,7 @@ function updateDurableStep(record, patch, { deferWrite = false } = {}) {
       if (durableDeferredWriteTimer) clearTimeout(durableDeferredWriteTimer);
       durableDeferredWriteTimer = setTimeout(() => {
         durableDeferredWriteTimer = null;
-        void writeDurableState();
+        void writeDurableState().catch(() => {});
       }, 200);
     }
   });
@@ -185,10 +192,45 @@ function clearDurableRun(runId) {
   if (!clean) return Promise.resolve(false);
   return queueDurableMutation(async () => {
     const state = await loadDurableState();
-    if (!state.runs[clean]) return false;
+    const existed = !!state.runs[clean];
     delete state.runs[clean];
+    // Always rewrite, even when memory already considers the run absent. A
+    // prior failed rename can leave an older on-disk copy; this makes retrying
+    // completion idempotently enforce the tombstone.
     await writeDurableState();
-    return true;
+    return existed;
+  });
+}
+
+function clearDurableRuns(runIds) {
+  const cleanIds = [...new Set(
+    (Array.isArray(runIds) ? runIds : []).map(cleanRunId).filter(Boolean),
+  )];
+  if (cleanIds.length > 10_000) {
+    return Promise.reject(new Error('Too many manual-AI runs were requested for one cleanup transaction.'));
+  }
+  if (cleanIds.length === 0) {
+    return Promise.resolve({ clearedRunIds: [], absentRunIds: [] });
+  }
+  return queueDurableMutation(async () => {
+    const state = await loadDurableState();
+    const priorRuns = new Map(cleanIds.map(runId => [runId, state.runs[runId]]));
+    const clearedRunIds = cleanIds.filter(runId => !!state.runs[runId]);
+    const absentRunIds = cleanIds.filter(runId => !state.runs[runId]);
+    cleanIds.forEach(runId => { delete state.runs[runId]; });
+    try {
+      // One atomic rename covers the whole deletion set. A group deletion can
+      // therefore never retire only some handoffs and then restore stale node
+      // markers for the rest.
+      await writeDurableState();
+    } catch (error) {
+      for (const [runId, priorRun] of priorRuns) {
+        if (priorRun) state.runs[runId] = priorRun;
+        else delete state.runs[runId];
+      }
+      throw error;
+    }
+    return { clearedRunIds, absentRunIds };
   });
 }
 
@@ -398,10 +440,9 @@ export function materializeNonApiPrompt({
   if (responseSchema) {
     settings.push(
       '', '--- REQUIRED RESPONSE FORMAT ---', '',
-      'Return only valid JSON matching this schema:',
+      'Return the complete response inside exactly one fenced JSON code block labelled `json`, and output nothing before or after that block. Inside the block, return only valid JSON matching this schema:',
       JSON.stringify(responseSchema, null, 2),
       '',
-      'Do not use Markdown code fences or include commentary outside the JSON.',
       // Observed on a resume-parse handoff: the chat returned the required
       // profile plus ~10 unrequested properties, including a verbatim re-
       // transcription of every role's bullet points inside the profile JSON.
@@ -413,12 +454,13 @@ export function materializeNonApiPrompt({
       // set rather than rejecting extras: a hard `additionalProperties: false`
       // would trap the user in a re-paste loop over output we already ignore.
       'Emit exactly the properties named in the schema, at every nesting level, and nothing else. Do not add extra, explanatory, or provenance properties (for example a "source" key, "notes", or a calculation trace). They are discarded on arrival, and they spend the output budget above - which is what truncates a long reply mid-JSON.',
-      // Observed on the same handoff: the chat application rendered a bare file
-      // name inside the JSON as an attachment card. A card carries no text, so
-      // copying the reply turned "source": "Work Experience.md" into
-      // "source": "". The pasted text keeps no trace of what was removed, so no
-      // validator downstream can detect it - prevention is the only defence.
-      'Every character of this reply is transferred by copying it as plain text, so anything your chat application renders as a widget instead of as text is silently lost on the way back. Write all values as literal text only: no file attachments or file cards, no download chips, no citation or reference markers, no collapsible sections, no links. In particular, never write out an attached file\'s name - a file name is exactly what these applications turn into an attachment card, and it then copies back as an empty string.',
+      // Observed first with a bare source filename, then again when a chat
+      // application cited the automatic attachment created from a long pasted
+      // prompt. Both rendered as file cards whose text/plain clipboard form was
+      // empty. Keep the payload in one verbatim code-block copy surface; the
+      // shared JSON parser deliberately accepts fences and ignores anything a
+      // chat UI may still append outside that block.
+      'Every character inside the JSON code block is transferred by copying it as plain text, so anything your chat application renders there as a widget is silently lost. The prompt may be represented by the chat application as an automatic paste attachment; treat that attachment only as input. Never cite, name, link to, or otherwise reference the file that contains the prompt. Copy every required value directly into the code block as literal JSON characters. Do not place file attachments or file cards, download chips, file-citation or attachment-reference markers, or collapsible sections inside the code block. When the schema requires an http(s) URL, write it as an ordinary literal JSON string rather than a rich link. If the chat application would normally add a citation to the file containing this prompt, omit it.',
     );
   }
   sections.push(settings.join('\n'));
@@ -716,14 +758,25 @@ export function registerNonApiAiHandlers() {
     const record = pendingRequests.get(args?.requestId);
     if (!record) return { cancelled: false };
     if (event.sender !== record.sender) return { cancelled: false };
-    await clearDurableRun(record.runId);
     // A manual cancellation is a cancellation of the owning job operation, not
     // merely one prompt. In particular, scoring must not mistake it for a
     // recoverable model failure and split/reissue more prompts.
     if (record.nodeId) {
-      abortNodeTasks(record.nodeId, record.sender, cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'));
-      return { cancelled: true, nodeCancelled: true };
+      const acknowledgement = await abortNodeTasksAndWait(
+        record.nodeId,
+        record.sender,
+        cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'),
+      );
+      // Abort acknowledgement retains every discovered run for a renderer-crash
+      // retry. Clearing this prompt's durable transport state is not the
+      // renderer's durable-cleanup acknowledgement: the renderer may crash
+      // immediately after this invoke returns and before recording the run id
+      // in its Search/Board cleanup receipt. Only complete-non-api-ai-run(s)
+      // may release the retained acknowledgement.
+      await clearDurableRun(record.runId);
+      return { cancelled: true, nodeCancelled: true, ...acknowledgement };
     }
+    await clearDurableRun(record.runId);
     abortPending(record, cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'));
     return { cancelled: true, nodeCancelled: false };
   });
@@ -745,9 +798,20 @@ export function registerNonApiAiHandlers() {
     return { flushed: true };
   });
 
-  ipcMain.handle('complete-non-api-ai-run', async (_event, args = {}) => ({
-    cleared: await clearDurableRun(args?.runId),
-  }));
+  ipcMain.handle('complete-non-api-ai-run', async (event, args = {}) => {
+    const cleared = await clearDurableRun(args?.runId);
+    releaseAcknowledgedManualAiRunIds(event.sender, [args?.runId]);
+    return { cleared, absent: !cleared };
+  });
+
+  ipcMain.handle('complete-non-api-ai-runs', async (event, args = {}) => {
+    const result = await clearDurableRuns(args?.runIds);
+    releaseAcknowledgedManualAiRunIds(event.sender, [
+      ...result.clearedRunIds,
+      ...result.absentRunIds,
+    ]);
+    return { completed: true, ...result };
+  });
 
   ipcMain.handle('reveal-non-api-ai-attachment', async (event, args = {}) => {
     if (isBackgroundE2E()) return { revealed: false, skipped: true };

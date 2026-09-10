@@ -9,8 +9,80 @@ import { canAttemptJobSourceResolve, isJobSourceResolveBusyHubState, isJobSource
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
-import { normalizeExternalHttpUrl } from '../utils/urlSafety';
+import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { EventLogger } from '../utils/EventLogger';
+import { useToast } from '../components/ToastProvider';
+import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage, warningForSolveIpcFailure } from '../utils/solveIpcFailure';
+import { findJobSearchBoardActiveRecoveryOwner } from '../utils/jobBoardSearchSelection';
+import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle';
+
+function hasBlockingJobSearchCleanup(data) {
+  return data?.manualAiResume?.retirementPending === true
+    || (Array.isArray(data?.manualAiCleanupReceipts)
+      && data.manualAiCleanupReceipts.some(receipt => receipt?.cancellationPending === true));
+}
+
+function restoredSourceProgressState(persistedProgress, retiredJobRunId = null, rejectUnknownGeneration = false) {
+  const restored = persistedProgress && typeof persistedProgress === 'object'
+    ? persistedProgress
+    : null;
+  const restoredRunId = restored?.jobRunId || null;
+  const abandonedRunId = retiredJobRunId || null;
+
+  // A saved-scrape recovery can reuse the original search run token. In that
+  // case retiring the "abandoned" id would also retire the valid restored
+  // warning generation. Different ids can be fenced normally.
+  const guard = createSourceProgressRunGuard(
+    abandonedRunId && abandonedRunId !== restoredRunId ? abandonedRunId : restoredRunId,
+  );
+  if (abandonedRunId && abandonedRunId !== restoredRunId) {
+    guard.retireActive();
+    if (restoredRunId) guard.accepts(restoredRunId);
+  }
+  return {
+    guard,
+    progress: restored,
+    // If an interrupted saved-scrape continuation reused the prior run token,
+    // the backend's late events are indistinguishable by id from the restored
+    // warning. Keep displaying the restored value, but reject progress until a
+    // deliberate new-run reset or the user explicitly resumes this source.
+    rejectUntilReset: rejectUnknownGeneration && (
+      (!restoredRunId && !abandonedRunId)
+      || (!!restoredRunId && restoredRunId === abandonedRunId)
+    ),
+  };
+}
+
+function terminalProgressIsCommitted(node, expected) {
+  if (!node) return true;
+  if (!expected || !isTerminalSourceStatus(expected.status)) return true;
+  const persisted = node.data?.persistedProgress;
+  return !!persisted
+    && persisted.status === expected.status
+    && persisted.count === expected.count
+    && (persisted.jobRunId || null) === (expected.jobRunId || null)
+    && JSON.stringify(persisted.warning || null) === JSON.stringify(expected.warning || null)
+    && (persisted.url || null) === (expected.url || null);
+}
+
+async function waitForTerminalProgressCommit(getNode, nodeId, expected) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (terminalProgressIsCommitted(getNode(nodeId), expected)) return true;
+    await new Promise((resolve) => {
+      let timer = null;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer != null) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(finish, 25);
+      globalThis.requestAnimationFrame?.(finish);
+    });
+  }
+  return terminalProgressIsCommitted(getNode(nodeId), expected);
+}
 
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
@@ -35,30 +107,122 @@ import { EventLogger } from '../utils/EventLogger';
  *   }
  */
 export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, data }) {
-  const { getNode, deleteElements, updateNodeData } = useReactFlow();
+  const { getNode, getNodes, getEdges, deleteElements, updateNodeData } = useReactFlow();
+  const { addToast } = useToast();
   // Same nav context the owning Job Search Module reads currentFile from — needed so a
   // captcha-resolve can history-dedup against this project's jobs-history CSV
   // (mirrors the headless search path), instead of re-surfacing already-seen
   // jobs every time the user re-solves a source.
   const nav = useContext(CanvasNavigationContext);
-  const moduleRunQueue = useModuleRunQueue();
-  const [progress, setProgress] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
+  // The provider republishes its context value when the queue snapshot changes
+  // so consumers showing positions can re-render. Take the queue operations
+  // themselves (which are stable for the provider lifetime), rather than
+  // depending on that changing wrapper object in lifecycle effects.
+  const { acquireModuleRun, cancelQueuedRunsForNode } = useModuleRunQueue();
+  const [progress, setProgressState] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
+  const progressRef = useRef(data.persistedProgress || null);
+  // Terminal source state is part of the graph snapshot a waiting Job Board
+  // captures as soon as this action releases the global lane. Persist it in
+  // the same call that changes local UI state; a passive effect runs too late
+  // and can pair a newly-clean hub with the card's previous warning.
+  const setProgress = useCallback((nextOrUpdater, { persistTerminal = true } = {}) => {
+    const previous = progressRef.current;
+    const next = typeof nextOrUpdater === 'function'
+      ? nextOrUpdater(previous)
+      : nextOrUpdater;
+    progressRef.current = next;
+    setProgressState(next);
+    if (persistTerminal && next !== previous && next && isTerminalSourceStatus(next.status)) {
+      const existing = getNode(id)?.data?.persistedProgress;
+      updateNodeData(id, {
+        persistedProgress: {
+          ...next,
+          doneAt: existing?.doneAt ?? Date.now(),
+        },
+      });
+    }
+    return next;
+  }, [getNode, id, updateNodeData]);
   const [resolving, setResolving] = useState(false);
+  // External listing opens do not use the long-running Solve state, but still
+  // need a synchronous latch so a double-click cannot launch two OS tabs.
+  const externalOpenInFlightRef = useRef(false);
   // `setResolving(true)` does not update this closure until React renders, so a
   // quick double-click could otherwise open two native Chrome verification
   // windows. Keep a synchronous latch for the actual IPC lifetime.
   const resolveInFlightRef = useRef(false);
-  const progressRunGuardRef = useRef(createSourceProgressRunGuard(data.persistedProgress?.jobRunId));
+  // `resolveInFlightRef` is set before acquiring the lane so the source card
+  // can cancel its *queued* work when removed. Only this flag says the card
+  // owns the hub-scoped IPC task; a queued sibling must never abort whichever
+  // source currently owns the same hub id.
+  const resolveStartedRef = useRef(false);
+  // The resolver IPC is intentionally hub-scoped so recovered rows merge into
+  // the right paused run. Its UI lifetime is narrower: deleting this source
+  // card must prevent a queued/late resolver from opening a browser or
+  // dispatching rows into the hub after the card is gone.
+  const resolveLifecycleRef = useRef(0);
+  const initialRollbackReceipt = data._boardRollbackProgressRestore;
+  const initialProgressState = restoredSourceProgressState(
+    data.persistedProgress,
+    initialRollbackReceipt?.retiredJobRunId,
+    !!initialRollbackReceipt?.nonce,
+  );
+  // The receipt can remain on node data until the next reset/explicit Solve.
+  // Apply each nonce only once; terminal progress persistence creates a new
+  // object and would otherwise bounce receipt -> local state -> node data in a
+  // render loop even though the semantic progress did not change.
+  const appliedRollbackReceiptNonceRef = useRef(initialRollbackReceipt?.nonce || null);
+  const progressRunGuardRef = useRef(initialProgressState.guard);
+  // If rollback happened before the backend revealed the abandoned jobRunId,
+  // reject all progress until the next explicit fresh-run reset. Otherwise the
+  // first late token would be mistaken for the restored generation.
+  const rejectProgressUntilResetRef = useRef(initialProgressState.rejectUntilReset);
   // Local-only dismiss: clicking Skip on a warned card just hides the
   // Solve/Skip + warning text on this card. Doesn't touch hub state — the
   // next Re-run Search will refetch this source fresh and re-emit progress.
   const [dismissed, setDismissed] = useState(false);
+
+  const applyProgressRestore = useCallback((persistedProgress, retiredJobRunId = null, rejectUnknown = false) => {
+    const restoredState = restoredSourceProgressState(
+      persistedProgress,
+      retiredJobRunId,
+      rejectUnknown,
+    );
+    progressRunGuardRef.current = restoredState.guard;
+    rejectProgressUntilResetRef.current = restoredState.rejectUntilReset;
+    // Rollback must reproduce the snapshot byte-for-byte. In particular,
+    // legacy terminal receipts may not have doneAt; stamping one here would
+    // make the coordinator's exact rollback acknowledgment time out.
+    setProgress(restoredState.progress, { persistTerminal: false });
+    setDismissed(false);
+  }, [setProgress]);
+
+  useEffect(() => () => {
+    resolveLifecycleRef.current += 1;
+    if (!resolveInFlightRef.current) return;
+    // The queue entry is scheduled under the hub (the backend ownership), with
+    // this card registered as a cancellation alias. Cancel the queue first so
+    // an unstarted resolver cannot begin after this component disappears.
+    cancelQueuedRunsForNode(id, 'Job source card removed');
+    // An already-started resolver has no card-specific main-process task id:
+    // it deliberately uses hubId so its recovered rows retain hub ownership.
+    // Do not cancel by hub id until this card has acquired the lane. Multiple
+    // warning cards from one paused hub can queue independently; deleting a
+    // queued card must leave its active sibling's hub-scoped browser/request
+    // untouched.
+    if (resolveStartedRef.current) {
+      window.electronAPI?.cancelNodeTask?.(data.hubId, 'job-source-card-removed');
+    }
+    resolveInFlightRef.current = false;
+    resolveStartedRef.current = false;
+  }, [cancelQueuedRunsForNode, data.hubId, id]);
 
   useEffect(() => {
     if (!window.electronAPI?.onJobSourceProgress) return;
     const cleanup = window.electronAPI.onJobSourceProgress((payload) => {
       if (payload?.nodeId && payload.nodeId !== data.hubId) return;
       if (payload?.sourceId !== data.sourceId) return;
+      if (rejectProgressUntilResetRef.current) return;
       if (!progressRunGuardRef.current.accepts(payload?.jobRunId)) return;
       // Carry warning + url forward across events — see mergeSourceProgress.
       // Reset the local dismiss flag on every fresh event so a new run
@@ -67,7 +231,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       setDismissed(false);
     });
     return () => cleanup?.();
-  }, [data.hubId, data.sourceId]);
+  }, [data.hubId, data.sourceId, setProgress]);
 
   // Fresh-run reset. The owning hub broadcasts this the moment it (re)starts a
   // scrape. This card holds its count in LOCAL state (seeded from
@@ -79,13 +243,43 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   useEffect(() => {
     const onReset = (event) => {
       if (event.detail?.hubId !== data.hubId) return;
+      rejectProgressUntilResetRef.current = false;
+      appliedRollbackReceiptNonceRef.current = null;
       progressRunGuardRef.current.retireActive();
+      updateNodeData(id, { _boardRollbackProgressRestore: null });
       setProgress(null);
       setDismissed(false);
     };
     document.addEventListener('job-source-progress-reset', onReset);
     return () => document.removeEventListener('job-source-progress-reset', onReset);
-  }, [data.hubId]);
+  }, [data.hubId, id, setProgress, updateNodeData]);
+
+  // An exact Job Board child rollback replaces this node's persisted graph
+  // payload, but React keeps the component mounted when its id is unchanged.
+  // Restore the local progress and run-generation guard explicitly so a warning
+  // from the abandoned run cannot survive, and a pre-run warning is not rejected
+  // merely because the normal fresh-run reset retired its token.
+  useEffect(() => {
+    const onRestore = (event) => {
+      const detail = event.detail || {};
+      if (detail.hubId !== data.hubId || detail.sourceId !== data.sourceId) return;
+      const abandonedRunId = detail.retiredJobRunId || progressRunGuardRef.current.active();
+      applyProgressRestore(detail.persistedProgress, abandonedRunId, true);
+    };
+    document.addEventListener('job-source-progress-restore', onRestore);
+    return () => document.removeEventListener('job-source-progress-restore', onRestore);
+  }, [applyProgressRestore, data.hubId, data.sourceId]);
+
+  // A restored card that was absent at dispatch time cannot receive the event
+  // above. The transient node-data receipt provides the same fence after mount
+  // and also updates an already-mounted same-id component through props.
+  useEffect(() => {
+    const receipt = data._boardRollbackProgressRestore;
+    if (!receipt?.nonce) return;
+    if (appliedRollbackReceiptNonceRef.current === receipt.nonce) return;
+    appliedRollbackReceiptNonceRef.current = receipt.nonce;
+    applyProgressRestore(data.persistedProgress, receipt.retiredJobRunId, true);
+  }, [applyProgressRestore, data._boardRollbackProgressRestore, data.persistedProgress]);
 
   // Some gating warnings are derived only after the complete, history-filtered
   // result set is known (notably Indeed's residual description check). The
@@ -97,6 +291,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       if (event.detail?.hubId !== data.hubId || event.detail?.sourceId !== data.sourceId) return;
       const nextWarning = event.detail?.warning;
       if (!nextWarning) return;
+      if (rejectProgressUntilResetRef.current) return;
       const jobRunId = event.detail?.jobRunId || progressRunGuardRef.current.active();
       if (!progressRunGuardRef.current.accepts(jobRunId)) return;
       setDismissed(false);
@@ -116,7 +311,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     };
     document.addEventListener('job-source-warning-sync', onWarningSync);
     return () => document.removeEventListener('job-source-warning-sync', onWarningSync);
-  }, [data.hubId, data.sourceId]);
+  }, [data.hubId, data.sourceId, setProgress]);
 
   // "Score current results" on the owning hub means the user chose to proceed
   // without resolving the remaining blocks. The hub empties its own warning
@@ -140,27 +335,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     };
     document.addEventListener('job-source-clear-warnings', onClearWarnings);
     return () => document.removeEventListener('job-source-clear-warnings', onClearWarnings);
-  }, [data.hubId]);
-
-  // Mirror progress into node data ONLY on terminal states (done / error / skipped).
-  // The sanitizer keeps job-source cards only when persistedProgress carries
-  // a warning or error, so writing intermediate 'searching' states is wasted
-  // — and worse, it dirties the workspace on every progress event during a
-  // scrape (~7 sources × multiple updates = constant auto-save churn).
-  // doneAt is stamped on the FIRST terminal write so the bug reporter can
-  // distinguish "just finished, grace period still running" from a card that
-  // genuinely survived past the auto-dismiss window.
-  useEffect(() => {
-    if (!progress) return;
-    if (progress.status !== 'done' && progress.status !== 'error' && progress.status !== 'skipped') return;
-    updateNodeData(id, (node) => {
-      const existing = node?.data?.persistedProgress;
-      // Preserve doneAt from the first terminal write — don't overwrite it on
-      // subsequent terminal events (e.g. status flip from error → done).
-      const doneAt = existing?.doneAt ?? Date.now();
-      return { persistedProgress: { ...progress, doneAt } };
-    });
-  }, [progress, id, updateNodeData]);
+  }, [data.hubId, setProgress]);
 
   // The owning Job Search Module coordinates clean-card dismissal after ALL source cards
   // have reported terminal progress. That keeps the source counts visible as a
@@ -183,15 +358,25 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // job-detail URL has no ItemList for the generic resolver to extract, and
     // treating it as a captcha solve used to close a perfectly good detail
     // page with a misleading zero-result/site-changed diagnostic.
-    if (hubLocked) return;
+    if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) return;
     if (warningAction === 'open-external') {
-      if (resolving) return;
-      const url = normalizeExternalHttpUrl(progress?.url);
-      if (!url) return;
-      if (window.electronAPI?.openExternal) {
-        await window.electronAPI.openExternal(url);
-      } else {
-        window.open(url, '_blank', 'noopener');
+      if (resolving || externalOpenInFlightRef.current) return;
+      externalOpenInFlightRef.current = true;
+      try {
+        const opened = await openExternalUrl(progress?.url, {
+          dispatcher: window.electronAPI?.openExternal,
+          fallback: window.open,
+        });
+        if (!opened.ok) {
+          addToast({
+            title: 'Cannot Open Listing',
+            description: openExternalFailureMessage(opened),
+            type: 'error',
+            dedupeKey: `job-source-open-external:${id}`,
+          });
+        }
+      } finally {
+        externalOpenInFlightRef.current = false;
       }
       return;
     }
@@ -199,8 +384,19 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // its pre-score recovery snapshot write. The button can be stale for one
     // render, so this guard is deliberately independent of its disabled state.
     if (resolving || resolveInFlightRef.current || hubBusy) return;
+    if (findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())) {
+      addToast({
+        title: 'Job Board Recovery in Progress',
+        description: 'Finish or cancel the interrupted Job Board run before resolving this source.',
+        type: 'info',
+      });
+      return;
+    }
     if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
     resolveInFlightRef.current = true;
+    resolveStartedRef.current = false;
+    const resolveLifecycle = resolveLifecycleRef.current;
+    const resolverAlive = () => resolveLifecycleRef.current === resolveLifecycle;
     setResolving(true);
     // Optimistically clear the red error/warning so the card reads as "working"
     // the instant Solve is clicked — not after the (now multi-minute) resolve
@@ -211,28 +407,25 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // fresh event (some captcha sources) can be restored to its actionable red.
     const prevForRestore = progress;
     setProgress(prev => prev ? { ...prev, status: 'searching', warning: null, detail: 'Solving…' } : prev);
-    // Mirror that optimistic clear on the owning hub. The hub's done-state
-    // ScrapeWarningsPanel ("N throttled") reads data.scrapeWarnings, which only
-    // gets the resolved source dropped once the resolve COMPLETES — so through a
-    // multi-minute LinkedIn re-fetch it sits stale while this card already reads
-    // as "working". Dispatching here drops the matching non-blocking warning the
-    // instant Solve is clicked; onResolved re-adds it if the attempt comes back
-    // still-warned (re-walled / same-IP). Block/paste warnings are left to the
-    // hub (they gate the paused 'sources-ready' state).
-    document.dispatchEvent(new CustomEvent('job-source-retry-start', {
-      detail: { hubId: data.hubId, sourceId: data.sourceId },
-    }));
     const requestedHubData = getNode(data.hubId)?.data || {};
     // The source's event token wins: a hub can start a newer run while a
     // retained warning card still paints, and a Solve must stay scoped to the
     // run that created that warning.
     const jobRunId = progress?.jobRunId || requestedHubData.jobRunId || null;
+    const capturedRunIsCurrent = () => {
+      const hub = getNode(data.hubId);
+      return !!hub && (hub.data?.jobRunId || null) === (jobRunId || null);
+    };
     let lease = null;
     let resolveQueueCancelled = false;
     try {
-      lease = await moduleRunQueue.acquireModuleRun({
+      lease = await acquireModuleRun({
         nodeId: data.hubId,
+        cancellationNodeIds: [id],
         kind: 'job-source-resolve',
+        // Resolve work can open the same manual-AI handoff as a full search.
+        // It must wait behind every other job workflow, not just this hub.
+        lane: 'job-search',
         label: `Resolve ${data.name || data.sourceId}`,
         onQueued: ({ position }) => {
           setProgress(prev => prev ? { ...prev, status: 'searching', detail: `Waiting to resolve (${position})…` } : prev);
@@ -241,24 +434,44 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           resolveQueueCancelled = true;
         },
       });
+      if (!resolverAlive()) return;
+      resolveStartedRef.current = true;
       // A queued resolve can outlive its source warning. Re-read both ownership
       // dimensions after the app-wide lease starts so it never targets a newer
       // run or a hub that has resumed normal gathering/scoring.
-      const hubData = getNode(data.hubId)?.data || {};
-      if (hubData.locked
+      const hubNode = getNode(data.hubId);
+      const hubData = hubNode?.data || {};
+      if (!hubNode || isJobWorkflowDeletionPending(data.hubId) || hubData.locked
+        || hasBlockingJobSearchCleanup(hubData)
         // A persisted pre-token hub has no `jobRunId` property (`undefined`),
         // while a source card deliberately normalizes that absence to `null`.
         // Treat those two legacy representations as the same generation; a
         // pair of actual, differing tokens still fences a queued Solve.
         || (hubData.jobRunId || null) !== (jobRunId || null)
+        || findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
         || isJobSourceResolveBusyHubState(hubData.hubState)) {
         setProgress(prev => (
-          prev?.jobRunId === jobRunId && !isTerminalSourceStatus(prev.status)
+          (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
             ? prevForRestore
             : prev
         ));
         return;
       }
+      // An exact Board rollback may have fenced late progress from an abandoned
+      // continuation that reused this warning's run id. Reaching this point is
+      // an explicit user-approved resume against the same live hub generation,
+      // so it is the safe boundary at which to reopen progress for that token.
+      rejectProgressUntilResetRef.current = false;
+      appliedRollbackReceiptNonceRef.current = null;
+      updateNodeData(id, { _boardRollbackProgressRestore: null });
+      // Mirror the optimistic clear on the owning hub only after this action
+      // owns the shared lane and its live Board/run guard has passed. Doing it
+      // at click time let a Board reserve the Search while Solve waited, after
+      // which the guarded early return restored the card but permanently
+      // removed this warning from the Board's rollback baseline.
+      document.dispatchEvent(new CustomEvent('job-source-retry-start', {
+        detail: { hubId: data.hubId, sourceId: data.sourceId },
+      }));
       let result;
       const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
       if (resumeState) {
@@ -274,7 +487,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // Rows recovered by a native-challenge resume go through the same
           // pinned-role title gate as the main search (jobTitleMatch.js), or a
           // solved source would be the one way off-role jobs reach the board.
-          targetRole: (hubData.targetRole || '').trim(),
+          targetRole: (
+            hubData.pendingTargetRole
+            ?? hubData.activeTargetRole
+            ?? hubData.targetRole
+            ?? ''
+          ).trim(),
           resumeState,
         });
       } else {
@@ -290,8 +508,49 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
           // Same gate as the main search — a captcha Solve re-extracts rows
           // in-page, so without this the solved source could ship off-role jobs.
-          targetRole: (hubData.targetRole || '').trim(),
+          targetRole: (
+            hubData.pendingTargetRole
+            ?? hubData.activeTargetRole
+            ?? hubData.targetRole
+            ?? ''
+          ).trim(),
         });
+      }
+      // handleSafe resolves failures as { success:false, error }, so they do
+      // not reach the catch below unless we explicitly convert the envelope.
+      // Keep the raw diagnostic in EventLogger; card data gets only concise,
+      // actionable copy so a Puppeteer stderr blob is never persisted.
+      if (!resolverAlive() || !capturedRunIsCurrent()) return;
+      if (isJobWorkflowDeletionPending(data.hubId)) {
+        // A delete confirmation is still reversible. Keep the original source
+        // warning actionable instead of publishing a completed Solve into a
+        // hub whose deletion transaction has not committed.
+        setProgress(prev => (
+          (prev?.jobRunId || null) === (jobRunId || null)
+            ? prevForRestore
+            : prev
+        ));
+        if (prevForRestore?.warning) {
+          document.dispatchEvent(new CustomEvent('job-source-resolve-failed', {
+            detail: {
+              hubId: data.hubId,
+              sourceId: data.sourceId,
+              warning: prevForRestore.warning,
+              resolved: false,
+              restorative: true,
+              jobRunId,
+            },
+          }));
+        }
+        return;
+      }
+      if (isSolveIpcFailure(result)) {
+        const message = solveIpcFailureMessage(result);
+        const error = new Error(message);
+        if (isSolveIpcCancellation(result)) error.name = 'AbortError';
+        else EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Solve IPC failed:`, result?.error || message);
+        error.solveIpcResult = result;
+        throw error;
       }
       // When the captcha-resolve window auto-detects the challenge as
       // cleared, the visible browser session that just bypassed the bot
@@ -300,6 +559,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // merge into pendingJobs and the warning drops in one shot. Without
       // the inline items, the original headless scrape's 0-job result
       // from this source would persist even after a successful solve.
+      const continuationPromises = [];
       if (result?.resolved) {
         const items = Array.isArray(result?.items) ? result.items : [];
         const resolvedCount = items.length;
@@ -359,6 +619,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             resolved: true,
             warning: result.warning || nextBlockedWarning,
             jobRunId,
+            // The owning Search may need to continue directly into scoring.
+            // It appends that promise synchronously during dispatch so this
+            // source keeps the global lane until the whole paused workflow is
+            // terminal, ahead of Boards already waiting behind this Solve.
+            continuationPromises,
           },
         }));
         if (result.nextBlockedUrl) {
@@ -447,7 +712,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             };
             return next;
           });
-          document.dispatchEvent(new CustomEvent('job-source-resolved', {
+          // This outcome did not recover any source rows. Keep it off the
+          // successful-resolve channel: the hub must restore its warning, but
+          // must not log a misleading "Resolved … 0 items" receipt or touch
+          // its pending-job merge state.
+          document.dispatchEvent(new CustomEvent('job-source-resolve-failed', {
             detail: {
               hubId: data.hubId,
               sourceId: data.sourceId,
@@ -469,24 +738,106 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           setProgress(prev => (prev && !isTerminalSourceStatus(prev.status)) ? prevForRestore : prev);
         }
       }
+      if (continuationPromises.length > 0) {
+        await Promise.allSettled(continuationPromises);
+      }
     } catch (error) {
       // Queue cancellation/reset and IPC failures are normal races here. Keep
       // the original actionable state when this card still belongs to the
       // captured run, and never leak an async click-handler rejection.
+      if (!resolverAlive() || !capturedRunIsCurrent()) return;
+      let solveIpcResult = error?.solveIpcResult || null;
       if (resolveQueueCancelled) {
         EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Resolve queue cancelled before start`);
       } else {
-        EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Resolve did not start or complete:`, error);
+        const failureError = error instanceof Error ? error : new Error(String(error || 'Solve IPC rejected'));
+        // A preload/WebContents teardown can reject rather than return the
+        // usual handleSafe envelope. Normalize it so this failure remains
+        // visible and restores the source's actionable warning just like a
+        // browser launch/navigation envelope.
+        const solveFailure = failureError.solveIpcResult || {
+          success: false,
+          error: failureError.message,
+        };
+        const cancelled = failureError.name === 'AbortError' || isSolveIpcCancellation(solveFailure);
+        const message = failureError.solveIpcResult ? failureError.message : solveIpcFailureMessage(solveFailure);
+        if (!cancelled) {
+          // A handleSafe envelope was already recorded at the point it was
+          // converted into an Error above. Logging it again here produced two
+          // renderer errors for one failed Solve (one raw Chromium diagnostic,
+          // then one generic Error), making reports look like duplicate clicks.
+          // Rejected invokes reach this branch without `solveIpcResult` and
+          // still need their one renderer-side diagnostic.
+          if (!failureError.solveIpcResult) {
+            EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Resolve did not start or complete:`, error);
+          }
+          addToast({
+            title: 'Solve could not open',
+            description: message,
+            type: 'error',
+            dedupeKey: `job-solve-failed:${data.hubId}:${data.sourceId}`,
+          });
+          failureError.solveIpcResult = solveFailure;
+          solveIpcResult = solveFailure;
+        } else {
+          EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Resolve cancelled by lifecycle`);
+          solveIpcResult = null;
+        }
       }
       setProgress(prev => (
-        prev?.jobRunId === jobRunId && !isTerminalSourceStatus(prev.status)
-          ? prevForRestore
+        (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
+          ? (solveIpcResult
+            ? { ...prevForRestore, warning: warningForSolveIpcFailure(prevForRestore?.warning, solveIpcResult) }
+            : prevForRestore)
           : prev
       ));
+      if (isJobWorkflowDeletionPending(data.hubId) && prevForRestore?.warning) {
+        document.dispatchEvent(new CustomEvent('job-source-resolve-failed', {
+          detail: {
+            hubId: data.hubId,
+            sourceId: data.sourceId,
+            warning: prevForRestore.warning,
+            resolved: false,
+            restorative: true,
+            jobRunId,
+          },
+        }));
+      }
+      if (solveIpcResult && prevForRestore?.warning) {
+        // onRetryStart optimistically removes non-blocking hub warnings. Put
+        // the original actionable source warning back immediately on an IPC
+        // launch/navigation failure so the hub and its card cannot disagree.
+        // A failed launch/navigation likewise only restores the hub warning.
+        // It is not a zero-item recovery and must never enter the successful
+        // merge listener.
+        document.dispatchEvent(new CustomEvent('job-source-resolve-failed', {
+          detail: {
+            hubId: data.hubId,
+            sourceId: data.sourceId,
+            items: [],
+            replaceSourceItems: false,
+            replaceMatchingItems: false,
+            removedItemKeys: [],
+            gatheredCountDelta: 0,
+            resolved: false,
+            warning: warningForSolveIpcFailure(prevForRestore.warning, solveIpcResult),
+            jobRunId,
+          },
+        }));
+      }
     } finally {
+      if (lease && resolverAlive()) {
+        const committed = await waitForTerminalProgressCommit(getNode, id, progressRef.current);
+        if (!committed) {
+          EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] terminal progress was not committed before queue release`);
+        }
+      }
       lease?.release();
-      resolveInFlightRef.current = false;
-      setResolving(false);
+      if (resolverAlive()) {
+        resolveInFlightRef.current = false;
+        resolveStartedRef.current = false;
+        setResolving(false);
+      }
     }
   };
 
@@ -504,6 +855,19 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // visible and informational.
   const hubLocked = useStore(
     useCallback((s) => !!s.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
+  );
+  const hubCleanupBlocked = useStore(
+    useCallback(
+      (s) => hasBlockingJobSearchCleanup(s.nodeLookup.get(data.hubId)?.data),
+      [data.hubId],
+    ),
+  );
+  const hubBoardRecoveryOwned = useStore(
+    useCallback((s) => !!findJobSearchBoardActiveRecoveryOwner(
+      data.hubId,
+      s.nodeLookup,
+      s.edges,
+    ), [data.hubId]),
   );
   const fallbackCount = useStore(
     useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.finalSourceCounts?.[data.sourceId], [data.hubId, data.sourceId])
@@ -546,10 +910,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const warningCanResolve = canAttemptJobSourceResolve(warning);
   const warningBlocksScoring = isJobSourceWarningGating(warning);
   const resolverBusy = hubBusy && warningAction !== 'open-external';
-  const resolverActionDisabled = resolving || hubLocked || resolverBusy;
+  const resolverActionDisabled = resolving || hubLocked || hubCleanupBlocked
+    || hubBoardRecoveryOwned || resolverBusy;
   // Skipping is safe during an ordinary live search, but not while this card's
   // own resolver is queued/running: that would race its terminal warning.
-  const sourceActionDisabled = hubLocked || resolving;
+  const sourceActionDisabled = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned || resolving;
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
   const isError     = status === 'error';
@@ -678,6 +1043,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
+                : hubBoardRecoveryOwned
+                  ? 'The owning Job Board run must finish or be cancelled first'
                 : resolverBusy
                   ? 'Source gathering/checkpointing is still in progress. Solve becomes available after it finishes.'
                 : progress?.warning?.actionTitle
@@ -703,7 +1070,19 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (sourceActionDisabled) return;
+              if (
+                sourceActionDisabled
+                || isJobWorkflowDeletionPending(data.hubId)
+                || hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)
+              ) return;
+              if (findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())) {
+                addToast({
+                  title: 'Job Board Run in Progress',
+                  description: 'Finish or cancel the owning Job Board run before skipping this source.',
+                  type: 'info',
+                });
+                return;
+              }
               setDismissed(true);
               setProgress(prev => prev ? {
                 ...prev,
@@ -740,6 +1119,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/60 hover:text-white bg-white/[0.03] hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default"
             title={hubLocked
               ? 'Hub is locked'
+              : hubBoardRecoveryOwned
+                ? 'The owning Job Board run must finish or be cancelled first'
               : warningBlocksScoring
                 ? 'Skip the unresolved remainder of this source and continue once every blocked source is resolved or skipped.'
                 : 'Dismiss this warning. It did not pause scoring and does not remove jobs already collected from this source.'}

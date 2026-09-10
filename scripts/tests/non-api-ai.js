@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, generateMarkdown, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, generateMarkdown, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -110,10 +110,11 @@ export default [
       const jobSearchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const jobBoardSource = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       assert(dialogSource.includes("new CustomEvent('non-api-ai-node-cancelled'")
-        && dialogSource.includes('result.nodeCancelled && activeNodeId')
+        && dialogSource.includes('result.nodeCancelled && cancelledNodeId')
+        && dialogSource.includes('detail: { nodeId: cancelledNodeId, runId: cancelledRunId }')
         && jobSearchSource.includes("document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled)")
         && jobSearchSource.includes('resetHandler();'),
-      'cancelling a node-owned manual AI request notifies its Job Search hub to run the same reset path as its in-card cancel control');
+      'cancelling a node-owned manual AI request notifies its Job Search hub with exact run ownership before using the in-card cancellation path');
       assert(preloadSource.includes("revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath })")
         && dialogSource.includes('activeRequest.attachments?.length > 0')
         && dialogSource.includes('Show in Finder'),
@@ -136,6 +137,30 @@ export default [
         && dialogSource.includes('submittingRequestIds.has(activeRequestId)')
         && dialogSource.includes('actionRequestIdsRef.current.has(activeRequestId)'),
       'the handoff UI exposes every pending batch, tracks each request action independently, and binds cancellation to its captured request');
+      assert(dialogSource.includes('const [isExpanded, setIsExpanded] = useState(false)')
+        && dialogSource.includes('Pending AI handoffs')
+        && dialogSource.includes('Expand')
+        && dialogSource.includes('Minimize')
+        && dialogSource.includes('pointer-events-none fixed inset-0')
+        && dialogSource.includes('pointer-events-auto fixed bottom-4 right-4')
+        && dialogSource.includes('role="region"')
+        && !dialogSource.includes('aria-modal="true"')
+        && !dialogSource.includes('aria-controls="non-api-ai-handoff-panel"')
+        && !dialogSource.includes('updateModalCount')
+        && !dialogSource.includes('trapFocus')
+        && !dialogSource.includes('blockEscape'),
+      'pending handoffs default to a compact non-modal dock: its expanded controls own pointer events, do not point at an unmounted panel, and leave the canvas interactive without trapping keyboard focus');
+      const ownerBadgeStart = dialogSource.indexOf('const ownerBadgeForNode = (nodeId) =>');
+      const ownerBadgeEnd = dialogSource.indexOf('\n};', ownerBadgeStart) + 3;
+      const ownerBadgeSource = dialogSource.slice(ownerBadgeStart, ownerBadgeEnd);
+      assert(ownerBadgeStart >= 0
+        && ownerBadgeSource.includes('Math.imul')
+        && ownerBadgeSource.includes("return `Hub ${((hash >>> 0).toString(36).toUpperCase()).padStart(7, '0')}`;")
+        && !ownerBadgeSource.includes('.slice(')
+        && dialogSource.includes('const multipleHubQueue = useMemo(() =>')
+        && dialogSource.includes('const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;')
+        && dialogSource.includes('{multipleHubQueue && ownerBadgeForNode(activeRequest.nodeId) && ('),
+      'a queue spanning Job Search hubs assigns each owner a deterministic privacy-safe badge in both its selectable chip and active handoff header, without exposing an id fragment');
       assert(appSource.lastIndexOf('<NonApiAiDialog />') > appSource.lastIndexOf('</ErrorBoundary>'),
         'the global handoff stays mounted above the canvas error boundary so an external-AI wait can still be cancelled after a renderer error');
       assert(transportSource.includes('NON_API_AI_HANDLER_CHANNELS')
@@ -176,6 +201,62 @@ export default [
         && jobSearchSource.includes('recoveryMode: resume.recoveryMode'),
       'background scoring marks append recovery and consumes that mode again after restart');
       return { bridge: 'request-id-bound', replay: 'listener-first', registration: 'idempotent' };
+    },
+  },
+  {
+    name: 'non-API AI: every Job Search recovery path owns one shared lane and workflow id',
+    run: () => {
+      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const between = (start, end) => {
+        const from = source.indexOf(start);
+        const to = source.indexOf(end, from);
+        return from >= 0 && to > from ? source.slice(from, to) : '';
+      };
+      const usaJobs = between('const triggerUSAJobsBackgroundSearch = useCallback', 'const handleJobsSettingsChange = useCallback');
+      const legacyBatch = between('const pollBatchOnce = useCallback', 'const handlePostSearchResult = useCallback');
+      const paused = between('const resumeScoring = useCallback', 'useEffect(() => {\n    resumeScoringRef.current = resumeScoring;');
+      const crashResume = between('const handleResumeRun = useCallback', 'const handleDiscardResume = useCallback');
+      const savedScrape = between('const handleResumeSavedScrape = useCallback', 'const autoResumedManualAiRunRef = useRef(null);');
+
+      assert(usaJobs.includes("lane: 'job-search'")
+        && usaJobs.includes('const manualAiRunId = createManualAiRunId(currentId);')
+        && usaJobs.includes('manualAiRunId,')
+        && usaJobs.includes('lease?.release();')
+        && usaJobs.includes('processingRunsRef.current.finish(processingToken)')
+        && usaJobs.includes('await resumeScoringRef.current?.()'),
+      'the USAJobs append holds the shared job lane and one workflow id, then releases before handing off paused scoring so it cannot deadlock itself');
+      assert(legacyBatch.includes("lane: 'job-search'")
+        && legacyBatch.includes('const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);')
+        && legacyBatch.includes('manualAiRunId,')
+        && legacyBatch.includes('if (!queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun')
+        && legacyBatch.includes('lease?.release();'),
+      'retired legacy batches re-score only after acquiring the shared job lane and preserve one durable manual-AI workflow id');
+      assert(paused.includes("lane: 'job-search'")
+        && paused.includes('const manualAiRunId = createManualAiRunId(currentId);')
+        && paused.includes('completeManualAiRun(manualAiRunId);'),
+      'paused-source scoring carries one manual-AI workflow id through preference evaluation, scoring, and terminal preference filtering');
+      const crashLeaseAt = crashResume.indexOf('lease = await moduleRunQueue.acquireModuleRun');
+      const crashDelegationAt = crashResume.indexOf('Interrupted-run queue delegated to Job Board');
+      const crashProcessingAt = crashResume.indexOf('processingToken = processingRunsRef.current.start();');
+      assert(crashResume.includes("lane: 'job-search'")
+        && crashResume.includes('const manualAiRunId = options?.manualAiRunId || createManualAiRunId(currentId);')
+        && crashResume.includes('if (!queueManagedByBoard) {')
+        && crashResume.includes("error: 'A Board-managed resume requires an orchestrator node id.'")
+        && crashLeaseAt >= 0 && crashDelegationAt > crashLeaseAt && crashProcessingAt > crashDelegationAt
+        && crashResume.includes('manualAiRunId,')
+        && crashResume.includes('lease?.release();')
+        && crashResume.includes('completeManualAiRun(manualAiRunId);'),
+      'crash recovery reuses an exact Board-provided workflow id when orchestrated, otherwise acquires the shared lane, and starts processing only after either admission path is established');
+      assert(savedScrape.includes("lane: 'job-search'")
+        && savedScrape.includes('if (!queueManagedByBoard) {')
+        && savedScrape.includes("throw new Error('A board-managed recovery requires an orchestrator node id.')")
+        && savedScrape.includes('options?.manualAiRunId || createManualAiRunId(id)')
+        && savedScrape.includes("manualAiRecoveryMode: resultMode === 'append' ? 'append-scored-jobs' : 'resume-saved-scrape'")
+        && savedScrape.includes('lease?.release();')
+        && source.includes('isSavedScrapeManualAiResume(resume)')
+        && source.includes('Saved recovery queue delegated to Job Board'),
+      'saved-scrape recovery is lane-serialized when standalone, reuses the Board lease when orchestrated, and routes either saved replay mode back to the exact saved snapshot after restart');
+      return { workflows: 5, lane: 'job-search' };
     },
   },
   {
@@ -238,21 +319,28 @@ export default [
         && !handoff.includes('Attach this local file')
         && handoff.includes(JSON.stringify(schema, null, 2))
         && handoff.includes('--- REQUIRED RESPONSE FORMAT ---')
-        && handoff.includes('Return only valid JSON matching this schema:')
-        && handoff.includes('Do not use Markdown code fences or include commentary outside the JSON.'),
+        && handoff.includes('exactly one fenced JSON code block labelled `json`')
+        && handoff.includes('Inside the block, return only valid JSON matching this schema:')
+        && !handoff.includes('Do not use Markdown code fences'),
       'attachment instructions stay outside the copyable prompt while the exact structured-output contract remains');
-      // Two silent-corruption defences, both from an observed resume-parse
-      // handoff. The chat returned ~10 unrequested properties (billed against
-      // the stated output cap, which is what truncates a long reply on a
-      // transport with no cap-raise retry), and it rendered a bare file name in
-      // the JSON as an attachment card - which copies back as an empty string,
-      // leaving no trace for any validator to catch.
+      // Two silent-corruption defences from observed structured handoffs. The
+      // chat returned ~10 unrequested properties (billed against the stated
+      // output cap, which is what truncates a long reply on a transport with no
+      // cap-raise retry), and both a bare filename and a citation to an
+      // automatically-created paste attachment rendered as cards that copy
+      // back as empty strings. A card appended to existing text leaves no trace
+      // for a validator; job scoring separately rejects contractually-required
+      // evidence fields when the entire value becomes blank.
       assert(handoff.includes('Emit exactly the properties named in the schema, at every nesting level, and nothing else.')
         && handoff.includes('they spend the output budget above')
-        && handoff.includes('transferred by copying it as plain text')
-        && handoff.includes('no file attachments or file cards')
-        && handoff.includes("never write out an attached file's name"),
-      'the structured contract forbids both unrequested properties and chat-UI widgets that do not survive a plain-text copy');
+        && handoff.includes('automatic paste attachment')
+        && handoff.includes('treat that attachment only as input')
+        && handoff.includes('Never cite, name, link to, or otherwise reference the file that contains the prompt')
+        && handoff.includes('Do not place file attachments or file cards')
+        && handoff.includes('schema requires an http(s) URL')
+        && handoff.includes('ordinary literal JSON string rather than a rich link')
+        && handoff.includes('normally add a citation to the file containing this prompt, omit it'),
+      'the structured contract isolates the exact schema in a copyable code block and forbids chat-UI widgets that do not survive a plain-text copy');
       return { chars: handoff.length };
     },
   },
@@ -272,6 +360,7 @@ export default [
       assert(freeText.includes('Expected response format: free text')
         && !freeText.includes('--- REQUIRED RESPONSE FORMAT ---')
         && !freeText.includes('Emit exactly the properties named in the schema')
+        && !freeText.includes('fenced JSON code block')
         && !freeText.includes('no file attachments or file cards'),
       'a schema-less handoff carries no structured-output rules');
 
@@ -284,7 +373,10 @@ export default [
       });
       assert(structured.includes('Expected response format: JSON')
         && structured.includes('Emit exactly the properties named in the schema')
-        && structured.includes('no file attachments or file cards'),
+        && structured.includes('exactly one fenced JSON code block labelled `json`')
+        && structured.includes('automatic paste attachment')
+        && structured.includes('Do not place file attachments or file cards')
+        && structured.includes('schema requires an http(s) URL'),
       'a schema-bearing handoff carries both rules');
       return { freeText: freeText.length, structured: structured.length };
     },
@@ -770,6 +862,99 @@ export default [
         && sent.some(item => item.channel === 'non-api-ai-settled' && item.payload?.cancelled),
       'the owner cancellation aborts the registered node task, rejects the handoff, and emits settlement instead of allowing retries');
       return { nodeCancelled: own.nodeCancelled };
+    },
+  },
+  {
+    name: 'non-API AI: acknowledged manual-run ids survive cancellation until explicit durable completion',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 711;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const foreignSender = new EventEmitter();
+      foreignSender.id = 712;
+      foreignSender.isDestroyed = () => false;
+      foreignSender.send = () => {};
+      const runId = `cancel-ack-${process.pid}-${Date.now()}`;
+      const nodeId = `cancel-ack-node-${process.pid}`;
+
+      handleSafe('non-api-cancel-ack-ledger-test', async (_event, _args, signal) => ({
+        result: await callLLMText('Return a result.', {
+          signal, task: 'job-scoring', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
+            type: 'object', required: ['result'], properties: { result: { type: 'string' } },
+          },
+        }),
+      }));
+      const invocation = ipcMain.__getInvokeHandler('non-api-cancel-ack-ledger-test')(
+        { sender },
+        { nodeId, manualAiRunId: runId },
+      );
+      let request = null;
+      for (let attempt = 0; attempt < 100 && !request; attempt += 1) {
+        request = sent.find(item => item.channel === 'non-api-ai-request')?.payload || null;
+        if (!request) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(request?.requestId && request.runId === runId,
+        'the cancellable dialog exposes the same renderer-owned manual run id registered on its node task');
+
+      const cancellation = await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')(
+        { sender },
+        { requestId: request.requestId },
+      );
+      const cancelledInvocation = await invocation;
+      assert(cancellation.cancelled === true
+        && cancellation.settled === true
+        && JSON.stringify(cancellation.manualAiRunIds) === JSON.stringify([runId])
+        && cancelledInvocation.success === false,
+      'dialog cancellation returns the acknowledged manual run id after its node task has settled');
+
+      const rediscovered = await abortNodeTasksAndWait(nodeId, sender, undefined, 1_000);
+      const foreign = await abortNodeTasksAndWait(nodeId, foreignSender, undefined, 1_000);
+      assert(rediscovered.abortedCount === 0
+        && rediscovered.settled === true
+        && JSON.stringify(rediscovered.manualAiRunIds) === JSON.stringify([runId])
+        && foreign.manualAiRunIds.length === 0,
+      'a reload cancellation rediscovers the retained id after active-task unregister, without crossing renderer ownership');
+
+      const completed = await ipcMain.__getInvokeHandler('complete-non-api-ai-run')(
+        { sender },
+        { runId },
+      );
+      const afterCompletion = await abortNodeTasksAndWait(nodeId, sender, undefined, 1_000);
+      assert(completed.absent === true
+        && afterCompletion.manualAiRunIds.length === 0,
+      'only explicit renderer completion releases an acknowledgement, even when dialog cancellation already removed the durable handoff');
+
+      let releaseUncooperative;
+      const slowRunId = `${runId}-slow`;
+      const slowNodeId = `${nodeId}-slow`;
+      handleSafe('non-api-cancel-ack-timeout-test', async () => {
+        await new Promise(resolve => { releaseUncooperative = resolve; });
+        return { drained: true };
+      });
+      const slowInvocation = ipcMain.__getInvokeHandler('non-api-cancel-ack-timeout-test')(
+        { sender },
+        { nodeId: slowNodeId, manualAiRunId: slowRunId },
+      );
+      const timedOut = await abortNodeTasksAndWait(slowNodeId, sender, undefined, 1);
+      const timedOutRetry = await abortNodeTasksAndWait(slowNodeId, sender, undefined, 1);
+      assert(timedOut.settled === false
+        && timedOutRetry.settled === false
+        && JSON.stringify(timedOutRetry.manualAiRunIds) === JSON.stringify([slowRunId]),
+      'a bounded cancellation timeout never releases its discovered run id');
+      releaseUncooperative();
+      await slowInvocation;
+      const afterLateSettlement = await abortNodeTasksAndWait(slowNodeId, sender, undefined, 1_000);
+      assert(JSON.stringify(afterLateSettlement.manualAiRunIds) === JSON.stringify([slowRunId]),
+        'late task settlement unregisters execution without pretending the renderer durably recorded cleanup');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId: slowRunId });
+      const afterSlowCompletion = await abortNodeTasksAndWait(slowNodeId, sender, undefined, 1_000);
+      assert(afterSlowCompletion.manualAiRunIds.length === 0,
+        'explicit completion also releases an acknowledgement retained across a cancellation timeout');
+      return { rediscovered: 1, timeoutRetained: 1 };
     },
   },
   {

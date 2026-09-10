@@ -177,6 +177,33 @@ function canSafelyPreferCompensationAssessment(candidate, existing) {
 const FINGERPRINT_CACHE = new WeakMap();
 
 /**
+ * Fingerprint every immutable Job Search input that can alter a Board card.
+ * Candidate residence is included because the Board compensation pass chooses
+ * its comparison market from this per-Search snapshot. Keeping this helper
+ * beside moduleFingerprint also lets graph duplication rebuild an equivalent
+ * signature after Search node ids/provenance are remapped.
+ */
+export function moduleCombineFingerprint(scoredJobs, remoteResidences) {
+  const source = remoteResidences && typeof remoteResidences === 'object' ? remoteResidences : {};
+  const residenceRows = ['usa', 'canada', 'other'].map((key) => {
+    const value = source[key] && typeof source[key] === 'object' ? source[key] : {};
+    return [
+      key,
+      value.city || '',
+      value.subdivision || value.stateCode || value.region || '',
+      value.country || '',
+      value.countryCode || '',
+      value.countryConflict === true,
+    ];
+  });
+  const residenceFingerprint = moduleFingerprint([{
+    source: 'remote-residences',
+    location: JSON.stringify(residenceRows),
+  }]);
+  return `${moduleFingerprint(scoredJobs)}.${residenceFingerprint}`;
+}
+
+/**
  * Cheap content fingerprint of one module's scored jobs. Changes when the set
  * changes size (re-scrape), any score changes (re-score), the order changes,
  * or any card-visible/origin-sensitive job field changes,
@@ -188,13 +215,13 @@ const FINGERPRINT_CACHE = new WeakMap();
  * cryptographic hash, but unlike the old count+score-sum format it can't be
  * fooled by a re-run whose score deltas cancel out ([80,90] → [85,85]).
  *
- * The "6:" prefix versions the format: combineSignatures saved by older
+ * The "7:" prefix versions the format: combineSignatures saved by older
  * fingerprint can't be recomputed, so the board treats a signature without the
  * marker as a legacy baseline to adopt rather than a staleness mismatch (see
  * isLegacyCombineSignature).
  *
  * @param {object[]} scoredJobs
- * @returns {string} e.g. "6:191:123456789" (version:length:fold)
+ * @returns {string} e.g. "7:191:123456789" (version:length:fold)
  */
 export function moduleFingerprint(scoredJobs) {
   const isArray = Array.isArray(scoredJobs);
@@ -299,6 +326,29 @@ export function moduleFingerprint(scoredJobs) {
       for (const url of sourceUrls) fold(url);
     }
   };
+  const foldStructured = (value, depth = 0) => {
+    if (depth > 8) { fold('__depth_limit__'); return; }
+    if (value == null || typeof value !== 'object') {
+      fold(typeof value);
+      fold(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      fold('array');
+      fold(value.length);
+      value.slice(0, 100).forEach(item => foldStructured(item, depth + 1));
+      if (value.length > 100) fold('__items_truncated__');
+      return;
+    }
+    const keys = Object.keys(value).sort();
+    fold('object');
+    fold(keys.length);
+    keys.slice(0, 100).forEach((key) => {
+      fold(key);
+      foldStructured(value[key], depth + 1);
+    });
+    if (keys.length > 100) fold('__keys_truncated__');
+  };
   for (const j of arr) {
     if (!j || typeof j !== 'object') {
       fold('__non-job__');
@@ -309,14 +359,28 @@ export function moduleFingerprint(scoredJobs) {
     fold(j.company);
     fold(j.location);
     fold(j.salary);
+    fold(j.compensation);
+    fold(j.currency);
     fold(j.snippet);
+    fold(j.description);
     fold(j.reasoning);
     fold(j.careerDirection);
     fold(j.source);
     fold(j.url);
+    fold(j.googleCardUrl);
     fold(j.posted);
     fold(j.language);
     fold(j.originHubId);
+    // These fields are consumed by the downstream compensation pipeline even
+    // when they are not rendered directly on a card. A paused Combine must be
+    // invalidated if its role/work-mode/experience cohort inputs change.
+    fold(j.remote === true);
+    fold(j.isRemote === true);
+    fold(j.workMode);
+    fold(j.remoteRegion);
+    fold(j.remoteCountry);
+    foldStructured(j.compensationContext);
+    foldStructured(j.experienceAssessment);
     // Preference status, evidence and its secondary ordering score are all
     // user-visible card input. Any change must offer Re-combine rather than
     // leaving a board showing the previous ordering/explanation.
@@ -366,7 +430,7 @@ export function moduleFingerprint(scoredJobs) {
       fold(range?.period ?? range?.payPeriod ?? range?.unit);
     }
   }
-  const signature = `6:${arr.length}:${h >>> 0}`;
+  const signature = `7:${arr.length}:${h >>> 0}`;
   if (isArray) FINGERPRINT_CACHE.set(scoredJobs, signature);
   return signature;
 }
@@ -380,11 +444,12 @@ export function moduleFingerprint(scoredJobs) {
 export function isLegacyCombineSignature(signature) {
   const s = String(signature || '');
   // v3 introduced visible-data folding, v4 added compensation, v5 added the
-  // fit audit, and v6 adds Job Preferences. Those signatures must still be
+  // fit audit, v6 added Job Preferences, and v7 adds pre-research compensation
+  // inputs. Those signatures must still be
   // compared (and therefore go stale) after an upgrade; silently adopting one
   // could leave old card ordering/evidence visible. Only pre-v3 formats lack a
   // safe enough baseline to compare and are adopted on load.
-  return !!s && !/(?:^|\|)[^=]+=[3456]:/.test(s);
+  return !!s && !/(?:^|\|)[^=]+=[34567]:/.test(s);
 }
 
 /**

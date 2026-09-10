@@ -7,7 +7,12 @@ import { generateId } from './idGenerator.js';
 import { safeClone } from './navigationUtils.js';
 import { JOB_COLLECTION_LIMITS_DEFAULT } from './jobCollectionLimits.js';
 import { readLastRemoteResidences } from './jobSearchLocations.js';
-import { TRANSIENT_PROCESSING_HUB_STATES, getJobSearchTransientKeysForSave } from './persistenceTransientState.js';
+import {
+  JOBBOARD_TRANSIENT_KEYS,
+  TRANSIENT_PROCESSING_HUB_STATES,
+  getJobSearchTransientKeysForSave,
+} from './persistenceTransientState.js';
+import { remapCopiedJobModuleReferences } from './jobBoardSearchSelection.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that
@@ -141,10 +146,32 @@ const CLONED_JOB_HUB_RUN_KEYS = new Set([
   'isRateLimit',
   'rerunOutcome',
   'rerunNotice',
+  'manualAiResume',
+  'manualAiCleanupReceipts',
+  'terminalFinalizationRecovery',
+]);
+const CLONED_JOB_BOARD_RUN_KEYS = new Set([
+  ...JOBBOARD_TRANSIENT_KEYS,
+  // Durable only for reopening the same Board. A clone has a new owner id and
+  // must never continue the original Board's selected-search transaction.
+  'boardScanResume',
+  // Unlike a saved Board, a clone cannot resume the original renderer/main-
+  // process handoff. Keeping this marker makes the clone replay that run id as
+  // soon as it mounts.
+  'manualAiResume',
+  'boardCancellation',
+  'manualAiCleanupReceipts',
 ]);
 
 function sanitizeJobHubClone(data) {
   const state = data?.hubState;
+  // A terminal-looking hub can still carry a durable manual-AI restart marker
+  // (for example a saved-result re-analysis). A clone has a new node identity
+  // and can never own that original IPC/manual workflow.
+  delete data.manualAiResume;
+  delete data.manualAiCleanupReceipts;
+  delete data.terminalFinalizationRecovery;
+  delete data.queuedModuleRun;
   if (!NONTERMINAL_JOB_HUB_STATES.has(state)) return;
   const hasCompletedResults = Array.isArray(data.scoredJobs) && data.scoredJobs.length > 0;
   data.hubState = hasCompletedResults ? 'done' : 'empty';
@@ -187,6 +214,10 @@ export function cloneNode(original, dx = 40, dy = 40) {
   // Clear flags that should not carry over from source
   if (clone.data) {
     clone.data.isNew = false;
+    // Renderer-only receipt used to restore a source card's local progress
+    // guard after an exact Board rollback. A duplicate has no abandoned run
+    // to fence and must not replay the receipt under its new identity.
+    delete clone.data._boardRollbackProgressRestore;
   }
 
   // Unlock: clones should always be freely movable/deletable
@@ -201,6 +232,16 @@ export function cloneNode(original, dx = 40, dy = 40) {
   // cleanup above; Sell Hub retains its existing draft recovery behavior.
   if (clone.type === 'jobhub') {
     sanitizeJobHubClone(clone.data);
+  } else if (clone.type === 'jobboard') {
+    // A standalone Board clone starts with no edges, so its connection-specific
+    // nonempty allow-list cannot be reused. An explicit [] is topology-free
+    // user intent (scan none), so retain it; group duplication restores/remaps
+    // nonempty selections after every nested node id is allocated below.
+    if (!Array.isArray(clone.data.selectedSearchModuleIds)
+      || clone.data.selectedSearchModuleIds.length > 0) {
+      delete clone.data.selectedSearchModuleIds;
+    }
+    for (const key of CLONED_JOB_BOARD_RUN_KEYS) delete clone.data[key];
   } else if (clone.data?.hubState) {
     if (clone.data.hubState === 'researching') {
       clone.data.hubState = 'draft';
@@ -229,7 +270,14 @@ export function reassignCanvasDataIDs(node) {
 
   const processCanvasData = (canvasData) => {
     if (!canvasData) return canvasData;
-    const newNodes = (canvasData.nodes || []).map(n => {
+    // Allocate this level's complete node-id map before cloning any node. A
+    // Board can precede one of its selected Job Searches in canvas order, so a
+    // one-pass map would otherwise have no replacement id available yet.
+    const childNodes = canvasData.nodes || [];
+    for (const child of childNodes) {
+      if (typeof child?.id === 'string' && child.id) getMappedId(child.id);
+    }
+    const clonedNodes = childNodes.map(n => {
       // Pass dx=0, dy=0 to preserve exact relative positioning within the sub-canvas.
       // cloneNode's `selected: true` is for the node the user acted on; inside a
       // sub-canvas it would make every child of the copy drag and delete together.
@@ -241,6 +289,16 @@ export function reassignCanvasDataIDs(node) {
       }
       return newNode;
     });
+    // The full level map is now available, so ownership backlinks, group-tree
+    // child ids, Job Card provenance, and Board Search selections can all move
+    // to their corresponding copies without retaining aliases to the original
+    // module graph.
+    const newNodes = remapCopiedJobModuleReferences(
+      childNodes,
+      clonedNodes,
+      idMap,
+      canvasData.edges || [],
+    );
     
     const newEdges = (canvasData.edges || []).map(e => ({
       ...e,

@@ -12,6 +12,10 @@ export const TRANSIENT_PROCESSING_HUB_STATES = [
 
 const JOBSEARCH_TRANSIENT_KEYS = [
   'queuedModuleRun',
+  // Renderer-only cancellation receipt. It keeps a remounted hub from
+  // accepting late source progress from a Board child that was rolled back;
+  // a process restart has no such in-memory event stream to fence.
+  '_boardRollbackSourceProgressFence',
   'scrapeWarnings',
   'pendingJobs',
   'pendingTargetRole',
@@ -69,6 +73,11 @@ const JOBSEARCH_TRANSIENT_KEYS = [
 ];
 
 const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
+  // A queued continuation is renderer-only. Keep the durable sources-ready
+  // payload, but let reload offer its normal Skip/Score actions instead of
+  // preserving a queue lock with no worker behind it.
+  'queuedModuleRun',
+  '_boardRollbackSourceProgressFence',
   'errorMessage',
   'isRateLimit',
   'rerunOutcome',
@@ -86,6 +95,14 @@ const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
 export const SELLHUB_TRANSIENT_KEYS = [
   'queuedModuleRun',
   'platformFitPending',
+];
+
+// The queue label is renderer-owned and has no worker behind it after restart.
+// Completed results, selectedSearchModuleIds, manualAiResume, and
+// boardScanResume are deliberately durable: together they let an interrupted
+// Board reacquire its lane and continue the exact selected-search transaction.
+export const JOBBOARD_TRANSIENT_KEYS = [
+  'queuedModuleRun',
 ];
 
 // A hub that FINISHED owns its frozen run values the same way a paused
