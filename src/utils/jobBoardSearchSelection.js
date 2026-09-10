@@ -1,4 +1,58 @@
-import { combineSignature, moduleCombineFingerprint } from '../nodes/jobboard/mergeJobs.js';
+import { combineSignature, moduleCombineFingerprint, parseCombineSignature } from '../nodes/jobboard/mergeJobs.js';
+
+// `Date.now()` is not an ordering primitive: two Board clicks can share its
+// millisecond. Keep a process-local high-water mark while also writing the
+// allocated value into the durable plan, so reload arbitration preserves the
+// same click/admission order rather than falling back to canvas layout order.
+let nextBoardAdmissionOrder = 1;
+
+export function normalizeJobBoardAdmissionOrder(value) {
+  // This sequence is durable transaction authority, not a display number.
+  // Reject coercible JSON shapes such as `true` and `[1]`: Number() would turn
+  // them into a plausible order and let malformed persistence reorder recovery
+  // or advance the high-water mark. Numeric strings remain compatible with
+  // older serialized canvases, but blank strings are not an order.
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const order = Number(value);
+  return Number.isSafeInteger(order) && order > 0 ? order : null;
+}
+
+// Persisted orchestration data is user-controlled canvas JSON. In particular,
+// `Number(null)` and `Number('')` are zero, not real timestamps. Keep invalid
+// values out of recovery ordering instead of letting a malformed plan become
+// the oldest possible transaction.
+export function normalizeJobBoardRecoveryTimestamp(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
+export function allocateJobBoardAdmissionOrder(nodes) {
+  const allNodes = Array.isArray(nodes)
+    ? nodes
+    : (nodes && typeof nodes.values === 'function' ? [...nodes.values()] : []);
+  let highestPersistedOrder = 0;
+  for (const node of allNodes) {
+    if (node?.type !== 'jobboard') continue;
+    // A cancellation receipt can be the only surviving part of a just-ended
+    // plan (for example while exact child cleanup is still in flight). It
+    // retains the same ownership sequence and must advance the high-water
+    // mark too; otherwise a reload could give a new Board a smaller number
+    // and let it jump ahead of that still-reserved Search.
+    for (const value of [
+      node.data?.boardScanResume?.admissionOrder,
+      node.data?.boardCancellation?.admissionOrder,
+    ]) {
+      const order = normalizeJobBoardAdmissionOrder(value);
+      if (order != null) highestPersistedOrder = Math.max(highestPersistedOrder, order);
+    }
+  }
+  const allocated = Math.max(nextBoardAdmissionOrder, highestPersistedOrder + 1);
+  nextBoardAdmissionOrder = allocated + 1;
+  return allocated;
+}
 
 function uniqueStringIds(ids) {
   if (!Array.isArray(ids)) return [];
@@ -99,7 +153,8 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
       return [{
         orchestratorNodeId: board.id,
         boardRunId: plan.boardRunId,
-        startedAt: Number.isFinite(Number(plan.startedAt)) ? Number(plan.startedAt) : null,
+        startedAt: normalizeJobBoardRecoveryTimestamp(plan.startedAt),
+        admissionOrder: normalizeJobBoardAdmissionOrder(plan.admissionOrder),
         canvasIndex,
         // A searches-phase plan reserves every selected Search from competing
         // Board reruns, but only the active child (or its exact cancellation
@@ -117,16 +172,15 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
       return [{
         orchestratorNodeId: board.id,
         boardRunId: cancellation.boardRunId,
-        startedAt: Number.isFinite(Number(cancellation.startedAt))
-          ? Number(cancellation.startedAt)
-          : null,
+        startedAt: normalizeJobBoardRecoveryTimestamp(cancellation.startedAt),
+        admissionOrder: normalizeJobBoardAdmissionOrder(cancellation.admissionOrder),
         canvasIndex,
         ownsChildManualRecovery: true,
       }];
     }
 
-    // A standalone "Combine saved" has no boardScanResume, but its durable
-    // manual-AI marker now carries the exact completed Search generations that
+    // A standalone/recovered Combine has no boardScanResume, but its durable
+    // manual-AI marker carries the exact completed Search generations that
     // produced the pending prompt. Reserve those shared inputs too: otherwise a
     // second Board can rerun one while the first Board is recovering, wasting
     // valid manual work and forcing the exact signature fence to supersede it.
@@ -141,20 +195,35 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
       && Array.isArray(manualCombine.combineSourceRuns)
       && manualCombine.combineSourceRuns.some(entry => entry?.sourceId === searchId);
     if (!ownsStandaloneCombineInput) return [];
-    const manualStartedAt = Number.isFinite(Number(manualCombine.startedAt))
-      ? Number(manualCombine.startedAt)
+    const manualStartedAt = normalizeJobBoardRecoveryTimestamp(manualCombine.startedAt)
       // Backward-compatible fallback for canvases saved before immutable
       // combine admission timestamps were persisted.
-      : (Number.isFinite(Number(manualCombine.updatedAt)) ? Number(manualCombine.updatedAt) : null);
+      ?? normalizeJobBoardRecoveryTimestamp(manualCombine.updatedAt);
     return [{
       orchestratorNodeId: board.id,
       boardRunId: manualCombine.runId,
       startedAt: manualStartedAt,
+      admissionOrder: null,
       canvasIndex,
       ownsChildManualRecovery: false,
     }];
   });
   candidates.sort((left, right) => {
+    // Compare the durable admission sequence only when both plans carry it.
+    // Mixed upgraded/legacy canvases retain their historical timestamp and
+    // canvas-order behavior until every competing plan has a real sequence.
+    if (
+      left.admissionOrder != null
+      && right.admissionOrder != null
+      && left.admissionOrder !== right.admissionOrder
+    ) {
+      return left.admissionOrder - right.admissionOrder;
+    }
+    // Valid durable times rank ahead of malformed/missing legacy timestamps.
+    // Otherwise a canvas-index tie-break could let `startedAt: null` (coerced
+    // from hand-edited persistence) jump in front of a real transaction.
+    if (left.startedAt != null && right.startedAt == null) return -1;
+    if (left.startedAt == null && right.startedAt != null) return 1;
     if (left.startedAt != null && right.startedAt != null && left.startedAt !== right.startedAt) {
       return left.startedAt - right.startedAt;
     }
@@ -176,10 +245,198 @@ export function findJobSearchBoardActiveRecoveryOwner(searchId, nodes, edges) {
   const {
     canvasIndex: _canvasIndex,
     startedAt: _startedAt,
+    admissionOrder: _admissionOrder,
     ownsChildManualRecovery: _ownsChildManualRecovery,
     ...owner
   } = candidates[0];
   return owner;
+}
+
+/**
+ * A Board keeps its transaction receipt while its active Search is paused at a
+ * source-card solve/skip gate. The receipt still reserves that Search from
+ * other Boards, but the *exact* paused Search needs to finish its already-
+ * collected generation when the user resolves its sources. This is deliberately
+ * narrower than `findJobSearchBoardActiveRecoveryOwner`: callers may use it
+ * only for the paused Search continuation, never to admit a new search run.
+ */
+export function findJobSearchBoardPausedContinuationOwner(
+  searchId,
+  jobRunId,
+  nodes,
+  edges,
+  { allowLocked = false } = {},
+) {
+  if (typeof jobRunId !== 'string' || !jobRunId) return null;
+  const owner = findJobSearchBoardActiveRecoveryOwner(searchId, nodes, edges);
+  if (!owner) return null;
+  const allNodes = Array.isArray(nodes)
+    ? nodes
+    : (nodes && typeof nodes.values === 'function' ? [...nodes.values()] : []);
+  const board = allNodes.find(node => node?.id === owner.orchestratorNodeId);
+  const plan = board?.data?.boardScanResume;
+  const awaiting = plan?.awaitingSourceResolution;
+  const search = allNodes.find(node => node?.id === searchId);
+  // A paused source continuation is a narrow handoff inside a searches-phase
+  // Board plan. A Board-level manual prompt or cleanup receipt is incompatible
+  // with that phase; if a torn save contains both, fail closed rather than let
+  // a source-card action race a different Board-owned manual-AI transaction.
+  const boardHasManualAiRecovery = typeof board?.data?.manualAiResume?.runId === 'string'
+    && !!board.data.manualAiResume.runId;
+  const boardHasPendingCleanup = Array.isArray(board?.data?.manualAiCleanupReceipts)
+    && board.data.manualAiCleanupReceipts.some(receipt => (
+      typeof receipt?.runId === 'string' && !!receipt.runId
+    ));
+  const connected = (Array.isArray(edges) ? edges : []).some((edge) => (
+    (edge?.source === board?.id && edge?.target === searchId)
+    || (edge?.target === board?.id && edge?.source === searchId)
+  ));
+  if (
+    plan?.version !== 1
+    || plan.phase !== 'searches'
+    || plan.boardRunId !== owner.boardRunId
+    // A lock blocks continuation controls, but a final source-card removal
+    // still has to route through the owning Board's exact cancellation path.
+    // Callers retain the conservative default; only lifecycle cleanup opts in.
+    || (!allowLocked && board?.data?.locked)
+    || board?.data?.boardCancellation
+    || boardHasManualAiRecovery
+    || boardHasPendingCleanup
+    || plan.activeSourceId !== searchId
+    || awaiting?.sourceId !== searchId
+    || typeof awaiting?.jobRunId !== 'string'
+    || !awaiting.jobRunId
+    || awaiting.jobRunId !== jobRunId
+    || search?.type !== 'jobhub'
+    || search.data?.hubState !== 'sources-ready'
+    || search.data?.jobRunId !== jobRunId
+    || !connected
+  ) return null;
+  return owner;
+}
+
+/**
+ * Find the Board that can cancel a source-card gate during the tiny handoff
+ * between a child returning `paused` and its parent persisting
+ * `awaitingSourceResolution`. It deliberately does not authorize a source
+ * continuation: callers may use it only to cancel the exact active Board.
+ *
+ * Requiring the active rollback receipt makes this narrower than the generic
+ * active-owner election. Without that receipt a queued Board has merely
+ * reserved the Search and must not inherit a standalone/other-Board warning.
+ */
+export function findJobSearchBoardCancellablePausedSourceOwner(
+  searchId,
+  jobRunId,
+  nodes,
+  edges,
+  { allowInFlightContinuation = false } = {},
+) {
+  // Once the handoff is durable, retain all of the regular paused-continuation
+  // proof (including a locked Board, whose card controls are disabled but whose
+  // removal still needs exact cancellation).
+  const pausedOwner = findJobSearchBoardPausedContinuationOwner(
+    searchId,
+    jobRunId,
+    nodes,
+    edges,
+    { allowLocked: true },
+  );
+  if (pausedOwner) return pausedOwner;
+  if (typeof searchId !== 'string' || !searchId || typeof jobRunId !== 'string' || !jobRunId) {
+    return null;
+  }
+  const owner = findJobSearchBoardActiveRecoveryOwner(searchId, nodes, edges);
+  if (!owner) return null;
+  const allNodes = Array.isArray(nodes)
+    ? nodes
+    : (nodes && typeof nodes.values === 'function' ? [...nodes.values()] : []);
+  const board = allNodes.find(node => node?.id === owner.orchestratorNodeId);
+  const search = allNodes.find(node => node?.id === searchId);
+  const plan = board?.data?.boardScanResume;
+  const rollback = plan?.activeSourceRollback;
+  const cancellation = board?.data?.boardCancellation;
+  const boardHasManualAiRecovery = typeof board?.data?.manualAiResume?.runId === 'string'
+    && !!board.data.manualAiResume.runId;
+  const boardHasPendingCleanup = Array.isArray(board?.data?.manualAiCleanupReceipts)
+    && board.data.manualAiCleanupReceipts.some(receipt => (
+      typeof receipt?.runId === 'string' && !!receipt.runId
+    ));
+  const connected = (Array.isArray(edges) ? edges : []).some((edge) => (
+    (edge?.source === board?.id && edge?.target === searchId)
+    || (edge?.target === board?.id && edge?.source === searchId)
+  ));
+  // A successful Solve clears its gating warning before the source resolver
+  // releases its shared lane: the same resolver synchronously starts scoring
+  // through the exact Board continuation. During that small no-warning window
+  // a final card unmount must still cancel the Board transaction—not raw-abort
+  // the hub mid-continuation. This wider proof is deliberately opt-in for the
+  // card that actually owns a started resolver; ordinary clean siblings keep
+  // the gating-warning requirement below and cannot cancel another source.
+  const awaiting = plan?.awaitingSourceResolution;
+  const exactInFlightAwaitingContinuation = (
+    plan?.version === 1
+    && plan.phase === 'searches'
+    && plan.boardRunId === owner.boardRunId
+    && !cancellation
+    && !boardHasManualAiRecovery
+    && !boardHasPendingCleanup
+    && plan.activeSourceId === searchId
+    && awaiting?.sourceId === searchId
+    && awaiting.jobRunId === jobRunId
+    && search?.type === 'jobhub'
+    && search.data?.jobRunId === jobRunId
+    && connected
+  );
+  const exactInFlightCancellation = (
+    cancellation?.boardRunId === owner.boardRunId
+    && cancellation.sourceId === searchId
+    && search?.type === 'jobhub'
+    && search.data?.jobRunId === jobRunId
+    && connected
+  );
+  if (
+    allowInFlightContinuation
+    && (exactInFlightAwaitingContinuation || exactInFlightCancellation)
+  ) return owner;
+  // A Board cancellation is already an exact source-owned transaction. Card
+  // removal during the short receipt→child-abort window must join that same
+  // coordinator cancellation (which returns busy/retries as appropriate), not
+  // fall through to a raw hub abort before the Board reaches its child.
+  if (
+    exactInFlightCancellation
+    && search.data?.hubState === 'sources-ready'
+  ) return owner;
+  if (
+    plan?.version !== 1
+    || plan.phase !== 'searches'
+    || plan.boardRunId !== owner.boardRunId
+    || plan.awaitingSourceResolution != null
+    || cancellation
+    || boardHasManualAiRecovery
+    || boardHasPendingCleanup
+    || plan.activeSourceId !== searchId
+    || !Array.isArray(plan.selectedSearchModuleIds)
+    || !plan.selectedSearchModuleIds.includes(searchId)
+    || rollback?.version !== 1
+    || rollback.sourceId !== searchId
+    || search?.type !== 'jobhub'
+    || search.data?.hubState !== 'sources-ready'
+    || search.data?.jobRunId !== jobRunId
+    || !connected
+  ) return null;
+  return owner;
+}
+
+/**
+ * A Board can keep ownership while it is cancelling or while the Search has
+ * moved to another generation. In either case a source-card event must not
+ * merge rows into the Search or admit its scoring continuation. Standalone
+ * Searches have no active owner and remain eligible.
+ */
+export function isJobSearchBoardPausedContinuationBlocked(searchId, jobRunId, nodes, edges) {
+  return !!findJobSearchBoardActiveRecoveryOwner(searchId, nodes, edges)
+    && !findJobSearchBoardPausedContinuationOwner(searchId, jobRunId, nodes, edges);
 }
 
 export function findJobSearchBoardRecoveryOwner(searchId, manualAiRunId, nodes, edges) {
@@ -209,6 +466,7 @@ export function findJobSearchBoardRecoveryOwner(searchId, manualAiRunId, nodes, 
     const {
       canvasIndex: _canvasIndex,
       startedAt: _startedAt,
+      admissionOrder: _admissionOrder,
       ownsChildManualRecovery: _ownsChildManualRecovery,
       ...owner
     } = exactMarkerOwner;
@@ -226,6 +484,7 @@ export function findJobSearchBoardRecoveryOwner(searchId, manualAiRunId, nodes, 
   const {
     canvasIndex: _canvasIndex,
     startedAt: _startedAt,
+    admissionOrder: _admissionOrder,
     ownsChildManualRecovery: _ownsChildManualRecovery,
     ...owner
   } = childRecoveryCandidates[0];
@@ -359,7 +618,8 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
       : null;
   };
 
-  return provenanceRemappedClones.map((clone) => {
+  const resetBoardCloneIds = new Set();
+  const remappedClones = provenanceRemappedClones.map((clone) => {
     const original = originalsById.get(oldIdByNewId.get(clone.id));
     if (!original) return clone;
 
@@ -412,23 +672,18 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
           if (clearProvenanceChanged) clearProvenance = { ...clearProvenance, priorSourceRuns };
         }
         if (typeof originalClearProvenance.priorCombineSignature === 'string') {
+          const parsedPriorSignature = parseCombineSignature(originalClearProvenance.priorCombineSignature);
           let signatureChanged = false;
-          const priorCombineSignature = originalClearProvenance.priorCombineSignature
-            .split('|')
-            .filter(Boolean)
-            .map((row) => {
-              const separator = row.lastIndexOf('=');
-              if (separator < 0) return row;
-              const originalSourceId = row.slice(0, separator);
+          const priorCombineSignature = parsedPriorSignature.valid
+            ? combineSignature(parsedPriorSignature.entries.map(([originalSourceId, fingerprint]) => {
               const sourceId = copiedOwnerId(originalSourceId, 'jobhub');
-              if (!sourceId) return row;
+              if (!sourceId) return { id: originalSourceId, fingerprint };
               signatureChanged = true;
               // This is a historical pre-clear fingerprint, not a statement
               // about the copied Search's current data. Translate only its id.
-              return `${sourceId}=${row.slice(separator + 1)}`;
-            })
-            .sort()
-            .join('|');
+              return { id: sourceId, fingerprint };
+            }))
+            : originalClearProvenance.priorCombineSignature;
           if (signatureChanged) {
             clearProvenanceChanged = true;
             clearProvenance = { ...clearProvenance, priorCombineSignature };
@@ -468,23 +723,50 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
       }
 
       const expectedResultCount = Number(original.data?.resultCount);
+      const originalResultCardCount = originalNodes.filter((node) => (
+        node?.type === 'jobcard' && node.data?.hubId === original.id
+      )).length;
       const copiedResultCardCount = originalNodes.filter((node) => (
         node?.type === 'jobcard'
         && node.data?.hubId === original.id
         && copiedOwnerId(node.id, 'jobcard')
       )).length;
-      const copiedCompleteCascade = Number.isFinite(expectedResultCount)
-        && expectedResultCount >= 0
-        && copiedResultCardCount === expectedResultCount;
+      const hasDeclaredResultCount = Number.isFinite(expectedResultCount) && expectedResultCount >= 0;
+      const copiedCompleteCascade = hasDeclaredResultCount
+        ? copiedResultCardCount === expectedResultCount
+        : originalResultCardCount > 0 && copiedResultCardCount === originalResultCardCount;
+
+      // `cloneNode` intentionally preserves a completed Board long enough for
+      // this graph-aware pass to rebuild its copied signature/provenance. A
+      // normal duplicate, however, often contains only the Board itself: its
+      // job groups/cards were not selected. Leaving that clone as “Done · N
+      // results” creates an empty, misleading Board with no display cascade.
+      // Reset only when a positive original cascade was not copied in full;
+      // a complete cluster/group copy (and a truthful zero-result Board) keeps
+      // its completed presentation and receives the remapped signature below.
+      const originalHadVisibleResults = expectedResultCount > 0 || originalResultCardCount > 0;
+      // A legacy Board with neither a declared result count nor result cards
+      // cannot prove it was a truthful zero-result completion. Treat it as an
+      // empty setup on copy rather than cloning a terminal-looking Board whose
+      // visible cascade was never present in this graph level.
+      const unverifiedTerminalBoard = original.data?.hubState === 'done'
+        && !hasDeclaredResultCount
+        && originalResultCardCount === 0;
+      if ((originalHadVisibleResults && !copiedCompleteCascade) || unverifiedTerminalBoard) {
+        if (remappedData === clone.data) remappedData = { ...(clone.data || {}) };
+        remappedData.hubState = 'empty';
+        for (const key of [
+          'resultCount', 'moduleCount', 'scoreRangeMin', 'scoreRangeMax',
+          'scoreThreshold', 'sourceFilter', 'jobTaxonomy', 'finalSourceCounts',
+          'mergeStats', 'combineSignature', 'combineSourceRuns', 'stale',
+          'staleReason', 'clearProvenance',
+        ]) delete remappedData[key];
+        resetBoardCloneIds.add(clone.id);
+      }
       if (copiedCompleteCascade && typeof original.data?.combineSignature === 'string') {
-        const signatureModules = original.data.combineSignature
-          .split('|')
-          .filter(Boolean)
-          .map((row) => {
-            const separator = row.lastIndexOf('=');
-            if (separator < 0) return { id: row, fingerprint: '' };
-            const originalSourceId = row.slice(0, separator);
-            const originalFingerprint = row.slice(separator + 1);
+        const parsedSignature = parseCombineSignature(original.data.combineSignature);
+        if (parsedSignature.valid) {
+          const signatureModules = parsedSignature.entries.map(([originalSourceId, originalFingerprint]) => {
             const sourceId = copiedOwnerId(originalSourceId, 'jobhub');
             if (!sourceId) return { id: originalSourceId, fingerprint: originalFingerprint };
             // A state:* row describes a Search deliberately excluded from the
@@ -504,7 +786,8 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
               ),
             };
           });
-        setDataField('combineSignature', combineSignature(signatureModules));
+          setDataField('combineSignature', combineSignature(signatureModules));
+        }
       }
 
       const selection = original.data?.selectedSearchModuleIds;
@@ -538,6 +821,17 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
 
     return remappedData === clone.data ? clone : { ...clone, data: remappedData };
   });
+
+  // A partial Board cascade is not meaningful on its own: cards/groups point
+  // at the reset Board and can otherwise remain visible as orphaned results.
+  // Remove only the display descendants owned by a Board normalized above;
+  // independent copied Job Cards (whose original Board was not copied) retain
+  // their existing standalone-copy behavior.
+  if (resetBoardCloneIds.size === 0) return remappedClones;
+  return remappedClones.filter((clone) => !(
+    (clone?.type === 'jobgroup' || clone?.type === 'jobcard')
+    && resetBoardCloneIds.has(clone.data?.hubId)
+  ));
 }
 
 // Compatibility name for callers that only need the Board-selection behavior.

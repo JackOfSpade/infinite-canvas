@@ -164,6 +164,10 @@ const CLONED_JOB_BOARD_RUN_KEYS = new Set([
 ]);
 
 function sanitizeJobHubClone(data) {
+  // Imported/hand-edited legacy canvases can contain a Job Search node without
+  // its usual data object. Duplication must still produce an editable node
+  // instead of throwing before React Flow has a chance to repair/render it.
+  if (!data || typeof data !== 'object') return;
   const state = data?.hubState;
   // A terminal-looking hub can still carry a durable manual-AI restart marker
   // (for example a saved-result re-analysis). A clone has a new node identity
@@ -203,13 +207,33 @@ function sanitizeJobHubClone(data) {
  */
 export function cloneNode(original, dx = 40, dy = 40) {
   const src = safeClone(original);
+  const originalPosition = original?.position && typeof original.position === 'object'
+    ? original.position
+    : {};
+  const sourceX = Number(originalPosition.x);
+  const sourceY = Number(originalPosition.y);
+  const offsetX = Number(dx);
+  const offsetY = Number(dy);
 
   const clone = {
     ...src,
     id: generateId(),
-    position: { x: original.position.x + dx, y: original.position.y + dy },
+    // Position is normally guaranteed by React Flow, but old/imported canvas
+    // JSON is user data. A missing or non-finite coordinate used to turn a
+    // harmless duplicate into a synchronous crash (or an off-canvas NaN node).
+    position: {
+      x: (Number.isFinite(sourceX) ? sourceX : 0) + (Number.isFinite(offsetX) ? offsetX : 0),
+      y: (Number.isFinite(sourceY) ? sourceY : 0) + (Number.isFinite(offsetY) ? offsetY : 0),
+    },
     selected: true,
   };
+
+  // Every known node renderer treats data as an object. Normalizing only an
+  // absent/malformed payload preserves ordinary clone data while allowing
+  // legacy Job Board/Search nodes to pass the run-state sanitizer below.
+  if (!clone.data || typeof clone.data !== 'object' || Array.isArray(clone.data)) {
+    clone.data = {};
+  }
 
   // Clear flags that should not carry over from source
   if (clone.data) {
@@ -260,20 +284,46 @@ export function cloneNode(original, dx = 40, dy = 40) {
  * Pure function — returns a new object tree; does not mutate the input.
  */
 export function reassignCanvasDataIDs(node) {
-  if (node.type !== 'group' || !node.data?.canvasData) return node;
+  if (node?.type !== 'group' || !node.data || !Object.hasOwn(node.data, 'canvasData')) return node;
 
   const idMap = new Map();
+  // Canvas node ids are intended to be unique across the whole nested group
+  // tree: a child may later be extracted into an ancestor canvas. Legacy or
+  // hand-edited payloads can violate that invariant. Keep the first valid
+  // occurrence deterministically; assigning a second clone the same mapped id
+  // would create an invalid React Flow canvas, while assigning it a different
+  // id would leave every old edge/ownership reference ambiguous.
+  const seenOriginalNodeIds = new Set();
   const getMappedId = (oldId) => {
     if (!idMap.has(oldId)) idMap.set(oldId, generateId());
     return idMap.get(oldId);
   };
 
   const processCanvasData = (canvasData) => {
-    if (!canvasData) return canvasData;
+    // A malformed legacy group payload should become a valid, empty
+    // sub-canvas on duplicate. Keeping a string/array/null here lets a later
+    // navigation path treat it as a canvas object and either throw or silently
+    // discard state outside this repair boundary.
+    if (!canvasData || typeof canvasData !== 'object' || Array.isArray(canvasData)) {
+      return { nodes: [], edges: [], drawings: [] };
+    }
     // Allocate this level's complete node-id map before cloning any node. A
     // Board can precede one of its selected Job Searches in canvas order, so a
     // one-pass map would otherwise have no replacement id available yet.
-    const childNodes = canvasData.nodes || [];
+    // A malformed old clipboard/group must not make duplication unusable. An
+    // invalid child cannot participate in an edge/reference remap anyway, so
+    // omit only that malformed entry and preserve every valid child.
+    const childNodes = Array.isArray(canvasData.nodes)
+      ? canvasData.nodes.filter((child) => {
+        if (!child
+          || typeof child !== 'object'
+          || typeof child.id !== 'string'
+          || !child.id
+          || seenOriginalNodeIds.has(child.id)) return false;
+        seenOriginalNodeIds.add(child.id);
+        return true;
+      })
+      : [];
     for (const child of childNodes) {
       if (typeof child?.id === 'string' && child.id) getMappedId(child.id);
     }
@@ -284,7 +334,10 @@ export function reassignCanvasDataIDs(node) {
       let newNode = { ...cloneNode(n, 0, 0), selected: false };
       newNode.id = getMappedId(n.id); // remap original ID consistently
 
-      if (newNode.type === 'group' && newNode.data?.canvasData) {
+      // An own canvasData key means this is a nested sub-canvas even when a
+      // malformed legacy value is falsy (null, '', or 0). Normalize it at the
+      // same boundary as the parent; only a genuinely absent key stays absent.
+      if (newNode.type === 'group' && Object.hasOwn(newNode.data, 'canvasData')) {
         newNode.data = { ...newNode.data, canvasData: processCanvasData(newNode.data.canvasData) };
       }
       return newNode;
@@ -297,17 +350,23 @@ export function reassignCanvasDataIDs(node) {
       childNodes,
       clonedNodes,
       idMap,
-      canvasData.edges || [],
+      Array.isArray(canvasData.edges) ? canvasData.edges : [],
     );
     
-    const newEdges = (canvasData.edges || []).map(e => ({
+    const retainedNodeIds = new Set(newNodes.map(node => node?.id).filter(Boolean));
+    const newEdges = (Array.isArray(canvasData.edges) ? canvasData.edges : [])
+      .filter(edge => edge && typeof edge === 'object')
+      .filter(edge => retainedNodeIds.has(idMap.get(edge.source) ?? edge.source)
+        && retainedNodeIds.has(idMap.get(edge.target) ?? edge.target))
+      .map(e => ({
       ...e,
       id: generateId(),
       source: idMap.get(e.source) ?? e.source,
       target: idMap.get(e.target) ?? e.target,
-    }));
+      }));
     
-    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: generateId() } : d);
+    const newDrawings = (Array.isArray(canvasData.drawings) ? canvasData.drawings : [])
+      .map(d => d?.id ? { ...d, id: generateId() } : d);
     
     return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
   };

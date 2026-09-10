@@ -1057,18 +1057,58 @@ function recordedRunToken(value) {
   return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
 }
 
-// Job Board's durable provenance is the canonical combine signature
-// (`sourceHubId=fingerprint|…`).  Keep this parser deliberately local to the
-// diagnostic seam: the fingerprint is opaque here; only a bounded source-id
-// index is needed to establish whether a board actually consumed this run.
+// Source hub ids are opaque canvas identities, so versioned Combine
+// provenance may legitimately contain `|` or `=`. Keep them out of display
+// formatting (which still uses receiptIdentifier), but retain a bounded raw
+// value for internal, exact equality checks against the active hub.
+function opaqueHubIdForCorrelation(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 180
+    ? value
+    : null;
+}
+
+// Job Board's durable provenance is the canonical combine signature. Version
+// 8 uses JSON `[sourceHubId, fingerprint]` pairs so imported ids containing
+// `|`/`=` stay intact; older delimiter signatures remain readable. Keep this
+// parser deliberately local to the diagnostic seam: the fingerprint is opaque
+// here; only a bounded source-id index is needed to establish whether a board
+// actually consumed this run.
 function sourceHubIdsFromCombineSignature(value) {
   const ids = new Set();
   if (typeof value !== 'string') return [];
-  for (const part of value.split('|')) {
-    const separator = part.lastIndexOf('=');
-    if (separator <= 0) continue;
-    const id = part.slice(0, separator).trim();
-    if (/^[A-Za-z0-9_.:-]{1,180}$/.test(id)) ids.add(id);
+  let sourceIds = [];
+  let structured = false;
+  // Match the renderer parser exactly. A legacy imported source id could
+  // itself start with `8:`; only v8's JSON pair-array prefix is structured.
+  if (value.startsWith('8:[[')) {
+    try {
+      const entries = JSON.parse(value.slice(2));
+      if (!Array.isArray(entries) || !entries.every(entry => (
+        Array.isArray(entry)
+        && entry.length === 2
+        && typeof entry[0] === 'string'
+        && entry[0]
+        && typeof entry[1] === 'string'
+      ))) return [];
+      sourceIds = entries.map(([id]) => id);
+      structured = true;
+    } catch {
+      return [];
+    }
+  } else {
+    sourceIds = value.split('|').flatMap((part) => {
+      const separator = part.lastIndexOf('=');
+      return separator > 0 ? [part.slice(0, separator)] : [];
+    });
+  }
+  for (const rawId of sourceIds) {
+    // Legacy rows have no escaping, so retain their historical conservative
+    // receipt-id filter. A v8 row is unambiguous JSON and can preserve an
+    // imported delimiter-bearing id exactly for correlation.
+    const id = structured
+      ? opaqueHubIdForCorrelation(rawId)
+      : receiptIdentifier(rawId, '');
+    if (id) ids.add(id);
   }
   return [...ids].slice(0, 25);
 }
@@ -1077,9 +1117,12 @@ function sourceRunsFromClearProvenance(value) {
   const sourceRuns = [];
   const seen = new Set();
   for (const entry of Array.isArray(value) ? value : []) {
+    // This value is an opaque ownership key used only for exact comparison
+    // below; preserve a valid imported delimiter-bearing id without widening
+    // any report-text formatting path.
     const sourceHubId = typeof entry?.sourceHubId === 'string'
-      ? receiptIdentifier(entry.sourceHubId, '')
-      : '';
+      ? opaqueHubIdForCorrelation(entry.sourceHubId)
+      : null;
     const runId = recordedRunToken(entry?.runId);
     if (!sourceHubId || !runId) continue;
     const key = `${sourceHubId}\u0000${runId}`;
@@ -1528,8 +1571,11 @@ export function buildJobCompletionAssessment(
   const boards = (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25).map(board => {
     const combinedSourceHubIds = sourceHubIdsFromCombineSignature(board?.combineSignature);
     const connectedSourceHubIds = [...new Set((Array.isArray(board?.connectedSourceHubIds) ? board.connectedSourceHubIds : [])
-      .map(id => typeof id === 'string' ? id.trim() : '')
-      .filter(id => /^[A-Za-z0-9_.:-]{1,180}$/.test(id)))].slice(0, 25);
+      // Connected ids are compared but never rendered directly. Preserve the
+      // exact bounded opaque identity so an imported `|`/`=` id can make its
+      // Board relevant to this run.
+      .map(opaqueHubIdForCorrelation)
+      .filter(Boolean))].slice(0, 25);
     const rawClear = board?.clearProvenance;
     const clearedAt = typeof rawClear?.clearedAt === 'number'
       && Number.isSafeInteger(rawClear.clearedAt)

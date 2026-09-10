@@ -998,7 +998,13 @@ export default [
         { id: 'group', type: 'group', position: { x: 4, y: 4 }, data: { isDropTarget: true, _boardRollbackProgressRestore: { nonce: 'nested-renderer-only' }, canvasData: { nodes: [
           { id: 'inner-job', type: 'jobcard', position: { x: 0, y: 0 }, style: { opacity: 0.1 }, data: { title: 'Inner' } },
           { id: 'inner-reanalyzing-hub', type: 'jobhub', position: { x: 0, y: 2 }, data: { hubState: 'scoring', pendingJobs: [1], scoredJobs: [{ title: 'Nested saved result' }] } },
-        ], edges: [], drawings: [] } } },
+          { id: 'inner-paused-hub', type: 'jobhub', position: { x: 0, y: 4 }, data: { hubState: 'sources-ready', pendingJobs: [1], scrapeWarnings: [{ sourceId: 'inner-blocked-source' }] } },
+          { id: 'inner-clean-source', type: 'jobsourcecard', position: { x: 1, y: 4 }, data: { hubId: 'inner-paused-hub', persistedProgress: { status: 'done' } } },
+          { id: 'inner-blocked-source', type: 'jobsourcecard', position: { x: 2, y: 4 }, data: { hubId: 'inner-paused-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        ], edges: [
+          { id: 'inner-keep-edge', source: 'inner-paused-hub', target: 'inner-blocked-source' },
+          { id: 'inner-dropped-edge', source: 'inner-paused-hub', target: 'inner-clean-source' },
+        ], drawings: [] } } },
       ];
       const sanitized = sanitizeNodesForSave(nodes);
       const hub = sanitized.find(n => n.id === 'hub');
@@ -1050,6 +1056,54 @@ export default [
       const nestedReanalyzingHub = sanitizedGroup.data.canvasData.nodes.find(n => n.id === 'inner-reanalyzing-hub');
       assert(nestedReanalyzingHub.data.hubState === 'done' && nestedReanalyzingHub.data.scoredJobs.length === 1 && !('pendingJobs' in nestedReanalyzingHub.data),
         'Serialization restores interrupted re-analysis in nested canvases too');
+      assert(!sanitizedGroup.data.canvasData.nodes.some(n => n.id === 'inner-clean-source')
+        && sanitizedGroup.data.canvasData.nodes.some(n => n.id === 'inner-blocked-source')
+        && sanitizedGroup.data.canvasData.edges.length === 1
+        && sanitizedGroup.data.canvasData.edges[0].id === 'inner-keep-edge',
+      'Serialization prunes nested edges to dropped ephemeral cards while preserving edges between surviving nested nodes');
+      // Load applies the same recursive sanitizer, so a second pass must leave
+      // the nested edge topology stable rather than resurrecting an orphan.
+      const reloadedGroup = sanitizeNodesForSave(sanitized).find(n => n.id === 'group');
+      assert(reloadedGroup.data.canvasData.edges.length === 1
+        && reloadedGroup.data.canvasData.edges[0].id === 'inner-keep-edge',
+      'Serialization load recovery keeps the already-pruned nested edge list stable');
+      const stableNestedCanvas = [{
+        id: 'stable-group', type: 'group', data: {
+          canvasData: {
+            nodes: [{ id: 'stable-child', type: 'text', data: { text: 'kept' } }],
+            edges: [{ id: 'stable-edge', source: 'stable-child', target: 'stable-child' }],
+            drawings: [],
+            viewMetadata: { collapsed: false },
+          },
+        },
+      }];
+      assert(sanitizeNodesForSave(stableNestedCanvas) === stableNestedCanvas,
+        'Serialization leaves an already-valid nested canvas referentially stable');
+      const malformedNestedCanvases = sanitizeNodesForSave([
+        { id: 'string-canvas', type: 'group', data: { canvasData: 'not-a-canvas' } },
+        { id: 'array-canvas', type: 'group', data: { canvasData: [] } },
+        { id: 'null-canvas', type: 'group', data: { canvasData: null } },
+        {
+          id: 'bad-collections-canvas', type: 'group', data: {
+            canvasData: {
+              nodes: { invalid: true },
+              edges: 'invalid',
+              drawings: null,
+              viewMetadata: { preserve: true },
+            },
+          },
+        },
+      ]);
+      const emptyNestedCanvas = { nodes: [], edges: [], drawings: [] };
+      assert(['string-canvas', 'array-canvas', 'null-canvas'].every((id) => (
+        JSON.stringify(malformedNestedCanvases.find(node => node.id === id).data.canvasData)
+          === JSON.stringify(emptyNestedCanvas)
+      )), 'Serialization repairs primitive, array, and null nested canvas payloads to an empty canvas');
+      const repairedCollections = malformedNestedCanvases.find(node => node.id === 'bad-collections-canvas').data.canvasData;
+      assert(JSON.stringify({ nodes: repairedCollections.nodes, edges: repairedCollections.edges, drawings: repairedCollections.drawings })
+        === JSON.stringify(emptyNestedCanvas)
+        && repairedCollections.viewMetadata?.preserve === true,
+      'Serialization repairs non-array nested node/edge/drawing collections without losing valid canvas metadata');
       const edges = sanitizeEdgesForSave([
         { id: 'keep', source: 'hub', target: 'job' },
         { id: 'drop', source: 'hub', target: 'missing' },
@@ -4300,6 +4354,141 @@ export default [
         && reassigned.data.canvasData.edges.some(edge => edge.source === nestedSearchB.id && edge.target === nestedSourceCard.id),
       'Node factory clone safety: nested module graph edges must use the same reassigned ids as ownership backlinks');
       assert(reassigned.data.canvasData.drawings[0].id !== 'draw-a', 'Node factory clone safety: drawing ids should be reassigned');
+
+      const malformedHubClone = cloneNode({
+        id: 'legacy-malformed-hub', type: 'jobhub', data: null,
+      });
+      const malformedBoardClone = cloneNode({
+        id: 'legacy-malformed-board', type: 'jobboard', position: { x: 'bad', y: null }, data: [],
+      }, Number.NaN, 5);
+      assert(malformedHubClone.data && malformedHubClone.position.x === 40 && malformedHubClone.position.y === 40
+        && malformedBoardClone.data && malformedBoardClone.position.x === 0 && malformedBoardClone.position.y === 5,
+      'Node factory clone safety: malformed legacy module data or coordinates must normalize to an editable, finite clone rather than throwing during duplicate/paste');
+
+      const malformedGroupClone = reassignCanvasDataIDs({
+        id: 'malformed-group', type: 'group', data: {
+          canvasData: {
+            nodes: [
+              { id: 'valid-child', type: 'text', position: { x: 1, y: 2 }, data: {} },
+              { type: 'text', position: { x: 3, y: 4 }, data: {} },
+              null,
+            ],
+            edges: { not: 'an-array' },
+            drawings: { not: 'an-array' },
+          },
+        },
+      });
+      assert(malformedGroupClone.data.canvasData.nodes.length === 1
+        && malformedGroupClone.data.canvasData.nodes[0].id !== 'valid-child'
+        && Array.isArray(malformedGroupClone.data.canvasData.edges)
+        && malformedGroupClone.data.canvasData.edges.length === 0
+        && Array.isArray(malformedGroupClone.data.canvasData.drawings)
+        && malformedGroupClone.data.canvasData.drawings.length === 0,
+      'Node factory clone safety: malformed nested group arrays must be repaired at the duplication boundary without blocking every valid child');
+
+      const duplicateNestedIdsClone = reassignCanvasDataIDs({
+        id: 'duplicate-nested-ids', type: 'group', data: {
+          canvasData: {
+            nodes: [
+              {
+                id: 'duplicate-search', type: 'jobhub', position: { x: 1, y: 2 },
+                data: { hubState: 'done', targetRole: 'Keep this Search', customMetadata: { source: 'first' } },
+              },
+              {
+                id: 'duplicate-search', type: 'jobhub', position: { x: 3, y: 4 },
+                data: { hubState: 'done', targetRole: 'Drop this duplicate' },
+              },
+              {
+                id: 'source-owned-by-first', type: 'jobsourcecard', position: { x: 5, y: 6 },
+                data: { hubId: 'duplicate-search', sourceId: 'indeed', customMetadata: { keep: true } },
+              },
+              {
+                id: 'nested-container', type: 'group', position: { x: 7, y: 8 }, data: {
+                  canvasData: {
+                    nodes: [
+                      { id: 'nested-duplicate', type: 'text', position: { x: 1, y: 1 }, data: { text: 'Keep nested', customMetadata: { first: true } } },
+                      { id: 'nested-duplicate', type: 'text', position: { x: 2, y: 2 }, data: { text: 'Drop nested duplicate' } },
+                      // This collides with a parent-level id, which is just as
+                      // unsafe after extracting the nested group.
+                      { id: 'duplicate-search', type: 'text', position: { x: 3, y: 3 }, data: { text: 'Drop cross-level duplicate' } },
+                    ],
+                    edges: [
+                      { id: 'nested-kept-edge', source: 'nested-duplicate', target: 'nested-duplicate', label: 'keep nested edge' },
+                      { id: 'nested-orphan-edge', source: 'nested-duplicate', target: 'duplicate-search' },
+                    ],
+                    drawings: [{ id: 'nested-drawing', points: [], color: '#123456' }],
+                  },
+                },
+              },
+            ],
+            edges: [
+              { id: 'kept-owner-edge', source: 'duplicate-search', target: 'source-owned-by-first', label: 'keep owner edge' },
+              { id: 'orphan-edge', source: 'duplicate-search', target: 'missing-node' },
+            ],
+            drawings: [{ id: 'root-drawing', points: [], color: '#abcdef' }],
+          },
+        },
+      });
+      const duplicateRootCanvas = duplicateNestedIdsClone.data.canvasData;
+      const keptDuplicateSearch = duplicateRootCanvas.nodes.find(node => node.type === 'jobhub');
+      const remappedSourceCard = duplicateRootCanvas.nodes.find(node => node.type === 'jobsourcecard');
+      const duplicateNestedGroup = duplicateRootCanvas.nodes.find(node => node.id !== 'nested-container' && node.type === 'group');
+      const nestedDuplicateCanvas = duplicateNestedGroup.data.canvasData;
+      const allDuplicatedNestedIds = [
+        ...duplicateRootCanvas.nodes.map(node => node.id),
+        ...nestedDuplicateCanvas.nodes.map(node => node.id),
+      ];
+      assert(duplicateRootCanvas.nodes.filter(node => node.type === 'jobhub').length === 1
+        && keptDuplicateSearch.data.targetRole === 'Keep this Search'
+        && keptDuplicateSearch.data.customMetadata?.source === 'first'
+        && remappedSourceCard.data.hubId === keptDuplicateSearch.id
+        && remappedSourceCard.data.customMetadata?.keep === true,
+      'Node factory clone safety: duplicate imported ids keep the first valid node and retain its unambiguous owner metadata');
+      assert(new Set(allDuplicatedNestedIds).size === allDuplicatedNestedIds.length
+        && nestedDuplicateCanvas.nodes.length === 1
+        && nestedDuplicateCanvas.nodes[0].data.text === 'Keep nested'
+        && nestedDuplicateCanvas.nodes[0].data.customMetadata?.first,
+      'Node factory clone safety: duplicate ids are removed recursively, including collisions with an ancestor canvas');
+      assert(duplicateRootCanvas.edges.length === 1
+        && duplicateRootCanvas.edges[0].source === keptDuplicateSearch.id
+        && duplicateRootCanvas.edges[0].target === remappedSourceCard.id
+        && duplicateRootCanvas.edges[0].label === 'keep owner edge'
+        && nestedDuplicateCanvas.edges.length === 1
+        && nestedDuplicateCanvas.edges[0].source === nestedDuplicateCanvas.nodes[0].id
+        && nestedDuplicateCanvas.edges[0].target === nestedDuplicateCanvas.nodes[0].id
+        && nestedDuplicateCanvas.edges[0].label === 'keep nested edge'
+        && duplicateRootCanvas.drawings[0].color === '#abcdef'
+        && nestedDuplicateCanvas.drawings[0].color === '#123456',
+      'Node factory clone safety: valid edge/drawing metadata survives while references to omitted duplicate or missing nodes are pruned');
+      const malformedNestedCanvasClone = reassignCanvasDataIDs({
+        id: 'malformed-nested-canvas-values', type: 'group', data: {
+          canvasData: {
+            nodes: [
+              { id: 'nested-null', type: 'group', position: { x: 1, y: 1 }, data: { canvasData: null } },
+              { id: 'nested-string', type: 'group', position: { x: 2, y: 2 }, data: { canvasData: 'invalid' } },
+              { id: 'nested-zero', type: 'group', position: { x: 3, y: 3 }, data: { canvasData: 0 } },
+              { id: 'nested-array', type: 'group', position: { x: 4, y: 4 }, data: { canvasData: [] } },
+              { id: 'not-a-subcanvas', type: 'group', position: { x: 5, y: 5 }, data: { title: 'No canvasData key' } },
+            ],
+            edges: [], drawings: [],
+          },
+        },
+      });
+      const malformedNestedGroups = malformedNestedCanvasClone.data.canvasData.nodes;
+      const canonicalEmptyCanvas = JSON.stringify({ nodes: [], edges: [], drawings: [] });
+      const groupWithoutCanvasData = malformedNestedGroups.find(node => node.data?.title === 'No canvasData key');
+      assert(malformedNestedGroups.slice(0, 4).every(clonedGroup => (
+        JSON.stringify(clonedGroup.data.canvasData) === canonicalEmptyCanvas
+      )) && groupWithoutCanvasData
+        && !Object.hasOwn(groupWithoutCanvasData.data, 'canvasData'),
+      'Node factory clone safety: falsy and non-object nested canvasData values normalize recursively, while a group without canvasData retains that distinction');
+      const malformedCanvasPayloadClone = reassignCanvasDataIDs({
+        id: 'malformed-canvas-payload', type: 'group', data: { canvasData: 'not-a-canvas' },
+      });
+      assert(JSON.stringify(malformedCanvasPayloadClone.data.canvasData) === JSON.stringify({
+        nodes: [], edges: [], drawings: [],
+      }),
+      'Node factory clone safety: a non-object legacy canvasData payload must normalize to an empty navigable sub-canvas');
       return { cloneIdChanged: clone.id !== source.id, boardSelectionCleared: true, nestedBoardSelectionRemapped: true, nestedOwnershipRemapped: true, childId };
     },
   },

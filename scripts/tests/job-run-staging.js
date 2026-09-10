@@ -46,6 +46,30 @@ export default [
         && queue.getSnapshot().lanes['job-search'] == null,
       `cancelling a queued hub must remove only its shared-lane entry, got ${JSON.stringify({ cancelledCount, cancelledReason, snapshot: queue.getSnapshot() })}`);
 
+      // acquireModuleRun reserves its lane synchronously but intentionally
+      // runs onStart in a microtask. A deletion in that admission gap must
+      // cancel it just like a queued entry; otherwise an unmounted Search can
+      // still start a browser/IPC worker after its owner disappeared.
+      const preStartEvents = [];
+      const preStart = queue.acquireModuleRun({
+        nodeId: 'pre-start-hub',
+        cancellationNodeIds: ['pre-start-source-card'],
+        lane: 'job-search',
+        onStart: () => preStartEvents.push('started'),
+        onCancel: () => preStartEvents.push('cancelled'),
+      }).then(() => null, error => error?.message || String(error));
+      const preStartCancelled = queue.cancelQueuedRunsForNode(
+        'pre-start-source-card',
+        'Source removed during queue admission',
+      );
+      const preStartReason = await preStart;
+      await Promise.resolve();
+      assert(preStartCancelled === 1
+        && preStartReason === 'Source removed during queue admission'
+        && JSON.stringify(preStartEvents) === JSON.stringify(['cancelled'])
+        && queue.getSnapshot().lanes['job-search'] == null,
+      `a cancellation alias must stop an admitted-but-not-started run, got ${JSON.stringify({ preStartCancelled, preStartReason, preStartEvents, snapshot: queue.getSnapshot() })}`);
+
       // A source resolver is executed by its hub in the main process, but the
       // source-card UI may disappear independently while it waits in the lane.
       // Its card id must therefore cancel the queued entry without breaking
@@ -88,24 +112,43 @@ export default [
       boardLease.release();
 
       const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
-      const cleanupStart = sourceCard.indexOf('useEffect(() => () => {');
+      const cleanupStart = sourceCard.indexOf('useUnmountEffect(() => {');
       const cleanupEnd = sourceCard.indexOf('\n\n  useEffect(() => {', cleanupStart);
       const resolverCleanup = sourceCard.slice(cleanupStart, cleanupEnd);
+      const ownedBoardCancelAt = resolverCleanup.indexOf('if (pausedBoardOwner) {');
+      const standaloneCleanupAt = resolverCleanup.indexOf('if (!resolveInFlightRef.current) return;');
+      const ownedBoardCleanup = resolverCleanup.slice(ownedBoardCancelAt, standaloneCleanupAt);
+      const standaloneCleanup = resolverCleanup.slice(standaloneCleanupAt);
       const provider = fs.readFileSync(path.resolve('src/contexts/ModuleRunQueueContext.jsx'), 'utf8');
       assert(sourceCard.includes('const resolveLifecycleRef = useRef(0);')
         && sourceCard.includes('const resolveStartedRef = useRef(false);')
         && sourceCard.includes('const { acquireModuleRun, cancelQueuedRunsForNode } = useModuleRunQueue();')
+        && sourceCard.includes('const jobSearchCoordinator = useJobSearchCoordinator();')
+        && sourceCard.includes("import { useUnmountEffect } from '../hooks/useUnmountEffect';")
+        && sourceCard.includes('`useUnmountEffect` filters React StrictMode')
         && sourceCard.includes("cancellationNodeIds: [id]")
         && sourceCard.includes("cancelQueuedRunsForNode(id, 'Job source card removed')")
-        && resolverCleanup.includes('if (resolveStartedRef.current) {')
-        && resolverCleanup.includes("cancelNodeTask?.(data.hubId, 'job-source-card-removed')")
-        && resolverCleanup.includes('}, [cancelQueuedRunsForNode, data.hubId, id]);')
+        && ownedBoardCancelAt >= 0
+        && standaloneCleanupAt > ownedBoardCancelAt
+        && resolverCleanup.includes('const cardOwnsCurrentGate = Array.isArray(hubData.scrapeWarnings)')
+        && resolverCleanup.includes('warning?.sourceId === data.sourceId && isJobSourceWarningGating(warning)')
+        && resolverCleanup.includes('findJobSearchBoardCancellablePausedSourceOwner(')
+        && ownedBoardCleanup.includes('jobSearchCoordinator.cancelBoardModule(pausedBoardOwner.orchestratorNodeId, {')
+        && ownedBoardCleanup.includes('boardRunId: pausedBoardOwner.boardRunId')
+        && ownedBoardCleanup.includes("reason: 'job-source-card-removed'")
+        && ownedBoardCleanup.includes('suppressToast: true')
+        && ownedBoardCleanup.includes('.catch((error) => {')
+        && ownedBoardCleanup.includes('return;')
+        && !ownedBoardCleanup.includes("cancelNodeTask?.(data.hubId, 'job-source-card-removed')")
+        && standaloneCleanup.includes('if (resolveStartedRef.current) {')
+        && standaloneCleanup.includes("cancelNodeTask?.(data.hubId, 'job-source-card-removed')")
+        && resolverCleanup.endsWith('\n  });')
         && !resolverCleanup.includes('moduleRunQueue')
         && provider.includes('cancelQueuedRunsOwnedByNode: queue.cancelQueuedRunsOwnedByNode')
         && provider.includes('}), [queue, snapshot]);')
         && sourceCard.includes('if (!resolverAlive()) return;'),
-      'a deleted source card must retain its queued/active lifecycle boundary despite provider snapshot rerenders, and only cancel its hub task after it owns the active lease');
-      return { sharedLane: true, queuedCancellation: true, ownedResetPreservesParentAlias: true, sameHubActiveSiblingProtected: true, sourceCardLifecycleCancellation: true, snapshotRerenderSafe: true };
+      'a removed gating source card must cancel its exact paused Board generation without a raw hub abort, while standalone resolvers retain their queued/active cancellation boundary despite provider snapshot rerenders');
+      return { sharedLane: true, queuedCancellation: true, ownedResetPreservesParentAlias: true, sameHubActiveSiblingProtected: true, sourceCardLifecycleCancellation: true, exactBoardSourceCardCancellation: true, snapshotRerenderSafe: true };
     },
   },
   {

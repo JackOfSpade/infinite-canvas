@@ -442,14 +442,81 @@ export function moduleFingerprint(scoredJobs) {
  * flagging a false "connections changed".
  */
 export function isLegacyCombineSignature(signature) {
-  const s = String(signature || '');
+  const parsed = parseCombineSignature(signature);
+  if (parsed.format === 'empty') return false;
+  if (parsed.format === 'v8') return false;
+  // A corrupted structured signature may have been written after a Combine
+  // but cannot be verified against the visible cascade. Unlike pre-v3 legacy
+  // signatures, it must *not* be adopted as a fresh baseline: normal Board
+  // equality will flag it stale and hide the unverifiable old result.
+  if (parsed.format === 'v8-invalid') return false;
+  // A malformed delimiter signature cannot safely describe the visible
+  // cascade. Treat it like the older pre-versioned shapes: the Board will
+  // adopt its live input baseline rather than parse a truncated id and claim
+  // an imported result set is current.
+  if (!parsed.valid) return !!String(signature || '');
   // v3 introduced visible-data folding, v4 added compensation, v5 added the
   // fit audit, v6 added Job Preferences, and v7 adds pre-research compensation
   // inputs. Those signatures must still be
   // compared (and therefore go stale) after an upgrade; silently adopting one
   // could leave old card ordering/evidence visible. Only pre-v3 formats lack a
   // safe enough baseline to compare and are adopted on load.
-  return !!s && !/(?:^|\|)[^=]+=[34567]:/.test(s);
+  return !parsed.entries.some(([, fingerprint]) => /^[34567]:/.test(fingerprint));
+}
+
+/**
+ * Decode a Board combine signature without making node ids part of a fragile
+ * delimiter grammar. Version 8 serializes sorted `[id, fingerprint]` pairs as
+ * JSON only when a delimiter-bearing imported id/fingerprint (or the reserved
+ * v8 prefix) requires it, so `search|west=1` remains one exact identity
+ * without rewriting normal saves.
+ *
+ * Delimiter signatures are retained for saved-canvas compatibility. They are
+ * intentionally parsed strictly: a malformed row is not silently split into a
+ * different source id, because that could make stale detection or copied Board
+ * provenance refer to the wrong Job Search.
+ */
+export function parseCombineSignature(signature) {
+  if (typeof signature !== 'string' || !signature) {
+    return { format: 'empty', valid: true, entries: [] };
+  }
+  // The emitted v8 form starts with a JSON pair array. Do not reserve every
+  // `8:` prefix: a pre-v8 imported node id can itself begin with `8:` and its
+  // ordinary delimiter signature must remain readable after upgrade.
+  if (signature.startsWith('8:[[')) {
+    try {
+      const value = JSON.parse(signature.slice(2));
+      if (!Array.isArray(value) || !value.every((entry) => (
+        Array.isArray(entry)
+        && entry.length === 2
+        && typeof entry[0] === 'string'
+        && entry[0]
+        && typeof entry[1] === 'string'
+      ))) {
+        return { format: 'v8-invalid', valid: false, entries: [] };
+      }
+      return { format: 'v8', valid: true, entries: value };
+    } catch {
+      return { format: 'v8-invalid', valid: false, entries: [] };
+    }
+  }
+  // Keep historically valid delimiter signatures such as
+  // `8:imported-search=7:…` readable: imported node ids were unrestricted
+  // before v8. But a bare `8:` payload cannot be a delimiter signature at
+  // all. Classify it as a corrupt structured attempt so the Board marks its
+  // visible cascade stale instead of adopting unverifiable provenance as an
+  // old baseline.
+  if (signature.startsWith('8:') && !signature.includes('=')) {
+    return { format: 'v8-invalid', valid: false, entries: [] };
+  }
+  const entries = [];
+  for (const row of signature.split('|')) {
+    if (!row) continue;
+    const separator = row.lastIndexOf('=');
+    if (separator <= 0) return { format: 'legacy-invalid', valid: false, entries: [] };
+    entries.push([row.slice(0, separator), row.slice(separator + 1)]);
+  }
+  return { format: 'legacy', valid: true, entries };
 }
 
 /**
@@ -493,20 +560,39 @@ export function deriveBoardCardStats(nodes, hubId, currentData = {}) {
 
 /**
  * Canonical signature of every completed module at Combine time: sorted
- * `id=fingerprint` pairs. Zero-result completed modules are intentionally
- * included so a terminal empty re-run is an update, not a disappearance. Two
- * combines are equivalent (→ the cached board is still valid) iff their
- * signatures are equal — same completed-module set AND same data in each.
- * Order independent (connection order doesn't matter).
+ * `id=fingerprint` pairs for ordinary IDs, with v8 JSON `[id, fingerprint]`
+ * pairs only when an imported delimiter-bearing value needs it. Zero-result
+ * completed modules are intentionally included so a terminal empty re-run is
+ * an update, not a disappearance. Two combines are equivalent (→ the cached
+ * board is still valid) iff their signatures are equal — same completed-module
+ * set AND same data in each. Order independent (connection order doesn't
+ * matter).
  *
  * @param {{id: string, fingerprint: string}[]} modules  completed modules (zero-result included)
  * @returns {string}
  */
 export function combineSignature(modules) {
-  return (Array.isArray(modules) ? modules : [])
-    .map(m => `${m.id}=${m.fingerprint}`)
-    .sort()
-    .join('|');
+  const entries = (Array.isArray(modules) ? modules : [])
+    .filter(module => typeof module?.id === 'string' && module.id)
+    .map(module => [module.id, String(module.fingerprint ?? '')])
+    .sort(([leftId, leftFingerprint], [rightId, rightFingerprint]) => (
+      leftId < rightId ? -1 : leftId > rightId ? 1
+        : leftFingerprint < rightFingerprint ? -1 : leftFingerprint > rightFingerprint ? 1 : 0
+    ));
+  if (entries.length === 0) return '';
+  // Keep ordinary generated ids byte-for-byte compatible with the v3–v7
+  // persisted representation. Raw equality is deliberately used by durable
+  // recovery fences, so unconditionally upgrading a healthy Board to JSON
+  // would falsely mark every existing canvas stale after an app update.
+  // `=` in an id remains unambiguous because legacy parsing splits at the
+  // final separator; an `=` in the opaque fingerprint (or any `|`) is not.
+  const legacySignature = entries.map(([id, fingerprint]) => `${id}=${fingerprint}`).join('|');
+  const requiresStructuredFormat = legacySignature.startsWith('8:') || entries.some(([id, fingerprint]) => (
+    id.includes('|') || fingerprint.includes('|') || fingerprint.includes('=')
+  ));
+  return requiresStructuredFormat
+    ? `8:${JSON.stringify(entries)}`
+    : legacySignature;
 }
 
 /**
@@ -541,12 +627,7 @@ export function emptyReplacementIneligibilityReason({
  * @returns {string} e.g. "1 disconnected · 1 updated" (or "connections changed")
  */
 export function staleReason(prevSignature, liveModules, connectedModules) {
-  const was = new Map(
-    String(prevSignature || '').split('|').filter(Boolean).map((s) => {
-      const eq = s.lastIndexOf('='); // ids have no '='; fingerprint has no '|'
-      return [s.slice(0, eq), s.slice(eq + 1)];
-    })
-  );
+  const was = new Map(parseCombineSignature(prevSignature).entries);
   const now = new Map((Array.isArray(liveModules) ? liveModules : []).map(m => [m.id, m.fingerprint]));
   const connected = new Map((Array.isArray(connectedModules) ? connectedModules : []).map(m => [m.id, m]));
   let disconnected = 0, added = 0, updated = 0, updating = 0;

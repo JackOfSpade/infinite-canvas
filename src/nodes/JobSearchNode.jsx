@@ -56,7 +56,7 @@ import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../uti
 import { detectQueryOperators } from '../utils/jobTitleMatch';
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
-import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
+import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, isJobSearchBoardPausedContinuationBlocked, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
 import { safeClone } from '../utils/navigationUtils';
 import {
   getJobWorkflowDeletionLifecycleRevision,
@@ -403,6 +403,40 @@ function isSavedScrapeManualAiResume(resume) {
     || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode);
 }
 
+// The Board's `awaitingSourceResolution` receipt is the authority for a
+// post-Solve/Skip continuation. Revalidate all of it in the child executor:
+// the Board can have waited in the shared lane while a user reset, re-ran,
+// locked, or disconnected this Search. `recover-staged-scoring` is deliberately
+// limited to the sanitizer's nonterminal shape; a genuine done receipt must go
+// through the normal Board terminal path instead of re-opening its sidecar.
+function isExactPausedBoardScoringContinuation(node, nodeId, boardPlan, boardRunId, continuation) {
+  const data = node?.data || {};
+  const awaiting = boardPlan?.awaitingSourceResolution;
+  if (
+    !continuation
+    || continuation.sourceId !== nodeId
+    || typeof continuation.jobRunId !== 'string'
+    || !continuation.jobRunId
+    || boardPlan?.version !== 1
+    || boardPlan?.phase !== 'searches'
+    || boardPlan?.boardRunId !== boardRunId
+    || boardPlan?.activeSourceId !== nodeId
+    || awaiting?.sourceId !== nodeId
+    || awaiting?.jobRunId !== continuation.jobRunId
+    || data.jobRunId !== continuation.jobRunId
+    || data.manualAiResume?.runId
+  ) return false;
+  const noGatingWarnings = !(Array.isArray(data.scrapeWarnings)
+    ? data.scrapeWarnings
+    : []).some(isJobSourceWarningGating);
+  if (continuation.mode === 'finish-paused-scoring') {
+    return data.hubState === 'sources-ready' && noGatingWarnings;
+  }
+  return continuation.mode === 'recover-staged-scoring'
+    && (data.hubState === 'empty' || data.hubState === 'done')
+    && !data.resultDisposition;
+}
+
 function boardRunReadiness(node, {
   processing = false,
   platformsVerifying = false,
@@ -412,6 +446,7 @@ function boardRunReadiness(node, {
   recoveryOwner = null,
   terminalFinalizationRecovery = false,
   legacyBatchRecovery = false,
+  pausedScoringContinuation = false,
 } = {}) {
   if (!node || node.type !== 'jobhub') {
     return searchRunOutcome('not-ready', { error: 'This Job Search module is no longer available.' });
@@ -468,7 +503,11 @@ function boardRunReadiness(node, {
       error: 'This Job Search module has a saved manual-AI step that must be resumed before a fresh scan.',
     });
   }
-  if (hubState === 'sources-ready' && !(exactManualRecovery && isSavedScrapeManualAiResume(manualAiResume))) {
+  if (
+    hubState === 'sources-ready'
+    && !(exactManualRecovery && isSavedScrapeManualAiResume(manualAiResume))
+    && !pausedScoringContinuation
+  ) {
     return searchRunOutcome('paused', {
       runId: liveData.jobRunId || null,
       resultDisposition: liveData.resultDisposition || null,
@@ -507,6 +546,15 @@ function boardRunReadiness(node, {
   if (exactManualRecovery && isSavedScrapeManualAiResume(manualAiResume)) {
     if (!(liveData.resumeProfile && typeof liveData.resumeProfile === 'object')) {
       return searchRunOutcome('not-ready', { error: 'This saved job search has no stored career profile.' });
+    }
+    return null;
+  }
+  // The Board's durable descriptor freezes the original generation. Its staged
+  // rows/profile are the recovery input, so current source toggles and location
+  // edits cannot turn this exact continuation into a fresh provider search.
+  if (pausedScoringContinuation) {
+    if (!(liveData.resumeProfile && typeof liveData.resumeProfile === 'object')) {
+      return searchRunOutcome('not-ready', { error: 'This saved Job Search has no stored career profile.' });
     }
     return null;
   }
@@ -1174,6 +1222,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
   const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(enabledBrowserLoginSourceIds);
+  // Queue callbacks can wait behind another job workflow long enough for the
+  // connection-verification store to change. Read this at the actual lane turn
+  // instead of trusting the render that enqueued the request.
+  const platformsVerifyingRef = useRef(platformsVerifying);
+  platformsVerifyingRef.current = platformsVerifying;
   const lastCompletedRunAtText = formatCompletionTimestamp(data.lastCompletedRunAt);
 
   useEffect(() => {
@@ -3070,6 +3123,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (
       !queueManagedExternally
       && findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+      && !findJobSearchBoardPausedContinuationOwner(
+        id,
+        admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
+        getNodes(),
+        getEdges(),
+      )
     ) {
       EventLogger.log(`[JobSearch][${id}] Legacy batch continuation deferred to its durable Job Board owner.`);
       return searchRunOutcome('paused', {
@@ -3729,6 +3788,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         !laneTurnData
         || laneTurnData.locked
         || isJobWorkflowDeletionPending(currentId)
+        // Verification can begin while a request is waiting in the shared
+        // lane. Re-check at its actual turn before destructive setup;
+        // otherwise the stale queued callback can start provider work while
+        // the UI correctly says "Checking Connections".
+        || platformsVerifyingRef.current
         || hasPendingManualAiRetirement(laneTurnData)
       ) {
         return searchRunOutcome('not-ready', {
@@ -3781,6 +3845,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         activeTargetRole: null,
         scrapeWarnings: [],
         jobRunId: null,
+        // A previous collection-only/Test Mode completion is terminal, but its
+        // unscored provenance belongs only to that generation. Clear it at the
+        // fresh-run boundary so a later ordinary scored (or authoritative
+        // zero-result) run can supply a Job Board input.
+        aiSkipped: false,
+        collectionOnly: false,
+        testMode: false,
         _boardRollbackSourceProgressFence: null,
         rerunOutcome: null,
         rerunNotice: null,
@@ -4463,8 +4534,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const requestedData = getNode(id)?.data || data;
     const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null;
     if (
-      !queueManagedExternally
-      && findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+      findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+      && !findJobSearchBoardPausedContinuationOwner(id, requestedJobRunId, getNodes(), getEdges())
     ) {
       return searchRunOutcome('paused', {
         runId: requestedJobRunId,
@@ -4575,8 +4646,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
         }
         if (
-          !queueManagedExternally
-          && findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+          findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+          && !findJobSearchBoardPausedContinuationOwner(id, requestedJobRunId, getNodes(), getEdges())
         ) {
           clearContinuationQueueMarker();
           return searchRunOutcome('paused', {
@@ -4776,8 +4847,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         });
       }
       if (
-        !queueManagedExternally
-        && findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
+        findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
+        && !findJobSearchBoardPausedContinuationOwner(currentId, requestedJobRunId, getNodes(), getEdges())
       ) {
         clearContinuationQueueMarker();
         return searchRunOutcome('paused', {
@@ -5078,6 +5149,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ) {
           return searchRunOutcome('not-found');
         }
+        if (
+          typeof options?.expectedRunId === 'string'
+          && options.expectedRunId
+          && discovered.runId !== options.expectedRunId
+        ) {
+          return searchRunOutcome('recovery-inspection-failed', {
+            runId: options.expectedRunId,
+            error: 'The staged Job Search run no longer matches the Job Board continuation.',
+          });
+        }
         if (typeof options?.onDiscoveredRun === 'function') {
           options.onDiscoveredRun(discovered);
         }
@@ -5240,6 +5321,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         !liveData
         || liveData.locked
         || isJobWorkflowDeletionPending(currentId)
+        || platformsVerifyingRef.current
         || hasPendingManualAiRetirement(liveData)
         || laneResumeLocation !== offerResumeLocation
         || !(liveData.resumeProfile && typeof liveData.resumeProfile === 'object')
@@ -5556,6 +5638,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (isJobWorkflowDeletionPending(id)) return;
       const skippedSourceId = e.detail?.sourceId;
       if (!skippedSourceId) return;
+      // A retained source card can outlive its warning generation. Do not let
+      // an old Skip clear the current paused run or trigger its scoring lane;
+      // source cards now always carry their captured generation in this event.
+      const skippedJobRunId = e.detail?.jobRunId || null;
+      const activeJobRunId = jobRunIdRef.current || null;
+      const activeBoardOwner = findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
+      if (
+        skippedJobRunId !== activeJobRunId
+        // Pre-token legacy standalone cards can still skip their matching
+        // pre-token hub. A Board pause, however, is always tokenized and must
+        // fail closed if its source card did not carry that exact token.
+        || (activeBoardOwner && !skippedJobRunId)
+        || isJobSearchBoardPausedContinuationBlocked(id, skippedJobRunId, getNodes(), getEdges())
+      ) {
+        EventLogger.log(`[JobSearch][${id}] Ignored stale source skip for ${skippedSourceId}`);
+        return;
+      }
       const warningAction = e.detail?.action === 'dismiss' ? 'dismiss' : 'skip';
       if (hubStateRef.current === 'searching') {
         // A decision made while the other sources are still running must survive
@@ -5596,7 +5695,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     };
     document.addEventListener('job-source-skip', onSkip);
     return () => document.removeEventListener('job-source-skip', onSkip);
-  }, [id, updateGlobal, scheduleCleanSourceCardDismiss]);
+  }, [getEdges, getNodes, id, updateGlobal, scheduleCleanSourceCardDismiss]);
 
   // A browser Solve that could not open/navigate (or returned unresolved)
   // still needs to put back the warning optimistically removed by
@@ -5646,6 +5745,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // either way, a late result from the old run is ignored.
       if ((e.detail?.jobRunId || null) !== (jobRunIdRef.current || null)) {
         EventLogger.log(`[JobSearch][${id}] Ignored stale source resolve for ${e.detail?.sourceId || 'unknown source'}`);
+        return;
+      }
+      // The source resolver holds the global lane and can return after its
+      // Board records cancellation intent. The result may still carry the
+      // current Search token, so independently require the exact paused Board
+      // handoff before changing pending jobs, warnings, or starting externally
+      // managed scoring.
+      if (isJobSearchBoardPausedContinuationBlocked(id, e.detail?.jobRunId || null, getNodes(), getEdges())) {
+        EventLogger.log(`[JobSearch][${id}] Ignored source resolve after its Board continuation was fenced for ${e.detail?.sourceId || 'unknown source'}`);
         return;
       }
       const resolvedSourceId = e.detail?.sourceId;
@@ -5746,7 +5854,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     };
     document.addEventListener('job-source-resolved', onResolved);
     return () => document.removeEventListener('job-source-resolved', onResolved);
-  }, [id, updateGlobal, scheduleCleanSourceCardDismiss]);
+  }, [getEdges, getNodes, id, updateGlobal, scheduleCleanSourceCardDismiss]);
 
   // Optimistic counterpart to onResolved: JobSourceCardNode dispatches this the
   // instant the user clicks Solve (before the resolve runs). Drop the matching
@@ -5760,6 +5868,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const onRetryStart = (e) => {
       if (e.detail?.hubId !== id) return;
       if (isJobWorkflowDeletionPending(id)) return;
+      // Current source cards carry the exact generation they proved at click
+      // time. A late optimistic retry receipt must not trim a warning from a
+      // newer Search after Reset/re-run. Untagged legacy events retain their
+      // historic standalone compatibility; successful/Skip events have their
+      // own strict generation fences below.
+      const retryJobRunId = e.detail?.jobRunId;
+      if (
+        typeof retryJobRunId === 'string'
+        && retryJobRunId
+        && retryJobRunId !== (jobRunIdRef.current || null)
+      ) return;
       const sid = e.detail?.sourceId;
       if (!sid) return;
       const current = scrapeWarningsRef.current || [];
@@ -5784,7 +5903,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // dismiss source cards while that continuation is already evaluating/scoring.
     if (processingRunsRef.current.active || scoringContinuationAdmissionRef.current) return;
     if (hasPendingManualAiRetirement(liveData)) return;
-    if (findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())) {
+    if (
+      findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
+      && !findJobSearchBoardPausedContinuationOwner(
+        id,
+        liveData.jobRunId || null,
+        getNodes(),
+        getEdges(),
+      )
+    ) {
       addToast({
         title: 'Job Board Run in Progress',
         description: 'Finish or cancel the owning Job Board run before scoring this paused Search.',
@@ -6429,6 +6556,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           manualAiResume: {
             ...(existing?.runId === detail.runId ? existing : {}),
             runId: detail.runId,
+            // The global manual-AI dialog identifies its own request, not the
+            // Search generation that produced it. Persist the latter locally
+            // so a waiting Board can refuse a same-Search but unrelated prompt
+            // after reload. Legacy markers without this field retain their
+            // backwards-compatible ownership fallback.
+            jobRunId: existing?.runId === detail.runId && Object.hasOwn(existing, 'jobRunId')
+              ? existing.jobRunId
+              : (jobRunIdRef.current || node?.data?.jobRunId || null),
             task: detail.task || null,
             stepKey: detail.stepKey || null,
             recoveryMode: detail.recoveryMode || null,
@@ -7301,6 +7436,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     boardRunId,
     isCancelled,
     manualAiResume = null,
+    pausedSourceContinuation = null,
     recoverInterruptedJobRun = false,
     finalizationRecovery = null,
   } = {}) => {
@@ -7361,15 +7497,30 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const recoveryOwner = manualAiResume?.runId
       ? findJobSearchBoardRecoveryOwner(id, manualAiResume.runId, getNodes(), getEdges())
       : findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
+    const boardPlanForPausedContinuation = getNode(orchestratorNodeId)?.data?.boardScanResume || null;
+    const exactPausedScoringContinuation = isExactPausedBoardScoringContinuation(
+      liveNode,
+      id,
+      boardPlanForPausedContinuation,
+      boardRunId,
+      pausedSourceContinuation,
+    );
+    if (pausedSourceContinuation && !exactPausedScoringContinuation) {
+      return searchRunOutcome('not-ready', {
+        runId: pausedSourceContinuation.jobRunId || null,
+        error: 'The paused Job Search continuation no longer matches its Job Board recovery plan.',
+      });
+    }
     const notReady = boardRunReadiness(liveNode, {
       processing: processingRunsRef.current.active,
-      platformsVerifying,
+      platformsVerifying: platformsVerifyingRef.current,
       manualAiResume: effectiveManualAiResume,
       orchestratorNodeId,
       boardRunId,
       recoveryOwner,
       terminalFinalizationRecovery: !!effectiveFinalizationRecovery || !!requestedManualRetirementRecovery,
       legacyBatchRecovery: exactLegacyBatchRecovery,
+      pausedScoringContinuation: exactPausedScoringContinuation,
     });
     if (notReady) return notReady;
     if (requestedManualRetirementRecovery) {
@@ -7389,7 +7540,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
     }
     const liveBefore = liveNode.data || data;
-    const boardPlanAtAdmission = getNode(orchestratorNodeId)?.data?.boardScanResume;
+    const boardPlanAtAdmission = boardPlanForPausedContinuation;
     const durableRollbackAtAdmission = boardPlanAtAdmission?.version === 1
       && boardPlanAtAdmission.boardRunId === boardRunId
       && boardPlanAtAdmission.activeSourceId === id
@@ -7520,6 +7671,39 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           boardRunId,
           manualAiRunId,
         });
+      } else if (exactPausedScoringContinuation) {
+        control.ownsExistingRecoveryRun = true;
+        control.cancelledRunId = pausedSourceContinuation.jobRunId;
+        if (pausedSourceContinuation.mode === 'finish-paused-scoring') {
+          // The clean paused state still carries its in-canvas pending rows;
+          // complete those rows inside the Board-owned lane without asking any
+          // provider to start a replacement search.
+          outcome = await resumeScoringRef.current?.({ queueManagedExternally: true });
+        } else {
+          // Save sanitization removed the in-memory rows while a post-resolution
+          // scorer was in flight. Re-open only the exact staged ledger recorded
+          // by the Board. Unlike generic interrupted-search recovery, a missing
+          // sidecar is an inspection failure—not permission to run fresh.
+          outcome = await resumeInterruptedRunRef.current?.({
+            discoverForBoard: true,
+            expectedRunId: pausedSourceContinuation.jobRunId,
+            queueManagedByBoard: true,
+            parentCancelled: cancelled,
+            orchestratorNodeId,
+            boardRunId,
+            manualAiRunId,
+            onDiscoveredRun: (discovered) => {
+              control.ownsExistingRecoveryRun = true;
+              control.cancelledRunId = discovered?.runId || pausedSourceContinuation.jobRunId;
+            },
+          });
+          if (outcome?.status === 'not-found') {
+            outcome = searchRunOutcome('recovery-inspection-failed', {
+              runId: pausedSourceContinuation.jobRunId,
+              error: 'The staged post-resolution Job Search run was not found. It was kept unchanged; retry or cancel this Job Board run.',
+            });
+          }
+        }
       } else if (isSavedScrapeManualAiResume(effectiveManualAiResume)) {
         control.ownsExistingRecoveryRun = true;
         outcome = await resumeSavedScrapeRef.current?.({
@@ -7688,7 +7872,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } finally {
       if (boardRunControlRef.current === control) boardRunControlRef.current = null;
     }
-  }, [cancelBoardRun, canvasFilePath, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, platformsVerifying, pollBatchOnce, retryTerminalFinalization, updateGlobal]);
+  }, [cancelBoardRun, canvasFilePath, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, pollBatchOnce, retryTerminalFinalization, updateGlobal]);
 
   useEffect(() => {
     cancelBoardRunRef.current = cancelBoardRun;
@@ -8330,7 +8514,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || !admissionData.resumeProfile
       || typeof admissionData.resumeProfile !== 'object'
       || processingRunsRef.current.active
-      || platformsVerifying
+      // A Board-owned saved-scrape replay has a durable job/profile snapshot
+      // and does not contact a platform. Its parent has already validated the
+      // exact recovery token, so a later, unrelated connection check must not
+      // strand that recovery after reload. Standalone resumes remain blocked
+      // until the selected-platform check has settled.
+      || (!queueManagedByBoard && platformsVerifyingRef.current)
     ) {
       return searchRunOutcome('not-ready', { error: 'This saved Job Search is not ready to resume.' });
     }
@@ -8406,6 +8595,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         !laneTurnData
         || laneTurnData.locked
         || isJobWorkflowDeletionPending(currentId)
+        || (!queueManagedByBoard && platformsVerifyingRef.current)
         || (
           !queueManagedByBoard
           && (
@@ -8783,7 +8973,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (lease) await waitForRendererCommitFrame();
       lease?.release();
     }
-  }, [addToast, appendJobsToDoneCanvas, cancelCleanSourceCardDismiss, canvasFilePath, data, epoch, getEdges, getNode, getNodes, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun, savedAnalysisMeta?.runId, moduleRunQueue, deferDirectSearchToBoard]);
+  }, [addToast, appendJobsToDoneCanvas, cancelCleanSourceCardDismiss, canvasFilePath, data, epoch, getEdges, getNode, getNodes, id, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun, savedAnalysisMeta?.runId, moduleRunQueue, deferDirectSearchToBoard]);
 
   resumeSavedScrapeRef.current = handleResumeSavedScrape;
 

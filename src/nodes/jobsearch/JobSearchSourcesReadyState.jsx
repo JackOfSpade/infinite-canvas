@@ -7,7 +7,8 @@ import { ShieldAlert, FastForward } from 'lucide-react';
  * one or more block-severity scrape warnings (captcha, login wall, etc.)
  * and is now waiting for the user to either:
  *   - Resolve each blocked source via its source card's Solve / Skip buttons
- *     (auto-resumes once the last warning is dropped), or
+ *     (auto-resumes once the last warning is dropped; a waiting Job Board then
+ *     continues automatically), or
  *   - Click "Score current results" here to skip every remaining block at
  *     once and proceed to scoring with the partial data.
  *
@@ -34,7 +35,7 @@ export function JobSearchSourcesReadyState({
           : 'Some sources need attention before we score results.'}
       </p>
       <p className="text-white/30 text-[10px] text-center px-2 leading-snug mt-1">
-        Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. Or click below to score what we have now.
+        Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed. Or click below to score what we have now.
       </p>
 
       {resumeSummary && (

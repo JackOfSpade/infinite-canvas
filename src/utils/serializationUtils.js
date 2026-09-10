@@ -398,6 +398,30 @@ export function sanitizeEdgesForSave(edges, sanitizedNodes) {
   return changed ? out : edges;
 }
 
+// A group's `canvasData.edges` belongs to that group's immediate canvas, not
+// to its descendants. Keep this intentionally narrower than
+// `sanitizeEdgesForSave`: an inner edge may connect two direct children of the
+// group, but must never survive merely because a same-id node exists farther
+// down a nested group. This runs after the group's child nodes were sanitized,
+// so an ephemeral source card removed on save cannot leave a dangling edge in
+// the saved nested canvas.
+function sanitizeNestedCanvasEdgesForSave(edges, sanitizedNodes) {
+  if (!Array.isArray(edges)) return edges;
+  const liveIds = new Set((Array.isArray(sanitizedNodes) ? sanitizedNodes : [])
+    .map(node => node?.id)
+    .filter(Boolean));
+  let changed = false;
+  const out = [];
+  for (const edge of edges) {
+    if (liveIds.has(edge?.source) && liveIds.has(edge?.target)) {
+      out.push(edge);
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? out : edges;
+}
+
 /**
  * Strip transient visual properties from nodes before saving.
  * Prevents runtime-only state (e.g. source-filter dim opacity) from
@@ -448,9 +472,32 @@ export function sanitizeNodesForSave(nodes) {
     // Also strip all transient data fields from this group node. The rollback
     // receipt is renderer-only state used to rehydrate a source card's local
     // run guard; persisting it would make a later reload look like a rollback.
-    if (n.type === 'group' && n.data?.canvasData) {
-      const innerNodes = n.data.canvasData.nodes || [];
+    if (n.type === 'group' && Object.hasOwn(n.data || {}, 'canvasData')) {
+      const rawCanvasData = n.data.canvasData;
+      const canvasDataIsObject = !!rawCanvasData
+        && typeof rawCanvasData === 'object'
+        && !Array.isArray(rawCanvasData);
+      // Imported/legacy groups can carry a primitive/array/null canvasData or
+      // non-array collections. Normalize only those malformed pieces while
+      // preserving legitimate object metadata (such as collapsed view state).
+      const innerNodes = canvasDataIsObject && Array.isArray(rawCanvasData.nodes)
+        ? rawCanvasData.nodes
+        : [];
+      const innerEdges = canvasDataIsObject && Array.isArray(rawCanvasData.edges)
+        ? rawCanvasData.edges
+        : [];
+      const innerDrawings = canvasDataIsObject && Array.isArray(rawCanvasData.drawings)
+        ? rawCanvasData.drawings
+        : [];
       const sanitizedInner = sanitizeNodesForSave(innerNodes);
+      const sanitizedInnerEdges = sanitizeNestedCanvasEdgesForSave(
+        innerEdges,
+        sanitizedInner,
+      );
+      const canvasDataNeedsNormalization = !canvasDataIsObject
+        || innerNodes !== rawCanvasData.nodes
+        || innerEdges !== rawCanvasData.edges
+        || innerDrawings !== rawCanvasData.drawings;
       const {
         isDropTarget: _idt,
         _hmr: _h,
@@ -462,13 +509,23 @@ export function sanitizeNodesForSave(nodes) {
         || '_hmr' in n.data
         || '_boardRollbackProgressRestore' in n.data
       );
-      if (hasTransientData || sanitizedInner !== n.data.canvasData.nodes) {
+      if (
+        hasTransientData
+        || canvasDataNeedsNormalization
+        || sanitizedInner !== innerNodes
+        || sanitizedInnerEdges !== innerEdges
+      ) {
         changed = true;
         out.push({
           ...n,
           data: {
             ...cleanData,
-            canvasData: { ...n.data.canvasData, nodes: sanitizedInner },
+            canvasData: {
+              ...(canvasDataIsObject ? rawCanvasData : {}),
+              nodes: sanitizedInner,
+              edges: sanitizedInnerEdges,
+              drawings: innerDrawings,
+            },
           },
         });
       } else {

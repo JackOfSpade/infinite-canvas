@@ -42,6 +42,92 @@ import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHisto
 
 export default [
   {
+    name: 'Job completion diagnostics preserve opaque delimiter-bearing Board correlations and reject malformed v8 pairs',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+        scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline,
+        history: telemetry.history,
+      };
+      const sourceId = 'imported|search=west';
+      const boardId = 'v8-provenance-board';
+      const canvas = path.join(os.tmpdir(), `ic-v8-provenance-${Date.now()}-${Math.random()}.json`);
+      try {
+        // No receipt or snapshot is needed here: this is the public diagnostic
+        // seam that maps a Board's durable provenance to the active hub.
+        Object.assign(telemetry, {
+          nodeId: sourceId,
+          search: null,
+          resolves: {},
+          scoring: null,
+          bucketing: null,
+          pipeline: null,
+          history: null,
+        });
+        const validSignature = combineSignature([{ id: sourceId, fingerprint: 'v8-fingerprint' }]);
+        const assessmentFor = (board) => buildJobCompletionAssessment(
+          canvas,
+          new Set([sourceId, boardId]),
+          [{ id: boardId, stale: false, ...board }],
+          1,
+        );
+        const valid = buildJobCompletionAssessment(canvas, new Set([sourceId, boardId]), [{
+          id: boardId,
+          hubState: 'done',
+          resultCount: 1,
+          mergeUnique: 1,
+          combineSignature: validSignature,
+          connectedSourceHubIds: [],
+          stale: false,
+        }], 1);
+        const connected = assessmentFor({
+          hubState: 'empty',
+          resultCount: 0,
+          mergeUnique: null,
+          combineSignature: null,
+          connectedSourceHubIds: [sourceId],
+        });
+        const cleared = assessmentFor({
+          hubState: 'empty',
+          resultCount: 0,
+          mergeUnique: null,
+          combineSignature: null,
+          connectedSourceHubIds: [],
+          clearProvenance: {
+            priorSourceRuns: [{ sourceHubId: sourceId, runId: 'cleared-run' }],
+          },
+        });
+        const malformed = assessmentFor({
+          hubState: 'done',
+          resultCount: 1,
+          mergeUnique: 1,
+          // The renderer classifies a v8 pair with a non-string fingerprint as
+          // invalid. Diagnostics must not use its id as correlation evidence.
+          combineSignature: `8:${JSON.stringify([[sourceId, 7]])}`,
+          connectedSourceHubIds: [],
+        });
+        assert(validSignature.startsWith('8:[[')
+          && valid.includes('1/1 correlate to this source run')
+          && !valid.includes('none correlate to this source run'),
+        'a valid structured signature preserves delimiter-bearing source ids for exact Board correlation');
+        assert(connected.includes('1/1 correlate to this source run')
+          && cleared.includes('1/1 correlate to this source run'),
+        'connected-edge and clear-receipt ownership paths preserve the same opaque delimiter-bearing id for correlation');
+        assert(malformed.includes('1 recorded · none correlate to this source run')
+          && !malformed.includes('1/1 correlate to this source run'),
+        'a malformed structured signature with a non-string fingerprint cannot certify Board correlation');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { delimiterBearingId: true, connectedAndClearCorrelate: true, malformedFingerprintRejected: true };
+    },
+  },
+  {
     name: 'manual scraper: cooldown re-probe treats confirmed unavailable rows as recovery and preserves their counters',
     run: async () => {
       // Mock the exact shape `expandDescriptions` returns when every probe
@@ -6049,8 +6135,10 @@ export default [
         && sourceCard.includes('resolveInFlightRef.current = false')
         && restoresNativeVerificationOutcome,
       'a derived blocking warning remains an error, rapid Continue clicks are single-flight, and a failed native verification keeps its returned outcome visible');
-      assert(sourceCard.includes('progress?.jobRunId || requestedHubData.jobRunId || null'),
-        'a source-card Solve carries its sticky per-source run token instead of relying on a potentially newer hub token');
+      assert(sourceCard.includes('const jobRunId = effectiveJobSourceCardRunId(')
+        && sourceCard.includes('const hubDataAtClick = getNode(data.hubId)?.data || {};')
+        && !sourceCard.includes('progress?.jobRunId || requestedHubData.jobRunId || null'),
+      'a source-card Solve keeps its sticky per-source token, with only the narrowly-proven legacy sources-ready gate allowed to recover a missing persisted token');
       const jobSearchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       assert(sourceCard.includes('progressRunGuardRef.current.accepts(payload?.jobRunId)')
         && sourceCard.includes('progressRunGuardRef.current.retireActive()')

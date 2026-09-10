@@ -1,5 +1,5 @@
 import React, { useId, useMemo } from 'react';
-import { AlertCircle, CheckCircle2, Layers, Loader2, Search, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2, Search, X } from 'lucide-react';
 
 const ACTIVE_STATES = new Set([
   'queued',
@@ -112,8 +112,6 @@ export function JobBoardSearchSelection({
   recoveryError = null,
   onRetry = null,
   recoveryCanCancel = true,
-  onCombineSaved = null,
-  canCombineSaved = false,
 }) {
   const fieldsetId = useId();
   const selectedSet = useMemo(
@@ -308,24 +306,11 @@ export function JobBoardSearchSelection({
               ? 'Select at least one connected Job Search module'
               : hasUnreadySelection
                 ? 'Finish setting up the selected searches first'
-                : 'Run the selected Job Search modules, then combine their results'}
+                : 'Run the selected Job Search modules. If a source needs manual attention, resolve it there; this Board continues and combines saved results automatically.'}
         >
           {running ? <X size={11} /> : <Search size={11} />}
           {running ? 'Cancel current run' : 'Search selected & combine'}
         </button>
-
-        {typeof onCombineSaved === 'function' && (
-          <button
-            type="button"
-            onClick={onCombineSaved}
-            disabled={controlsDisabled || !canCombineSaved}
-            className="flex items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-white/45 transition-colors hover:bg-white/10 hover:text-white/70 disabled:cursor-not-allowed disabled:opacity-35"
-            title="Combine all completed connected modules' saved results without scanning again"
-          >
-            <Layers size={10} />
-            Combine saved
-          </button>
-        )}
       </div>
       )}
     </fieldset>

@@ -5,16 +5,18 @@ import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { createSourceProgressRunGuard, mergeSourceProgress, isTerminalSourceStatus } from '../utils/sourceProgress';
-import { canAttemptJobSourceResolve, isJobSourceResolveBusyHubState, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
+import { canAttemptJobSourceResolve, effectiveJobSourceCardRunId, isJobSourceResolveBusyHubState, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
+import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage, warningForSolveIpcFailure } from '../utils/solveIpcFailure';
-import { findJobSearchBoardActiveRecoveryOwner } from '../utils/jobBoardSearchSelection';
+import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePausedSourceOwner, findJobSearchBoardPausedContinuationOwner, isJobSearchBoardPausedContinuationBlocked } from '../utils/jobBoardSearchSelection';
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle';
+import { useUnmountEffect } from '../hooks/useUnmountEffect';
 
 function hasBlockingJobSearchCleanup(data) {
   return data?.manualAiResume?.retirementPending === true
@@ -119,6 +121,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // themselves (which are stable for the provider lifetime), rather than
   // depending on that changing wrapper object in lifecycle effects.
   const { acquireModuleRun, cancelQueuedRunsForNode } = useModuleRunQueue();
+  const jobSearchCoordinator = useJobSearchCoordinator();
   const [progress, setProgressState] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
   const progressRef = useRef(data.persistedProgress || null);
   // Terminal source state is part of the graph snapshot a waiting Job Board
@@ -161,6 +164,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // card must prevent a queued/late resolver from opening a browser or
   // dispatching rows into the hub after the card is gone.
   const resolveLifecycleRef = useRef(0);
+  // The Job Search removes clean terminal cards itself after a short grace
+  // period. That is not a user deletion: when the final Solve is still
+  // awaiting its Board-owned scoring continuation, that expected cleanup must
+  // neither abort the shared hub nor cancel the Board transaction it is about
+  // to complete. Keep this one-shot marker local to the card so an actual
+  // delete of an equally clean-looking card still takes the exact Board path.
+  const automaticCleanDismissalRef = useRef(false);
+  const automaticCleanDismissalResetTimerRef = useRef(null);
   const initialRollbackReceipt = data._boardRollbackProgressRestore;
   const initialProgressState = restoredSourceProgressState(
     data.persistedProgress,
@@ -197,8 +208,88 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     setDismissed(false);
   }, [setProgress]);
 
-  useEffect(() => () => {
+  // `useUnmountEffect` filters React StrictMode's setup → cleanup → setup
+  // replay. A normal effect cleanup would otherwise treat the replay as card
+  // removal and cancel a Board merely for rendering an actionable card.
+  useUnmountEffect(() => {
     resolveLifecycleRef.current += 1;
+    const automaticCleanDismissal = automaticCleanDismissalRef.current;
+    automaticCleanDismissalRef.current = false;
+    if (automaticCleanDismissalResetTimerRef.current != null) {
+      clearTimeout(automaticCleanDismissalResetTimerRef.current);
+      automaticCleanDismissalResetTimerRef.current = null;
+    }
+    // This deletion was scheduled by the owning Search after every displayed
+    // source became clean. A final Solve can remain alive here solely because
+    // it is awaiting the exact Board-owned scoring continuation. It has
+    // already published its source result, so let that valid continuation own
+    // the lane rather than treating renderer housekeeping as a user Cancel.
+    if (automaticCleanDismissal) return;
+    // A sources-ready Board plan is waiting for a decision about this exact
+    // Search generation. Deleting its actionable card is an ownership event,
+    // not merely local UI cleanup: without an exact Board cancellation the
+    // Board would retain its `awaitingSourceResolution` receipt forever, while
+    // an in-flight Solve's raw hub abort could bypass the Board rollback.
+    //
+    // Require both the card's own generation and a current gating warning for
+    // this platform. A clean/stale sibling card from the same Search must not
+    // cancel a Board paused for a different source.
+    const hubData = getNode(data.hubId)?.data || {};
+    const persistedProgress = getNode(id)?.data?.persistedProgress || data.persistedProgress;
+    const cardJobRunId = effectiveJobSourceCardRunId(
+      progressRef.current,
+      persistedProgress,
+      hubData,
+      data.sourceId,
+    );
+    const cardOwnsCurrentGate = Array.isArray(hubData.scrapeWarnings)
+      && hubData.scrapeWarnings.some((warning) => (
+        warning?.sourceId === data.sourceId && isJobSourceWarningGating(warning)
+      ));
+    // Once the last Solve clears its hub warning, this particular resolver can
+    // still be carrying the exact Board-owned scoring continuation in the
+    // same queue turn. Preserve Board rollback if this card disappears there;
+    // do not grant the exception to a clean sibling or a merely queued card.
+    const cardOwnsExactInFlightBoardContinuation = !cardOwnsCurrentGate
+      && resolveStartedRef.current
+      && !!cardJobRunId;
+    const pausedBoardOwner = (cardOwnsCurrentGate || cardOwnsExactInFlightBoardContinuation)
+      ? findJobSearchBoardCancellablePausedSourceOwner(
+          data.hubId,
+          cardJobRunId,
+          getNodes(),
+          getEdges(),
+          { allowInFlightContinuation: cardOwnsExactInFlightBoardContinuation },
+        )
+      : null;
+    if (pausedBoardOwner) {
+      // This also rejects a queued resolver belonging to this card. The Board
+      // cancellation then owns the active worker through its exact child
+      // rollback path; do not send a raw hub-scoped abort that could outlive or
+      // race that transaction.
+      cancelQueuedRunsForNode(id, 'Job source card removed');
+      void jobSearchCoordinator.cancelBoardModule(pausedBoardOwner.orchestratorNodeId, {
+        boardRunId: pausedBoardOwner.boardRunId,
+        reason: 'job-source-card-removed',
+        suppressToast: true,
+      }).then((result) => {
+        if (result?.cancelled === true || result?.status === 'completed') return;
+        EventLogger.error(
+          `[JobSource][${data.hubId}/${data.sourceId}] Exact Board cancellation after card removal did not settle:`,
+          result?.error || result?.status || 'unknown result',
+        );
+      }).catch((error) => {
+        // Preserve the Board's durable receipt for its normal Retry path; an
+        // unmount cleanup cannot safely fall back to a hub-wide abort here.
+        EventLogger.error(
+          `[JobSource][${data.hubId}/${data.sourceId}] Exact Board cancellation after card removal failed:`,
+          error,
+        );
+      });
+      resolveInFlightRef.current = false;
+      resolveStartedRef.current = false;
+      return;
+    }
     if (!resolveInFlightRef.current) return;
     // The queue entry is scheduled under the hub (the backend ownership), with
     // this card registered as a cancellation alias. Cancel the queue first so
@@ -215,7 +306,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     }
     resolveInFlightRef.current = false;
     resolveStartedRef.current = false;
-  }, [cancelQueuedRunsForNode, data.hubId, id]);
+  });
 
   useEffect(() => {
     if (!window.electronAPI?.onJobSourceProgress) return;
@@ -345,7 +436,51 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       if (event.detail?.hubId !== data.hubId) return;
       const isCleanTerminal = (progress?.status === 'done' || progress?.status === 'skipped') && !progress.warning;
       if (!isCleanTerminal) return;
-      deleteElements({ nodes: [{ id }] });
+      // The owning Search's automatic tidy-up can land while the card's final
+      // Solve still owns a Board-scoped continuation. Mark only this scheduled
+      // removal so unmount cleanup can preserve that continuation. A failed or
+      // ignored React Flow deletion clears the marker shortly after, ensuring a
+      // later person-initiated deletion still uses the normal cancellation
+      // ownership path.
+      automaticCleanDismissalRef.current = true;
+      if (automaticCleanDismissalResetTimerRef.current != null) {
+        clearTimeout(automaticCleanDismissalResetTimerRef.current);
+      }
+      automaticCleanDismissalResetTimerRef.current = setTimeout(() => {
+        automaticCleanDismissalRef.current = false;
+        automaticCleanDismissalResetTimerRef.current = null;
+      }, 1_000);
+      try {
+        const deletion = deleteElements({ nodes: [{ id }] });
+        void Promise.resolve(deletion).then((outcome) => {
+          // React Flow returns deletedNodes for an accepted deletion. Retain
+          // the marker until component cleanup in that normal case; otherwise
+          // release it promptly so a later real deletion cannot be mistaken
+          // for this automatic tidy-up.
+          if (
+            Array.isArray(outcome?.deletedNodes)
+            && !outcome.deletedNodes.some(node => node?.id === id)
+          ) {
+            automaticCleanDismissalRef.current = false;
+            if (automaticCleanDismissalResetTimerRef.current != null) {
+              clearTimeout(automaticCleanDismissalResetTimerRef.current);
+              automaticCleanDismissalResetTimerRef.current = null;
+            }
+          }
+        }).catch(() => {
+          automaticCleanDismissalRef.current = false;
+          if (automaticCleanDismissalResetTimerRef.current != null) {
+            clearTimeout(automaticCleanDismissalResetTimerRef.current);
+            automaticCleanDismissalResetTimerRef.current = null;
+          }
+        });
+      } catch {
+        automaticCleanDismissalRef.current = false;
+        if (automaticCleanDismissalResetTimerRef.current != null) {
+          clearTimeout(automaticCleanDismissalResetTimerRef.current);
+          automaticCleanDismissalResetTimerRef.current = null;
+        }
+      }
     };
     document.addEventListener('job-source-dismiss-clean', onDismiss);
     return () => document.removeEventListener('job-source-dismiss-clean', onDismiss);
@@ -384,7 +519,30 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // its pre-score recovery snapshot write. The button can be stale for one
     // render, so this guard is deliberately independent of its disabled state.
     if (resolving || resolveInFlightRef.current || hubBusy) return;
-    if (findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())) {
+    // Keep this card action pinned to the warning generation captured at the
+    // click boundary. A newer hub/plan pair must not make a stale card appear
+    // eligible for the Board's paused-continuation exception. Do not borrow
+    // the live hub token here: an old rendered card with no token must not
+    // become authorized merely because a newer Board pause uses that hub.
+    const hubDataAtClick = getNode(data.hubId)?.data || {};
+    const jobRunId = effectiveJobSourceCardRunId(
+      progress,
+      data.persistedProgress,
+      hubDataAtClick,
+      data.sourceId,
+    );
+    if ((hubDataAtClick.jobRunId || null) !== jobRunId) {
+      addToast({
+        title: 'Search Updated',
+        description: 'This source card belongs to an older search run. Wait for the current source status.',
+        type: 'info',
+      });
+      return;
+    }
+    if (
+      findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
+      && !findJobSearchBoardPausedContinuationOwner(data.hubId, jobRunId, getNodes(), getEdges())
+    ) {
       addToast({
         title: 'Job Board Recovery in Progress',
         description: 'Finish or cancel the interrupted Job Board run before resolving this source.',
@@ -405,13 +563,20 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // lands; this just bridges the gap until the first event arrives. Snapshot
     // the prior state so a solve that returns resolved:false WITHOUT emitting a
     // fresh event (some captcha sources) can be restored to its actionable red.
-    const prevForRestore = progress;
-    setProgress(prev => prev ? { ...prev, status: 'searching', warning: null, detail: 'Solving…' } : prev);
-    const requestedHubData = getNode(data.hubId)?.data || {};
+    // Pin a proven legacy fallback onto this local action before the first
+    // await. Any later card event/restore now carries the exact generation and
+    // cannot require another compatibility fallback.
+    const prevForRestore = progress ? { ...progress, jobRunId } : progress;
+    setProgress(prev => prev ? {
+      ...prev,
+      jobRunId,
+      status: 'searching',
+      warning: null,
+      detail: 'Solving…',
+    } : prev);
     // The source's event token wins: a hub can start a newer run while a
     // retained warning card still paints, and a Solve must stay scoped to the
     // run that created that warning.
-    const jobRunId = progress?.jobRunId || requestedHubData.jobRunId || null;
     const capturedRunIsCurrent = () => {
       const hub = getNode(data.hubId);
       return !!hub && (hub.data?.jobRunId || null) === (jobRunId || null);
@@ -448,7 +613,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         // Treat those two legacy representations as the same generation; a
         // pair of actual, differing tokens still fences a queued Solve.
         || (hubData.jobRunId || null) !== (jobRunId || null)
-        || findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
+        || (
+          findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
+          && !findJobSearchBoardPausedContinuationOwner(data.hubId, jobRunId, getNodes(), getEdges())
+        )
         || isJobSourceResolveBusyHubState(hubData.hubState)) {
         setProgress(prev => (
           (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
@@ -470,7 +638,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // which the guarded early return restored the card but permanently
       // removed this warning from the Board's rollback baseline.
       document.dispatchEvent(new CustomEvent('job-source-retry-start', {
-        detail: { hubId: data.hubId, sourceId: data.sourceId },
+        detail: { hubId: data.hubId, sourceId: data.sourceId, jobRunId },
       }));
       let result;
       const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
@@ -521,6 +689,24 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // Keep the raw diagnostic in EventLogger; card data gets only concise,
       // actionable copy so a Puppeteer stderr blob is never persisted.
       if (!resolverAlive() || !capturedRunIsCurrent()) return;
+      // Board cancellation is deliberately durable before its child cleanup
+      // finishes. A browser Solve can settle during that interval with the
+      // same Search token, so the token check above is not enough: only the
+      // exact sources-ready continuation recorded by the still-live Board may
+      // publish rows or queue scoring. Restore the card's prior actionable
+      // state locally; do not dispatch a hub event into the cancelling owner.
+      if (isJobSearchBoardPausedContinuationBlocked(data.hubId, jobRunId, getNodes(), getEdges())) {
+        EventLogger.log(
+          `[JobSource][${data.hubId}/${data.sourceId}] Ignored Solve result after its Board continuation was fenced`,
+        );
+        setProgress(prev => (
+          (prev?.jobRunId || null) === (jobRunId || null)
+            ? prevForRestore
+            : prev
+        ));
+        setDismissed(false);
+        return;
+      }
       if (isJobWorkflowDeletionPending(data.hubId)) {
         // A delete confirmation is still reversible. Keep the original source
         // warning actionable instead of publishing a completed Solve into a
@@ -863,11 +1049,22 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     ),
   );
   const hubBoardRecoveryOwned = useStore(
-    useCallback((s) => !!findJobSearchBoardActiveRecoveryOwner(
-      data.hubId,
-      s.nodeLookup,
-      s.edges,
-    ), [data.hubId]),
+    useCallback((s) => {
+      const hubData = s.nodeLookup.get(data.hubId)?.data || {};
+      const jobRunId = effectiveJobSourceCardRunId(
+        progress,
+        data.persistedProgress,
+        hubData,
+        data.sourceId,
+      );
+      return !!findJobSearchBoardActiveRecoveryOwner(data.hubId, s.nodeLookup, s.edges)
+        && !findJobSearchBoardPausedContinuationOwner(
+          data.hubId,
+          jobRunId,
+          s.nodeLookup,
+          s.edges,
+        );
+    }, [data.hubId, data.persistedProgress, data.sourceId, progress]),
   );
   const fallbackCount = useStore(
     useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.finalSourceCounts?.[data.sourceId], [data.hubId, data.sourceId])
@@ -1060,8 +1257,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                       // could not start) while the panel right above correctly
                       // said to close a window. Say only what is true for every
                       // resumable warning.
-                      ? 'Resumes the search from where this source stopped — see the reason above for what to do first'
-                  : 'Open the failed page in a browser sharing your session — solve the captcha or log in, cookies persist for the next Re-run Search'}
+                      ? 'Resumes the search from where this source stopped. A waiting Job Board continues automatically once every blocked source is resolved or skipped — see the reason above for what to do first'
+                  : 'Open the failed page in a browser sharing your session — solve the captcha or log in. A waiting Job Board continues automatically once every blocked source is resolved or skipped'}
             >
               <ExternalLink size={9} />
               {resolving ? 'Running…' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve')}
@@ -1075,7 +1272,30 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 || isJobWorkflowDeletionPending(data.hubId)
                 || hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)
               ) return;
-              if (findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())) {
+              const hubDataAtSkip = getNode(data.hubId)?.data || {};
+              const sourceJobRunId = effectiveJobSourceCardRunId(
+                progress,
+                data.persistedProgress,
+                hubDataAtSkip,
+                data.sourceId,
+              );
+              if ((hubDataAtSkip.jobRunId || null) !== sourceJobRunId) {
+                addToast({
+                  title: 'Search Updated',
+                  description: 'This source card belongs to an older search run. Wait for the current source status.',
+                  type: 'info',
+                });
+                return;
+              }
+              if (
+                findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
+                && !findJobSearchBoardPausedContinuationOwner(
+                  data.hubId,
+                  sourceJobRunId,
+                  getNodes(),
+                  getEdges(),
+                )
+              ) {
                 addToast({
                   title: 'Job Board Run in Progress',
                   description: 'Finish or cancel the owning Job Board run before skipping this source.',
@@ -1086,6 +1306,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               setDismissed(true);
               setProgress(prev => prev ? {
                 ...prev,
+                jobRunId: sourceJobRunId,
                 status: warningBlocksScoring
                   ? 'skipped'
                   : (prev.status === 'done' || prev.status === 'skipped'
@@ -1105,6 +1326,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                   action: warningAction,
                   warningCode: warning?.code || null,
                   warningSeverity: warning?.severity || null,
+                  // Unlike ordinary stale UI state, a Board-paused Search can
+                  // continue only its recorded generation. Carry the card's
+                  // own token through Skip so the hub refuses an old card's
+                  // event before it clears warnings or admits scoring.
+                  jobRunId: sourceJobRunId,
                 },
               }));
               // A non-gating warning never held the hub open, so there may be no
@@ -1122,7 +1348,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               : hubBoardRecoveryOwned
                 ? 'The owning Job Board run must finish or be cancelled first'
               : warningBlocksScoring
-                ? 'Skip the unresolved remainder of this source and continue once every blocked source is resolved or skipped.'
+                ? 'Skip the unresolved remainder of this source. Once every blocked source is resolved or skipped, scoring and any waiting Job Board continue automatically.'
                 : 'Dismiss this warning. It did not pause scoring and does not remove jobs already collected from this source.'}
           >
             <SkipForward size={9} />

@@ -76,15 +76,18 @@ export function useCanvasActions({
       return clone;
     });
     const newNodes = remapCopiedJobModuleReferences(nodesToDuplicate, clonedNodes, oldIdToNewId, sourceEdges);
+    const retainedNewNodeIds = new Set(newNodes.map(node => node?.id).filter(Boolean));
 
     const newEdges = [];
     sourceEdges.forEach(eEdge => {
-      if (oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target)) {
+      const source = oldIdToNewId.get(eEdge.source);
+      const target = oldIdToNewId.get(eEdge.target);
+      if (source && target && retainedNewNodeIds.has(source) && retainedNewNodeIds.has(target)) {
         newEdges.push({
           ...eEdge,
           id: generateId(),
-          source: oldIdToNewId.get(eEdge.source),
-          target: oldIdToNewId.get(eEdge.target),
+          source,
+          target,
           selected: true,
         });
       }
@@ -195,9 +198,14 @@ export function useCanvasActions({
       oldIdToNewId,
       clipboardData.edges || [],
     );
+    const retainedNewNodeIds = new Set(newNodes.map(node => node?.id).filter(Boolean));
 
     const newEdges = (clipboardData.edges || [])
-      .filter(eEdge => oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target))
+      .filter(eEdge => {
+        const source = oldIdToNewId.get(eEdge?.source);
+        const target = oldIdToNewId.get(eEdge?.target);
+        return !!source && !!target && retainedNewNodeIds.has(source) && retainedNewNodeIds.has(target);
+      })
       .map(eEdge => ({
         ...eEdge,
         id: generateId(),

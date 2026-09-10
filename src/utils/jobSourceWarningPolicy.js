@@ -13,6 +13,42 @@ export function isJobSourceWarningGating(warning) {
 }
 
 /**
+ * Select the generation a persisted source-card action is allowed to address.
+ *
+ * Current cards carry their own `jobRunId`; that token is always authoritative
+ * (including a deliberately malformed/null token, which must fail closed).
+ * Older saved canvases predate per-card tokens, though. A legacy warning card
+ * is still actionable after reload only when the live hub is paused at
+ * `sources-ready` for this exact gating source. In that narrowly-proven case
+ * the hub's current token is the only recoverable generation to adopt.
+ */
+export function effectiveJobSourceCardRunId(
+  progress,
+  persistedProgress,
+  hubData,
+  sourceId,
+) {
+  const tokenCandidates = [progress, persistedProgress];
+  for (const candidate of tokenCandidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    if (!Object.hasOwn(candidate, 'jobRunId')) continue;
+    return typeof candidate.jobRunId === 'string' && candidate.jobRunId
+      ? candidate.jobRunId
+      : null;
+  }
+  const hubRunId = typeof hubData?.jobRunId === 'string' && hubData.jobRunId
+    ? hubData.jobRunId
+    : null;
+  const matchesCurrentGate = Array.isArray(hubData?.scrapeWarnings)
+    && hubData.scrapeWarnings.some((warning) => (
+      warning?.sourceId === sourceId && isJobSourceWarningGating(warning)
+    ));
+  return hubData?.hubState === 'sources-ready' && hubRunId && matchesCurrentGate
+    ? hubRunId
+    : null;
+}
+
+/**
  * The source-card action is a real Skip only for a gating warning. For a
  * partial-data warning, it merely acknowledges and hides the diagnostic.
  */

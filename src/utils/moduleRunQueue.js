@@ -100,6 +100,13 @@ export function createModuleRunQueue({ onChange = null } = {}) {
     Promise.resolve()
       .then(() => {
         if (entry.cancelled) throw new Error(entry.cancelReason || 'Node deleted');
+        // `active` means this entry owns the lane, but it is not yet safe to
+        // start external work until this turn has actually reached onStart.
+        // Deletion/reset can happen between acquireModuleRun() returning and
+        // this microtask. Keep that tiny admission window cancellable rather
+        // than allowing a removed node to open a worker after its queue entry
+        // was already considered active.
+        entry.started = true;
         if (typeof entry.onStart === 'function') {
           entry.onStart({ ...describeEntry(entry, 0), wasQueued: !!entry.wasQueued });
         }
@@ -154,6 +161,7 @@ export function createModuleRunQueue({ onChange = null } = {}) {
       resolve,
       reject,
       released: false,
+      started: false,
       cancelled: false,
       cancelReason: null,
       wasQueued: false,
@@ -216,6 +224,30 @@ export function createModuleRunQueue({ onChange = null } = {}) {
         cancelled++;
         laneChanged = true;
       }
+      // startEntry assigns an entry to `active` synchronously, but invokes
+      // onStart in the next microtask. Treat that pre-start admission window
+      // like a queued entry: no user code or external worker has begun yet,
+      // and cancellation must prevent it from doing so. Once `started` is
+      // true the owner is responsible for aborting its actual task; the queue
+      // only releases its lane when that owner settles its lease.
+      const active = state.active;
+      if (
+        active
+        && !active.started
+        && (
+          active.nodeId === nodeId
+          || (includeCancellationAliases && active.cancellationNodeIds.includes(nodeId))
+        )
+      ) {
+        active.released = true;
+        active.cancelled = true;
+        active.cancelReason = reason;
+        state.active = null;
+        safeCall(active.onCancel, describeEntry(active, 0));
+        active.reject(new Error(reason));
+        cancelled++;
+        laneChanged = true;
+      }
       if (laneChanged) affectedLanes.push(lane);
     });
     if (cancelled > 0) {
@@ -224,6 +256,11 @@ export function createModuleRunQueue({ onChange = null } = {}) {
         removeIdleLane(lane);
       });
       emitChange();
+      // Match normal release semantics: observers see the cancelled entry
+      // gone before the next waiting entry starts. Deferring drain until every
+      // lane has been examined also prevents a replacement entry from being
+      // accidentally considered part of the same cancellation sweep.
+      affectedLanes.forEach(drain);
     }
     return cancelled;
   };
