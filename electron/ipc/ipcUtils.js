@@ -256,9 +256,21 @@ export function snapshotActiveNodeTasks(senderId = null) {
     for (const [nodeId, set] of tasks.entries()) {
       let oldestRegisteredAt = now;
       const channels = new Set();
+      // Keep a small, redacted per-controller shape for diagnostics that need
+      // to distinguish one node's simultaneous operations.  In particular a
+      // manual AI handoff is a legitimate long-lived IPC invocation, whereas
+      // an unrelated operation on the same node may still be genuinely stuck.
+      // Channel and opaque workflow id are control-plane metadata only; neither
+      // is rendered, and no IPC arguments, prompt, response, or file path is
+      // retained here.
+      const taskDetails = [];
       for (const meta of set.values()) {
         if (meta.registeredAt < oldestRegisteredAt) oldestRegisteredAt = meta.registeredAt;
         if (meta.channel) channels.add(meta.channel);
+        taskDetails.push({
+          channel: meta.channel || null,
+          manualAiRunId: meta.manualAiRunId || null,
+        });
       }
       out.push({
         senderId: sender?.id ?? null,
@@ -266,6 +278,7 @@ export function snapshotActiveNodeTasks(senderId = null) {
         taskCount: set.size,
         oldestAgeMs: now - oldestRegisteredAt,
         channels: [...channels],
+        taskDetails,
       });
     }
   }

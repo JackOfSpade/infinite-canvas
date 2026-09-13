@@ -6,6 +6,7 @@ import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '
 import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
 import { buildMainProcessLogsMarkdown, newestFirstLogLines, timestampedLogLines } from '../test-dependencies.js';
 import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/utils/EventLogger.js';
+import { descriptionPanelFailureAttribution } from '../../electron/ipc/browser/manualScraper.js';
 // Imported directly rather than through test-dependencies.js (a file this task
 // must not touch): clipboardCap.js has zero electron/module dependencies, so
 // this is safe and mirrors the EventLogger.js direct-import pattern above.
@@ -26,7 +27,7 @@ import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
-import { handoffElapsed, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { buildJobBoardDiagnostics, buildJobLinkSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
@@ -35,12 +36,140 @@ import { isTerminalSourceStatus } from '../test-dependencies.js';
 import { clipReportText } from '../test-dependencies.js';
 import { composeDetailBlockReprobeResult, didDetailBlockReprobeRecover } from '../test-dependencies.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { jobRunPathScopeForCanvas } from '../../electron/ipc/jobRunStaging.js';
+import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas } from '../../electron/ipc/jobRunStaging.js';
+import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
+import { __recordJobSourceDispatchForTests, __resetJobsTelemetryForTests } from '../../electron/ipc/jobs.js';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../../src/utils/jobBoardProvenance.js';
+import { collectCompactJobBoardTopology } from '../../src/utils/jobBoardReportTopology.js';
 import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 
 export default [
+  {
+    name: 'job diagnostics never joins ambiguous terminal receipts to another hub snapshot',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-receipt-snapshot-join-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubA = 'receipt-snapshot-hub-a';
+      const hubB = 'receipt-snapshot-hub-b';
+      const writeGeneration = (hubId, runId, count) => {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({ runId, sourceHubId: hubId, canvasFilePath: canvas, jobs: Array.from({ length: count }, () => ({})) }));
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({
+          runId, nodeId: hubId, terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: count }, cleanup: { attempted: true, cleared: true },
+        }));
+      };
+      try {
+        writeGeneration(hubA, 'shared-prefix-run-a', 3);
+        writeGeneration(hubB, 'shared-prefix-run-b', 12);
+        const ambiguous = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]), [], 0, new Set([hubA, hubB]));
+        assert(ambiguous.includes('Terminal receipt: ⚠️ ambiguous across 2 current Job Search hubs')
+          && ambiguous.includes('Saved score-ready snapshot: ambiguous terminal receipts')
+          && ambiguous.includes('multiple terminal receipt generations are present; no single run was selected for compact reconciliation')
+          && !ambiguous.includes('terminal receipt is not completed')
+          && !ambiguous.includes('12 job(s)'),
+        'multiple completed current receipts must state ambiguity rather than borrowing either hub’s snapshot or claiming one failed');
+
+        // A selected live hub is the only admissible path to a matching
+        // generation; matching by owner alone is insufficient after a rerun.
+        const selected = buildJobCompletionAssessment(canvas, new Set([hubA]), [], 0, new Set([hubA]));
+        assert(selected.includes('Saved score-ready snapshot: 3 job(s)')
+          && selected.includes('run `shared-prefix-run-a`')
+          && !selected.includes('12 job(s)'),
+        'one current receipt joins only its exact owner/run snapshot');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { receiptScopes: 2 };
+    },
+  },
+  {
+    name: 'job diagnostics bound oversized snapshots and retain Board transaction metadata',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-board-diagnostic-bounds-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'sameprefix-source-A';
+      const secondHubId = 'sameprefix-source-B';
+      const boardId = 'sameprefix-board-A';
+      const twinBoardId = 'sameprefix-board-B';
+      try {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({
+          runId: 'sameprefix-run-A', sourceHubId: hubId, canvasFilePath: canvas, createdAt: '2026-09-13T00:00:00.000Z', gatheredJobCount: 7,
+          jobs: [{ description: 'x'.repeat(4 * 1024 * 1024) }],
+        }));
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(recovery.includes('TOO_LARGE') && recovery.includes('bounded header only, unverified')
+          && recovery.includes('7 score-ready (header claim)'),
+        'oversized snapshots expose only a bounded, explicitly unverified header');
+
+        const board = { id: boardId, type: 'jobboard', data: {
+          hubState: 'empty', resultCount: 0, stale: false,
+          selectedSearchModuleIds: [hubId, secondHubId],
+          boardScanResume: { phase: 'awaiting-source', boardRunId: 'sameprefix-run-board', activeSourceId: hubId, awaitingSourceId: secondHubId, completedSourceRuns: [{ sourceHubId: hubId, runId: 'sameprefix-run-A' }] },
+          combineSignature: '8:[["sameprefix-source-A","a"],["sameprefix-source-B","b"]]',
+          // The manual-combine receipt deliberately uses sourceId rather than
+          // persisted sourceHubId. FULL diagnostics must retain this pair.
+          combineSourceRuns: [{ sourceId: secondHubId, runId: 'sameprefix-combine-B' }],
+          recoverableFailure: { stage: 'combine' }, cancellationCleanup: { status: 'rolled-back' }, clearProvenance: { priorResultCount: 4 },
+        } };
+        const twinBoard = { id: twinBoardId, type: 'jobboard', data: { hubState: 'empty', resultCount: 0 } };
+        // The only real Board↔Search edge is after more than 2,000 unrelated
+        // edges. Diagnostics and completion assembly must inspect it exactly.
+        const lateLiveEdge = { id: 'edge-live', source: hubId, target: boardId };
+        const longEdges = [
+          ...Array.from({ length: 2_001 }, (_, index) => ({ id: `unrelated-${index}`, source: `x-${index}`, target: `y-${index}` })),
+          lateLiveEdge,
+          { id: 'edge-b', source: secondHubId, target: boardId },
+        ];
+        const boardReport = buildJobBoardDiagnostics([
+          { id: hubId, type: 'jobhub', data: {} }, { id: secondHubId, type: 'jobhub', data: {} }, board, twinBoard,
+          { id: 'group-1', type: 'jobgroup', data: { hubId: boardId } }, { id: 'card-1', type: 'jobcard', data: { hubId: boardId } },
+        ], longEdges);
+        const sourceLabels = [...boardReport.matchAll(/samepref…[a-f0-9]+/g)].map(match => match[0]);
+        const boardLabels = [...boardReport.matchAll(/- Board `([^`]+)`:/g)].map(match => match[1]);
+        assert(boardReport.includes('connected=') && boardReport.includes('groups=1 · cards=1')
+          && boardReport.includes('phase=awaiting-source') && boardReport.includes('recoverable-failure=recorded')
+          && boardReport.includes('cancellation=recorded') && boardReport.includes('clear=recorded (prior results 4)')
+          && boardReport.includes('combine-source-runs=1')
+          && new Set(sourceLabels).size >= 2
+          && boardLabels.length === 2 && new Set(boardLabels).size === 2
+          && !boardReport.includes(hubId) && !boardReport.includes(secondHubId)
+          && !boardReport.includes(boardId) && !boardReport.includes(twinBoardId),
+        'Board diagnostics retain sourceId combine receipts, scan late live edges, and keep colliding labels distinct across individual Board rows');
+
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({
+          runId: 'sameprefix-run-A', nodeId: hubId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 7 }, cleanup: { attempted: true, cleared: true },
+        }));
+        const full = generateMarkdown({
+          description: 'empty connected Board correlation fixture', filterCode: 'FULL',
+          filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [hubId, boardId], currentJobHubIds: [hubId], jobBoardStates: [], jobBoardStateCount: 0, omittedSections: [] },
+          nodes: [{ id: hubId, type: 'jobhub', data: {} }, board],
+          edges: longEdges, drawings: [], frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        }).markdown;
+        assert(full.includes('Job Board consumers: 1/1 correlate to this source run'),
+          'a Board omitted from compact filter stats still inherits its live Job Search edge for completion correlation');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { boundedSnapshot: true, emptyConnectedBoard: true };
+    },
+  },
+  {
+    name: 'late panel failures retain the issuing card attribution',
+    run: () => {
+      const current = { startIndex: 8, key: 'next-card', title: 'Next card' };
+      const issuing = { startIndex: 7, key: 'previous-card', title: 'Previous card' };
+      const late = descriptionPanelFailureAttribution(issuing, current);
+      const beforeFirstRequest = descriptionPanelFailureAttribution(null, current);
+      assert(late.startIndex === 7 && late.key === 'previous-card' && late.title === 'Previous card',
+        'a response delivered during the between-card cooldown must defer and report the request that caused it, not the next card');
+      assert(beforeFirstRequest.startIndex === 8 && beforeFirstRequest.key === 'next-card',
+        'without an issued request, late-panel attribution must safely retain the current fallback');
+      return { lateIndex: late.startIndex + 1, fallbackIndex: beforeFirstRequest.startIndex + 1 };
+    },
+  },
   {
     name: 'Job completion diagnostics preserve opaque delimiter-bearing Board correlations and reject malformed v8 pairs',
     run: () => {
@@ -116,8 +245,9 @@ export default [
           && !valid.includes('none correlate to this source run'),
         'a valid structured signature preserves delimiter-bearing source ids for exact Board correlation');
         assert(connected.includes('1/1 correlate to this source run')
-          && cleared.includes('1/1 correlate to this source run'),
-        'connected-edge and clear-receipt ownership paths preserve the same opaque delimiter-bearing id for correlation');
+          && cleared.includes('1/1 correlate to this source run')
+          && !connected.includes(sourceId) && !cleared.includes(sourceId),
+          'connected-edge and clear-receipt ownership paths preserve the same opaque delimiter-bearing id for correlation');
         assert(malformed.includes('1 recorded · none correlate to this source run')
           && !malformed.includes('1/1 correlate to this source run'),
         'a malformed structured signature with a non-string fingerprint cannot certify Board correlation');
@@ -125,6 +255,95 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { delimiterBearingId: true, connectedAndClearCorrelate: true, malformedFingerprintRejected: true };
+    },
+  },
+  {
+    name: 'Job completion assessment redacts colliding unsafe Board ids across stale, clear, taxonomy, and consumer facts',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-completion-board-redaction-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const sourceId = 'completion-redaction-source';
+      const runId = 'completion-redaction-run';
+      // These deliberately share a redaction prefix and contain imported/custom
+      // punctuation that must never cross into the support-report prose.
+      const staleBoardId = 'sameprefix-board/unsafe?stale';
+      const clearBoardId = 'sameprefix-board/unsafe?clear';
+      const unionBoardId = 'sameprefix-board/unsafe?union';
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+        scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing,
+        pipeline: telemetry.pipeline,
+        history: telemetry.history,
+        preferences: telemetry.preferences,
+      };
+      try {
+        const completedAt = Date.now();
+        fs.writeFileSync(canvas, '{}', 'utf8');
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), sourceId);
+        fs.mkdirSync(path.dirname(analysis.jsonPath), { recursive: true });
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({
+          runId, sourceHubId: sourceId, canvasFilePath: canvas, gatheredJobCount: 1, jobs: [{}],
+        }), 'utf8');
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, sourceId), JSON.stringify({
+          runId, nodeId: sourceId, completedAt,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 1 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        Object.assign(telemetry, {
+          nodeId: sourceId,
+          search: { runId, kept: 1, bySource: {} },
+          resolves: {},
+          scoring: { input: 1, scored: 1, placeholders: 0, unscored: 0, failedBatches: 0 },
+          bucketing: { input: 2, missing: 0, duplicated: 0 },
+          pipeline: { runId, phase: 'completed' },
+          history: null,
+          preferences: null,
+        });
+        const assessment = buildJobCompletionAssessment(canvas, new Set([sourceId]), [
+          {
+            id: staleBoardId, hubState: 'done', resultCount: 1, mergeUnique: 1,
+            combineSignature: combineSignature([{ id: sourceId, fingerprint: 'stale' }]),
+            connectedSourceHubIds: [sourceId], stale: true,
+          },
+          {
+            id: clearBoardId, hubState: 'empty', resultCount: 0, renderedCardCount: 0, mergeUnique: null,
+            connectedSourceHubIds: [sourceId], stale: false,
+            clearProvenance: {
+              clearedAt: completedAt + 1,
+              priorCombineSignature: combineSignature([{ id: sourceId, fingerprint: 'before-clear' }]),
+              priorResultCount: 1,
+              priorSourceRuns: [{ sourceHubId: sourceId, runId }],
+            },
+          },
+          {
+            id: unionBoardId, hubState: 'done', resultCount: 2, mergeUnique: 2, renderedCardCount: 2,
+            combineSignature: combineSignature([
+              { id: sourceId, fingerprint: 'current' },
+              { id: 'completion-redaction-sibling', fingerprint: 'sibling' },
+            ]),
+            connectedSourceHubIds: [sourceId], stale: false,
+          },
+        ], 3, new Set([sourceId]));
+        const labels = [...assessment.matchAll(/`(id…[a-f0-9]+)`/g)].map(match => match[1]);
+        const clearLabel = assessment.match(/deliberately cleared: `(id…[a-f0-9]+)`/)?.[1];
+        assert(assessment.includes('BOARD REFRESH REQUIRED')
+          && assessment.includes('was deliberately cleared after this run')
+          && assessment.includes('deliberately cleared:')
+          && assessment.includes('input is Job Board')
+          && ![staleBoardId, clearBoardId, unionBoardId].some(id => assessment.includes(id))
+          && new Set(labels).size === 3
+          && !!clearLabel
+          && labels.filter(label => label === clearLabel).length >= 2,
+        'one completion-wide label context redacts every unsafe Board id while retaining distinct labels and a stable clear-reference across assessment lines');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { redactedBoards: 3, stableClearLabel: true };
     },
   },
   {
@@ -198,6 +417,231 @@ export default [
         'issue-report renderer payload retains safe counts for diagnostics');
     },
 },
+  {
+    name: 'Board transaction diagnostics retain nested canvas-local connectivity without cross-level joins',
+    run: () => {
+      const sharedBoardId = 'same-board-id';
+      const rootSourceId = 'root-source-only';
+      const nestedSourceId = 'nested-source-only';
+      const nestedBoard = { id: sharedBoardId, type: 'jobboard', data: { hubState: 'done', resultCount: 2 } };
+      const report = buildJobBoardDiagnostics([
+        { id: sharedBoardId, type: 'jobboard', data: { hubState: 'empty', resultCount: 0 } },
+        { id: rootSourceId, type: 'jobhub', data: {} },
+        {
+          id: 'container-group', type: 'group', data: {
+            canvasData: {
+              nodes: [
+                nestedBoard,
+                { id: nestedSourceId, type: 'jobhub', data: {} },
+                { id: 'nested-card', type: 'jobcard', hidden: true, data: { hubId: sharedBoardId } },
+                { id: 'nested-result-group', type: 'jobgroup', data: { hubId: sharedBoardId } },
+              ],
+              edges: [{ id: 'nested-link', source: nestedSourceId, target: sharedBoardId }],
+            },
+          },
+        },
+      ], [{ id: 'root-link', source: rootSourceId, target: sharedBoardId }]);
+      const rows = report.split('\n').filter(line => line.startsWith('- Board '));
+      assert(rows.length === 2
+        && rows.some(line => line.includes('scope=root') && line.includes('groups=0 · cards=0'))
+        && rows.some(line => line.includes('scope=nested canvas 1 (depth 1)') && line.includes('groups=1 · cards=1 · hidden-children=1')),
+      `nested Board/card/group facts must be rendered from their own canvas level, got:\n${report}`);
+      const sourceLines = report.split('\n').filter(line => line.includes('  - Sources:'));
+      assert(sourceLines.length === 2
+        && sourceLines.some(line => line.includes('…root-sou'))
+        && sourceLines.some(line => line.includes('…nested-s'))
+        && sourceLines.every(line => !line.includes('…root-sou`, `…nested-s')),
+      `same Board id in separate levels must not merge root/nested connections, got:\n${report}`);
+      assert(!report.includes(sharedBoardId) && !report.includes(rootSourceId) && !report.includes(nestedSourceId),
+        'nested diagnostics must retain the Board section’s opaque-id redaction');
+      return { boards: rows.length, nestedCanvas: true };
+    },
+  },
+  {
+    name: 'Job Board report topology keeps sibling duplicate ids local and reports bounded no-Board inspection',
+    run: () => {
+      const duplicateBoardId = 'duplicated-imported-board';
+      const topology = collectCompactJobBoardTopology([
+        {
+          id: 'first-group', type: 'group', data: { canvasData: {
+            nodes: [
+              { id: duplicateBoardId, type: 'jobboard', data: {} },
+              { id: 'first-source', type: 'jobhub', data: {} },
+              { id: 'first-card', type: 'jobcard', data: { hubId: duplicateBoardId } },
+            ],
+            edges: [{ source: duplicateBoardId, target: 'first-source' }],
+          } },
+        },
+        {
+          id: 'second-group', type: 'group', data: { canvasData: {
+            nodes: [
+              { id: duplicateBoardId, type: 'jobboard', data: {} },
+              { id: 'second-source', type: 'jobhub', data: {} },
+            ],
+            edges: [{ source: duplicateBoardId, target: 'second-source' }],
+          } },
+        },
+      ], []);
+      assert(topology.boards.length === 2
+        && topology.boards[0].scope !== topology.boards[1].scope
+        && topology.boards[0].connectedSourceHubIds.join(',') === 'first-source'
+        && topology.boards[1].connectedSourceHubIds.join(',') === 'second-source'
+        && topology.boards[0].renderedCardCount === 1,
+      'compact JOBS/RECOVERY Board provenance must retain sibling canvas scope and never cross-link duplicate imported ids');
+
+      const beyondNodeBudget = Array.from({ length: 10_001 }, (_, index) => ({ id: `ordinary-${index}`, type: 'document', data: {} }));
+      beyondNodeBudget.push({ id: 'late-board', type: 'jobboard', data: {} });
+      const bounded = buildJobBoardDiagnostics(beyondNodeBudget, []);
+      assert(bounded.includes('## Job Board Transaction & Display Diagnostics')
+        && bounded.includes('Boards rendered: 0 of 0 discovered')
+        && bounded.includes('node budget'),
+      'a Board beyond the node budget must produce an explicit bounded FULL diagnostic rather than silently disappearing');
+
+      const hostile = { id: 'hostile-but-valid-id', type: 'jobboard' };
+      Object.defineProperty(hostile, 'data', { get: () => { throw new Error('diagnostic getter must not run'); } });
+      const safeReport = buildJobBoardDiagnostics([hostile, { id: 'source', type: 'jobhub', data: {} }], [{ source: 'source', target: hostile.id }]);
+      assert(safeReport.includes('state=`not retained`') && !safeReport.includes('diagnostic getter must not run'),
+        'a throwing Board payload getter must omit only that Board metadata, not make the full diagnostic fail');
+
+      const unreadableLength = new Proxy([], {
+        get(target, key, receiver) {
+          if (key === 'length') throw new Error('private canvas length');
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const unreadableTopology = collectCompactJobBoardTopology([
+        { id: 'unreadable-group', type: 'group', data: { canvasData: { nodes: unreadableLength, edges: [] } } },
+      ], []);
+      assert(unreadableTopology.boards.length === 0
+        && unreadableTopology.omissions.includes('unreadable canvas nodes'),
+        'a proxy-backed nested canvas whose length getter throws must produce a bounded omission rather than aborting report export');
+
+      const nestedBehindUnreadableEdges = buildJobBoardDiagnostics([
+        {
+          id: 'edge-hostile-group', type: 'group', data: { canvasData: {
+            nodes: [{ id: 'nested-after-edge-failure', type: 'jobboard', data: { hubState: 'done' } }],
+            edges: [],
+          } },
+        },
+      ], new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') throw new Error('private root edge state');
+        return Reflect.get(target, key, receiver);
+      } }));
+      assert(nestedBehindUnreadableEdges.includes('nested canvas 1 (depth 1)')
+        && nestedBehindUnreadableEdges.includes('unreadable canvas edges')
+        && !nestedBehindUnreadableEdges.includes('private root edge state'),
+      'an unreadable parent edge collection does not suppress safe nested Board diagnostics');
+
+      const wideCanvas = Array.from({ length: 300 }, (_, index) => ({
+        id: `wide-group-${index}`, type: 'group', data: { canvasData: { nodes: [], edges: [] } },
+      }));
+      const wideTopology = collectCompactJobBoardTopology(wideCanvas, []);
+      const wideFull = buildJobBoardDiagnostics(wideCanvas, []);
+      assert(wideTopology.omissions.includes('canvas-level budget')
+        && wideFull.includes('canvas-level budget'),
+      'both compact and FULL walkers bound queued child canvases, not only levels eventually inspected');
+
+      const hostileClear = new Proxy({}, {
+        get() { throw new Error('private clear provenance must not escape'); },
+      });
+      const resilientCompletion = buildJobCompletionAssessment(null, new Set(), [{
+        id: 'hostile-clear-board', clearProvenance: hostileClear,
+      }], 1, new Set());
+      assert(resilientCompletion.includes('## Job Completion Assessment')
+        && !resilientCompletion.includes('private clear provenance must not escape'),
+      'an unreadable compact clear-provenance object must be omitted locally rather than collapsing the completion assessment');
+
+      const privateSourceHubId = 'private-combine-source-id';
+      const completion = generateMarkdown({
+        description: 'opaque Board provenance fixture', filterCode: 'FULL',
+        filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: ['opaque-board'], currentJobHubIds: [], omittedSections: [] },
+        nodes: [{ id: 'opaque-board', type: 'jobboard', data: { combineSignature: `${privateSourceHubId}=private-fingerprint` } }],
+        edges: [], drawings: [], frontEndState: {}, nodeInternals: [{ id: 'opaque-board', type: 'jobboard', position: {}, selected: false }], nodeComponentStates: [], eventLogs: [],
+      }).markdown;
+      assert(completion.includes('combineSignature: present (opaque source provenance)') && !completion.includes(privateSourceHubId),
+        'Node Diagnostics must retain a Board signature presence fact without leaking source ids embedded in the serialized signature');
+
+      const privateStalePayload = 'query=private-role&token=do-not-export';
+      const staleReport = generateMarkdown({
+        description: 'opaque stale reason fixture', filterCode: 'FULL',
+        filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: ['stale-board'], currentJobHubIds: [], omittedSections: [] },
+        nodes: [{ id: 'stale-board', type: 'jobboard', data: { stale: true, staleReason: privateStalePayload } }],
+        edges: [], drawings: [], frontEndState: {}, nodeInternals: [{ id: 'stale-board', type: 'jobboard', position: {}, selected: false }], nodeComponentStates: [], eventLogs: [],
+      }).markdown;
+      assert(staleReport.includes('staleReason: recorded (details withheld)') && !staleReport.includes(privateStalePayload),
+        'an arbitrary persisted Board stale reason is reduced to a presence fact instead of exporting query/token text');
+
+      const privateManualBoardId = 'manual-board/private?opaque';
+      const manualProgress = manualAiBoardProgressForNode([{
+        id: privateManualBoardId, type: 'jobboard', data: { boardScanResume: {
+          phase: 'awaiting-source', selectedSearchModuleIds: ['manual-source'], completedSourceRuns: {}, activeSourceId: 'manual-source',
+        } },
+      }], 'manual-source');
+      assert(manualProgress.includes('Board `…id`') && !manualProgress.includes(privateManualBoardId),
+        'manual handoff Board context redacts custom Board ids instead of using the raw short-id formatter');
+      return { compactScopes: topology.boards.length, boundedNoBoard: true, getterSafe: true, rawSignatureLeak: false, handoffBoardRedacted: true };
+    },
+  },
+  {
+    name: 'Job-link diagnostics bound cyclic, deep, and oversized renderer payloads',
+    run: () => {
+      const root = [{
+        source: 'google', title: 'Normal listing', company: 'Acme', location: 'Toronto',
+        url: 'https://www.google.com/search?htidocid=normal&token=not-exported',
+      }];
+      let cursor = root;
+      for (let index = 0; index < 200; index++) {
+        const next = [];
+        cursor.push({ next });
+        cursor = next;
+      }
+      cursor.push(root); // Explicit cycle; the walker must not recurse forever.
+      root.push(...Array.from({ length: 6 }, (_, outer) => Array.from({ length: 200 }, (_, inner) => ({
+        source: 'google', title: `Large listing ${outer}-${inner}`, company: 'Acme', location: 'Toronto',
+        url: `https://www.google.com/search?htidocid=${outer}-${inner}&token=not-exported`,
+      }))));
+      const report = buildJobLinkSnapshot(root);
+      assert(report.includes('## Job Listing Link Diagnostics')
+        && report.includes('Normal listing')
+        && report.includes('Inspection was bounded')
+        && report.includes('depth budget')
+        && report.includes('row budget'),
+      `cyclic/deep/oversized payload must produce bounded, explicit diagnostics, got:\n${report.slice(0, 3_000)}`);
+      assert(!report.includes('token='),
+        'bounded link diagnostics must preserve existing URL query/token redaction');
+      return { bounded: true };
+    },
+  },
+  {
+    name: 'Job-link diagnostics cover ordinary wide canvases and bound hostile arrays separately',
+    run: () => {
+      const ordinaryCanvas = [
+        ...Array.from({ length: 292 }, (_, index) => ({
+          source: 'dice', title: `Ordinary listing ${index}`, company: 'Acme', location: 'Toronto',
+          url: `https://careers.example.test/jobs/${index}`,
+        })),
+        ...Array.from({ length: 102 }, (_, index) => ({
+          id: `group-${index}`, type: 'jobgroup', data: { expanded: false },
+        })),
+      ];
+      const ordinary = buildJobLinkSnapshot(ordinaryCanvas);
+      assert(ordinary.includes('Unique job rows inspected: 292')
+        && !ordinary.includes('Unique job rows inspected: 292 (bounded sample)')
+        && ordinary.includes('`dice`: 292 total'),
+      `a 394-node canvas with 292 cards must be fully inspected, got:\n${ordinary.slice(0, 3_000)}`);
+
+      const hostile = Array.from({ length: 5_001 }, (_, index) => ({
+        source: 'dice', title: `Hostile listing ${index}`, company: 'Acme', location: 'Toronto',
+        url: `https://careers.example.test/jobs/${index}`,
+      }));
+      const bounded = buildJobLinkSnapshot(hostile);
+      assert(bounded.includes('Unique job rows inspected: 1000 (bounded sample)')
+        && bounded.includes('per-array child budget')
+        && bounded.includes('row budget'),
+      `a >5,000-item hostile array must be explicitly bounded, got:\n${bounded.slice(0, 3_000)}`);
+      return { ordinaryNodes: ordinaryCanvas.length, ordinaryCards: 292, hostileItems: hostile.length };
+    },
+  },
 {
     name: 'job recovery diagnostics survive restart without in-memory pipeline telemetry',
     run: () => {
@@ -338,9 +782,12 @@ export default [
           && recovery.includes('Last successful saved scrape 2/2: parseable'),
         'recovery diagnostics enumerate each current hub’s owner-scoped current and last-success analysis metadata');
         const assessment = buildJobCompletionAssessment(canvas, new Set([hubA, hubB]));
-        assert(assessment.includes('Saved score-ready snapshot: multiple-owned-snapshots.')
+        assert(assessment.includes('Terminal receipt: ⚠️ ambiguous across 2 current Job Search hubs')
+          && assessment.includes('Saved score-ready snapshot: ambiguous terminal receipts.')
+          && assessment.includes('multiple terminal receipt generations are present; no single run was selected for compact reconciliation')
+          && !assessment.includes('terminal receipt is not completed')
           && !assessment.includes('DURABLE OUTPUT COMPLETE'),
-        'completion assessment leaves concurrent owner snapshots uncollapsed rather than pairing an arbitrary hub snapshot with a receipt');
+        'completion assessment leaves concurrent receipts/snapshots unjoined rather than pairing arbitrary owner generations');
 
         fs.writeFileSync(analysisA.jsonPath, JSON.stringify({
           runId: 'conflicting-owner-run', sourceHubId: hubA, nodeId: hubB,
@@ -502,7 +949,7 @@ export default [
     },
   },
   {
-    name: 'job recovery diagnostics accept ordinary owner-scoped snapshots above the staging preview cap without exposing their job payload',
+    name: 'job recovery diagnostics validate ordinary roughly four MiB owner-scoped snapshots without exposing their job payload',
     run: () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-normal-large-job-snapshot-'));
       const canvas = path.join(dir, 'canvas.json');
@@ -520,12 +967,12 @@ export default [
           gatheredJobCount: 12,
           sourceGatheredCount: 12,
           profile: {},
-          jobs: [{ title: secret, description: 'x'.repeat(300 * 1024) }],
+          jobs: [{ title: secret, description: 'x'.repeat(Math.floor(3.9 * 1024 * 1024)) }],
         };
         fs.writeFileSync(analysis.jsonPath, JSON.stringify(snapshot), 'utf8');
         const bytes = fs.statSync(analysis.jsonPath).size;
-        assert(bytes > 256 * 1024 && bytes <= 512 * 1024,
-          `fixture must exercise the raised bounded metadata window, got ${bytes} bytes`);
+        assert(bytes > 3.8 * 1024 * 1024 && bytes <= 4 * 1024 * 1024,
+          `fixture must exercise the bounded four MiB snapshot window, got ${bytes} bytes`);
 
         const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
         assert(recovery.includes('Current saved scrape: parseable')
@@ -533,7 +980,7 @@ export default [
           && recovery.includes(`hub \`${hubId}\` is present in this canvas`)
           && !recovery.includes('TOO_LARGE')
           && !recovery.includes('⚠️ unowned artifact ignored'),
-        'a normal owner-scoped snapshot above 256 KiB remains parseable and ownership-verified under the bounded metadata reader');
+        'a normal roughly four MiB owner-scoped snapshot remains parseable and ownership-verified under the bounded snapshot reader');
         assert(!recovery.includes(secret)
           && !recovery.includes('x'.repeat(120)),
         'large snapshot job content remains redacted even when the metadata reader parses it for safe counts and ownership');
@@ -541,6 +988,298 @@ export default [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'job recovery diagnostics distinguish oversized snapshots from malformed or unowned artifacts',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-oversized-job-snapshot-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'oversized-snapshot-hub';
+      const secret = 'PRIVATE OVERSIZED SNAPSHOT PAYLOAD';
+      try {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'), hubId);
+        const oversized = {
+          version: 2,
+          createdAt: '2026-09-09T00:00:00.000Z',
+          nodeId: hubId,
+          sourceHubId: hubId,
+          runId: 'oversized-snapshot-run',
+          canvasFilePath: canvas,
+          gatheredJobCount: 1,
+          jobs: [{ title: secret, description: 'x'.repeat(4 * 1024 * 1024) }],
+        };
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify(oversized), 'utf8');
+        assert(fs.statSync(analysis.jsonPath).size > 4 * 1024 * 1024,
+          'fixture must exceed the bounded snapshot limit');
+
+        const tooLarge = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(tooLarge.includes('⚠️ unreadable (`TOO_LARGE`)')
+          && !tooLarge.includes('⚠️ unowned artifact ignored')
+          && !tooLarge.includes('⚠️ malformed modern artifact ignored before legacy fallback')
+          && !tooLarge.includes(secret),
+        'a valid-but-oversized snapshot is stated as unverified by size, never mislabeled as malformed or unowned, and never leaks payload');
+
+        fs.writeFileSync(analysis.jsonPath, '{malformed modern snapshot', 'utf8');
+        fs.writeFileSync(analysis.legacyCanvasJsonPath, JSON.stringify({
+          version: 2,
+          createdAt: '2026-09-09T00:00:00.000Z',
+          nodeId: hubId,
+          sourceHubId: hubId,
+          runId: 'legacy-valid-snapshot-run',
+          canvasFilePath: canvas,
+          gatheredJobCount: 1,
+          jobs: [{}],
+        }), 'utf8');
+        const malformed = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(malformed.includes('run `legacy-valid-snapshot-run`')
+          && malformed.includes('⚠️ malformed modern artifact ignored before legacy fallback')
+          && !malformed.includes('⚠️ unowned artifact ignored'),
+        'a genuinely malformed modern snapshot remains distinguishable and may use an ownership-verified legacy fallback');
+        return { oversized: true, malformedFallback: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job recovery reads a validated first-property metadata envelope for oversized snapshots',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-oversized-envelope-snapshot-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'envelope-snapshot-hub';
+      const secondHubId = 'envelope-snapshot-invalid-hub';
+      const secret = 'PRIVATE OVERSIZED ENVELOPE JOB PAYLOAD';
+      const createdAt = '2026-09-13T08:00:00.000Z';
+      const metadataFor = (ownerId, runId, overrides = {}) => ({
+        schemaVersion: 1, createdAt, canvasFilePath: canvas, sourceHubId: ownerId, nodeId: ownerId, runId,
+        gatheredJobCount: 7, candidatePoolJobCount: 9, descriptionRecoveryJobCount: 2, ...overrides,
+      });
+      const oversizedPayload = (metadata, { first = true, rootOverrides = {} } = {}) => {
+        const root = {
+          version: 2, createdAt, canvasFilePath: canvas, sourceHubId: metadata.sourceHubId, nodeId: metadata.nodeId,
+          runId: metadata.runId, gatheredJobCount: metadata.gatheredJobCount,
+          jobs: Array.from({ length: metadata.candidatePoolJobCount }, (_, index) => ({
+            title: index === 0 ? secret : `safe row ${index}`,
+            description: index === 0 ? 'x'.repeat(4 * 1024 * 1024) : '',
+          })),
+          descriptionRecoveryJobs: Array.from({ length: metadata.descriptionRecoveryJobCount }, () => ({})), ...rootOverrides,
+        };
+        return JSON.stringify(first ? { reportMetadata: metadata, ...root } : {
+          version: root.version, reportMetadata: metadata, ...Object.fromEntries(Object.entries(root).filter(([key]) => key !== 'version')),
+        });
+      };
+      const pathsFor = (ownerId) => getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), ownerId);
+      const writeSnapshot = (ownerId, text) => fs.writeFileSync(pathsFor(ownerId).jsonPath, text, 'utf8');
+      const receiptPath = lastRunReceiptPathForCanvas(canvas, hubId);
+      let originalReadSync = null;
+      try {
+        const metadata = metadataFor(hubId, 'envelope-valid-run');
+        writeSnapshot(hubId, oversizedPayload(metadata));
+        assert(fs.statSync(pathsFor(hubId).jsonPath).size > 4 * 1024 * 1024,
+          'metadata-envelope fixture must exceed the legacy four MiB full-parse limit');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId: metadata.runId, nodeId: hubId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 7 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+
+        const readLengths = [];
+        originalReadSync = fs.readSync;
+        fs.readSync = (...args) => {
+          readLengths.push(Number(args[3]) || 0);
+          return originalReadSync(...args);
+        };
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        const completion = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+        fs.readSync = originalReadSync;
+        originalReadSync = null;
+        assert(Math.max(...readLengths) <= 16 * 1024,
+          `oversized snapshot reader must request only its bounded metadata prefix, got ${Math.max(...readLengths)} bytes`);
+        assert(recovery.includes('ownership-verified report metadata only (bounded prefix)')
+          && recovery.includes('7 score-ready job(s) · 9 retained for preference re-evaluation')
+          && recovery.includes('2 recovery-pool job(s)')
+          && recovery.includes('field audit omitted (metadata-only bounded prefix)')
+          && recovery.includes('run `envelope-valid-run`')
+          && recovery.includes(`hub \`${hubId}\` is present in this canvas`)
+          && recovery.includes('canvas matches this report')
+          && !recovery.includes(secret),
+        'a valid oversized writer envelope supplies exact owned counts while job payload and field audit remain omitted');
+        assert(completion.includes('Saved score-ready snapshot: 7 job(s) · 9 retained for preference re-evaluation · run `envelope-valid-run`')
+          && completion.includes('The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.')
+          && !completion.includes(secret),
+        'completion reconciliation accepts a matching metadata-only snapshot without loading job contents');
+
+        const telemetry = getJobsTelemetry();
+        const savedTelemetry = {
+          nodeId: telemetry.nodeId, windowId: telemetry.windowId, pipeline: telemetry.pipeline,
+          search: telemetry.search, resolves: telemetry.resolves,
+        };
+        try {
+          Object.assign(telemetry, {
+            nodeId: hubId, windowId: null, pipeline: null, resolves: {},
+            search: {
+              ts: Date.now(), runId: metadata.runId, queries: 1, raw: 7, deduped: 7, kept: 7,
+              ageDropped: 0, roleDropped: 0, historyDropped: 0, relevanceDropped: 0, bySource: {},
+            },
+          });
+          const pipeline = buildJobsPipelineSnapshot(new Set([hubId]), null, canvas);
+          assert(pipeline.includes('ownership-verified report metadata only; snippet, salary, and field-quality audits were skipped')
+            && !pipeline.includes('does not match the current search run')
+            && !pipeline.includes('0 jobs — no snippet, salary, or field-quality rows to report'),
+          'the live pipeline labels an owned metadata-only snapshot as intentionally unaudited, never stale or empty');
+
+          telemetry.search = { ...telemetry.search, runId: 'stale-envelope-run' };
+          const stalePipeline = buildJobsPipelineSnapshot(new Set([hubId]), null, canvas);
+          assert(stalePipeline.includes('Saved scrape snapshot does not match the current search run')
+            && !stalePipeline.includes('Saved scrape snapshot (current run): ownership-verified report metadata only')
+            && !stalePipeline.includes(secret),
+          'a metadata-only snapshot must still match the live run token before pipeline output calls it current');
+        } finally {
+          Object.assign(telemetry, savedTelemetry);
+        }
+
+        const boundaryOwner = `h${'x'.repeat(199)}`;
+        const boundaryMetadata = metadataFor(boundaryOwner, `r${'y'.repeat(199)}`, {
+          gatheredJobCount: 7, candidatePoolJobCount: 10, descriptionRecoveryJobCount: 0,
+        });
+        writeSnapshot(boundaryOwner, oversizedPayload(boundaryMetadata));
+        const boundary = buildJobRecoverySnapshot(canvas, new Set([boundaryOwner]), new Set([boundaryOwner]));
+        assert(boundary.includes('ownership-verified report metadata only (bounded prefix)')
+          && boundary.includes('7 score-ready job(s) · 10 retained for preference re-evaluation')
+          && !boundary.includes('report metadata envelope invalid'),
+        'the metadata reader accepts the writer’s 200-character identifier boundary and valid preference-pool counts');
+
+        writeSnapshot(hubId, oversizedPayload(metadata, { first: false }));
+        const nonFirst = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(nonFirst.includes('report metadata envelope not-first; oversized payload was not loaded')
+          && !nonFirst.includes(secret)
+          && !nonFirst.includes('unowned artifact ignored'),
+        'a reportMetadata object outside the first top-level property is rejected without scanning or leaking the payload');
+
+        writeSnapshot(hubId, oversizedPayload(metadataFor(hubId, 'malformed-envelope-run', { schemaVersion: 2 })));
+        const malformed = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(malformed.includes('report metadata envelope invalid; oversized payload was not loaded')
+          && !malformed.includes(secret),
+        'a malformed metadata schema is rejected before ownership/count diagnostics are trusted');
+
+        writeSnapshot(hubId, oversizedPayload(metadataFor(hubId, 'impossible-count-envelope', {
+          gatheredJobCount: 10, candidatePoolJobCount: 7,
+        })));
+        const impossibleCounts = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(impossibleCounts.includes('report metadata envelope invalid; oversized payload was not loaded')
+          && !impossibleCounts.includes('10 score-ready job(s)'),
+        'the reader rejects a metadata envelope whose score-ready count exceeds its retained candidate pool, matching writer accounting');
+
+        writeSnapshot(hubId, oversizedPayload(metadataFor(hubId, 'epoch-envelope', {
+          createdAt: '1970-01-01T00:00:00.000Z',
+        })));
+        const epochEnvelope = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(epochEnvelope.includes('report metadata envelope invalid; oversized payload was not loaded'),
+          'the reader fail-closes epoch-zero metadata timestamps, which do not provide a recordable report age');
+
+        const foreignMetadata = metadataFor('foreign-envelope-owner', 'foreign-envelope-run');
+        writeSnapshot(hubId, oversizedPayload(foreignMetadata));
+        const scopeMismatch = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(scopeMismatch.includes('report metadata scope does not match this owner/canvas; oversized payload was not loaded')
+          && !scopeMismatch.includes(secret)
+          && !scopeMismatch.includes('unowned artifact ignored'),
+        'a structurally valid envelope with mismatched owner scope is rejected explicitly, not relabeled as an unowned payload');
+
+        const smallRoot = {
+          version: 2, createdAt, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId,
+          runId: 'small-metadata-mismatch', gatheredJobCount: 1, jobs: [{}], descriptionRecoveryJobs: [],
+        };
+        const smallMetadata = metadataFor(hubId, 'small-metadata-mismatch');
+        writeSnapshot(hubId, JSON.stringify({ reportMetadata: smallMetadata, ...smallRoot }));
+        const payloadMismatch = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(payloadMismatch.includes('report metadata does not match the parsed snapshot payload')
+          && !payloadMismatch.includes('unowned artifact ignored'),
+        'snapshots within the legacy limit remain fully parsed and cross-checked against their metadata envelope');
+
+        const fractionalMetadata = metadataFor(hubId, 'small-fractional-created-at', {
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 0,
+        });
+        const fractionalRoot = {
+          version: 2, createdAt: Date.parse(createdAt) + 0.5, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId,
+          runId: 'small-fractional-created-at', gatheredJobCount: 1, jobs: [{}], descriptionRecoveryJobs: [],
+        };
+        writeSnapshot(hubId, JSON.stringify({ reportMetadata: fractionalMetadata, ...fractionalRoot }));
+        const fractionalCreatedAt = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(fractionalCreatedAt.includes('report metadata does not match the parsed snapshot payload'),
+          'the reader rejects fractional root timestamps even when Date serialization would round them into the envelope timestamp');
+
+        const smallMatchingMetadata = metadataFor(hubId, 'small-nonfirst-envelope', {
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 0,
+        });
+        const smallMatchingRoot = {
+          version: 2, createdAt, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId,
+          runId: 'small-nonfirst-envelope', gatheredJobCount: 1, jobs: [{}], descriptionRecoveryJobs: [],
+        };
+        writeSnapshot(hubId, JSON.stringify({
+          version: 2, reportMetadata: smallMatchingMetadata,
+          ...Object.fromEntries(Object.entries(smallMatchingRoot).filter(([key]) => key !== 'version')),
+        }));
+        const smallNonFirst = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(smallNonFirst.includes('report metadata does not match the parsed snapshot payload')
+          && !smallNonFirst.includes('ownership-verified report metadata only'),
+        'a modern envelope is rejected when reportMetadata is not the first parsed top-level property');
+
+        const numericMetadata = metadataFor(hubId, 'small-numeric-extension', {
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 0,
+        });
+        const numericRoot = {
+          version: 2, createdAt, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId,
+          runId: 'small-numeric-extension', gatheredJobCount: 1, jobs: [{}], descriptionRecoveryJobs: [],
+        };
+        // This is the writer's physical order: reportMetadata first, followed
+        // by an integer-like extension key. JSON.parse enumerates "0" first,
+        // so the reader must validate raw serialized order rather than relying
+        // on Object.keys(parsed)[0].
+        writeSnapshot(hubId, `{"reportMetadata":${JSON.stringify(numericMetadata)},"0":"extension",${Object.entries(numericRoot).map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`).join(',')}}`);
+        const numericFirst = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(numericFirst.includes('Current saved scrape: parseable')
+          && numericFirst.includes('run `small-numeric-extension`')
+          && !numericFirst.includes('report metadata does not match the parsed snapshot payload'),
+        'a writer-format snapshot with an integer-like extension key remains valid when its metadata is physically first');
+
+        const duplicateFirstMetadata = metadataFor(hubId, 'small-duplicate-first', {
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 0,
+        });
+        const duplicateEffectiveMetadata = metadataFor(hubId, 'small-duplicate-effective', {
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 0,
+        });
+        const duplicateRoot = { ...numericRoot, runId: 'small-duplicate-effective' };
+        writeSnapshot(hubId, `{"reportMetadata":${JSON.stringify(duplicateFirstMetadata)},"reportMetadata":${JSON.stringify(duplicateEffectiveMetadata)},${Object.entries(duplicateRoot).map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`).join(',')}}`);
+        const duplicateMetadata = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(duplicateMetadata.includes('report metadata does not match the parsed snapshot payload')
+          && !duplicateMetadata.includes('run `small-duplicate-effective`'),
+        'a later duplicate reportMetadata key cannot override the raw first envelope used for ownership validation');
+
+        const legacyFallback = {
+          version: 2, createdAt, canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId,
+          runId: 'legacy-after-envelope-rejection', gatheredJobCount: 1, jobs: [{}], descriptionRecoveryJobs: [],
+        };
+        fs.writeFileSync(pathsFor(hubId).legacyCanvasJsonPath, JSON.stringify(legacyFallback), 'utf8');
+        const envelopeRejectedFallback = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(envelopeRejectedFallback.includes('run `legacy-after-envelope-rejection`')
+          && envelopeRejectedFallback.includes('⚠️ modern report metadata envelope rejected before legacy fallback')
+          && !envelopeRejectedFallback.includes('run `small-duplicate-effective`'),
+        'an owned legacy fallback retains the warning that its modern primary rejected a metadata envelope');
+
+        const validAgain = metadataFor(hubId, 'envelope-valid-again');
+        writeSnapshot(hubId, oversizedPayload(validAgain));
+        const nonFirstSecond = metadataFor(secondHubId, 'envelope-nonfirst-second');
+        writeSnapshot(secondHubId, oversizedPayload(nonFirstSecond, { first: false }));
+        const mixed = buildJobRecoverySnapshot(canvas, new Set([hubId, secondHubId]), new Set([hubId, secondHubId]));
+        assert(mixed.includes('Current saved scrapes: 2 owner-scoped bundle(s) retained; at least one is unverified or invalid; see individual rows below.')
+          && !mixed.includes('Current saved scrapes: 2 owner-scoped bundle(s) retained; each is independently ownership-verified.'),
+        'plural recovery headings do not claim verification when an invalid oversized envelope is also listed');
+      } finally {
+        if (originalReadSync) fs.readSync = originalReadSync;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { boundedPrefixBytes: 16 * 1024, scoreReady: 7, candidatePool: 9 };
     },
   },
 {
@@ -1092,7 +1831,8 @@ export default [
         }).markdown;
         const boardCountAssessment = boardCountMismatch.slice(boardCountMismatch.indexOf('## Job Completion Assessment'), boardCountMismatch.indexOf('## Job Search Pipeline'));
         assert(boardCountAssessment.includes('⚠️ **INDETERMINATE**')
-          && boardCountAssessment.includes('Job Board `count-mismatch-board` results 15 ≠ current run 16')
+          && boardCountAssessment.includes('results 15 ≠ current run 16')
+          && !boardCountAssessment.includes('count-mismatch-board')
           && !boardCountAssessment.includes('✅ **VERIFIED COMPLETE**'),
         'a non-stale one-source board with a mismatched result count cannot inherit the search-only green verdict');
 
@@ -1111,7 +1851,7 @@ export default [
         }).markdown;
         const boardSourceAssessment = boardSourceMismatch.slice(boardSourceMismatch.indexOf('## Job Completion Assessment'), boardSourceMismatch.indexOf('## Job Search Pipeline'));
         assert(boardSourceAssessment.includes('⚠️ **INDETERMINATE**')
-          && boardSourceAssessment.includes('lacks combined-source correlation for hub `completion-hub`')
+          && boardSourceAssessment.includes('lacks combined-source correlation for source hub')
           && !boardSourceAssessment.includes('✅ **VERIFIED COMPLETE**'),
         'a connected non-stale board whose saved combine source omits this run cannot be certified as current');
 
@@ -1132,7 +1872,8 @@ export default [
         }).markdown;
         const clearedBoardAssessment = clearedBoard.slice(clearedBoard.indexOf('## Job Completion Assessment'), clearedBoard.indexOf('## Job Search Pipeline'));
         assert(clearedBoardAssessment.includes('⚠️ **INDETERMINATE**')
-          && clearedBoardAssessment.includes('Job Board `cleared-board` is `empty`, not done')
+          && clearedBoardAssessment.includes('is `empty`, not done')
+          && !clearedBoardAssessment.includes('cleared-board')
           && !clearedBoardAssessment.includes('✅ **VERIFIED COMPLETE**'),
         'an empty connected board without clear provenance cannot certify that the completed source remains consumed');
 
@@ -1157,9 +1898,10 @@ export default [
         }).markdown;
         const clearedAfterCompletionAssessment = clearedAfterCompletion.slice(clearedAfterCompletion.indexOf('## Job Completion Assessment'), clearedAfterCompletion.indexOf('## Job Search Pipeline'));
         assert(clearedAfterCompletionAssessment.includes('✅ **VERIFIED COMPLETE**')
-          && clearedAfterCompletionAssessment.includes('Job Board `cleared-after-completion` was deliberately cleared after this run (prior results 16); its result cards are no longer present.')
-          && clearedAfterCompletionAssessment.includes('deliberately cleared: `cleared-after-completion` (prior 16; result cards no longer present)')
-          && !clearedAfterCompletionAssessment.includes('Job Board `cleared-after-completion` is `empty`, not done'),
+          && clearedAfterCompletionAssessment.includes('was deliberately cleared after this run (prior results 16); its result cards are no longer present.')
+          && clearedAfterCompletionAssessment.includes('deliberately cleared:')
+          && !clearedAfterCompletionAssessment.includes('cleared-after-completion')
+          && !clearedAfterCompletionAssessment.includes('is `empty`, not done'),
         'a non-stale empty board with post-receipt, same-hub clear provenance proves a deliberate removal instead of downgrading the completed search');
 
         const fallbackClearedAfterCompletion = generateMarkdown({
@@ -1182,7 +1924,8 @@ export default [
         }).markdown;
         const fallbackClearAssessment = fallbackClearedAfterCompletion.slice(fallbackClearedAfterCompletion.indexOf('## Job Completion Assessment'), fallbackClearedAfterCompletion.indexOf('## Job Search Pipeline'));
         assert(fallbackClearAssessment.includes('✅ **VERIFIED COMPLETE**')
-          && fallbackClearAssessment.includes('Job Board `fallback-cleared-board` was deliberately cleared after this run'),
+          && fallbackClearAssessment.includes('was deliberately cleared after this run')
+          && !fallbackClearAssessment.includes('fallback-cleared-board'),
         'the bug-report fallback board mapping retains sanitized clear provenance and a zero rendered-card count');
 
         const rejectedClearProvenance = (clearProvenance) => generateMarkdown({
@@ -1241,7 +1984,8 @@ export default [
         for (const rejected of [tooEarlyClear, outOfRangeClear, uncorrelatedClear, legacySameHubClear, priorRunSameHubClear, coerciveBoardCounts]) {
           const assessment = rejected.slice(rejected.indexOf('## Job Completion Assessment'), rejected.indexOf('## Job Search Pipeline'));
           assert(assessment.includes('⚠️ **INDETERMINATE**')
-            && assessment.includes('Job Board `rejected-clear-receipt` is `empty`, not done')
+            && assessment.includes('is `empty`, not done')
+            && !assessment.includes('rejected-clear-receipt')
             && !assessment.includes('deliberately cleared'),
           'a too-early/out-of-Date-range, unrelated, legacy, or prior-run clear receipt must not certify this run\'s board consumption');
         }
@@ -1259,7 +2003,8 @@ export default [
           });
           const assessment = invalidReceiptTimestamp.slice(invalidReceiptTimestamp.indexOf('## Job Completion Assessment'), invalidReceiptTimestamp.indexOf('## Job Search Pipeline'));
           assert(assessment.includes('⚠️ **INDETERMINATE**')
-            && assessment.includes('Job Board `rejected-clear-receipt` is `empty`, not done')
+            && assessment.includes('is `empty`, not done')
+            && !assessment.includes('rejected-clear-receipt')
             && !assessment.includes('deliberately cleared'),
           'an out-of-JavaScript-Date-range receipt completion timestamp cannot certify a board clear');
         } finally {
@@ -1380,7 +2125,7 @@ export default [
         }).markdown;
         const pristineZeroAssessment = zeroWithPristineBoard.slice(zeroWithPristineBoard.indexOf('## Job Completion Assessment'), zeroWithPristineBoard.indexOf('## Job Listing Link Diagnostics'));
         assert(pristineZeroAssessment.includes('✅ **VERIFIED COMPLETE**')
-          && !pristineZeroAssessment.includes('Job Board `pristine-zero-board` is `empty`, not done'),
+          && !pristineZeroAssessment.includes('is `empty`, not done'),
         'a pristine connected Job Board does not make a fully evidenced zero-result run indeterminate');
 
         const zeroWithHiddenBoardCard = generateMarkdown({
@@ -1398,7 +2143,8 @@ export default [
         }).markdown;
         const hiddenCardZeroAssessment = zeroWithHiddenBoardCard.slice(zeroWithHiddenBoardCard.indexOf('## Job Completion Assessment'), zeroWithHiddenBoardCard.indexOf('## Job Listing Link Diagnostics'));
         assert(hiddenCardZeroAssessment.includes('⚠️ **INDETERMINATE**')
-          && hiddenCardZeroAssessment.includes('Job Board `hidden-card-zero-board` is `empty`, not done'),
+          && hiddenCardZeroAssessment.includes('is `empty`, not done')
+          && !hiddenCardZeroAssessment.includes('hidden-card-zero-board'),
         'a board with hidden or orphaned cards cannot use the pristine empty-board exemption');
 
         const zeroWithPositiveSibling = generateMarkdown({
@@ -1416,7 +2162,8 @@ export default [
         }).markdown;
         const positiveSiblingZeroAssessment = zeroWithPositiveSibling.slice(zeroWithPositiveSibling.indexOf('## Job Completion Assessment'), zeroWithPositiveSibling.indexOf('## Job Listing Link Diagnostics'));
         assert(positiveSiblingZeroAssessment.includes('⚠️ **INDETERMINATE**')
-          && positiveSiblingZeroAssessment.includes('Job Board `multi-source-zero-board` is `empty`, not done'),
+          && positiveSiblingZeroAssessment.includes('is `empty`, not done')
+          && !positiveSiblingZeroAssessment.includes('multi-source-zero-board'),
         'an uncombined positive sibling cannot be hidden behind a zero-result source exemption');
 
         const staleBoardResult = generateMarkdown({
@@ -1439,8 +2186,8 @@ export default [
         const issueReporterSource = fs.readFileSync(path.resolve('src/hooks/useIssueReporter.js'), 'utf8');
         assert(issueReporterSource.includes('jobBoardStates: allJobBoardStates.slice(0, 25)')
           && issueReporterSource.includes('jobBoardStateCount: allJobBoardStates.length')
-          && issueReporterSource.includes('combineSignature: typeof node.data?.combineSignature')
-          && issueReporterSource.includes('mergeUnique: reportBoardCount(node.data?.mergeStats?.unique)')
+          && issueReporterSource.includes("combineSignature: typeof safeReportField(data, 'combineSignature')")
+          && issueReporterSource.includes("mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique'))")
           && issueReporterSource.includes('connectedSourceHubIds:'),
         'the renderer stamps bounded board count, merge, and source-correlation facts before JOBS/RECOVERY filters remove the node payload');
 
@@ -1511,7 +2258,7 @@ export default [
         }).markdown;
         const pristinePreferenceAssessment = preferenceFilteredWithPristineBoard.slice(preferenceFilteredWithPristineBoard.indexOf('## Job Completion Assessment'), preferenceFilteredWithPristineBoard.indexOf('## Job Listing Link Diagnostics'));
         assert(pristinePreferenceAssessment.includes('✅ **VERIFIED COMPLETE**')
-          && !pristinePreferenceAssessment.includes('Job Board `pristine-preference-board` is `empty`, not done'),
+          && !pristinePreferenceAssessment.includes('is `empty`, not done'),
         'a pristine connected board does not make a fully evidenced preference-filtered run indeterminate');
 
         // A preference-filtered receipt has zero score-ready jobs by design,
@@ -1677,6 +2424,8 @@ export default [
           && focused.includes('Last terminal run receipt: ✅ completed')
           && focused.includes('hub `receipt-hub` is present in this canvas'),
         'FULL and RECOVERY retain the durable terminal receipt after a simulated restart');
+        assert(full.includes('Detailed live per-job evidence appears in Job Search Pipeline only when retained in this process.'),
+          'restart diagnostics clarify that live per-job pipeline evidence is process-retained, not durable receipt data');
 
         fs.unlinkSync(receiptPath);
         const absent = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
@@ -1706,17 +2455,32 @@ export default [
         source: 'google', title: 'Missing Direct Link', company: 'Peraton', location: 'Virginia', url: '',
         googleCardUrl: 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=MissingDirectId',
       };
+      const trulyMissing = {
+        source: 'google', title: 'Truly Missing Link', company: 'No Link', location: 'Anywhere', url: '', googleCardUrl: '',
+      };
       const nodes = [
         { id: 'job-card', type: 'jobcard', data: jobData },
         { id: 'board', type: 'jobboard', data: { results: [{ ...jobData }] } },
         { id: 'direct-card', type: 'jobcard', data: directWithBlankRawQuery },
         { id: 'missing-card', type: 'jobcard', data: missingDirect },
+        { id: 'truly-missing-card', type: 'jobcard', data: trulyMissing },
       ];
       const base = {
         description: 'Google listing links open a broken page.', nodes, edges: [], drawings: [],
-        frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        frontEndState: {},
+        nodeInternals: nodes.filter(node => node.type === 'jobcard').map(node => ({
+          id: node.id, type: node.type, position: { x: 0, y: 0 }, selected: false,
+        })),
+        nodeComponentStates: [], eventLogs: [],
       };
       const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const nodeSection = full.split('## Node Diagnostics')[1]?.split('\n## ')[0] || '';
+      assert(nodeSection.includes('link: Google fallback')
+        && nodeSection.includes('link: direct')
+        && nodeSection.includes('link: missing')
+        && !nodeSection.includes('SecretOpaqueId')
+        && !nodeSection.includes('MissingDirectId'),
+      'Node Diagnostics reports the effective job-card link state without exposing raw Google-card tokens');
       const focused = generateMarkdown({
         ...base,
         filterCode: 'JOBLINK',
@@ -1724,10 +2488,10 @@ export default [
       }).markdown;
       for (const report of [full, focused]) {
         const section = report.split('## Job Listing Link Diagnostics')[1]?.split('\n## ')[0] || '';
-        assert(section.includes('Unique job rows inspected: 3')
+        assert(section.includes('Unique job rows inspected: 4')
           && section.includes('1 internal Google route(s) exposed as public')
           && section.includes('1 direct Apply-on URL(s)')
-          && section.includes('1 missing direct Apply-on URL(s) (1 retain a Google identity fallback)')
+          && section.includes('2 missing direct Apply-on URL(s) (1 retain a Google identity fallback)')
           && section.includes('3 legacy `ibp=htl;jobs`')
           && section.includes('3 blank raw search query')
           && section.includes('"Missing Direct Link"')
@@ -1737,7 +2501,7 @@ export default [
         assert(!section.includes('SecretOpaqueId'),
           'job-link diagnostics must never export opaque query/fragment values');
       }
-      return { unique: 3, blankQuery: 3 };
+      return { unique: 4, blankQuery: 3 };
     },
   },
 {
@@ -2352,6 +3116,57 @@ export default [
         && !logs.includes(secret)
         && !logs.includes('#challenge'),
       'FULL keeps the diagnostic URL path in main-process logs but never exports query/hash tokens');
+      return { redacted: true };
+    },
+  },
+  {
+    name: 'Event History redacts renderer URLs and career/search values at the report boundary',
+    run: () => {
+      const rawUrl = 'https://jobs.example.test/search?query=Principal%20Privacy%20Engineer&token=event-url-secret#details';
+      const rawQuery = 'PRIVATE CAREER QUERY, SECOND VALUE';
+      const rawRole = 'PRIVATE "TARGET" ROLE, SECOND VALUE';
+      const rawPreference = 'PRIVATE PREFERENCE, SECOND VALUE';
+      const rawDocumentId = 'PRIVATE-GOOGLE-JOBS-DOCUMENT-ID';
+      const report = generateMarkdown({
+        description: 'Event-history redaction fixture.', filterCode: 'FULL',
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [],
+        eventLogs: [
+          `[2026-09-13T04:00:00.000-04:00] [JobSearch] Starting USAJobs background search for query: "${rawQuery}"`,
+          `[2026-09-13T04:00:01.000-04:00] [JobSearch] Target role set — skipping query variation generation and searching exactly "${rawRole}"`,
+          `[2026-09-13T04:00:02.000-04:00] [JobTree] show more in role "${rawRole}" id=group-1 (now 8/20)`,
+          `[2026-09-13T04:00:03.000-04:00] [JobCard] external-link requested id=card-1 q=${rawQuery} htidocid=${rawDocumentId} target=google-jobs`,
+          `[2026-09-13T04:00:04.000-04:00] [JobSearch] source=usajobs stage=collecting request=${rawUrl}`,
+          `[2026-09-13T04:00:04.500-04:00] [JobSearch] preferences=${rawPreference} stage=scoring`,
+          '[2026-09-13T04:00:05.000-04:00] [JobSearch] source=indeed stage=scoring scored=3',
+          '[2026-09-13T04:00:06.000-04:00] [JobCard] external-link requested q=present htidocid=missing target=google-jobs',
+        ],
+      }).markdown;
+      const history = report.slice(report.indexOf('## Event History'));
+      for (const privateValue of [
+        rawUrl,
+        'query=Principal%20Privacy%20Engineer',
+        'event-url-secret',
+        rawQuery,
+        rawRole,
+        rawPreference,
+        rawDocumentId,
+        // Catch partial leaks from comma-delimited values and a quote inside
+        // a quoted target role, not merely the original whole value.
+        'SECOND VALUE',
+        'TARGET" ROLE',
+      ]) {
+        assert(!history.includes(privateValue), `Event History must not export ${privateValue}`);
+      }
+      assert(history.includes('https://jobs.example.test/search')
+        && history.includes('Starting USAJobs background search for query: "[redacted query]"')
+        && history.includes('searching exactly "[redacted target role]"')
+        && history.includes('show more in role "[redacted role]"')
+        && history.includes('q=[redacted query] htidocid=[redacted document identifier] target=google-jobs')
+        && history.includes('preferences=[redacted preferences] stage=scoring')
+        && history.includes('source=indeed stage=scoring scored=3')
+        && history.includes('q=present htidocid=missing target=google-jobs'),
+      'Event History retains timestamps, event type, stage, safe URL identity, and non-sensitive diagnostic structure');
       return { redacted: true };
     },
   },
@@ -6499,9 +7314,9 @@ export default [
         && doneState.includes('Re-evaluate Saved Jobs')
         && /!locked\s*&&/.test(doneState),
       'done hubs expose Re-evaluate Saved Jobs only when the module is unlocked');
-      assert(search.includes('onReanalyze={data.terminalFinalizationRecovery ? null : handleReanalyze}')
+      assert(search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
         && handler.includes('getNode(id)?.data?.terminalFinalizationRecovery'),
-        'the completed search hub wires its re-analysis action into the done state');
+        'the completed standalone search hub wires its re-analysis action into the done state while connected Searches leave continuation to their Job Board');
       assert(search.includes("val.slice(0, 4000)")
         && (search.match(/maxLength=\{4000\}/g) || []).length >= 1
         && (doneState.match(/maxLength=\{4000\}/g) || []).length >= 1
@@ -9475,8 +10290,8 @@ export default [
         && bugReportSource.includes('new Date(rawClear.clearedAt).getTime()')
         && jobsSnapshotSource.includes("typeof entry?.sourceHubId === 'string'")
         && jobsSnapshotSource.includes("typeof value === 'string' ? value.trim() : ''")
-        && jobsSnapshotSource.includes('Number.isSafeInteger(rawClear.clearedAt)')
-        && jobsSnapshotSource.includes('new Date(rawClear.clearedAt).getTime()'),
+        && jobsSnapshotSource.includes('Number.isSafeInteger(rawClearedAt)')
+        && jobsSnapshotSource.includes('new Date(rawClearedAt).getTime()'),
       'exact-run clear provenance rejects coerced ID/token types and zero/out-of-Date-range timestamps at the renderer, direct report fallback, and final report boundaries');
       assert(doneStateSource.includes('canReplaceWithEmpty') && doneStateSource.includes('Clear stale results') && doneStateSource.includes('Inputs changed'),
         'stale zero-result boards expose a truthful action rather than a dead Re-combine button');
@@ -10454,6 +11269,253 @@ export default [
       }
     },
   },
+  {
+    name: 'job diagnostics retain bounded per-source scheduling and throttle history across fresh retries',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        sourceEvents: telemetry.sourceEvents,
+        sourceEventsT0: telemetry.sourceEventsT0,
+        sourceRunHistory: telemetry.sourceRunHistory,
+        pipeline: telemetry.pipeline,
+      };
+      const nodeId = 'source-schedule-history';
+      try {
+        Object.assign(telemetry, {
+          nodeId,
+          windowId: null,
+          sourceEvents: {},
+          sourceEventsT0: Date.now(),
+          sourceRunHistory: {},
+          pipeline: { phase: 'gathering-sources', active: true, runId: 'run-1' },
+        });
+        for (let run = 1; run <= 4; run += 1) {
+          telemetry.sourceEvents = {};
+          telemetry.sourceEventsT0 = Date.now();
+          telemetry.pipeline = { phase: 'gathering-sources', active: true, runId: `run-${run}` };
+          recordJobSourceProgress({ sourceId: 'google', jobRunId: `run-${run}`, status: 'searching' });
+          recordJobSourceProgress({
+            sourceId: 'google',
+            jobRunId: `run-${run}`,
+            status: run === 4 ? 'done' : 'error',
+            ...(run === 3 ? { warning: { code: 'http-429', severity: 'throttle' }, detail: 'private retry timing must not be retained' } : {}),
+          });
+        }
+        telemetry.pipeline = { phase: 'completed', active: false, runId: 'run-4', ts: Date.now() };
+        const records = telemetry.sourceRunHistory.google;
+        const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(records.length === 3
+          && records.map(record => record.runId).join(',') === 'run-2,run-3,run-4'
+          && records[1].warning?.code === 'http-429'
+          && records[2].terminalStatus === 'done',
+        'each source keeps only its three latest run receipts while retaining a terminal warning that preceded a clean retry');
+        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        assert(jobsSource.includes('recordJobSourceDispatch(sourceId);')
+          && jobsSource.includes('recordJobSourceDispatch(sid, activeRunId);')
+          && jobsSource.includes('recordJobSourceDispatch(sourceId, jobRunId);')
+          && jobsSource.includes('dispatchedAt')
+          && jobsSource.includes('terminalAt'),
+        'timing receipts distinguish a UI searching announcement from actual HTTP/browser dispatch and terminal completion');
+        assert(report.includes('### Source Scheduling & Throttle History')
+          && report.includes('hub `…-history` / `google`:')
+          && report.includes('run `run-3`: searching → error · ⚠️ http-429/throttle')
+          && report.includes('run `run-4`: searching → done')
+          && !report.includes('private retry timing must not be retained'),
+        'the JOBS/FULL/STALL pipeline snapshot renders both the retained warning and later clean terminal state without retaining arbitrary progress detail');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { retainedRuns: 3, source: 'google' };
+    },
+  },
+  {
+    name: 'source scheduling receipts reject stale dispatch and preserve first-attempt duration through a same-run Solve',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        sourceEvents: telemetry.sourceEvents,
+        sourceEventsT0: telemetry.sourceEventsT0,
+        sourceRunHistory: telemetry.sourceRunHistory,
+        pipeline: telemetry.pipeline,
+      };
+      try {
+        Object.assign(telemetry, {
+          nodeId: 'timing-guard-hub',
+          sourceEvents: {},
+          sourceEventsT0: Date.now(),
+          sourceRunHistory: {},
+          pipeline: { phase: 'gathering-sources', active: true, runId: 'replacement-run' },
+        });
+        recordJobSourceProgress({ sourceId: 'google', jobRunId: 'replacement-run', status: 'searching' });
+        assert(!__recordJobSourceDispatchForTests('google', 'superseded-run')
+          && !telemetry.sourceRunHistory.google.some(record => record.runId === 'superseded-run'),
+        'a late explicit browser dispatch cannot create or evict history in a replacement pipeline run');
+        assert(__recordJobSourceDispatchForTests('google', 'replacement-run'),
+          'the current pipeline run records its real source dispatch');
+        recordJobSourceProgress({
+          sourceId: 'google', jobRunId: 'replacement-run', status: 'error',
+          warning: { code: 'http-429', severity: 'throttle' },
+        });
+        const firstAttempt = { ...telemetry.sourceRunHistory.google[0] };
+        // This models a later source-card Solve completion under the same job
+        // run ID. It must not extend the original request's duration across
+        // user dwell time without a separately recorded recovery dispatch.
+        recordJobSourceProgress({ sourceId: 'google', jobRunId: 'replacement-run', status: 'done' });
+        const receipt = telemetry.sourceRunHistory.google[0];
+        assert(receipt.dispatchedAt === firstAttempt.dispatchedAt
+          && receipt.terminalAt === firstAttempt.terminalAt
+          && receipt.terminalStatus === 'error'
+          && receipt.warning?.code === 'http-429',
+        'a same-run Solve leaves the initial dispatched-to-terminal receipt intact instead of presenting user dwell time as source runtime');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { staleDispatch: 'rejected', terminalReceipt: 'preserved' };
+    },
+  },
+  {
+    name: 'multi-hub source scheduling history remains window-local without weakening single-owner funnel attribution',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      try {
+        const senderA = { id: 711 };
+        const senderB = { id: 712 };
+        const inContext = (sender, nodeId, callback) => __runWithIpcRequestContextForTests(
+          { sender, nodeId, channel: nodeId ? 'search-jobs' : 'bug-report' },
+          callback,
+        );
+        const setHistory = (sender, nodeId, sourceId, runId, warning = null) => inContext(sender, nodeId, () => {
+          const telemetry = getJobsTelemetry();
+          Object.assign(telemetry, {
+            nodeId,
+            windowId: sender.id,
+            pipeline: { runId, phase: 'completed', active: false, ts: Date.now() },
+            sourceRunHistory: {
+              ...(telemetry.sourceRunHistory || {}),
+              [sourceId]: [{
+                runId,
+                announcedAt: 1_000,
+                dispatchedAt: 2_000,
+                terminalAt: 5_000,
+                announcedStatus: 'searching',
+                terminalStatus: warning ? 'error' : 'done',
+                warning,
+              }],
+            },
+          });
+        });
+        setHistory(senderA, 'hub-a1', 'google', 'a1-run', { code: 'http-429', severity: 'throttle' });
+        setHistory(senderA, 'hub-a2', 'glassdoor', 'a2-run', { code: 'description-panel-http-error', severity: 'warn' });
+        setHistory(senderB, 'hub-b1', 'dice', 'b1-run');
+
+        const reportA = inContext(senderA, null, () => buildJobsPipelineSnapshot(
+          new Set(['hub-a1', 'hub-a2']), senderA.id, null,
+        ));
+        const wrongWindow = inContext(senderA, null, () => buildJobsPipelineSnapshot(
+          new Set(['hub-a1', 'hub-a2']), senderB.id, null,
+        ));
+        assert(reportA.includes('hub `hub-a1` / `google`: run `a1-run`')
+          && reportA.includes('hub `hub-a2` / `glassdoor`: run `a2-run`')
+          && reportA.includes('http-429/throttle')
+          && reportA.includes('description-panel-http-error/warn')
+          && !reportA.includes('hub `hub-b1`')
+          && !wrongWindow.includes('Source Scheduling & Throttle History'),
+        'a multi-hub FULL/JOBS/STALL snapshot merges only current-window hub-local history, including non-blocking terminal warnings, while a mismatched report window receives none');
+        return { currentWindowHubs: 2, foreignWindowHubs: 0 };
+      } finally {
+        // This test creates multiple sender-local records; leave no ambient
+        // latest telemetry behind for later, order-independent fixtures.
+        __resetJobsTelemetryForTests();
+      }
+    },
+  },
+  {
+    name: 'assembled FULL and focused job reports retain only current multi-hub source receipts without payload leakage',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      try {
+        const senderA = { id: 721 };
+        const senderB = { id: 722 };
+        const hubA1 = 'assembled-hub-a1';
+        const hubA2 = 'assembled-hub-a2';
+        const hubB = 'assembled-hub-b';
+        const secret = 'do-not-export-query-or-location-9f3a';
+        const inContext = (sender, nodeId, callback) => __runWithIpcRequestContextForTests(
+          { sender, nodeId, channel: nodeId ? 'search-jobs' : 'generate-bug-report-markdown' },
+          callback,
+        );
+        const seed = (sender, nodeId, sourceId, runId, extra = {}) => inContext(sender, nodeId, () => {
+          const telemetry = getJobsTelemetry();
+          Object.assign(telemetry, {
+            nodeId,
+            windowId: sender.id,
+            pipeline: { runId, phase: 'completed', active: false, ts: Date.now() },
+            sourceRunHistory: {
+              ...(telemetry.sourceRunHistory || {}),
+              [sourceId]: [{
+                runId, announcedAt: 1_000, dispatchedAt: 2_000, terminalAt: 3_000,
+                announcedStatus: 'searching', terminalStatus: 'error',
+                warning: { code: 'http-429', severity: 'throttle' },
+                ...extra,
+              }],
+            },
+          });
+        });
+        seed(senderA, hubA1, 'google', 'assembled-a1', {
+          detail: secret, query: secret, location: secret,
+        });
+        seed(senderA, hubA2, 'glassdoor', 'assembled-a2');
+        // Corrupt/unexpected keys must never become report-visible receipts.
+        seed(senderA, hubA2, 'untrusted-source-key', 'must-not-render', { detail: secret });
+        seed(senderB, hubB, 'dice', 'assembled-b');
+
+        const payloadFor = (filterCode, hubIds) => ({
+          description: 'source scheduling receipt diagnostics',
+          filterCode,
+          filterStats: {
+            hasJobNodes: true,
+            hasSellNodes: false,
+            currentNodeIds: hubIds,
+            currentJobHubIds: hubIds,
+            omittedSections: [],
+          },
+          nodes: hubIds.map(id => ({ id, type: 'jobhub', data: {} })),
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        });
+        const full = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('FULL', [hubA1, hubA2]), senderA.id,
+        ).markdown);
+        const jobs = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('JOBS', [hubA1, hubA2]), senderA.id,
+        ).markdown);
+        const stall = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('STALL', [hubA1, hubA2]), senderA.id,
+        ).markdown);
+        const nonCurrent = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('FULL', [hubA1]), senderA.id,
+        ).markdown);
+        const wrongWindow = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('FULL', [hubA1, hubA2]), senderB.id,
+        ).markdown);
+        const everyExpectedReport = [full, jobs, stall].every(report => report.includes('### Source Scheduling & Throttle History')
+          && report.includes('hub `…d-hub-a1` / `google`')
+          && report.includes('hub `…d-hub-a2` / `glassdoor`'));
+        assert(everyExpectedReport
+          && !full.includes('assembled-hub-b')
+          && !full.includes('untrusted-source-key')
+          && !full.includes(secret)
+          && !nonCurrent.includes('assembled-hub-a2')
+          && !wrongWindow.includes('Source Scheduling & Throttle History'),
+        'real FULL/JOBS/STALL report assembly retains each current sender-local Job Search hub, excludes foreign/non-current/corrupt receipts, and renders no arbitrary query/location/detail fields');
+      } finally {
+        __resetJobsTelemetryForTests();
+      }
+      return { assembledFilters: 3, leakedFields: 0 };
+    },
+  },
 {
     // A bare .slice() cut this evidence mid-word ("…the scraper stopped befor"),
     // which reads as a corrupted report rather than a truncated one, and the
@@ -11301,14 +12363,16 @@ export default [
         assert(!assessment.includes('run tokens disagree')
           && assessment.includes('- Run correlation: ✅ receipt + snapshot agree'),
           'another hub’s run token is not a second opinion about this run');
-        assert(assessment.includes('Separate later run in this process: hub `stopped-hub-b` reached phase `aborted`')
+        assert(assessment.includes('Separate later run in this process: hub `')
+          && assessment.includes('reached phase `aborted`')
           && assessment.includes('Cancelled by user — clicked Reset on this hub'),
           'the stopped run is reported as its own fact, with the real cancel cause rather than the shared sentinel');
         assert(assessment.includes('Live search stage: not retained for this run'),
           'another hub’s phase is never presented as this run’s gather stage');
         // The board that actually consumed hub A must be the one assessed.
-        assert(assessment.includes('`board-of-a` is `empty`') && !assessment.includes('board-of-b` is'),
-          `the connected board of the assessed hub is named, not the other hub’s board, got:\n${assessment}`);
+        assert(/`board-of…[a-f0-9]+` is `empty`/.test(assessment)
+          && !assessment.includes('board-of-a') && !assessment.includes('board-of-b'),
+          `the connected board of the assessed hub is named through its redacted label, not the other hub’s board, got:\n${assessment}`);
         assert(assessment.includes('Combine can still render them without re-scraping'),
           'an unconsumed board states that the score-ready rows are recoverable');
         assert(assessment.includes('✅ `ziprecruiter` traversed all 6 candidate identities (provider advertised ~5)')
@@ -11632,6 +12696,7 @@ export default [
         assert(report.includes('`dice`: successfully fetched 6 pages across API fan-out queries → stopped: jobs-per-platform')
           && report.includes('stopped by the configured Jobs per platform limit (50); this is a user cap, not provider exhaustion'),
         'API pagination reports summed fan-out request pages and explains the configured cap without calling it an exhausted provider');
+
         telemetry.search.bySource.dice = {
           ...telemetry.search.bySource.dice,
           stopReason: 'pages-per-platform',
@@ -11651,6 +12716,34 @@ export default [
         Object.assign(telemetry, saved);
       }
       return { apiPages: 6 };
+    },
+  },
+  {
+    name: 'job recovery labels the LinkedIn collection ceiling as app-internal',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-linkedin-internal-cap-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'linkedin-internal-cap';
+      try {
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, nodeId), JSON.stringify({
+          runId: 'linkedin-cap-run', nodeId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 150 },
+          cleanup: { attempted: true, cleared: true },
+          sources: {
+            linkedin: {
+              count: 150, providerGathered: 150, relevanceDropped: 0, stopReason: 'result-ceiling',
+              cap: { type: 'source-internal', limit: 150 },
+            },
+          },
+        }), 'utf8');
+        const report = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(report.includes("app's internal LinkedIn per-query collection ceiling/enrichment budget 150")
+          && !report.includes("source's own result ceiling"),
+        'the LinkedIn 150 cap is identified as the app’s collection/enrichment budget, never a provider result ceiling');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { limit: 150 };
     },
   },
   {
@@ -11959,6 +13052,276 @@ export default [
       assert(longDescription.length < 1_500,
         `a runaway description must not turn the pointer back into a giant paste, got ${longDescription.length} chars`);
       return { pointerLength: pointer.length };
+    },
+  },
+  {
+    name: 'Job Board FULL diagnostics retain bounded mounted selector eligibility and layout facts',
+    run: () => {
+      const boardId = 'selector-runtime-board';
+      const report = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: { hubState: 'empty' } },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: {
+          rowCount: 3,
+          selectedCount: 3,
+          actionEligible: false,
+          actionLabel: 'Search & combine',
+          eligibilityReasons: ['selected-source-unready', 'not-an-allowed-reason'],
+          selectorBounds: { clientWidth: 260, clientHeight: 583, scrollWidth: 260, scrollHeight: 583 },
+          sourceListBounds: { clientWidth: 236, clientHeight: 176, scrollWidth: 236, scrollHeight: 418 },
+        },
+      }]);
+      assert(report.includes('Selector runtime: rows=3 · selected=3 · action=disabled (Search & combine)')
+        && report.includes('reasons=selected-source-unready')
+        && report.includes('selector=260×583 scroll=260×583')
+        && report.includes('source-list=236×176 scroll=236×418 (y-scroll)')
+        && !report.includes('not-an-allowed-reason'),
+      `FULL Board diagnostics must render the actual selector gate and bounded overflow facts, got:\n${report}`);
+
+      const privateText = 'private-selector-action-or-reason';
+      const sanitized = buildJobBoardDiagnostics([
+        { id: boardId, type: 'jobboard', data: {} },
+      ], [], [{
+        id: boardId,
+        jobBoardSelector: {
+          rowCount: -1,
+          selectedCount: 1e9,
+          actionEligible: 'yes',
+          actionLabel: privateText,
+          eligibilityReasons: [privateText],
+          selectorBounds: { clientWidth: Infinity },
+        },
+      }]);
+      assert(sanitized.includes('Selector runtime: rows=not retained · selected=not retained · action=not retained')
+        && !sanitized.includes(privateText),
+      'malformed component state must be fail-closed and never leak arbitrary selector text');
+      return { selectorRows: 3, verticalOverflow: true };
+    },
+  },
+  {
+    name: 'Job Board FULL diagnostics retain redacted connected-source admission gates',
+    run: () => {
+      const boardId = 'diagnostic-board-private-id';
+      const freshId = 'diagnostic-fresh-private-id';
+      const reclaimedId = 'diagnostic-reclaimed-private-id';
+      const blockedId = 'diagnostic-blocked-private-id';
+      const freshCapability = `career-import:${freshId}:fresh-capability-private`;
+      const legacyCapability = `career-import:${reclaimedId}:legacy-capability-private`;
+      const blockedCapability = `career-import:${blockedId}:blocked-capability-private`;
+      const privatePath = '/Users/private/career-resume.pdf';
+      const report = buildJobBoardDiagnostics([
+        {
+          id: boardId,
+          type: 'jobboard',
+          data: {
+            hubState: 'empty',
+            selectedSearchModuleIds: [reclaimedId, blockedId],
+            boardScanResume: {
+              version: 1,
+              boardRunId: 'board-run-private',
+              phase: 'searches',
+              selectedSearchModuleIds: [reclaimedId, blockedId],
+              activeSourceId: reclaimedId,
+            },
+          },
+        },
+        {
+          id: freshId,
+          type: 'jobhub',
+          data: {
+            hubState: 'empty', careerFilePaths: [privatePath],
+            careerImportGeneration: freshCapability,
+            careerImportFreshCapability: freshCapability,
+            careerImportConsumption: null,
+          },
+        },
+        {
+          id: reclaimedId,
+          type: 'jobhub',
+          data: {
+            hubState: 'empty', careerFilePaths: [privatePath],
+            careerImportGeneration: legacyCapability,
+            careerImportFreshCapability: null,
+            careerImportConsumption: {
+              generation: legacyCapability,
+              capability: legacyCapability,
+              origin: 'job-board', boardRunId: 'legacy-board-run-private',
+            },
+          },
+        },
+        {
+          id: blockedId,
+          type: 'jobhub',
+          data: {
+            hubState: 'empty', careerFilePaths: [privatePath],
+            careerImportGeneration: blockedCapability,
+            careerImportFreshCapability: null,
+            careerImportConsumption: {
+              generation: blockedCapability,
+              capability: blockedCapability,
+              origin: 'job-board', boardRunId: 'fixed-board-run-private', admissionVersion: 2,
+            },
+          },
+        },
+      ], [
+        { source: boardId, target: freshId },
+        { source: reclaimedId, target: boardId },
+        { source: boardId, target: blockedId },
+      ]);
+      assert(report.includes('Connected source admission:')
+        && report.includes('selected=no') && report.includes('selected=yes')
+        && report.includes('hub-state=empty')
+        && report.includes('admission=fresh-imported-input')
+        && report.includes('admission=fresh-import-requires-clear')
+        && report.includes('selector-ready=no · selector-status=Clear + import required · selector-reason=admission:fresh-import-requires-clear')
+        && report.includes('fresh-capability=present') && report.includes('fresh-capability=absent')
+        && report.includes('consumption-origin=job-board')
+        && report.includes('admission-version=absent') && report.includes('admission-version=2')
+        && report.includes('scan-active') && report.includes('scan-selected'),
+      `FULL Board diagnostics must retain redacted persisted admission gates and recovery claims, got:\n${report}`);
+      assert(!report.includes(boardId) && !report.includes(freshId)
+        && !report.includes(reclaimedId) && !report.includes(blockedId)
+        && !report.includes(freshCapability) && !report.includes(legacyCapability)
+        && !report.includes(blockedCapability) && !report.includes(privatePath),
+      'connected-source diagnostics must never export opaque IDs, capabilities, or file paths');
+      return { sourceFacts: 3, legacyPreflightClaim: true };
+    },
+  },
+  {
+    name: 'Job Board diagnostics mirror default selection, redacted terminal counts, and scoped recovery ownership',
+    run: () => {
+      const defaultBoard = 'default-selection-board-private';
+      const terminalSource = 'terminal-count-source-private';
+      const defaultReport = buildJobBoardDiagnostics([
+        { id: defaultBoard, type: 'jobboard', data: { hubState: 'empty' } },
+        {
+          id: terminalSource, type: 'jobhub', data: {
+            hubState: 'done', jobRunId: 'terminal-run-private', resultDisposition: 'populated',
+            // This is the renderer-redacted shape; no scored-job content crosses
+            // the report boundary, but the positive terminal is still reusable.
+            scoredJobsCount: 2,
+          },
+        },
+      ], [{ source: defaultBoard, target: terminalSource }]);
+      assert(defaultReport.includes('selected=yes')
+        && defaultReport.includes('admission=reuse-terminal')
+        && defaultReport.includes('selector-ready=yes'),
+      `a missing selection allow-list defaults to every connected source and preserves a redacted positive terminal, got:\n${defaultReport}`);
+
+      const malformedSelectionReports = [{ stale: 'selection-object-private' }, 'selection-string-private']
+        .map((selectedSearchModuleIds, index) => buildJobBoardDiagnostics([
+          {
+            id: `malformed-selection-board-${index}`, type: 'jobboard',
+            data: { selectedSearchModuleIds },
+          },
+          { id: `malformed-selection-source-${index}`, type: 'jobhub', data: { hubState: 'empty' } },
+        ], [{ source: `malformed-selection-board-${index}`, target: `malformed-selection-source-${index}` }]));
+      assert(malformedSelectionReports.every(report => report.includes('selected=yes'))
+        && malformedSelectionReports.every(report => !report.includes('selection-object-private') && !report.includes('selection-string-private')),
+      'malformed non-array Board selections match the live default-all selector and never leak their payload');
+
+      const sharedSource = 'sibling-shared-source-private';
+      const firstBoard = 'sibling-first-board-private';
+      const secondBoard = 'sibling-second-board-private';
+      const scopedReport = buildJobBoardDiagnostics([
+        {
+          id: 'first-sibling-group', type: 'group', data: { canvasData: {
+            nodes: [
+              { id: firstBoard, type: 'jobboard', data: { boardScanResume: {
+                version: 1, boardRunId: 'first-board-run-private', phase: 'searches',
+                selectedSearchModuleIds: [sharedSource], activeSourceId: sharedSource,
+              } } },
+              { id: sharedSource, type: 'jobhub', data: { hubState: 'empty' } },
+            ],
+            edges: [{ source: firstBoard, target: sharedSource }],
+          } },
+        },
+        {
+          id: 'second-sibling-group', type: 'group', data: { canvasData: {
+            nodes: [
+              { id: secondBoard, type: 'jobboard', data: {} },
+              { id: sharedSource, type: 'jobhub', data: { hubState: 'empty' } },
+            ],
+            edges: [{ source: secondBoard, target: sharedSource }],
+          } },
+        },
+      ], []);
+      const scopedRows = scopedReport.split('\n- Board ').slice(1);
+      const firstScope = scopedRows.find(row => row.includes('scope=nested canvas 1 (depth 1)')) || '';
+      const secondScope = scopedRows.find(row => row.includes('scope=nested canvas 2 (depth 1)')) || '';
+      assert(firstScope.includes('scan-selected') && firstScope.includes('scan-active')
+        && secondScope.includes('recovery-claim=none'),
+      `sibling canvases that reuse a source id must not borrow another Board's recovery claim, got:\n${scopedReport}`);
+
+      const secret = 'malformed-recovery-secret-must-not-export';
+      const malformedReport = buildJobBoardDiagnostics([
+        {
+          id: 'malformed-board-private', type: 'jobboard', data: {
+            boardScanResume: {
+              version: 2, boardRunId: 'invalid-plan-run-private', phase: 'combine',
+              combineSourceRuns: [{ sourceId: 'malformed-source-private', runId: secret }],
+              completedSourceRuns: { 'malformed-source-private': { runId: secret } },
+            },
+            manualAiResume: {
+              runId: 'retiring-manual-private', retirementPending: true,
+              combineSourceRuns: [{ sourceId: 'malformed-source-private', runId: secret }],
+            },
+          },
+        },
+        { id: 'malformed-source-private', type: 'jobhub', data: { hubState: 'empty' } },
+      ], [{ source: 'malformed-board-private', target: 'malformed-source-private' }]);
+      assert(malformedReport.includes('recovery-claim=none') && !malformedReport.includes(secret),
+        'invalid-version and retirement-only recovery receipts fail closed without exporting malformed receipt values');
+      return { defaultAll: true, redactedTerminal: true, scopedClaims: true };
+    },
+  },
+  {
+    name: 'JOBBOARD filter keeps admission timeline and enhanced diagnostics without dropping graph state',
+    run: () => {
+      const logs = [
+        '[Canvas] unrelated setup 1', '[Canvas] unrelated setup 2', '[Canvas] unrelated setup 3', '[Canvas] unrelated setup 4',
+        '[JobSearch] login preflight requires Glassdoor', '[JobBoard] selected source admission blocked',
+        '[Accounts] Glassdoor logged in and verified', '[Canvas] unrelated teardown 1', '[Canvas] unrelated teardown 2',
+        '[Canvas] unrelated teardown 3', '[Canvas] unrelated teardown 4',
+      ];
+      const filtered = applyBugReportCode(logs, {}, 'JOBBOARD');
+      assert(filtered.matchedCodes.includes('JOBBOARD')
+        && filtered.filteredLogs.some(line => line.includes('login preflight'))
+        && filtered.filteredLogs.some(line => line.includes('selected source admission'))
+        && filtered.filteredLogs.some(line => line.includes('logged in and verified'))
+        && !filtered.filteredLogs.some(line => line.includes('unrelated setup 1'))
+        && filtered.sectionExclusions.has('drawings')
+        && !filtered.sectionExclusions.has('nodes')
+        && !filtered.sectionExclusions.has('edges')
+        && !filtered.sectionExclusions.has('nodeComponentStates'),
+      'JOBBOARD must be recognized, preserve the login-preflight/selector timeline, and retain graph plus mounted selector state');
+
+      const boardId = 'jobboard-filter-board-private';
+      const sourceId = 'jobboard-filter-source-private';
+      const payload = {
+        description: 'Logged in, but the Job Board action remains disabled.',
+        filterStats: { hasJobNodes: true, hasSellNodes: false, currentNodeIds: [boardId, sourceId], currentJobHubIds: [sourceId], omittedSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState', 'jobAuditDetail'] },
+        nodes: [
+          { id: boardId, type: 'jobboard', data: { hubState: 'empty' } },
+          { id: sourceId, type: 'jobhub', data: { hubState: 'empty' } },
+        ],
+        edges: [{ source: boardId, target: sourceId }], drawings: [], frontEndState: {}, nodeInternals: [],
+        nodeComponentStates: [{ id: boardId, jobBoardSelector: {
+          rowCount: 1, selectedCount: 1, actionEligible: false,
+          actionLabel: 'Search & combine', eligibilityReasons: ['selected-source-unready'],
+        } }], eventLogs: filtered.filteredLogs,
+      };
+      const focused = generateMarkdown({ ...payload, filterCode: 'JOBBOARD' }).markdown;
+      const full = generateMarkdown({ ...payload, filterCode: 'FULL' }).markdown;
+      assert(focused.includes('## Job Board Transaction & Display Diagnostics')
+        && focused.includes('Connected source admission:')
+        && focused.includes('selected=yes')
+        && focused.includes('selected-source-unready')
+        && full.includes('## Job Board Transaction & Display Diagnostics')
+        && full.includes('Connected source admission:'),
+      'JOBBOARD and FULL both render the enhanced Board section from retained nodes, edges, and selector state');
+      return { focusedTimeline: filtered.filteredLogs.length, fullBoardDiagnostics: true };
     },
   },
 ];

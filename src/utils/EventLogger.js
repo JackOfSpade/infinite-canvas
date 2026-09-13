@@ -48,6 +48,20 @@ export function formatEventLogEntry(message, date = new Date()) {
   return `[${localIsoTimestampWithOffset(date)}] ${message}`;
 }
 
+// Chromium dispatches these as window `error` events when it defers a
+// ResizeObserver delivery cycle. They are layout scheduling warnings, not
+// application exceptions; keep the exact browser text and timestamp in the
+// report, but do not mislabel them as a JS failure.
+export function classifyLayoutWarning(message) {
+  const text = String(message || '').trim();
+  if (
+    text === 'ResizeObserver loop limit exceeded'
+    || text === 'ResizeObserver loop completed with undelivered notifications'
+    || text === 'ResizeObserver loop completed with undelivered notifications.'
+  ) return `LAYOUT-WARNING: ${text}`;
+  return null;
+}
+
 /**
  * Safe object-to-string for logging. Prevents JSON.stringify circular ref crashes.
  */
@@ -249,7 +263,9 @@ class EventLoggerSingleton {
 
     window.addEventListener('error', (e) => {
       const loc = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno})` : '';
-      this.log(`JS-ERROR: ${e?.message || String(e)}${loc}`);
+      const message = e?.message || String(e);
+      const layoutWarning = classifyLayoutWarning(message);
+      this.log(layoutWarning ? `${layoutWarning}${loc}` : `JS-ERROR: ${message}${loc}`);
     });
 
     window.addEventListener('unhandledrejection', (e) => {

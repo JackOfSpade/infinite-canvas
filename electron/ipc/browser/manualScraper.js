@@ -721,6 +721,13 @@ const DESC_CONFIGS = {
     panelSelector: 'span.OOyDTc, span.ejCXj',
     panelMulti:    true,         // description split across visible + hidden spans
     closeSelector: null,
+    // Detail panels are separate network requests. At the old generic 600ms
+    // cadence Google reliably returned HTTP 429 near the end of a 30–40 card
+    // page. Use a minimum human-scale gap and periodically let the rolling
+    // request window drain; list extraction remains fast and is never retried.
+    clickDelayMs: 3000,
+    panelCooldownEvery: 8,
+    panelCooldownMs: 15000,
   },
   ziprecruiter: {
     keyParam:      'jid',
@@ -833,15 +840,14 @@ export function descriptionExpansionStrategy(sourceId) {
  *
  * `requestsIssued` counts actual mouse clicks which may cause the board's
  * detail API to run (including a bounded retry), rather than list rows. This
- * lets Glassdoor cool down before the next request after every small burst,
- * while other sources preserve their existing walk cadence.
+ * lets a configured source cool down before the next request after every small
+ * burst, while unconfigured sources preserve their existing walk cadence.
  */
 export function descriptionPanelPacing(sourceId, requestsIssued = 0) {
   const cfg = DESC_CONFIGS[sourceId] || {};
   const requestDelayMs = Math.max(0, Number(cfg.clickDelayMs) || DESC_CLICK_DELAY_MS);
   const every = Math.max(0, Number(cfg.panelCooldownEvery) || 0);
-  const checkpointDue = sourceId === 'glassdoor'
-    && every > 0
+  const checkpointDue = every > 0
     && Number(requestsIssued) > 0
     && Number(requestsIssued) % every === 0;
   const checkpointCooldownMs = Math.max(0, Number(cfg.panelCooldownMs) || 0);
@@ -851,9 +857,32 @@ export function descriptionPanelPacing(sourceId, requestsIssued = 0) {
     // Keep configured pacing visible in card-walk telemetry even before the
     // first checkpoint is due. The executor gates the actual wait on
     // `checkpointDue`; diagnostic output must not incorrectly imply that the
-    // 12s policy was absent just because this batch stopped before request 9.
+    // checkpoint policy was absent just because this batch stopped early.
     checkpointCooldownMs,
     checkpointEvery: every || null,
+  };
+}
+
+/**
+ * Attribute an asynchronous panel failure to the last request that could have
+ * caused it. `startIndex` is zero-based, matching the enrichment loop and the
+ * deferred-row slice. A fallback keeps the helper safe before the first click.
+ */
+export function descriptionPanelFailureAttribution(lastRequest, {
+  startIndex = 0,
+  key = '',
+  title = '',
+} = {}) {
+  const fallback = {
+    startIndex: Math.max(0, Math.trunc(Number(startIndex) || 0)),
+    key: String(key || ''),
+    title: String(title || ''),
+  };
+  if (!lastRequest || !Number.isFinite(Number(lastRequest.startIndex))) return fallback;
+  return {
+    startIndex: Math.max(0, Math.trunc(Number(lastRequest.startIndex))),
+    key: String(lastRequest.key || fallback.key),
+    title: String(lastRequest.title || fallback.title),
   };
 }
 
@@ -3815,6 +3844,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let panelRateLimitCount = 0;
   let panelHttpFailureCount = 0;
   let panelRequestsIssued = 0;
+  // Network response events do not necessarily arrive before the next card's
+  // pacing wait. Keep the issuing card so a late failure never gets assigned
+  // to the card that was merely about to be opened.
+  let lastPanelRequest = null;
+  const panelRequestContexts = new Map();
   let proactivePanelCooldowns = 0;
   let panelJsonResponses = 0;
   let panelJsonPayloads = 0;
@@ -3919,6 +3953,96 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     }).catch(() => {});
     return true;
   };
+  const panelFailureContext = (startIndex, key = '', title = '', responseKey = '') => {
+    const responseContext = responseKey ? panelRequestContexts.get(String(responseKey)) : null;
+    return descriptionPanelFailureAttribution(responseContext || lastPanelRequest, {
+      startIndex,
+      key,
+      title,
+    });
+  };
+  // Response events can land after the bounded DOM poll, including while a
+  // proactive cooldown runs.  Centralize Glassdoor's terminal handling so the
+  // pre-click guard keeps the same rows, warning, and telemetry as post-poll.
+  const stopForGlassdoorPanelFailure = async (startIndex, key = '', title = '') => {
+    if (glassdoorPanelRateLimit) {
+      const context = panelFailureContext(startIndex, key, title, glassdoorPanelRateLimit.key);
+      startIndex = context.startIndex;
+      key = context.key;
+      title = context.title;
+      panelRateLimitCount++;
+      const rateLimit = glassdoorPanelRateLimit;
+      const rateLimitKey = String(rateLimit.key || key);
+      // Clean up by the response identity, not merely the attribution
+      // fallback. The map normally resolves both to the same request, but a
+      // late event must never leave an old pending key behind.
+      pendingGlassdoorPanelKeys.delete(rateLimitKey);
+      glassdoorPanelResponseDetails.delete(rateLimitKey);
+      rememberCardWalkFailure(startIndex + 1, rateLimitKey, 'panel-http-429');
+      recordManualScraperTelemetry({
+        phase: 'detail-panel-rate-limit', sourceId, srcName: overlayBase.srcName,
+        itemIndex: startIndex + 1, itemTotal: enhanced.length,
+        key: rateLimitKey.slice(0, 80), reason: 'http-429', status: rateLimit.status,
+        url: rateLimit.url,
+      }, { updateActive: false });
+      logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor rate-limited the list-panel request for key=${rateLimitKey}; stopping card enrichment without retrying`);
+      descWarning ||= {
+        code: 'description-rate-limited', severity: 'block',
+        evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle. List rows were kept, but this and later listings carry no description and are held back from scoring.`,
+        suggestion: 'Wait a few minutes, then click Solve to retry the unresolved descriptions. List results were retained; deferred listings are not recorded as seen, so a later run can still collect them.',
+      };
+      for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+        enhanced[unresolvedIndex] = {
+          ...enhanced[unresolvedIndex],
+          descriptionDeferredReason: 'description-rate-limited',
+        };
+      }
+      await updateOverlay(page, {
+        ...overlayBase,
+        count: totalSoFar,
+        status: 'Glassdoor rate-limited panel loading — keeping list results and stopping description clicks.',
+      }).catch(() => {});
+      return true;
+    }
+    if (!glassdoorPanelHttpFailure) return false;
+    const context = panelFailureContext(startIndex, key, title, glassdoorPanelHttpFailure.key);
+    startIndex = context.startIndex;
+    key = context.key;
+    title = context.title;
+    panelHttpFailureCount++;
+    const failure = glassdoorPanelHttpFailure;
+    const failureKey = String(failure.key || key);
+    rememberCardWalkFailure(startIndex + 1, failureKey, `panel-http-${failure.status}`);
+    recordManualScraperTelemetry({
+      phase: 'detail-panel-http-error', sourceId, srcName: overlayBase.srcName,
+      itemIndex: startIndex + 1, itemTotal: enhanced.length,
+      key: failureKey.slice(0, 80), reason: `http-${failure.status}`,
+      status: failure.status, url: failure.url,
+    }, { updateActive: false });
+    logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor denied the list-panel request with HTTP ${failure.status} for key=${failureKey}; stopping without another request`);
+    descWarning ||= {
+      code: 'description-panel-http-error', severity: 'warn',
+      evidence: `Glassdoor returned HTTP ${failure.status} from its right-side panel endpoint for "${title || 'an untitled listing'}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`,
+      suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
+    };
+    for (let unresolvedIndex = startIndex; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+      enhanced[unresolvedIndex] = {
+        ...enhanced[unresolvedIndex],
+        descriptionDeferredReason: 'description-panel-http-error',
+      };
+    }
+    await updateOverlay(page, {
+      ...overlayBase,
+      count: totalSoFar,
+      status: `Glassdoor panel request failed (HTTP ${failure.status}) — keeping list results and stopping description clicks.`,
+    }).catch(() => {});
+    return true;
+  };
+  const stopForLatePanelFailure = async (startIndex, key = '', title = '') => {
+    const context = panelFailureContext(startIndex, key, title);
+    if (await stopForGooglePanelRateLimit(context.startIndex, context.key)) return true;
+    return stopForGlassdoorPanelFailure(context.startIndex, context.key, context.title);
+  };
   const takeGlassdoorPanelResponseDetail = async (key, waitMs = 900) => {
     if (sourceId !== 'glassdoor') return null;
     const deadline = Date.now() + waitMs;
@@ -3948,9 +4072,9 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     await updateOverlay(page, {
       ...overlayBase,
       count: totalSoFar,
-      status: `Pausing ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s to keep Glassdoor panel requests below its throttle…`,
+      status: `Pausing ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s to keep ${overlayBase.srcName} panel requests below its throttle…`,
     }).catch(() => {});
-    await new Promise(resolve => setTimeout(resolve, humanCooldown(pacing.checkpointCooldownMs)));
+    await sleepUnlessAborted(humanCooldown(pacing.checkpointCooldownMs), signal);
     return pacing;
   };
   const rememberCardWalkFailure = (itemIndex, key, reason) => {
@@ -4038,7 +4162,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     }
 
     const job = enhanced[i];
-    if (await stopForGooglePanelRateLimit(i, cardTargets[i]?.key)) break;
+    if (await stopForLatePanelFailure(i, cardTargets[i]?.key, job.title)) break;
     const physicalIndex = Number.isFinite(Number(physicalIndexes[i]))
       ? Number(physicalIndexes[i])
       : i + 1;
@@ -4233,6 +4357,18 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       }
 
       await waitForPanelPacing();
+      // sleepUnlessAborted intentionally resolves (rather than rejecting) so
+      // cancellation can unwind the scrape cleanly.  Do not mistake that
+      // successful resolution for permission to issue the next panel request.
+      // In particular, a Reset during a 15s checkpoint used to wake this wait
+      // and immediately click a card anyway.
+      if (signal?.aborted) interruptedAt ??= i + 1;
+      if (signal?.aborted) break;
+      if (page.isClosed()) break;
+      // A panel response can arrive after pollPanel's bounded observation
+      // window, including while this checkpoint is draining.  Re-check before
+      // the next click so a late Google 429 never buys one extra request.
+      if (await stopForLatePanelFailure(i, key, job.title)) break;
       if (sourceId === 'glassdoor') {
         glassdoorPanelHttpFailure = null;
         glassdoorPanelResponseDetails.delete(key);
@@ -4241,6 +4377,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
       await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
       panelRequestsIssued++;
+      lastPanelRequest = { startIndex: i, key, title: job.title };
+      panelRequestContexts.set(key, lastPanelRequest);
       // Glassdoor can show this signup prompt only after the click that would
       // normally hydrate the side panel. Give its animation a moment, then
       // dismiss it before treating an unchanged panel as selector drift.
@@ -4354,72 +4492,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         ? await takeGlassdoorPanelResponseDetail(key)
         : null;
       if (await stopForGooglePanelRateLimit(i, key)) break;
-      if (glassdoorPanelRateLimit) {
-        pendingGlassdoorPanelKeys.delete(key);
-        glassdoorPanelResponseDetails.delete(key);
-        panelRateLimitCount++;
-        const rateLimit = glassdoorPanelRateLimit;
-        const rateLimitKey = rateLimit.key || key;
-        rememberCardWalkFailure(i + 1, rateLimitKey, 'panel-http-429');
-        recordManualScraperTelemetry({
-          phase: 'detail-panel-rate-limit', sourceId, srcName: overlayBase.srcName,
-          itemIndex: i + 1, itemTotal: enhanced.length,
-          key: rateLimitKey.slice(0, 80), reason: 'http-429', status: rateLimit.status,
-          url: rateLimit.url,
-        }, { updateActive: false });
-        logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor rate-limited the list-panel request for key=${rateLimitKey}; stopping card enrichment without retrying`);
-        // `block`, matching Google's identical panel-429 (see
-        // stopForGooglePanelRateLimit). `warn` did not gate, so the hub never
-        // paused and JobSourceCardNode suppressed the Solve button entirely —
-        // leaving the description-recovery path that jobs.js registers for
-        // Glassdoor unreachable while every later row was deferred unscored.
-        descWarning = {
-          code: 'description-rate-limited', severity: 'block',
-          evidence: `Glassdoor returned HTTP 429 while loading the right-side panel for "${job.title || 'an untitled listing'}". The scraper stopped panel enrichment immediately instead of retrying more cards and extending the throttle. List rows were kept, but this and later listings carry no description and are held back from scoring.`,
-          suggestion: 'Wait a few minutes, then click Solve to retry the unresolved descriptions. List results were retained; deferred listings are not recorded as seen, so a later run can still collect them.',
-        };
-        for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-          enhanced[unresolvedIndex] = {
-            ...enhanced[unresolvedIndex],
-            descriptionDeferredReason: 'description-rate-limited',
-          };
-        }
-        await updateOverlay(page, {
-          ...overlayBase,
-          count: totalSoFar,
-          status: 'Glassdoor rate-limited panel loading — keeping list results and stopping description clicks.',
-        }).catch(() => {});
-        break;
-      }
-      if (glassdoorPanelHttpFailure) {
-        panelHttpFailureCount++;
-        const failure = glassdoorPanelHttpFailure;
-        rememberCardWalkFailure(i + 1, failure.key || key, `panel-http-${failure.status}`);
-        recordManualScraperTelemetry({
-          phase: 'detail-panel-http-error', sourceId, srcName: overlayBase.srcName,
-          itemIndex: i + 1, itemTotal: enhanced.length,
-          key: String(failure.key || key).slice(0, 80), reason: `http-${failure.status}`,
-          status: failure.status, url: failure.url,
-        }, { updateActive: false });
-        logger.warn(`[BrowserScraper] ${sourceId}: Glassdoor denied the list-panel request with HTTP ${failure.status} for key=${failure.key || key}; stopping without another request`);
-        descWarning = {
-          code: 'description-panel-http-error', severity: 'warn',
-          evidence: `Glassdoor returned HTTP ${failure.status} from its right-side panel endpoint for "${job.title || 'an untitled listing'}". This is a source response failure, not a panel-selector timeout; the scraper stopped before issuing another request.`,
-          suggestion: 'Retry Glassdoor later. List results were retained; this and later unresolved rows remain eligible for a future run.',
-        };
-        for (let unresolvedIndex = i; unresolvedIndex < enhanced.length; unresolvedIndex++) {
-          enhanced[unresolvedIndex] = {
-            ...enhanced[unresolvedIndex],
-            descriptionDeferredReason: 'description-panel-http-error',
-          };
-        }
-        await updateOverlay(page, {
-          ...overlayBase,
-          count: totalSoFar,
-          status: `Glassdoor panel request failed (HTTP ${failure.status}) — keeping list results and stopping description clicks.`,
-        }).catch(() => {});
-        break;
-      }
+      if (await stopForGlassdoorPanelFailure(i, key, job.title)) break;
       if (!panelText && descriptionPanelRetryAllowed(sourceId)) {
         // Transient panel-data fetch failures (for example a temporary 403)
         // leave the right panel stuck on the previous card so the change-poll
@@ -4427,13 +4500,40 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         // these without slowing the happy path. Glassdoor deliberately does
         // not retry: its same-request JSON capture is the only fallback, so one
         // unresolved listing cannot double the panel request rate.
-        await waitForPanelPacing();
+        const retryCheckpoint = await waitForPanelPacing();
         const retryPacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
         const retryWait = Math.max(DESC_RETRY_PAUSE_MS, retryPacing.requestDelayMs);
-        await new Promise(r => setTimeout(r, sourceId === 'glassdoor' ? humanCooldown(retryWait) : humanDelay(retryWait)));
+        // The checkpoint is itself a longer-than-normal inter-request pause
+        // for the configured sources.  Do not stack the ordinary retry gap on
+        // top of it; that made every eighth retry wait twice without adding
+        // throttle protection.  Keep a gap for any future config whose
+        // cooldown is shorter than its required request cadence.
+        const checkpointCoversRetryGap = retryCheckpoint.checkpointDue
+          && retryCheckpoint.checkpointCooldownMs >= retryWait;
+        if (!checkpointCoversRetryGap) {
+          await sleepUnlessAborted(
+            retryPacing.checkpointEvery
+              ? humanCooldown(retryWait)
+              : humanDelay(retryWait),
+            signal,
+          );
+        }
+        if (signal?.aborted) break;
+        if (page.isClosed()) break;
+        // The initial poll checks this too, but a callback can be delivered
+        // while the retry pause is in progress.  This immediate check matters
+        // for a one-card batch: there may be no next loop iteration to notice
+        // the throttle.
+        if (await stopForGooglePanelRateLimit(i, key)) break;
         await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
         panelRequestsIssued++;
+        lastPanelRequest = { startIndex: i, key, title: job.title };
+        panelRequestContexts.set(key, lastPanelRequest);
         panelText = await pollPanel();
+        // A retry is a real panel request and can be the one that receives the
+        // 429.  Stop and mark the current/later rows before continuing with
+        // title extraction; otherwise a final-card 429 is silently lost.
+        if (await stopForGooglePanelRateLimit(i, key)) break;
         if (panelModalFailure) {
           missingCount++;
           rememberCardWalkFailure(i + 1, key, `blocking-modal-${panelModalFailure.reason || 'unresolved'}`);
@@ -4594,9 +4694,25 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
     if (page.isClosed()) break;
     const nextPanelPacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
-    await new Promise(r => setTimeout(r, sourceId === 'glassdoor'
-      ? humanCooldown(nextPanelPacing.requestDelayMs)
-      : humanDelay(nextPanelPacing.requestDelayMs)));
+    // Pacing is strictly between panel requests.  The final card has no next
+    // request, and a due checkpoint will already provide a longer pre-click
+    // pause on the next iteration.  Skipping both avoids needless completion
+    // latency and the former gap+checkpoint double wait at requests 8, 16….
+    const hasNextCard = i + 1 < enhanced.length;
+    const checkpointCoversNextGap = nextPanelPacing.checkpointDue
+      && nextPanelPacing.checkpointCooldownMs >= nextPanelPacing.requestDelayMs;
+    if (hasNextCard && !checkpointCoversNextGap) {
+      await sleepUnlessAborted(
+        nextPanelPacing.checkpointEvery
+          ? humanCooldown(nextPanelPacing.requestDelayMs)
+          : humanDelay(nextPanelPacing.requestDelayMs),
+        signal,
+      );
+      if (signal?.aborted) {
+        interruptedAt ??= i + 2;
+        break;
+      }
+    }
   }
 
   // A single bounded batch summary is much more useful than the old
@@ -4989,6 +5105,98 @@ export function shouldTryZipRecruiterDirectContinuation({
     && Number.isInteger(maxPages)
     && pageNum < maxPages
     && hasNextUrl === true;
+}
+
+/**
+ * Decide whether one verified direct reload is warranted after ZipRecruiter's
+ * normal pager successfully lands on an empty page below its trustworthy
+ * advertised total. This is deliberately narrower than the hidden-tail
+ * continuation above: the direct URL must identify the page we just reached,
+ * and a retry is never repeated. A headline total is only a shortfall signal,
+ * never proof that every advertised listing is reachable.
+ */
+export function zipRecruiterProviderShortfallRecoveryOutcome({
+  sourceId,
+  claimedTotal,
+  providerGathered,
+  pageNum,
+  maxPages,
+  hasNextUrl,
+  pageIdentityValid,
+  retryAttempted = false,
+  documentReloaded = false,
+  extractedRows = 0,
+} = {}) {
+  const shortfall = sourceId === 'ziprecruiter'
+    && Number.isFinite(Number(claimedTotal))
+    && Number(claimedTotal) > Number(providerGathered || 0)
+    && Number.isInteger(pageNum)
+    && Number.isInteger(maxPages)
+    && pageNum >= 1
+    && pageNum <= maxPages;
+  if (!shortfall) return 'not-applicable';
+  if (retryAttempted) {
+    return pageIdentityValid && documentReloaded && Number(extractedRows) > 0 ? 'recovered' : 'shortfall';
+  }
+  return hasNextUrl === true && pageIdentityValid ? 'retry' : 'shortfall';
+}
+
+/**
+ * Keep the retry provenance safe to carry through jobs.js's terminal-source
+ * receipt. In particular, the direct URL used for the reload is browser-only:
+ * its query can carry provider search and tracking values and must never enter
+ * a durable result/report field.
+ */
+export function providerTotalShortfallRecoveryReceipt(recovery) {
+  if (!recovery || typeof recovery !== 'object') return null;
+  const boundedInteger = (value) => {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  };
+  const status = typeof recovery.status === 'string'
+    ? recovery.status.replace(/[^a-z0-9-]/gi, '').slice(0, 80)
+    : '';
+  if (!status) return null;
+  const receipt = {
+    pageNum: boundedInteger(recovery.pageNum),
+    attempts: boundedInteger(recovery.attempts),
+    status,
+    rawRows: boundedInteger(recovery.rawRows),
+    newProviderRows: boundedInteger(recovery.newProviderRows),
+    shortfall: boundedInteger(recovery.shortfall),
+  };
+  const terminalPageNum = boundedInteger(recovery.terminalPageNum);
+  if (terminalPageNum != null) receipt.terminalPageNum = terminalPageNum;
+  return receipt;
+}
+
+// A persistent shortfall must remain a usable completed source: the rows we
+// did collect are valid, and a drifting provider headline is not a target we
+// can hold the whole pipeline hostage to. It is nevertheless actionable, so
+// carry a compact non-gating warning to the completed Job Search UI rather
+// than leaving this fact visible only in a later bug report/terminal receipt.
+export function zipRecruiterProviderTotalShortfallWarning({
+  claimedTotal,
+  providerGathered,
+  retryStatus = '',
+} = {}) {
+  const total = Number.isSafeInteger(Number(claimedTotal)) && Number(claimedTotal) > 0
+    ? Number(claimedTotal)
+    : null;
+  const gathered = Number.isSafeInteger(Number(providerGathered)) && Number(providerGathered) >= 0
+    ? Number(providerGathered)
+    : null;
+  if (total == null || gathered == null || gathered >= total) return null;
+  const retry = typeof retryStatus === 'string' && retryStatus
+    ? ` The one verified page reload ended ${retryStatus.replace(/[^a-z0-9-]/gi, '').slice(0, 80) || 'without additional coverage'}.`
+    : '';
+  return {
+    code: 'provider-total-shortfall',
+    severity: 'warn',
+    shortLabel: 'Partial result coverage',
+    evidence: `ZipRecruiter returned an empty page after ${gathered} of ~${total} advertised candidate identities were traversed.${retry}`,
+    suggestion: 'Partial rows were kept. Rerun this source later to try its pager again; the advertised total can drift and is not treated as an exhaustive target.',
+  };
 }
 
 /**
@@ -6088,6 +6296,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let directContinuationFromPage = null;
       let directContinuationPages = 0;
       let directContinuationStop = null;
+      // A visible pager can successfully land on a blank ZipRecruiter page
+      // below the query header's verified total. Keep the one permitted direct
+      // reload receipt separate from the hidden-tail continuation above: this
+      // retries the page we just reached, never speculates about another one.
+      let providerTotalShortfallRecovery = null;
       let hitUnhandledPagination   = false;
       let sourceDetailBlockCode    = null;
       let sourceDetailBlockAt      = 0;    // ms epoch the block was (re)armed — drives the cooldown re-probe
@@ -6693,8 +6906,131 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             if (sourceId === 'ziprecruiter'
               && Number.isFinite(Number(sourceClaimedTotal))
               && providerSeen.size < Number(sourceClaimedTotal)) {
-              hitProviderTotalShortfall = true;
               const shortfall = Number(sourceClaimedTotal) - providerSeen.size;
+              const currentPage = zipRecruiterSearchPageNumber(safePageUrl(page));
+              const retryOutcome = zipRecruiterProviderShortfallRecoveryOutcome({
+                sourceId,
+                claimedTotal: sourceClaimedTotal,
+                providerGathered: providerSeen.size,
+                pageNum,
+                maxPages,
+                hasNextUrl: typeof task.options?.nextUrl === 'function',
+                pageIdentityValid: currentPage === pageNum,
+                retryAttempted: providerTotalShortfallRecovery?.attempts > 0,
+                extractedRows: extracted.length,
+              });
+              if (retryOutcome === 'retry') {
+                let directUrl = null;
+                try { directUrl = task.options.nextUrl(pageNum - 1); }
+                catch { /* invalid task wiring falls through to the shortfall receipt */ }
+                const directPage = zipRecruiterSearchPageNumber(directUrl);
+                if (directPage === pageNum) {
+                  providerTotalShortfallRecovery = {
+                    pageNum,
+                    attempts: 1,
+                    status: 'reload-issued',
+                    rawRows: 0,
+                    newProviderRows: 0,
+                    shortfall,
+                  };
+                  logger.info(`[BrowserScraper] ${srcName} page ${pageNum} loaded empty after ${providerSeen.size}/${sourceClaimedTotal} advertised candidate identities — reloading that verified direct page once before recording incomplete coverage`);
+                  recordManualScraperTelemetry({
+                    phase: 'provider-total-shortfall-retry', sourceId, srcName,
+                    queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                    pageNum, count: allJobs.length, claimedTotal: sourceClaimedTotal,
+                    providerGathered: providerSeen.size, shortfall, url: directUrl,
+                  }, { updateActive: false });
+                  await updateOverlay(page, {
+                    ...overlayBase,
+                    count: allJobs.length,
+                    status: `Retrying verified page ${pageNum}…`,
+                  }).catch(() => {});
+                  // ZipRecruiter has no reliable ready selector. A fixed settle
+                  // delay plus waitForReady can therefore still inspect the old
+                  // blank document (CONTENT_SELECTORS.ziprecruiter is null).
+                  // Leave an in-memory marker on that document and require it
+                  // to disappear after the reload; the marker is never retained
+                  // in telemetry or a result/receipt.
+                  const reloadMarker = `ic-zip-shortfall-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                  const issued = await page.evaluate(({ url, marker }) => {
+                    window.__infiniteCanvasZipShortfallReloadMarker = marker;
+                    window.location.href = url;
+                  }, { url: directUrl, marker: reloadMarker })
+                    .then(() => true)
+                    .catch(() => false);
+                  if (issued) {
+                    await sleepUnlessAborted(humanDelay(NAV_SETTLE_MS), signal);
+                    if (signal?.aborted) { earlyExit = true; break; }
+                    await injectOverlay(page);
+                    const retryReady = await waitForReady(page, sourceId, overlayBase, signal, task.url);
+                    if (retryReady === 'abort' || signal?.aborted) { earlyExit = true; break; }
+                    const landedPage = zipRecruiterSearchPageNumber(safePageUrl(page));
+                    const reloadReplacedDocument = await page.evaluate(marker => (
+                      window.__infiniteCanvasZipShortfallReloadMarker !== marker
+                    ), reloadMarker).catch(() => false);
+                    if ((retryReady === 'ok' || retryReady === 'recovered')
+                      && landedPage === pageNum && reloadReplacedDocument) {
+                      providerTotalShortfallRecovery.status = 'reload-landed';
+                      recordManualScraperTelemetry({
+                        phase: 'provider-total-shortfall-retry-landed', sourceId, srcName,
+                        queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                        pageNum, count: allJobs.length, url: safePageUrl(page),
+                      }, { updateActive: false });
+                      continue;
+                    }
+                    if (retryReady === 'hard-block' || retryReady === 'skip') {
+                      // Match the ordinary page-turn gate: a retry that reaches
+                      // a challenge terminal must not be relabelled as an
+                      // ordinary provider-total shortfall with no Solve/retry
+                      // guidance. The compact retry receipt still records that
+                      // this happened while checking the blank page.
+                      if (!sourceSiteChangedWarning || sourceSiteChangedWarning.severity !== 'block') {
+                        sourceSiteChangedWarning = retryReady === 'hard-block'
+                          ? {
+                            code: 'cloudflare-hard-block', severity: 'block',
+                            action: 'none', shortLabel: 'Wait, then rerun',
+                            evidence: `${srcName} was hard-blocked by Cloudflare while reloading page ${pageNum} after a blank result page.`,
+                            suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry.`,
+                          }
+                          : {
+                            code: 'session-blocked', severity: 'block',
+                            evidence: `${srcName} re-served a bot challenge while reloading page ${pageNum} after verification, so the session is blocked.`,
+                            suggestion: `Open ${srcName} in a normal Chrome tab, ensure you are logged in and unblocked, then run the search again.`,
+                          };
+                      }
+                      sourceSkipped = true;
+                    }
+                    providerTotalShortfallRecovery.status = retryReady === 'hard-block' || retryReady === 'skip'
+                      ? 'reload-blocked'
+                      : !reloadReplacedDocument ? 'reload-not-confirmed'
+                      : landedPage == null ? 'reload-redirected-off-results' : `reload-landed-page-${landedPage}`;
+                    recordManualScraperTelemetry({
+                      phase: 'provider-total-shortfall-retry-rejected', sourceId, srcName,
+                      queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                      pageNum, landedPage, count: allJobs.length,
+                      reason: providerTotalShortfallRecovery.status, url: safePageUrl(page),
+                    }, { updateActive: false });
+                  } else {
+                    providerTotalShortfallRecovery.status = 'reload-navigation-failed';
+                    recordManualScraperTelemetry({
+                      phase: 'provider-total-shortfall-retry-rejected', sourceId, srcName,
+                      queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                      pageNum, count: allJobs.length, reason: providerTotalShortfallRecovery.status,
+                    }, { updateActive: false });
+                  }
+                }
+              }
+              hitProviderTotalShortfall = true;
+              if (providerTotalShortfallRecovery?.status === 'reload-landed') {
+                providerTotalShortfallRecovery.status = 'blank-after-reload';
+              } else if (['rows-recovered', 'rows-reloaded-no-new-identities'].includes(providerTotalShortfallRecovery?.status)
+                && providerTotalShortfallRecovery.pageNum !== pageNum) {
+                // One successful reload must not make a later, un-retried blank
+                // page look as though the prior recovery failed. Preserve its
+                // row counts but name the terminal page honestly.
+                providerTotalShortfallRecovery.status = 'later-blank-after-one-retry';
+                providerTotalShortfallRecovery.terminalPageNum = pageNum;
+              }
               logger.warn(`[BrowserScraper] ${srcName} page ${pageNum} extracted no jobs after ${providerSeen.size}/${sourceClaimedTotal} advertised candidate identities — preserving ${shortfall} candidate identity shortfall as incomplete coverage`);
               recordManualScraperTelemetry({
                 phase: 'provider-total-shortfall', sourceId, srcName,
@@ -6703,6 +7039,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 claimedTotal: sourceClaimedTotal,
                 providerGathered: providerSeen.size,
                 shortfall,
+                recovery: providerTotalShortfallRecovery?.status || 'not-attempted',
               }, { updateActive: false });
             }
             hitEmptyPage = true;
@@ -6724,6 +7061,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             ? Math.max(0, extracted.length - loadMorePrevCount)
             : extracted.length;
           const newJobs = [];
+          let newProviderRows = 0;
           for (const job of extracted) {
             // One listing can surface in two role queries. Google embeds that
             // query in `q`/the fragment, so raw URL equality misses an exact
@@ -6731,7 +7069,38 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             const key = sourceJobKey(job);
             if (providerSeen.has(key)) continue;
             providerSeen.add(key);
+            newProviderRows++;
             if (!seen.has(key)) { seen.add(key); newJobs.push(job); }
+          }
+          if (providerTotalShortfallRecovery?.status === 'reload-landed'
+            && providerTotalShortfallRecovery.pageNum === pageNum) {
+            const recoveryOutcome = zipRecruiterProviderShortfallRecoveryOutcome({
+              sourceId,
+              claimedTotal: sourceClaimedTotal,
+              providerGathered: providerSeen.size - newProviderRows,
+              pageNum,
+              maxPages,
+              hasNextUrl: typeof task.options?.nextUrl === 'function',
+              pageIdentityValid: zipRecruiterSearchPageNumber(safePageUrl(page)) === pageNum,
+              retryAttempted: true,
+              documentReloaded: true,
+              extractedRows: extracted.length,
+            });
+            if (recoveryOutcome === 'recovered') {
+              providerTotalShortfallRecovery.status = newProviderRows > 0
+                ? 'rows-recovered'
+                : 'rows-reloaded-no-new-identities';
+              providerTotalShortfallRecovery.rawRows = extracted.length;
+              providerTotalShortfallRecovery.newProviderRows = newProviderRows;
+              recordManualScraperTelemetry({
+                phase: 'provider-total-shortfall-retry-recovered', sourceId, srcName,
+                queryIndex: qi + 1, queryTotal: sourceTasks.length,
+                pageNum, count: allJobs.length,
+                rawRows: extracted.length, newProviderRows,
+                providerGathered: providerSeen.size, claimedTotal: sourceClaimedTotal,
+              }, { updateActive: false });
+              logger.info(`[BrowserScraper] ${srcName} verified page ${pageNum} reload yielded ${extracted.length} row(s) (${newProviderRows} new provider identity/identities) — continuing pagination without inferring exhaustive coverage from the advertised total`);
+            }
           }
 
           // The user-selected aggregate source limit applies across all queries
@@ -7308,6 +7677,38 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         hitProviderTotalShortfall,
         dataStopReason,
       });
+      const shortfallRetry = providerTotalShortfallRecoveryReceipt(providerTotalShortfallRecovery);
+      const providerTotalShortfallWarning = hitProviderTotalShortfall
+        ? zipRecruiterProviderTotalShortfallWarning({
+          claimedTotal: sourceClaimedTotal,
+          providerGathered: providerSeen.size,
+          retryStatus: shortfallRetry?.status,
+        })
+        : null;
+      const retryLanded = ['reload-landed', 'rows-recovered', 'rows-reloaded-no-new-identities', 'blank-after-reload', 'later-blank-after-one-retry']
+        .includes(shortfallRetry?.status);
+      // jobs.js already persists `directContinuation` into the terminal
+      // source receipt. Carry the compact retry receipt there too, rather than
+      // relying on a new result field that its aggregation would discard.
+      const directContinuation = directContinuationFromPage != null
+        ? {
+          fromPage: directContinuationFromPage,
+          pages: directContinuationPages,
+          lastPage: directContinuationPages > 0
+            ? directContinuationFromPage + directContinuationPages - 1
+            : null,
+          stop: directContinuationStop || dataStopReason || stopReason,
+          ...(shortfallRetry ? { shortfallRetry } : {}),
+        }
+        : shortfallRetry
+          ? {
+            fromPage: shortfallRetry.pageNum,
+            pages: retryLanded ? 1 : 0,
+            lastPage: retryLanded ? shortfallRetry.pageNum : null,
+            stop: `provider-total-shortfall-retry:${shortfallRetry.status}`,
+            shortfallRetry,
+          }
+          : null;
       const result = {
         id:          `${sourceId}-0`,
         sourceId,
@@ -7321,17 +7722,18 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // its visible pager disappears. It never filters rows or asserts that
         // the drifting headline is an exact completion target.
         claimedTotal: sourceClaimedTotal,
-        directContinuation: directContinuationFromPage != null
-          ? {
-            fromPage: directContinuationFromPage,
-            pages: directContinuationPages,
-            lastPage: directContinuationPages > 0
-              ? directContinuationFromPage + directContinuationPages - 1
-              : null,
-            stop: directContinuationStop || dataStopReason || stopReason,
-          }
-          : null,
-        warning:     sourceSiteChangedWarning || null,
+        directContinuation,
+        // A separate receipt for the one direct reload allowed after a normal
+        // ZipRecruiter page turn lands blank below its trusted query total.
+        // Unlike `directContinuation`, this is a retry of the same numbered
+        // page and must not be reported as evidence that an unlinked tail was
+        // exhaustively traversed.
+        providerTotalShortfallRecovery: shortfallRetry,
+        // A persistent provider-total shortfall is non-gating: it must not
+        // strand otherwise usable rows in sources-ready, but it must remain
+        // visible/actionable after source cards are reaped. A concrete block
+        // warning from the retry still wins this informational outcome.
+        warning:     sourceSiteChangedWarning || providerTotalShortfallWarning || null,
         // A detail block does not stop the walk, so `stopReason` legitimately
         // stays `completed` — but the rows it produced carry no description and
         // are dropped by the scoring-evidence gate. Report it as its own fact

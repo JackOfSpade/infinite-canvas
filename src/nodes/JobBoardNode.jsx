@@ -20,13 +20,16 @@ import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
-import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
+import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
 import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { getSearchLocation, hasRequiredLocations, locationValidationMessage } from '../utils/jobSearchLocations';
+import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
+import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
+import { classifyJobBoardSourceAdmission, completedJobSearchOutcomeMatches, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
-import { exactPausedSourceContinuation, exactPausedSourceTerminalOutcome, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
+import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
 import { ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { safeClone } from '../utils/navigationUtils';
 import {
@@ -170,7 +173,9 @@ function boardRecoveryTouchesPendingDeletion(boardId, plan = null, manualResume 
   const sourceIds = new Set([
     ...(Array.isArray(plan?.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : []),
     plan?.activeSourceId,
+    ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
     plan?.cancellationCleanup?.sourceId,
+    ...Object.keys(plan?.cancellationCleanupsBySource || {}),
     ...Object.keys(plan?.completedSourceRuns || {}),
     ...(Array.isArray(plan?.combineSourceRuns)
       ? plan.combineSourceRuns.map(entry => entry?.sourceId)
@@ -200,7 +205,7 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   if (sourceData.locked) {
     return { ready: false, readinessReason: 'Unlock this module before scanning it.', statusLabel: 'Locked' };
   }
-  if ((sourceData.manualAiCleanupReceipts || []).some(receipt => receipt?.cancellationPending === true)) {
+  if (hasCancellationPendingManualAiCleanup(sourceData)) {
     return {
       ready: false,
       readinessReason: 'Finish its older manual-AI cancellation cleanup before scanning it.',
@@ -260,6 +265,59 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   if (sourceData.manualAiResume?.runId && isSavedScrapeManualAiResume(sourceData.manualAiResume)) {
     return { ready: true, readinessReason: '', statusLabel: 'Resume pending search' };
   }
+  // A terminal generation is immutable Board input.  Its saved hiring-fit
+  // rows (including a truthful zero) are safe to combine, but sending it into
+  // the normal runner would parse/scrape the same career input again.  Keep
+  // this before platform/location setup: reuse must not be disabled merely
+  // because a completed Search's current controls were later edited.
+  const sourceAdmission = classifyJobBoardSourceAdmission(node);
+  if (sourceAdmission.kind === 'reuse-terminal') {
+    const count = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
+    return {
+      ready: true,
+      boardAction: 'reuse',
+      readinessReason: count > 0
+        ? 'Its completed scored jobs will be reused and combined without another scan.'
+        : 'Its completed zero-result search will be reused when the Board combines saved inputs.',
+      statusLabel: count > 0 ? `${count} saved job${count === 1 ? '' : 's'} · reuse` : 'Saved empty result · reuse',
+    };
+  }
+  if (sourceAdmission.kind === 'terminal-requires-fresh-input') {
+    return {
+      ready: false,
+      boardAction: 'terminal-blocked',
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Clear + import required',
+    };
+  }
+  if (sourceAdmission.kind === 'fresh-import-requires-clear') {
+    return {
+      ready: false,
+      boardAction: 'fresh-import-blocked',
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Clear + import required',
+    };
+  }
+  // A source-ready Search owns already-gathered rows and its exact source-card
+  // continuation. Current platform toggles govern only a *fresh* scrape; they
+  // must not relabel this intermediate generation as "Needs platform" or make
+  // the Board discard/restart it after a user disables a source.
+  if (sourceAdmission.kind === 'continue-existing') {
+    return {
+      ready: true,
+      boardAction: 'continue',
+      readinessReason: 'Continue this paused search from its existing gathered results. Resolve or skip its blocked sources; the Board will finish and combine it automatically.',
+      statusLabel: 'Continue paused search',
+    };
+  }
+  if (sourceAdmission.kind === 'continuation-requires-run-token') {
+    return {
+      ready: false,
+      boardAction: 'continue-blocked',
+      readinessReason: sourceAdmission.reason,
+      statusLabel: 'Paused run needs attention',
+    };
+  }
   const runnableSources = getRunnableJobSourceIds(
     normalizeEnabledJobSourceIds(sourceData.enabledSourceIds),
     ACTIVE_JOB_SOURCES,
@@ -278,9 +336,6 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   if (runnableSources.length === 0) {
     return { ready: false, readinessReason: 'Select at least one job platform.', statusLabel: 'Needs platform' };
   }
-  if (hubState === 'sources-ready') {
-    return { ready: false, readinessReason: 'Resolve or skip its blocked sources first.', statusLabel: 'Needs attention' };
-  }
   if (!hubHasAcceptedInitialDrop(node)) {
     return { ready: false, readinessReason: 'Drop career files on this module first.', statusLabel: 'Needs files' };
   }
@@ -292,12 +347,170 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       statusLabel: 'Needs location',
     };
   }
-  return { ready: true, readinessReason: '', statusLabel: hubState === 'done' ? null : 'Ready to search' };
+  return {
+    ready: true,
+    boardAction: sourceAdmission.kind === 'fresh-imported-input' ? 'scan' : 'continue',
+    readinessReason: sourceAdmission.kind === 'fresh-imported-input'
+      ? 'Freshly imported career data will be searched, then combined.'
+      : '',
+    statusLabel: sourceAdmission.kind === 'fresh-imported-input'
+      ? 'Fresh career data · ready'
+      : 'Ready to search',
+  };
+}
+
+// This is deliberately only a preflight hint. The child re-reads this exact
+// run id before changing Search state, so a stale peek can never authorize a
+// fresh scan or a different recovery manifest.
+async function inspectExactResumableJobRun(canvasFilePath, nodeId, sourceData, {
+  platformsVerifying = false,
+} = {}) {
+  if (!canvasFilePath || !nodeId || !window.electronAPI?.peekJobRun) return null;
+  try {
+    const info = await window.electronAPI.peekJobRun({ canvasFilePath, nodeId });
+    const admission = exactInterruptedRecoveryAdmission({
+      info,
+      nodeId,
+      sourceData,
+      platformsVerifying,
+    });
+    return admission.ok ? admission.runId : null;
+  } catch {
+    return null;
+  }
+}
+
+// A probe result is valid only for the input shape it inspected. Keep this
+// compact signature separate from the manifest token so an old async response
+// can never make a Search look resumable after its profile or location changes.
+function interruptedRecoveryProbeSignature(sourceData) {
+  const resumeFingerprint = typeof sourceData?.resumeFingerprint === 'string'
+    && /^[a-f0-9]{64}$/.test(sourceData.resumeFingerprint.trim())
+    ? sourceData.resumeFingerprint.trim()
+    : '';
+  return JSON.stringify({
+    canonicalLocation: sourceData?.canonicalLocation || '',
+    preferredLocation: sourceData?.preferredLocation || '',
+    resumeFingerprint,
+    hasResumeProfile: !!(sourceData?.resumeProfile && typeof sourceData.resumeProfile === 'object'
+      && !Array.isArray(sourceData.resumeProfile)),
+  });
+}
+
+function hasActivePlatformVerification(verifyingPlatforms) {
+  return verifyingPlatforms instanceof Set
+    ? verifyingPlatforms.size > 0
+    : !!verifyingPlatforms;
+}
+
+// Recovery ownership is computed from several persisted source-id collections.
+// Keep every collection distinct in the reactive signature below: a source can
+// move from selected → active → completed without leaving the transaction, but
+// that transition changes which Board is allowed to adopt its continuation.
+function normalizeBoardRecoverySourceIds(sourceIds) {
+  return [...new Set(
+    (Array.isArray(sourceIds) ? sourceIds : [])
+      .filter(sourceId => typeof sourceId === 'string' && sourceId),
+  )].sort();
+}
+
+function boardScanRecoverySourceIdGroups(plan) {
+  const cancellationCleanups = plan?.cancellationCleanupsBySource;
+  const completedSourceRuns = plan?.completedSourceRuns;
+  return {
+    selectedSearchModuleIds: normalizeBoardRecoverySourceIds(plan?.selectedSearchModuleIds),
+    activeSourceIds: normalizeBoardRecoverySourceIds([
+      plan?.activeSourceId,
+      ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+    ]),
+    completedSourceRunIds: normalizeBoardRecoverySourceIds(
+      completedSourceRuns && typeof completedSourceRuns === 'object' && !Array.isArray(completedSourceRuns)
+        ? Object.keys(completedSourceRuns)
+        : [],
+    ),
+    combineSourceRunIds: normalizeBoardRecoverySourceIds(
+      (Array.isArray(plan?.combineSourceRuns) ? plan.combineSourceRuns : [])
+        .map(entry => entry?.sourceId),
+    ),
+    cancellationCleanupSourceIds: normalizeBoardRecoverySourceIds([
+      plan?.cancellationCleanup?.sourceId,
+      ...(cancellationCleanups && typeof cancellationCleanups === 'object' && !Array.isArray(cancellationCleanups)
+        ? Object.keys(cancellationCleanups)
+        : []),
+    ]),
+  };
+}
+
+function boardCancellationRecoverySourceIds(cancellation) {
+  return normalizeBoardRecoverySourceIds([
+    cancellation?.sourceId,
+    ...(Array.isArray(cancellation?.sourceIds) ? cancellation.sourceIds : []),
+  ]);
+}
+
+function canInspectInterruptedRecovery(readiness, sourceData) {
+  // A paused source still belongs to its Source-card Resolve/Skip path. Do
+  // not let a disabled current platform toggle disguise that gate as a generic
+  // interrupted search recovery. An already-consumed import is also allowed to
+  // probe: only an exact manifest can continue it; a missing manifest remains
+  // fail-closed rather than becoming another fresh search.
+  const recoveryProbeBlocked = readiness?.statusLabel === 'Needs platform'
+    || readiness?.statusLabel === 'Clear + import required';
+  return recoveryProbeBlocked
+    && sourceData?.hubState !== 'sources-ready'
+    && !!sourceData?.resumeProfile
+    && typeof sourceData.resumeProfile === 'object';
 }
 
 function isQueueableSearchContention(readiness) {
   return readiness?.statusLabel === 'Busy'
     || readiness?.statusLabel === 'Reserved by another board';
+}
+
+// A recovery plan's `updatedAt` is a write-progress timestamp, not an
+// authorization boundary.  In particular, a recovered scan refreshes it when
+// it first persists its in-memory copy of the plan.  Including that timestamp
+// in the one-shot latch lets a Board re-admit itself after its own write.
+//
+// Connected Search state is deliberately part of this key: resolving a paused
+// source, completing a manual handoff, changing source configuration, or
+// finishing platform verification must still wake the exact durable plan.
+function jobBoardSearchRecoveryKey(
+  plan,
+  connectedSignature,
+  verificationSignature,
+) {
+  // connectedSignature includes JSON derived from user-editable job data, so
+  // delimiter joining is ambiguous (`a|b` + `c` versus `a` + `b|c`). JSON
+  // frames every component and keeps the recovery latch collision-free.
+  return JSON.stringify([
+    plan?.boardRunId || '',
+    plan?.phase || 'searches',
+    connectedSignature || '',
+    verificationSignature || '',
+  ]);
+}
+
+function clearExactBoardScanResume(updateGlobal, boardId, boardRunId) {
+  if (!boardRunId) return;
+  updateGlobal(boardId, (node) => {
+    if (node?.data?.boardScanResume?.boardRunId !== boardRunId) return null;
+    return { boardScanResume: null };
+  });
+}
+
+// React can render an effect from the commit that *observed* a plan while the
+// event that retired it is already in the live store. A Board run id and phase
+// are the durable recovery identity; never let that stale render re-admit a
+// plan which was cleared or advanced to Combine in the meantime.
+function isCurrentBoardScanResume(livePlan, expectedPlan) {
+  if (
+    livePlan?.version !== 1
+    || expectedPlan?.version !== 1
+    || !livePlan.boardRunId
+    || livePlan.boardRunId !== expectedPlan.boardRunId
+  ) return false;
+  return (livePlan.phase || 'searches') === (expectedPlan.phase || 'searches');
 }
 
 // A collection-only/test run deliberately finishes in the normal `done` state
@@ -313,9 +526,9 @@ function nonMergeableSearchMessage(sourceData) {
     sourceData?.resultDisposition === 'collection-only'
     || isExplicitlyUnscoredModule(sourceData)
   ) {
-    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode and run it again.';
+    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.';
   }
-  return 'It completed without mergeable hiring-fit results. Run this search again before combining.';
+  return 'It completed without mergeable hiring-fit results. Manually clear career data and import fresh files in Job Search before using the Board.';
 }
 
 // Capture the mergeable terminal inputs from the live canvas. A Combine can
@@ -327,6 +540,7 @@ function liveCombineInputs(boardId, nodes, edges) {
     .filter(node => connected.has(node?.id) && node?.type === 'jobhub')
     .map(node => {
       const data = node.data || {};
+      const terminal = terminalJobSearchOutcome(node);
       const scoredJobs = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
       const remoteResidences = data.locationSnapshot?.remoteResidences || data.remoteResidences || {};
       const count = scoredJobs.length;
@@ -334,15 +548,17 @@ function liveCombineInputs(boardId, nodes, edges) {
         && (data.resultDisposition === 'empty-complete' || data.resultDisposition === 'preference-filtered');
       return {
         id: node.id,
-        runId: data.jobRunId || null,
-        resultDisposition: data.resultDisposition || null,
+        runId: terminal?.runId || null,
+        resultDisposition: terminal?.resultDisposition || null,
+        legacyPositiveResult: terminal?.legacyPositiveResult === true,
         label: moduleLabel(data),
         count,
         fingerprint: moduleCombineFingerprint(scoredJobs, remoteResidences),
         scoredJobs,
         remoteResidences,
         hubState: data.hubState || 'empty',
-        include: data.hubState === 'done' && (count > 0 || authoritativeEmpty),
+        include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
+          && (count > 0 || authoritativeEmpty),
       };
     });
   const completed = all.filter(module => module.include);
@@ -373,9 +589,7 @@ function combineInputsMatchExpected(modules, expectedSourceRuns) {
     return !!current
       && typeof expected?.fingerprint === 'string'
       && !!expected.fingerprint
-      && (current.runId || null) === (expected.runId || null)
-      && (current.resultDisposition || null) === (expected.resultDisposition || null)
-      && current.fingerprint === expected.fingerprint;
+      && jobSearchOutcomeReceiptMatches(current, expected);
   });
 }
 
@@ -397,10 +611,10 @@ function selectedRunsMatchExpected(modules, expectedSourceRuns) {
   const currentById = new Map((Array.isArray(modules) ? modules : []).map(module => [module.id, module]));
   return Object.entries(expectedSourceRuns).every(([sourceId, expected]) => {
     const current = currentById.get(sourceId);
-    return !!current
-      && (current.runId || null) === (expected?.runId || null)
-      && (current.resultDisposition || null) === (expected?.resultDisposition || null)
-      && (!expected?.fingerprint || current.fingerprint === expected.fingerprint);
+    if (!current) return false;
+    if (expected?.fingerprint) return jobSearchOutcomeReceiptMatches(current, expected);
+    return (current.runId || null) === (expected?.runId || null)
+      && (current.resultDisposition || null) === (expected?.resultDisposition || null);
   });
 }
 
@@ -411,7 +625,8 @@ function selectedRunsMatchExpected(modules, expectedSourceRuns) {
 /**
  * Job Board Module — orchestrator for the connected job-search pipeline. It
  * owns scan selection and queue admission, asks each selected Job Search module
- * to execute its source-scoped worker in order, then unions every completed
+ * to execute source-scoped workers (fresh independent children fan out;
+ * recovery preserves source order), then unions every completed
  * connected module's stored `scoredJobs`. Finally it re-runs taxonomy over the
  * union and spawns the band→salary→role→cards cascade. Backend work remains
  * keyed to each source hub so recovery/progress ownership is preserved.
@@ -449,9 +664,33 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(null);
   const [recoveryError, setRecoveryError] = useState(null);
+  // Kept out of persistent Board data: this is a renderer-only observation of
+  // the selector's real action predicate and measured layout at report time.
+  const [selectorRuntimeSnapshot, setSelectorRuntimeSnapshot] = useState(null);
+  const selectorEligibilityEventRef = useRef(null);
+  // The selector is synchronous but manifest inspection is disk-backed. Cache
+  // only a fenced, exact admission result so the UI can enable a valid recovery
+  // without ever claiming that every disabled-platform Search is runnable.
+  const [interruptedRecoveryProbes, setInterruptedRecoveryProbes] = useState({});
+  const interruptedRecoveryProbeGenerationRef = useRef(0);
   const scanRunRef = useRef(null);
+  // Recovery inspection awaits disk IPC before the normal scan token exists.
+  // Reserve that short window so a double click cannot start two probes and
+  // then two independent Board transactions.
+  const scanPreflightRef = useRef(null);
   const scanLaneLeaseOwnerRef = useRef(null);
   const activeSearchModuleIdRef = useRef(null);
+  // A Board normally advances its children in source order.  A fresh-file
+  // child can, however, stop at the first local-AI prompt for an arbitrary
+  // amount of time.  Keep the complete live set separately from the legacy
+  // singular ref so cancellation can still reach every child that was started
+  // before the first prompt was answered.
+  const activeSearchModuleIdsRef = useRef(new Set());
+  // A child dialog emits its cancellation after its IPC work has settled; the
+  // Search may already have cleared manualAiResume by then. Capture the exact
+  // source/run pair at its pending boundary so the Board can still cancel the
+  // matching fan-out generation without trusting the source id by itself.
+  const activeSearchManualAiRunIdsRef = useRef(new Map());
   const activeBoardRunIdRef = useRef(null);
   const cancellationInFlightRef = useRef(null);
   const disconnectCancellationRef = useRef(null);
@@ -496,6 +735,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // stuck forever on a marker that can no longer be safely resumed.
   const autoResumedManualAiRunRef = useRef(null);
   const autoResumedBoardScanRef = useRef(null);
+  // Keep a search-recovery error's external-state identity separate from the
+  // auto-resume latch. The latter also holds `cleanup:` and `combine:` tokens,
+  // which are not evidence that a Search result changed.
+  const searchRecoveryErrorRef = useRef(null);
   // An untitled canvas has no sidecar to recover after a reload, but a Search
   // can still pause for source-card input during this mounted renderer session.
   // A real component unmount cancels the Board transaction, so never extend
@@ -532,6 +775,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (e.source === id) ids.add(e.target);
         else if (e.target === id) ids.add(e.source);
       });
+      // The legacy/default execution order is the connected Job Search order
+      // in the canvas. Track only its relative source rank so reordering two
+      // connected sources refreshes the selector, while unrelated nodes moving
+      // or being inserted ahead of them do not create signature churn.
+      const sourceCanvasOrder = new Map();
+      (Array.isArray(s.nodes) ? s.nodes : []).forEach((node) => {
+        if (node?.type !== 'jobhub' || !ids.has(node.id)) return;
+        sourceCanvasOrder.set(node.id, sourceCanvasOrder.size);
+      });
       const parts = [];
       ids.forEach((nid) => {
         const n = s.nodeLookup.get(nid);
@@ -543,6 +795,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // not safe to use as a replacement input for an existing board.
           parts.push(JSON.stringify({
             id: nid,
+            sourceCanvasOrder: sourceCanvasOrder.get(nid) ?? null,
             fingerprint: moduleCombineFingerprint(
               n.data?.scoredJobs,
               n.data?.locationSnapshot?.remoteResidences || n.data?.remoteResidences || {},
@@ -563,13 +816,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             manualAiRetirementPending: n.data?.manualAiResume?.retirementPending === true,
             pendingBatchId: n.data?.pendingBatch?.batchId || '',
             pendingBatchJobRunId: n.data?.pendingBatch?.jobRunId || '',
-            cancellationPendingCleanupRunIds: normalizeManualAiCleanupReceipts(
-              n.data?.manualAiCleanupReceipts,
-            )
-              .filter(receipt => receipt.cancellationPending === true)
-              .map(receipt => receipt.runId)
-              .sort(),
+            // Use the same malformed-receipt-safe predicate as readiness.
+            // A run id is an ownership detail, not an input to selector state.
+            hasCancellationPendingManualAiCleanup: hasCancellationPendingManualAiCleanup(n.data),
             terminalFinalizationRunId: n.data?.terminalFinalizationRecovery?.runId || '',
+            hasTerminalFinalizationRecovery: n.data?.terminalFinalizationRecovery?.kind === 'terminal-finalization',
             errorMessage: n.data?.errorMessage || '',
             locked: !!n.data?.locked,
             hasCareerInput: hubHasAcceptedInitialDrop(n),
@@ -579,6 +830,32 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             searchLocation: n.data?.searchLocation || null,
             enabledSourceIds: n.data?.enabledSourceIds || null,
             collectionLimits: n.data?.collectionLimits || null,
+            // Fresh-import admission is intentionally one-shot, but a legacy
+            // login preflight can reclaim its exact unstarted claim. Include
+            // the compact capability identity—not volatile timestamps—so the
+            // selector immediately re-evaluates setup when that admission
+            // state changes without any other Search data changing.
+            careerImportAdmission: {
+              generation: n.data?.careerImportGeneration || null,
+              freshCapability: n.data?.careerImportFreshCapability || null,
+              consumption: n.data?.careerImportConsumption && typeof n.data.careerImportConsumption === 'object'
+                ? {
+                  generation: n.data.careerImportConsumption.generation || null,
+                  capability: n.data.careerImportConsumption.capability || null,
+                  origin: n.data.careerImportConsumption.origin || null,
+                  boardRunId: n.data.careerImportConsumption.boardRunId || null,
+                  admissionVersion: n.data.careerImportConsumption.admissionVersion ?? null,
+                }
+                : null,
+            },
+            // The admission enum collapses the legacy no-work proof into one
+            // non-sensitive reactive value. Do not serialize profile, query,
+            // warning, or count payloads merely to refresh the selector.
+            admissionKind: classifyJobBoardSourceAdmission(n).kind,
+            // Exact interrupted recovery also needs the current profile
+            // identity, but this signature contains only a fingerprint/boolean
+            // and normalized location fields—never career content.
+            recoveryProbeSignature: interruptedRecoveryProbeSignature(n.data),
           }));
         }
       });
@@ -594,28 +871,47 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const boardRecoverySig = useStore(
     useCallback((store) => {
       const owners = [];
-      store.nodeLookup.forEach((node) => {
+      // `getNodes()` elects its last-resort owner by array index. Read this
+      // same user-node array and retain that index in the signature: two
+      // otherwise-identical legacy plans can legitimately change owner when
+      // their canvas order changes. Positions are intentionally excluded, so
+      // ordinary dragging does not wake recovery work.
+      const canvasNodes = Array.isArray(store.nodes) ? store.nodes : [];
+      canvasNodes.forEach((node, canvasIndex) => {
         if (node?.type !== 'jobboard') return;
         const plan = node.data?.boardScanResume;
-        if (plan?.boardRunId) {
+        if (plan?.version === 1 && typeof plan.boardRunId === 'string' && !!plan.boardRunId) {
+          const sourceIds = boardScanRecoverySourceIdGroups(plan);
           owners.push(JSON.stringify({
             kind: 'scan',
             id: node.id,
+            canvasIndex,
             boardRunId: plan.boardRunId,
             phase: plan.phase || '',
+            startedAt: normalizeJobBoardRecoveryTimestamp(plan.startedAt),
+            admissionOrder: normalizeJobBoardAdmissionOrder(plan.admissionOrder),
             activeSourceId: plan.activeSourceId || '',
             cancellationSourceId: plan.cancellationCleanup?.sourceId || '',
             combineManualAiRunId: plan.combineManualAiRunId || '',
+            ...sourceIds,
           }));
         }
         const cancellation = node.data?.boardCancellation;
-        if (cancellation?.operationId) {
+        const cancellationSourceIds = boardCancellationRecoverySourceIds(cancellation);
+        if (
+          typeof cancellation?.boardRunId === 'string'
+          && !!cancellation.boardRunId
+          && cancellationSourceIds.length > 0
+        ) {
           owners.push(JSON.stringify({
             kind: 'cancellation',
             id: node.id,
-            operationId: cancellation.operationId,
+            canvasIndex,
             boardRunId: cancellation.boardRunId || '',
+            startedAt: normalizeJobBoardRecoveryTimestamp(cancellation.startedAt),
+            admissionOrder: normalizeJobBoardAdmissionOrder(cancellation.admissionOrder),
             sourceId: cancellation.sourceId || '',
+            sourceIds: cancellationSourceIds,
           }));
         }
         // A standalone manual Combine also reserves each exact completed
@@ -623,18 +919,30 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // recovered scan that yielded to it retries as soon as the marker is
         // completed/cancelled, even when the shared Search itself did not move.
         const manual = node.data?.manualAiResume;
-        if (manual?.runId && Array.isArray(manual.combineSourceRuns)) {
+        const manualCombineSourceIds = normalizeBoardRecoverySourceIds(
+          (Array.isArray(manual?.combineSourceRuns) ? manual.combineSourceRuns : [])
+            .map(entry => entry?.sourceId),
+        );
+        const manualStartedAt = normalizeJobBoardRecoveryTimestamp(manual?.startedAt)
+          ?? normalizeJobBoardRecoveryTimestamp(manual?.updatedAt);
+        if (
+          typeof manual?.runId === 'string'
+          && !!manual.runId
+          && manual.retirementPending !== true
+          && manualCombineSourceIds.length > 0
+        ) {
           owners.push(JSON.stringify({
             kind: 'combine',
             id: node.id,
+            canvasIndex,
             runId: manual.runId,
             // Cleanup-only manual markers intentionally stop reserving their
             // completed Search inputs. Include that ownership boundary in the
             // wake key so a recovered Board that yielded to this Combine gets
             retirementPending: manual.retirementPending === true,
-            startedAt: manual.startedAt ?? manual.updatedAt ?? null,
+            startedAt: manualStartedAt,
             combineInputSignature: manual.combineInputSignature || '',
-            sourceIds: manual.combineSourceRuns.map(entry => entry?.sourceId || ''),
+            sourceIds: manualCombineSourceIds,
           }));
         }
       });
@@ -643,22 +951,95 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // unblock this Board without changing either node's durable marker.
       // Include the compact global Board↔Search topology so yielded recovery
       // turns wake exactly when that election input changes.
-      store.edges.forEach((edge) => {
+      // Owner election treats Board↔Search edges as an undirected Set. Match
+      // that here so duplicate/reversed edges and insertion order do not cause
+      // irrelevant signature churn, while a real topology change still wakes
+      // recovery arbitration.
+      const boardSearchEdges = new Set();
+      (Array.isArray(store.edges) ? store.edges : []).forEach((edge) => {
         const source = store.nodeLookup.get(edge?.source);
         const target = store.nodeLookup.get(edge?.target);
         const isBoardSearch = (source?.type === 'jobboard' && target?.type === 'jobhub')
           || (source?.type === 'jobhub' && target?.type === 'jobboard');
         if (!isBoardSearch) return;
-        owners.push(JSON.stringify({
+        const board = source?.type === 'jobboard' ? source : target;
+        const search = source?.type === 'jobhub' ? source : target;
+        boardSearchEdges.add(JSON.stringify({
           kind: 'edge',
-          source: edge.source,
-          target: edge.target,
+          boardId: board.id,
+          searchId: search.id,
         }));
       });
+      owners.push(...boardSearchEdges);
       owners.sort();
       return owners.join('|');
     }, []),
   );
+
+  useEffect(() => {
+    const generation = ++interruptedRecoveryProbeGenerationRef.current;
+    let cancelled = false;
+    // The child refuses to run while its platform session is being verified.
+    // Do not retain an optimistic pre-verification affordance through that
+    // window; a later effect will inspect again once the live session settles.
+    if (!canvasFilePath || hasActivePlatformVerification(verifyingPlatforms)) {
+      setInterruptedRecoveryProbes({});
+      return () => { cancelled = true; };
+    }
+
+    const nodes = getNodes();
+    const edges = getEdges();
+    const candidateNodes = getConnectedJobSearchIds(id, nodes, edges)
+      .map(nodeId => nodes.find(node => node.id === nodeId))
+      .filter(node => {
+        if (node?.type !== 'jobhub') return false;
+        const recoveryOwner = node.data?.manualAiResume?.runId
+          ? findJobSearchBoardRecoveryOwner(node.id, node.data.manualAiResume.runId, nodes, edges)
+          : findJobSearchBoardActiveRecoveryOwner(node.id, nodes, edges);
+        const readiness = moduleSearchReadiness(node, verifyingPlatforms, {
+          orchestratorNodeId: id,
+          recoveryOwner,
+        });
+        return canInspectInterruptedRecovery(readiness, node.data);
+      });
+
+    Promise.all(candidateNodes.map(async (node) => ({
+      nodeId: node.id,
+      signature: interruptedRecoveryProbeSignature(node.data),
+      runId: await inspectExactResumableJobRun(canvasFilePath, node.id, node.data),
+    }))).then((results) => {
+      if (cancelled || interruptedRecoveryProbeGenerationRef.current !== generation) return;
+      const next = {};
+      results.forEach(({ nodeId, signature, runId }) => {
+        if (runId) next[nodeId] = { signature, runId };
+      });
+      setInterruptedRecoveryProbes(next);
+    }).catch(() => {
+      if (!cancelled && interruptedRecoveryProbeGenerationRef.current === generation) {
+        setInterruptedRecoveryProbes({});
+      }
+    });
+    return () => { cancelled = true; };
+  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, getEdges, getNodes, id, verifyingPlatforms]);
+
+  useEffect(() => {
+    const onRecoveryLedgerChanged = (event) => {
+      const { hubId, canvasFilePath: changedCanvasFilePath } = event?.detail || {};
+      if (!hubId || changedCanvasFilePath !== canvasFilePath) return;
+      // A Start fresh can arrive while a previous peek is still in flight.
+      // Invalidate that async generation before removing its cached affordance,
+      // otherwise its stale completion can put the old token straight back.
+      interruptedRecoveryProbeGenerationRef.current += 1;
+      setInterruptedRecoveryProbes((current) => {
+        if (!current[hubId]) return current;
+        const next = { ...current };
+        delete next[hubId];
+        return next;
+      });
+    };
+    document.addEventListener('job-run-recovery-ledger-changed', onRecoveryLedgerChanged);
+    return () => document.removeEventListener('job-run-recovery-ledger-changed', onRecoveryLedgerChanged);
+  }, [canvasFilePath]);
 
   const connectedModules = useMemo(() => {
     const edges = getEdges();
@@ -675,6 +1056,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           verifyingPlatforms,
           { orchestratorNodeId: id, recoveryOwner },
         );
+        const probe = interruptedRecoveryProbes[n.id];
+        const recoveryProbeEligible = !!canvasFilePath
+          && !hasActivePlatformVerification(verifyingPlatforms)
+          && canInspectInterruptedRecovery(readiness, n.data)
+          && probe?.signature === interruptedRecoveryProbeSignature(n.data)
+          && typeof probe?.runId === 'string'
+          && !!probe.runId;
         return {
           id: n.id,
           runId: n.data?.jobRunId || null,
@@ -691,18 +1079,74 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           isScored: !isExplicitlyUnscoredModule(n.data),
           resultDisposition: n.data?.resultDisposition || null,
           ...readiness,
+          ...(recoveryProbeEligible ? {
+            ready: true,
+            statusLabel: 'Resume saved recovery',
+            readinessReason: 'Resume this Search’s exact unfinished run.',
+          } : {}),
           ...(isQueueableSearchContention(readiness) ? { ready: true } : {}),
         };
       });
     // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectedSig, deletionLifecycleRevision, id, verifyingPlatforms]);
+  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, id, interruptedRecoveryProbes, verifyingPlatforms]);
 
   const connectedModuleIds = useMemo(() => connectedModules.map((module) => module.id), [connectedModules]);
-  const selectedSearchModuleIds = useMemo(
-    () => getSelectedConnectedJobSearchIds(data.selectedSearchModuleIds, connectedModuleIds),
-    [data.selectedSearchModuleIds, connectedModuleIds],
+  // Execution preference is deliberately independent from selection: old
+  // Boards (and newly connected Searches) retain this canvas-order fallback.
+  const executionOrderedConnectedIds = useMemo(
+    () => orderJobSearchIds(data.searchExecutionOrder, connectedModuleIds),
+    [data.searchExecutionOrder, connectedModuleIds],
   );
+  const executionOrderedModules = useMemo(() => {
+    const modulesById = new Map(connectedModules.map(module => [module.id, module]));
+    return executionOrderedConnectedIds.map(moduleId => modulesById.get(moduleId)).filter(Boolean);
+  }, [connectedModules, executionOrderedConnectedIds]);
+  const selectedSearchModuleIds = useMemo(
+    () => orderJobSearchIds(
+      data.searchExecutionOrder,
+      getSelectedConnectedJobSearchIds(data.selectedSearchModuleIds, connectedModuleIds),
+    ),
+    [data.searchExecutionOrder, data.selectedSearchModuleIds, connectedModuleIds],
+  );
+  const captureSelectorRuntimeSnapshot = useCallback((nextSnapshot) => {
+    // ResizeObserver can deliver duplicate observations. Avoid a state/render
+    // loop while retaining the latest exact client/scroll bounds.
+    setSelectorRuntimeSnapshot((current) => (
+      JSON.stringify(current) === JSON.stringify(nextSnapshot) ? current : nextSnapshot
+    ));
+  }, []);
+
+  useEffect(() => {
+    EventLogger.registerNodeState(id, {
+      jobBoardSelector: selectorRuntimeSnapshot,
+    });
+  }, [id, selectorRuntimeSnapshot]);
+
+  useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
+
+  useEffect(() => {
+    if (!selectorRuntimeSnapshot) return;
+    const signature = [
+      selectorRuntimeSnapshot.rowCount,
+      selectorRuntimeSnapshot.selectedCount,
+      selectorRuntimeSnapshot.actionEligible ? 'ready' : 'blocked',
+      Array.isArray(selectorRuntimeSnapshot.eligibilityReasons)
+        ? selectorRuntimeSnapshot.eligibilityReasons.join(',')
+        : '',
+    ].join('|');
+    if (selectorEligibilityEventRef.current === signature) return;
+    selectorEligibilityEventRef.current = signature;
+    EventLogger.log(
+      `[JobBoard] selector eligibility id=${id} rows=${selectorRuntimeSnapshot.rowCount ?? 0} `
+      + `selected=${selectorRuntimeSnapshot.selectedCount ?? 0} `
+      + `action=${selectorRuntimeSnapshot.actionEligible ? 'enabled' : 'disabled'} `
+      + `reasons=${Array.isArray(selectorRuntimeSnapshot.eligibilityReasons) && selectorRuntimeSnapshot.eligibilityReasons.length > 0
+        ? selectorRuntimeSnapshot.eligibilityReasons.join(',')
+        : 'none'}`,
+    );
+  }, [id, selectorRuntimeSnapshot]);
+
   const toggleSearchModule = useCallback((moduleId, checked) => {
     // An edge can disappear after this row rendered but before its checkbox
     // event runs. Resolve against the imperative graph so that stale event is
@@ -732,6 +1176,28 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return Array.isArray(next) ? { selectedSearchModuleIds: next } : null;
     });
     EventLogger.log(`[JobBoard] scan selection changed id=${id} module=${moduleId} checked=${checked === true}`);
+  }, [getEdges, getNodes, id, updateGlobal]);
+
+  const moveSearchModule = useCallback((moduleId, direction) => {
+    const connectedAtEvent = getConnectedJobSearchIds(id, getNodes(), getEdges());
+    if (!connectedAtEvent.includes(moduleId)) return;
+    updateGlobal(id, (node) => {
+      const liveConnectedIds = getConnectedJobSearchIds(id, getNodes(), getEdges());
+      if (!liveConnectedIds.includes(moduleId)) return null;
+      const next = moveJobSearchExecutionOrder(
+        node?.data?.searchExecutionOrder,
+        liveConnectedIds,
+        moduleId,
+        direction,
+      );
+      if (!Array.isArray(next)) return null;
+      const current = Array.isArray(node?.data?.searchExecutionOrder)
+        ? node.data.searchExecutionOrder
+        : null;
+      if (JSON.stringify(current) === JSON.stringify(next)) return null;
+      return { searchExecutionOrder: next };
+    });
+    EventLogger.log(`[JobBoard] search execution order changed id=${id} module=${moduleId} direction=${direction}`);
   }, [getEdges, getNodes, id, updateGlobal]);
 
   // Positive scored jobs always remain mergeable, even from an older canvas
@@ -979,27 +1445,43 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     addToast({ title: 'Board updated', description: 'The completed searches have no current jobs; old results were cleared. Undo restores them.', type: 'info' });
   }, [addToast, clearBoardChildren, getEdges, getNode, getNodes, id, updateGlobal]);
 
-  const cancelActiveSearchModule = useCallback((reason, { allowStale = false } = {}) => {
+  const cancelActiveSearchModule = useCallback((reason, { allowStale = false, sourceIds: requestedSourceIds = null } = {}) => {
     const liveBoardData = getNode(id)?.data || data;
     const durablePlan = liveBoardData.boardScanResume || data.boardScanResume;
     const durableCancellation = liveBoardData.boardCancellation || data.boardCancellation || null;
-    const sourceId = activeSearchModuleIdRef.current
-      || (durablePlan?.phase === 'searches' ? durablePlan.activeSourceId : null)
-      || durableCancellation?.sourceId
-      || null;
+    const sourceIds = new Set((Array.isArray(requestedSourceIds) && requestedSourceIds.length > 0
+      ? requestedSourceIds
+      : [
+      ...activeSearchModuleIdsRef.current,
+      activeSearchModuleIdRef.current,
+      ...(durablePlan?.phase === 'searches' && Array.isArray(durablePlan.activeSourceIds)
+        ? durablePlan.activeSourceIds
+        : []),
+      durablePlan?.phase === 'searches' ? durablePlan.activeSourceId : null,
+      ...(Array.isArray(durableCancellation?.sourceIds) ? durableCancellation.sourceIds : []),
+      durableCancellation?.sourceId,
+      ]).filter(Boolean));
     const boardRunId = activeBoardRunIdRef.current
       || durablePlan?.boardRunId
       || durableCancellation?.boardRunId
       || null;
-    activeSearchModuleIdRef.current = null;
-    activeBoardRunIdRef.current = null;
-    if (!sourceId || !boardRunId) return Promise.resolve({ status: 'none', cancelled: false });
+    if (Array.isArray(requestedSourceIds) && requestedSourceIds.length > 0) {
+      requestedSourceIds.forEach(sourceId => activeSearchModuleIdsRef.current.delete(sourceId));
+      if (requestedSourceIds.includes(activeSearchModuleIdRef.current)) {
+        activeSearchModuleIdRef.current = activeSearchModuleIdsRef.current.values().next().value || null;
+      }
+    } else {
+      activeSearchModuleIdRef.current = null;
+      activeSearchModuleIdsRef.current.clear();
+      activeBoardRunIdRef.current = null;
+    }
+    if (sourceIds.size === 0 || !boardRunId) return Promise.resolve({ status: 'none', cancelled: false });
 
     // The registered worker verifies both identities before rolling back, so a
     // late cleanup from an old Board run cannot abort a newer turn on the same
     // Job Search module. The raw node abort is only a compatibility fallback
     // for a source that unmounted before exposing its cancellation handler.
-    return jobSearchCoordinator.cancelSearchModule(sourceId, {
+    const cancelOne = (sourceId) => jobSearchCoordinator.cancelSearchModule(sourceId, {
       orchestratorNodeId: id,
       boardRunId,
       reason,
@@ -1060,6 +1542,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       }
       throw error;
     });
+    // Each child writes its exact cleanup receipt into the Board plan.  Keep
+    // those writes ordered: a Promise.all here would let two cancellations
+    // race the legacy singular `cancellationCleanup` bridge during upgrade.
+    return cancelJobBoardChildrenSequentially([...sourceIds], cancelOne).then((results) => (
+      results.length === 1 ? results[0].value : { status: 'cancelled', cancelled: true, results }
+    ));
   }, [canvasFilePath, data, getNode, id, jobSearchCoordinator, nav]);
 
   // An edge removal is an ownership event, not just a readiness change. Abort
@@ -1068,6 +1556,80 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // until the child confirms its source/data rollback to the awaiting scan.
   useEffect(() => {
     const plan = getNode(id)?.data?.boardScanResume || null;
+    const activeSourceIds = [...new Set([
+      ...activeSearchModuleIdsRef.current,
+      ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+      plan?.activeSourceId,
+    ].filter(Boolean))];
+    // A fan-out can have several independent children parked at handoffs.
+    // Removing one edge must cancel only that exact child; invalidating the
+    // Board epoch here would also abort its still-connected siblings.
+    if (activeSourceIds.length > 1) {
+      const disconnectedSourceId = activeSourceIds.find((candidateId) => !getEdges().some(edge => (
+        (edge.source === id && edge.target === candidateId)
+        || (edge.target === id && edge.source === candidateId)
+      )));
+      if (disconnectedSourceId) {
+        const boardRunId = activeBoardRunIdRef.current || plan?.boardRunId || null;
+        if (!boardRunId) return;
+        const cancellationKey = `${boardRunId}:${disconnectedSourceId}`;
+        if (disconnectCancellationRef.current === cancellationKey) return;
+        disconnectCancellationRef.current = cancellationKey;
+        EventLogger.log(`[JobBoard] fanned-out Search disconnected; cancelling exact child id=${id} run=${boardRunId} source=${disconnectedSourceId}`);
+        void cancelActiveSearchModule('job-board-search-disconnected', {
+          sourceIds: [disconnectedSourceId],
+        }).then(async () => {
+          activeSearchManualAiRunIdsRef.current.delete(disconnectedSourceId);
+          updateGlobal(id, (node) => {
+            const livePlan = node?.data?.boardScanResume;
+            if (livePlan?.boardRunId !== boardRunId) return null;
+            const cancellationCleanupsBySource = {
+              ...(livePlan.cancellationCleanupsBySource || {}),
+            };
+            delete cancellationCleanupsBySource[disconnectedSourceId];
+            // Keep the singular field only as a compatibility bridge to one
+            // remaining exact child receipt. It must never merge run ids or
+            // metadata from two fanned-out children.
+            const remainingCleanup = Object.values(cancellationCleanupsBySource)[0] || null;
+            const promoted = promoteJobBoardPausedSourceResolution({
+              awaitingSourceResolutions: livePlan.awaitingSourceResolutions
+                || [livePlan.awaitingSourceResolution].filter(Boolean),
+              activeSourceId: livePlan.activeSourceId,
+              activeSourceIds: livePlan.activeSourceIds
+                || [livePlan.activeSourceId].filter(Boolean),
+              activeSourceRollbacks: livePlan.activeSourceRollbacks || {},
+              activeSourceManualAiRunIds: livePlan.activeSourceManualAiRunIds || {},
+              consumedSourceId: disconnectedSourceId,
+            });
+            return {
+              boardScanResume: {
+                ...livePlan,
+                ...promoted,
+                cancellationCleanupsBySource,
+                cancellationCleanup: remainingCleanup,
+                updatedAt: Date.now(),
+              },
+            };
+          });
+          const committed = await waitForBoardPlanCommit({
+            getNode,
+            nodeId: id,
+            boardRunId,
+            matches: nextPlan => nextPlan.phase === 'searches'
+              && !nextPlan.activeSourceIds?.includes(disconnectedSourceId)
+              && !nextPlan.cancellationCleanupsBySource?.[disconnectedSourceId]
+              && nextPlan.cancellationCleanup?.sourceId !== disconnectedSourceId,
+          });
+          if (!committed) {
+            throw new Error('The disconnected Job Search cleanup receipt was not retired from the Board plan.');
+          }
+        }).catch((error) => {
+          EventLogger.error(`[JobBoard] fanned-out child cancellation failed id=${id} run=${boardRunId} source=${disconnectedSourceId}:`, error);
+          setRecoveryError(error?.message || 'The disconnected Job Search could not be rolled back. Retry or cancel this Board run.');
+        });
+        return;
+      }
+    }
     const sourceId = activeSearchModuleIdRef.current
       || (plan?.phase === 'searches' ? plan.activeSourceId : null);
     const boardRunId = activeBoardRunIdRef.current || plan?.boardRunId || null;
@@ -1139,10 +1701,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       || activeCombineRunId
       || liveData.manualAiResume?.runId
       || null;
-    const sourceId = activeSearchModuleIdRef.current
-      || (plan?.phase === 'searches' ? plan.activeSourceId : null)
-      || existing?.sourceId
-      || null;
+    const sourceIds = [...new Set([
+      ...activeSearchModuleIdsRef.current,
+      activeSearchModuleIdRef.current,
+      ...(plan?.phase === 'searches' && Array.isArray(plan.activeSourceIds)
+        ? plan.activeSourceIds
+        : []),
+      plan?.phase === 'searches' ? plan.activeSourceId : null,
+      ...(Array.isArray(existing?.sourceIds) ? existing.sourceIds : []),
+      existing?.sourceId,
+    ].filter(Boolean))];
+    const sourceId = sourceIds[0] || null;
     if (!boardRunId && !sourceId && manualAiRunIds.length === 0) return null;
 
     const operationId = existing?.operationId
@@ -1158,6 +1727,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       operationId,
       boardRunId,
       sourceId,
+      sourceIds,
       manualAiRunIds,
       childCleanup: plan?.cancellationCleanup || existing?.childCleanup || null,
       reason: reason || existing?.reason || 'board-run-cancelled',
@@ -2473,6 +3043,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       || hasPendingManualAiRetirement(liveBoardDataAtAdmission)
       || liveBoardDataAtAdmission.locked
     ) return;
+    if (scanPreflightRef.current) return;
+    const preflightToken = Symbol(`job-board-preflight:${id}`);
+    scanPreflightRef.current = preflightToken;
     setRecoveryError(null);
 
     // The click handler receives a React event; only our recovery effect passes
@@ -2482,6 +3055,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const resumePlan = request?.resumeBoardScan === true && request.plan && typeof request.plan === 'object'
       ? request.plan
       : null;
+    if (resumePlan && !isCurrentBoardScanResume(
+      getNode(id)?.data?.boardScanResume,
+      resumePlan,
+    )) {
+      // A recovery effect can hold the immediately-prior render after another
+      // callback cleared this plan. Do not turn that stale prop into a fresh
+      // scan; the current store is the recovery authority.
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      return { status: 'superseded' };
+    }
 
     // Resolve the allow-list from the live graph at admission. The stored list
     // can contain ids whose edges were removed since the last render; those
@@ -2489,24 +3072,33 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // them. Missing selection remains the backwards-compatible "all" default.
     const liveNodes = getNodes();
     const liveEdges = getEdges();
-    // Canvas node order is stable and is also the order shown in the selector;
-    // edge insertion direction/order must not make queue order surprising.
+    // Canvas node order is the stable fallback. An explicit per-Board
+    // execution preference can move connected Searches ahead of that fallback
+    // without changing the persisted selection allow-list's membership.
     const connectedIds = getConnectedJobSearchIds(id, liveNodes, liveEdges);
     const liveBoardData = getNode(id)?.data || data;
-    const configuredSelectedIds = getSelectedConnectedJobSearchIds(liveBoardData.selectedSearchModuleIds, connectedIds);
+    const configuredSelectedIds = orderJobSearchIds(
+      liveBoardData.searchExecutionOrder,
+      getSelectedConnectedJobSearchIds(liveBoardData.selectedSearchModuleIds, connectedIds),
+    );
     const transactionSelectedIds = resumePlan
       ? [...new Set((resumePlan.selectedSearchModuleIds || []).filter(sourceId => typeof sourceId === 'string' && sourceId))]
       : configuredSelectedIds;
     if (transactionSelectedIds.length === 0) {
-      addToast({ title: 'Choose searches to scan', description: 'Select at least one connected Job Search module.', type: 'info' });
-      if (resumePlan) updateGlobal(id, { boardScanResume: null });
+      addToast({ title: 'Choose Job Search sources', description: 'Select at least one connected source to start or continue. Completed connected results are reused when combining.', type: 'info' });
+      if (resumePlan) clearExactBoardScanResume(updateGlobal, id, resumePlan.boardRunId);
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
       return;
     }
 
     const sourceNodesById = new Map(liveNodes.map((node) => [node.id, node]));
-    const notReady = !resumePlan && transactionSelectedIds
-      .map((sourceId) => {
+    // An unfinished manifest freezes its original provider set. Probe it only
+    // when today's all-disabled platform selection is the sole admission
+    // blocker; every other readiness boundary stays authoritative.
+    const admissionReadiness = !resumePlan
+      ? await Promise.all(transactionSelectedIds.map(async (sourceId) => {
         const source = sourceNodesById.get(sourceId);
+        const cachedRecoveryProbe = interruptedRecoveryProbes[sourceId] || null;
         const recoveryOwner = source?.data?.manualAiResume?.runId
           ? findJobSearchBoardRecoveryOwner(sourceId, source.data.manualAiResume.runId, liveNodes, liveEdges)
           : findJobSearchBoardActiveRecoveryOwner(sourceId, liveNodes, liveEdges);
@@ -2514,12 +3106,60 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           orchestratorNodeId: id,
           recoveryOwner,
         });
+        const interruptedRecoveryRunId = canInspectInterruptedRecovery(readiness, source?.data)
+          ? await inspectExactResumableJobRun(canvasFilePath, sourceId, source?.data, {
+            platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
+          })
+          : null;
         return {
           sourceId,
           readiness,
+          interruptedRecoveryRunId,
+          cachedRecoveryProbe,
         };
-      })
-      .find(({ readiness }) => !readiness.ready && !isQueueableSearchContention(readiness));
+      }))
+      : [];
+    if (
+      scanPreflightRef.current !== preflightToken
+      || isJobWorkflowDeletionPending(id)
+      || !getNode(id)
+    ) {
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      return { status: 'cancelled' };
+    }
+    // Disk state can disappear or be replaced without a React Flow data update.
+    // If this click disproves the exact cached token, remove only the matching
+    // snapshot so the row immediately returns to its truthful setup state.
+    if (!resumePlan) {
+      const failedCachedProbes = admissionReadiness.filter(({ sourceId, interruptedRecoveryRunId, cachedRecoveryProbe }) => (
+        !interruptedRecoveryRunId
+        && cachedRecoveryProbe?.signature === interruptedRecoveryProbeSignature(sourceNodesById.get(sourceId)?.data)
+        && typeof cachedRecoveryProbe?.runId === 'string'
+        && !!cachedRecoveryProbe.runId
+      ));
+      if (failedCachedProbes.length > 0) {
+        setInterruptedRecoveryProbes((current) => {
+          let next = current;
+          failedCachedProbes.forEach(({ sourceId, cachedRecoveryProbe }) => {
+            const currentProbe = current[sourceId];
+            if (
+              currentProbe?.signature === cachedRecoveryProbe.signature
+              && currentProbe?.runId === cachedRecoveryProbe.runId
+            ) {
+              if (next === current) next = { ...current };
+              delete next[sourceId];
+            }
+          });
+          return next;
+        });
+      }
+    }
+    const notReady = !resumePlan && admissionReadiness
+      .find(({ readiness, interruptedRecoveryRunId }) => (
+        !readiness.ready
+        && !interruptedRecoveryRunId
+        && !isQueueableSearchContention(readiness)
+      ));
     if (notReady) {
       const label = moduleLabel(sourceNodesById.get(notReady.sourceId)?.data);
       addToast({
@@ -2527,13 +3167,35 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         description: notReady.readiness.readinessReason || 'Finish setting up this search, then try again.',
         type: 'error',
       });
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
       return;
     }
 
+    const selectedSourceNodes = transactionSelectedIds
+      .map(sourceId => sourceNodesById.get(sourceId))
+      .filter(Boolean);
+    const admissionPartition = resumePlan
+      ? null
+      : partitionJobBoardSourceAdmissions(selectedSourceNodes);
     const completedOutcomes = new Map(Object.entries(resumePlan?.completedSourceRuns || {}));
     const incompleteSearches = Array.isArray(resumePlan?.incompleteSearches)
       ? resumePlan.incompleteSearches.map(entry => ({ ...entry }))
       : [];
+    // A fresh Board action may include searches that have already completed.
+    // Those generations are immutable display inputs, not work items: record
+    // their exact terminal receipt now so `selectedIds` below never forwards
+    // one to JobSearchNode.runForJobBoard (which would otherwise re-scrape its
+    // old career files).  Recovery plans already persist this map and retain
+    // their own exact active-child handling, so do not rewrite it here.
+    if (!resumePlan) {
+      for (const { sourceId, source, admission } of admissionPartition.reusable) {
+        // A durable terminal/manual recovery still needs its registered child
+        // executor to finish cleanup. Only an ordinary settled generation can
+        // be adopted directly as a completed Board input.
+        if (source?.data?.manualAiResume?.runId || source?.data?.terminalFinalizationRecovery) continue;
+        completedOutcomes.set(sourceId, admission.outcome);
+      }
+    }
     // A plan written by an older renderer can already list a Test Mode /
     // collection-only child as completed. It is terminal, but not mergeable;
     // normalize that receipt before deciding which children to skip so recovery
@@ -2569,6 +3231,49 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const selectedIds = transactionSelectedIds.filter(sourceId => (
       !completedOutcomes.has(sourceId) && !incompleteIds.has(sourceId)
     ));
+    // A pre-existing blocked-source generation must be serialised through the
+    // Board's exact paused-source receipt.  It is not fresh work, even when a
+    // mixed selection also contains newly imported career data.
+    const initialContinuationSourceIds = new Set(
+      resumePlan ? [] : admissionPartition.continuations.map(entry => entry.sourceId),
+    );
+    // This one-shot value is the only authority for a provider-starting fresh
+    // child. It survives the parent plan for exact crash recovery, while the
+    // Search consumes it atomically at its own lane turn.
+    const freshImportCapabilities = resumePlan?.freshImportCapabilities || Object.fromEntries(
+      (admissionPartition?.fresh || []).map(({ sourceId, admission }) => [
+        sourceId,
+        admission.freshImportCapability,
+      ]).filter(([, capability]) => typeof capability === 'string' && !!capability),
+    );
+
+    // A recovered plan can already have classified every selected Search as
+    // incomplete while its parent render still carries the durable receipt.
+    // There is no child work left to admit in that case.  Do not create a new
+    // scan token, rewrite the plan, or take the shared lane merely to discover
+    // the same attention state again; clear only this exact old transaction.
+    // A plan with every source completed still proceeds to Combine below.
+    if (resumePlan && selectedIds.length === 0 && incompleteSearches.length > 0) {
+      const pausedOnly = incompleteSearches.every((entry) => entry.status === 'paused');
+      const nonMergeableOnly = incompleteSearches.every((entry) => entry.status === 'non-mergeable');
+      const labels = incompleteSearches.map((entry) => entry.label).join(', ');
+      addToast({
+        title: pausedOnly
+          ? 'Some searches need attention'
+          : nonMergeableOnly
+            ? 'Some searches need hiring-fit scoring'
+            : 'Some searches did not finish',
+        description: pausedOnly
+          ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
+          : nonMergeableOnly
+            ? `${labels} completed without hiring-fit scoring. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.`
+            : `${labels} did not finish. Review those modules, then run the board again.`,
+        type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
+      });
+      clearExactBoardScanResume(updateGlobal, id, resumePlan.boardRunId);
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      return { status: 'attention' };
+    }
 
     const entropy = globalThis.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -2590,13 +3295,22 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const locallyCancelled = epoch.start();
     const cancelled = () => locallyCancelled() || scanRunRef.current !== scanToken || !getNode(id);
     scanRunRef.current = scanToken;
+    if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
     activeBoardRunIdRef.current = boardRunId;
     setScanning(true);
     const totalSelected = transactionSelectedIds.length;
     let completed = completedOutcomes.size;
     let processed = completed + incompleteSearches.length;
-    setScanProgress({ completed: processed, total: totalSelected, label: 'Waiting to scan selected searches…' });
-    EventLogger.log(`[JobBoard] scan ${resumePlan ? 'resumed' : 'started'} id=${id} run=${boardRunId} selected=${transactionSelectedIds.join(',')}`);
+    const freshSelectedCount = selectedIds.length;
+    const reusedSelectedCount = completedOutcomes.size;
+    setScanProgress({
+      completed: processed,
+      total: totalSelected,
+      label: freshSelectedCount > 0
+        ? 'Waiting to start or continue selected sources…'
+        : 'Waiting to combine saved results…',
+    });
+    EventLogger.log(`[JobBoard] scan ${resumePlan ? 'resumed' : 'started'} id=${id} run=${boardRunId} selected=${transactionSelectedIds.join(',')} fresh=${freshSelectedCount} reused=${reusedSelectedCount}`);
 
     const baselineSourceRuns = resumePlan?.baselineSourceRuns || Object.fromEntries(
       transactionSelectedIds.map((sourceId) => {
@@ -2611,10 +3325,34 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }];
       }),
     );
-    const queuedRecoverySourceId = resumePlan?.activeSourceId
-      && selectedIds.includes(resumePlan.activeSourceId)
-      ? resumePlan.activeSourceId
-      : null;
+    const queuedRecoverySourceIds = [...new Set([
+      ...(Array.isArray(resumePlan?.activeSourceIds) ? resumePlan.activeSourceIds : []),
+      resumePlan?.activeSourceId,
+    ].filter(sourceId => selectedIds.includes(sourceId)))];
+    const queuedRecoverySourceId = queuedRecoverySourceIds[0] || null;
+    const queuedRecoverySourceRollbacks = Object.fromEntries(queuedRecoverySourceIds.map((sourceId) => {
+      const rollback = resumePlan?.activeSourceRollbacks?.[sourceId]
+        || (resumePlan?.activeSourceRollback?.sourceId === sourceId
+          ? resumePlan.activeSourceRollback
+          : null);
+      return [sourceId, rollback];
+    }).filter(([, rollback]) => !!rollback));
+    const queuedRecoverySourceManualAiRunIds = Object.fromEntries(queuedRecoverySourceIds.map((sourceId) => [
+      sourceId,
+      resumePlan?.activeSourceManualAiRunIds?.[sourceId],
+    ]).filter(([, runId]) => typeof runId === 'string' && !!runId));
+    const queuedAwaitingSourceResolutions = (Array.isArray(resumePlan?.awaitingSourceResolutions)
+      ? resumePlan.awaitingSourceResolutions
+      : [resumePlan?.awaitingSourceResolution]
+    ).filter((entry) => (
+      entry
+      && queuedRecoverySourceIds.includes(entry.sourceId)
+      && typeof entry.jobRunId === 'string'
+      && !!entry.jobRunId
+    ));
+    const queuedAwaitingSourceResolution = queuedAwaitingSourceResolutions.find(
+      entry => entry.sourceId === queuedRecoverySourceId,
+    ) || queuedAwaitingSourceResolutions[0] || null;
     let durableScanResume = {
       version: 1,
       boardRunId,
@@ -2622,21 +3360,22 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       admissionOrder: scanAdmissionOrder,
       selectedSearchModuleIds: transactionSelectedIds,
       baselineSourceRuns,
+      freshImportCapabilities,
       completedSourceRuns: Object.fromEntries(completedOutcomes),
       incompleteSearches,
       // This exact source/run handoff is the only case where a Board-owned
       // Search may continue from its source-card Solve/Skip UI. Keep the
       // active source and its rollback receipt too, so Cancel remains able to
       // restore the pre-search graph while the Board waits.
-      awaitingSourceResolution: queuedRecoverySourceId
-        && resumePlan?.awaitingSourceResolution?.sourceId === queuedRecoverySourceId
-        ? resumePlan.awaitingSourceResolution
-        : null,
+      awaitingSourceResolution: queuedAwaitingSourceResolution,
+      awaitingSourceResolutions: queuedAwaitingSourceResolutions,
       recoverableFailure: resumePlan?.recoverableFailure || null,
       activeSourceRollback: queuedRecoverySourceId
-        && resumePlan?.activeSourceRollback?.sourceId === queuedRecoverySourceId
-        ? resumePlan.activeSourceRollback
+        ? queuedRecoverySourceRollbacks[queuedRecoverySourceId] || null
         : null,
+      activeSourceIds: queuedRecoverySourceIds,
+      activeSourceRollbacks: queuedRecoverySourceRollbacks,
+      activeSourceManualAiRunIds: queuedRecoverySourceManualAiRunIds,
       // Keep the interrupted child's ownership visible while this recovered
       // Board waits for the outer lane. Clearing it here lets JobSearch's own
       // auto-resume adopt the same manual handoff as a standalone run.
@@ -2645,7 +3384,79 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       updatedAt: Date.now(),
     };
     const persistScanResume = (patch = {}) => {
-      durableScanResume = { ...durableScanResume, ...patch, updatedAt: Date.now() };
+      let nextPatch = patch;
+      // A fan-out can reach more than one source-card pause.  The existing UI
+      // deliberately operates one Solve/Skip card at a time, so consuming the
+      // active descriptor promotes the next durable descriptor rather than
+      // dropping it with the legacy singular field.
+      if (
+        patch.awaitingSourceResolution === null
+        && !Object.hasOwn(patch, 'awaitingSourceResolutions')
+        && Array.isArray(durableScanResume.awaitingSourceResolutions)
+        && durableScanResume.awaitingSourceResolutions.length > 0
+      ) {
+        const consumedSourceId = durableScanResume.awaitingSourceResolution?.sourceId
+          || durableScanResume.activeSourceId;
+        const promoted = promoteJobBoardPausedSourceResolution({
+          awaitingSourceResolutions: durableScanResume.awaitingSourceResolutions,
+          activeSourceId: durableScanResume.activeSourceId,
+          activeSourceIds: durableScanResume.activeSourceIds,
+          activeSourceRollbacks: durableScanResume.activeSourceRollbacks,
+          activeSourceManualAiRunIds: durableScanResume.activeSourceManualAiRunIds,
+          consumedSourceId,
+        });
+        nextPatch = {
+          ...patch,
+          ...promoted,
+        };
+      }
+      // Child pending notifications can persist an exact manual-AI run id
+      // independently while this Board is awaiting another fan-out child.
+      // Merge that same-generation data before any whole-plan write, then
+      // prune only sources no longer active in the new receipt.
+      const livePlan = getNode(id)?.data?.boardScanResume;
+      const liveManualAiRunIds = livePlan?.boardRunId === boardRunId
+        ? livePlan.activeSourceManualAiRunIds || {}
+        : {};
+      const liveCancellationCleanupMap = livePlan?.boardRunId === boardRunId
+        ? livePlan.cancellationCleanupsBySource || {}
+        : null;
+      const liveCancellationCleanups = liveCancellationCleanupMap
+        ? (Object.keys(liveCancellationCleanupMap).length > 0
+          ? liveCancellationCleanupMap
+          : (livePlan.cancellationCleanup?.sourceId
+            ? { [livePlan.cancellationCleanup.sourceId]: livePlan.cancellationCleanup }
+            : {}))
+        : null;
+      const nextActiveSourceIds = Object.hasOwn(nextPatch, 'activeSourceIds')
+        ? nextPatch.activeSourceIds
+        : durableScanResume.activeSourceIds;
+      const mergedManualAiRunIds = Object.fromEntries(Object.entries({
+        ...liveManualAiRunIds,
+        ...(durableScanResume.activeSourceManualAiRunIds || {}),
+        ...(nextPatch.activeSourceManualAiRunIds || {}),
+      }).filter(([sourceId]) => Array.isArray(nextActiveSourceIds) && nextActiveSourceIds.includes(sourceId)));
+      // Source-keyed child cleanup is the canonical receipt. When the live
+      // plan exists, prefer it over this closure's older snapshot so a just
+      // retired disconnected child cannot be resurrected by a later progress
+      // write. The singular field is compatibility-only and mirrors one exact
+      // remaining source, never a merged union.
+      const mergedCancellationCleanups = {
+        ...(liveCancellationCleanups || durableScanResume.cancellationCleanupsBySource || {}),
+        ...(nextPatch.cancellationCleanupsBySource || {}),
+      };
+      const legacyCancellationCleanup = Object.hasOwn(nextPatch, 'cancellationCleanup')
+        ? nextPatch.cancellationCleanup
+        : Object.values(mergedCancellationCleanups)[0]
+          || (liveCancellationCleanups ? null : durableScanResume.cancellationCleanup || null);
+      durableScanResume = {
+        ...durableScanResume,
+        ...nextPatch,
+        activeSourceManualAiRunIds: mergedManualAiRunIds,
+        cancellationCleanupsBySource: mergedCancellationCleanups,
+        cancellationCleanup: legacyCancellationCleanup,
+        updatedAt: Date.now(),
+      };
       updateGlobal(id, { boardScanResume: durableScanResume });
     };
     persistScanResume();
@@ -2663,9 +3474,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         throw new Error('The Job Board scan recovery plan was not committed before queue admission.');
       }
       if (cancelled()) return;
-      const queueLabel = totalSelected === 1
-        ? 'Scan 1 Job Search and combine'
-        : `Scan ${totalSelected} Job Searches and combine`;
+      const queueLabel = freshSelectedCount === 0
+        ? (totalSelected === 1
+          ? 'Combine 1 saved Job Search'
+          : `Combine ${totalSelected} saved Job Searches`)
+        : freshSelectedCount === 1
+          ? 'Continue 1 Job Search and combine'
+          : `Continue ${freshSelectedCount} Job Searches and combine`;
       // One Board action is one queue transaction. Keeping this lease through
       // every selected child and the final combine prevents another Board from
       // overwriting an earlier child's result between our verified completion
@@ -2681,7 +3496,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           setScanProgress({
             completed: processed,
             total: totalSelected,
-            label: `Waiting to scan selected searches · queue position ${position}`,
+            label: freshSelectedCount > 0
+              ? `Waiting to start or continue selected sources · queue position ${position}`
+              : `Waiting to combine saved results · queue position ${position}`,
           });
         },
         onQueueUpdate: ({ position }) => {
@@ -2689,7 +3506,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           setScanProgress({
             completed: processed,
             total: totalSelected,
-            label: `Waiting to scan selected searches · queue position ${position}`,
+            label: freshSelectedCount > 0
+              ? `Waiting to start or continue selected sources · queue position ${position}`
+              : `Waiting to combine saved results · queue position ${position}`,
           });
         },
         onStart: () => {
@@ -2716,8 +3535,338 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return;
       }
 
-      for (const sourceId of selectedIds) {
+      // Fresh searches are independent until their results are joined for the
+      // Board Combine.  Do not make a person answer Search A's copy/paste
+      // prompt before Searches B and C are even allowed to issue theirs.  The
+      // Board remains the single lane owner; this is deliberately a child
+      // *fan-out*, not a second Board transaction or a concurrent Combine.
+      // Recovery keeps the same source order and replays these children one at
+      // a time, which is safe because every pending child has its own durable
+      // manual-AI marker and rollback receipt.
+      const parallelFreshChildren = !resumePlan
+        && selectedIds.length > 1
+        && initialContinuationSourceIds.size === 0;
+      let sourceIdsToRunSerially = selectedIds;
+      if (parallelFreshChildren) {
+        const activeSourceRollbacks = Object.fromEntries(selectedIds.map((sourceId) => {
+          const source = getNode(sourceId);
+          return [sourceId, captureJobSearchRollback(
+            sourceId,
+            source?.data || {},
+            getNodes(),
+            getEdges(),
+          )];
+        }));
+        const firstSourceId = selectedIds[0];
+        persistScanResume({
+          activeSourceId: firstSourceId,
+          activeSourceIds: [...selectedIds],
+          activeSourceRollback: activeSourceRollbacks[firstSourceId],
+          activeSourceRollbacks,
+          activeSourceManualAiRunIds: {},
+          awaitingSourceResolution: null,
+        });
+        const fanoutPlanCommitted = await waitForBoardPlanCommit({
+          getNode,
+          nodeId: id,
+          boardRunId,
+          matches: plan => plan.phase === 'searches'
+            && Array.isArray(plan.activeSourceIds)
+            && selectedIds.every(sourceId => plan.activeSourceIds.includes(sourceId)),
+        });
+        if (!fanoutPlanCommitted) {
+          throw new Error('The Job Board child handoff plan was not committed before starting selected searches.');
+        }
         if (cancelled()) return;
+        selectedIds.forEach(sourceId => activeSearchModuleIdsRef.current.add(sourceId));
+        EventLogger.log(`[JobBoard] scan launching fresh child fan-out id=${id} run=${boardRunId} sources=${selectedIds.join(',')}`);
+        const fanoutTerminalSourceIds = new Set();
+        const fanoutCleanupFailureSourceIds = new Set();
+        const recordFreshChildSettlement = async ({ sourceId, result, error }) => {
+          // This callback waits for an exact durable receipt: a process crash
+          // while another child waits at manual AI must leave every finished
+          // sibling as a Board outcome, not as an active source recovery can
+          // rerun.
+          if (cancelled() || scanRunRef.current !== scanToken) return;
+          const livePlan = getNode(id)?.data?.boardScanResume;
+          const activeIds = Array.isArray(durableScanResume.activeSourceIds)
+            ? durableScanResume.activeSourceIds
+            : [];
+          if (
+            livePlan?.boardRunId !== boardRunId
+            || durableScanResume.boardRunId !== boardRunId
+            || !activeIds.includes(sourceId)
+          ) return;
+          const source = getNode(sourceId);
+          const sourceData = source?.data || {};
+          const label = moduleLabel(sourceData);
+          if (
+            error?.code === 'BOARD_CANCELLATION_CLEANUP_FAILED'
+            || (
+              livePlan.cancellationCleanup?.sourceId === sourceId
+              && livePlan.cancellationCleanup?.boardRunId === boardRunId
+            )
+          ) {
+            fanoutCleanupFailureSourceIds.add(sourceId);
+            setRecoveryError(error?.message || `${label} cleanup did not finish.`);
+            return;
+          }
+          const terminal = terminalJobSearchOutcome(source);
+          const exactCompleted = result?.status === 'completed'
+            && !!terminal
+            && isMergeableTerminalJobSearchOutcome(source, terminal)
+            && (!result.runId || terminal.runId === result.runId)
+            && (!sourceData.jobRunId || terminal.runId === sourceData.jobRunId);
+          const removeActiveSource = async (patch) => {
+            const promoted = promoteJobBoardPausedSourceResolution({
+              awaitingSourceResolutions: durableScanResume.awaitingSourceResolutions,
+              activeSourceId: durableScanResume.activeSourceId,
+              activeSourceIds: durableScanResume.activeSourceIds,
+              activeSourceRollbacks: durableScanResume.activeSourceRollbacks,
+              activeSourceManualAiRunIds: durableScanResume.activeSourceManualAiRunIds,
+              consumedSourceId: sourceId,
+            });
+            persistScanResume({ ...patch, ...promoted });
+            const committed = await waitForBoardPlanCommit({
+              getNode,
+              nodeId: id,
+              boardRunId,
+              matches: plan => plan.phase === 'searches'
+                && !plan.activeSourceIds?.includes(sourceId)
+                && (
+                  (patch.completedSourceRuns?.[sourceId]
+                    && plan.completedSourceRuns?.[sourceId]?.runId === patch.completedSourceRuns[sourceId].runId)
+                  || Array.isArray(plan.incompleteSearches)
+                      && plan.incompleteSearches.some(entry => entry?.sourceId === sourceId)
+                ),
+            });
+            if (!committed) throw new Error(`${label} settlement receipt was not committed.`);
+            activeSearchModuleIdsRef.current.delete(sourceId);
+            fanoutTerminalSourceIds.add(sourceId);
+          };
+          if (exactCompleted) {
+            completedOutcomes.set(sourceId, terminal);
+            completed += 1;
+            processed += 1;
+            await removeActiveSource({
+              completedSourceRuns: Object.fromEntries(completedOutcomes),
+              incompleteSearches: incompleteSearches.map(entry => ({ ...entry })),
+              recoverableFailure: null,
+            });
+            return;
+          }
+          if (result?.status === 'paused') {
+            const jobRunId = result.runId || sourceData.jobRunId || null;
+            if (!jobRunId) return;
+            const resolutions = [
+              ...(Array.isArray(durableScanResume.awaitingSourceResolutions)
+                ? durableScanResume.awaitingSourceResolutions
+                : [durableScanResume.awaitingSourceResolution].filter(Boolean)),
+              { sourceId, jobRunId, pausedAt: Date.now() },
+            ].filter((entry, index, entries) => (
+              entry?.sourceId
+              && entries.findIndex(item => item.sourceId === entry.sourceId) === index
+            )).sort((left, right) => (
+              selectedIds.indexOf(left.sourceId) - selectedIds.indexOf(right.sourceId)
+            ));
+            const activeSourceIds = [...new Set([
+              ...(durableScanResume.activeSourceIds || []),
+              sourceId,
+            ])];
+            const activeSourceId = resolutions[0]?.sourceId
+              || activeSourceIds.find(candidateId => selectedIds.includes(candidateId))
+              || null;
+            persistScanResume({
+              activeSourceId,
+              activeSourceIds,
+              activeSourceRollback: durableScanResume.activeSourceRollbacks?.[activeSourceId] || null,
+              awaitingSourceResolution: resolutions[0] || null,
+              awaitingSourceResolutions: resolutions,
+            });
+            const committed = await waitForBoardPlanCommit({
+              getNode,
+              nodeId: id,
+              boardRunId,
+              matches: plan => plan.phase === 'searches'
+                && plan.awaitingSourceResolutions?.some(entry => (
+                  entry?.sourceId === sourceId && entry.jobRunId === jobRunId
+                )),
+            });
+            if (!committed) throw new Error(`${label} paused-source receipt was not committed.`);
+            return;
+          }
+          // A failed, invalid, or individually-cancelled child is terminal for
+          // this Board run. Keep its exact attention row and retire its active
+          // rollback so reload never starts a replacement provider run.
+          const status = result?.status === 'cancelled'
+            ? 'disconnected'
+            : result?.status || (error ? 'failed' : 'incomplete');
+          const message = result?.error || error?.message || (
+            result?.status === 'completed'
+              ? `${label} changed before its terminal result could be recorded.`
+              : `${label} did not finish.`
+          );
+          if (!incompleteSearches.some(entry => entry?.sourceId === sourceId)) {
+            incompleteSearches.push({ sourceId, label, status, error: message });
+          }
+          processed += 1;
+          await removeActiveSource({
+            completedSourceRuns: Object.fromEntries(completedOutcomes),
+            incompleteSearches: incompleteSearches.map(entry => ({ ...entry })),
+          });
+        };
+        const childResults = await runJobBoardChildFanout(selectedIds, async (sourceId) => {
+          const childCancelled = () => cancelled() || !getEdges().some((edge) => (
+            (edge.source === id && edge.target === sourceId)
+            || (edge.target === id && edge.source === sourceId)
+          ));
+          return jobSearchCoordinator.runSearchModule(sourceId, {
+            orchestratorNodeId: id,
+            boardRunId,
+            isCancelled: childCancelled,
+            freshImportCapability: freshImportCapabilities[sourceId] || null,
+          });
+        }, { onSettled: recordFreshChildSettlement });
+        EventLogger.log(`[JobBoard] scan fresh child fan-out settled id=${id} run=${boardRunId} sources=${selectedIds.join(',')}`);
+        if (cancelled()) return;
+        const settlementCommitFailure = childResults.find(item => item.persistenceError);
+        if (settlementCommitFailure) {
+          const message = settlementCommitFailure.persistenceError?.message
+            || `${moduleLabel(getNode(settlementCommitFailure.sourceId)?.data)} settlement could not be committed.`;
+          setRecoveryError(message);
+          EventLogger.error(
+            `[JobBoard] child settlement receipt was not committed; retaining recovery authority id=${id}`
+            + ` run=${boardRunId} source=${settlementCommitFailure.sourceId}:`,
+            settlementCommitFailure.persistenceError,
+          );
+          return;
+        }
+        if (fanoutCleanupFailureSourceIds.size > 0) {
+          // The child has already installed the exact cleanup receipt. Keep
+          // it authoritative; classifying this as a normal incomplete result
+          // would clear the retryable cancellation ledger on reload.
+          return;
+        }
+        const pausedSources = [];
+        for (const { sourceId, result, error } of childResults) {
+          if (cancelled()) return;
+          if (fanoutTerminalSourceIds.has(sourceId)) continue;
+          activeSearchModuleIdsRef.current.delete(sourceId);
+          const source = getNode(sourceId);
+          const label = moduleLabel(source?.data);
+          if (error || result?.status === 'failed' || result?.status === 'not-ready' || result?.status === 'busy') {
+            processed += 1;
+            incompleteSearches.push({
+              sourceId,
+              label,
+              status: result?.status || 'failed',
+              error: result?.error || error?.message || `${label} did not finish.`,
+            });
+            continue;
+          }
+          if (result?.status === 'cancelled') {
+            // A single disconnected child is cancelled in place so its
+            // siblings can finish their independent work.  Only the Board
+            // cancellation token above ends the whole transaction.
+            processed += 1;
+            incompleteSearches.push({
+              sourceId,
+              label,
+              status: 'disconnected',
+              error: result?.error || `${label} was disconnected while it was running.`,
+            });
+            continue;
+          }
+          if (result?.status === 'paused') {
+            const pausedJobRunId = result.runId || source?.data?.jobRunId || null;
+            if (pausedJobRunId) pausedSources.push({ sourceId, jobRunId: pausedJobRunId });
+            continue;
+          }
+          if (result?.status === 'recovery-inspection-failed'
+            || result?.status === 'recovery-finalization-failed'
+            || result?.status === 'recovery-cleanup-failed') {
+            persistScanResume({
+              activeSourceId: sourceId,
+              activeSourceIds: [sourceId],
+              activeSourceRollback: activeSourceRollbacks[sourceId],
+              activeSourceRollbacks: { [sourceId]: activeSourceRollbacks[sourceId] },
+              recoverableFailure: { sourceId, kind: 'inspection', status: result.status, runId: result.runId || null, error: result.error || null },
+            });
+            setRecoveryError(result.error || `${label} recovery could not be inspected.`);
+            return;
+          }
+          const outcome = terminalJobSearchOutcome(source);
+          if (result?.status !== 'completed' || !outcome || !isMergeableTerminalJobSearchOutcome(source, outcome)) {
+            processed += 1;
+            incompleteSearches.push({
+              sourceId,
+              label,
+              status: !outcome ? 'incomplete' : 'non-mergeable',
+              error: !outcome
+                ? (source?.data?.errorMessage || `${label} did not publish a complete result that can be combined.`)
+                : nonMergeableSearchMessage(source?.data),
+            });
+            continue;
+          }
+          completedOutcomes.set(sourceId, outcome);
+          completed += 1;
+          processed += 1;
+        }
+        if (pausedSources.length > 0) {
+          const firstPaused = pausedSources[0];
+          const pausedSourceRollbacks = Object.fromEntries(pausedSources.map(({ sourceId }) => [
+            sourceId,
+            activeSourceRollbacks[sourceId],
+          ]));
+          persistScanResume({
+            activeSourceId: firstPaused.sourceId,
+            activeSourceIds: pausedSources.map(({ sourceId }) => sourceId),
+          activeSourceRollback: activeSourceRollbacks[firstPaused.sourceId],
+          activeSourceRollbacks: pausedSourceRollbacks,
+          activeSourceManualAiRunIds: Object.fromEntries(pausedSources.map(({ sourceId }) => [
+            sourceId,
+            activeSearchManualAiRunIdsRef.current.get(sourceId)?.runId,
+          ]).filter(([, runId]) => typeof runId === 'string' && !!runId)),
+            completedSourceRuns: Object.fromEntries(completedOutcomes),
+            incompleteSearches: incompleteSearches.map(entry => ({ ...entry })),
+            awaitingSourceResolution: { ...firstPaused, pausedAt: Date.now() },
+            // The singular field remains the source-card continuation contract.
+            // Retain every other paused child durably so a reload/cancellation
+            // cannot orphan its rollback or manual marker; recovery advances
+            // them in selected order after the active card is resolved.
+            awaitingSourceResolutions: pausedSources.map(item => ({ ...item, pausedAt: Date.now() })),
+          });
+          setScanProgress({
+            completed: processed,
+            total: totalSelected,
+            currentLabel: moduleLabel(getNode(firstPaused.sourceId)?.data),
+            label: 'Waiting for a selected Job Search to finish its resolved sources…',
+          });
+          EventLogger.log(`[JobBoard] scan waiting for source resolution after fresh child fan-out id=${id} run=${boardRunId} source=${firstPaused.sourceId} jobRun=${firstPaused.jobRunId}`);
+          return;
+        }
+        persistScanResume({
+          activeSourceId: null,
+          activeSourceIds: [],
+          activeSourceRollback: null,
+          activeSourceRollbacks: {},
+          activeSourceManualAiRunIds: {},
+          completedSourceRuns: Object.fromEntries(completedOutcomes),
+          incompleteSearches: incompleteSearches.map(entry => ({ ...entry })),
+          awaitingSourceResolution: null,
+          recoverableFailure: null,
+        });
+        sourceIdsToRunSerially = [];
+      }
+
+      for (const sourceId of sourceIdsToRunSerially) {
+        if (cancelled()) return;
+        // This receipt can promote the next paused child while this same
+        // recovered Board invocation is still walking the selected order.
+        // Never keep consulting the immutable click/reload snapshot here: it
+        // would recognize only the first manual-AI handoff and strand the
+        // remaining durable descriptors after that first continuation settles.
+        const iterationPlan = durableScanResume;
         const sourceNode = getNode(sourceId);
         const stillConnected = getEdges().some((edge) => (
           (edge.source === id && edge.target === sourceId)
@@ -2727,7 +3876,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!sourceNode || sourceNode.type !== 'jobhub' || !stillConnected) {
           const disconnectedResume = sourceNode?.data?.manualAiResume;
           if (
-            resumePlan?.activeSourceId === sourceId
+            iterationPlan?.activeSourceId === sourceId
             || (
               disconnectedResume?.runId
               && disconnectedResume.orchestratorNodeId === id
@@ -2783,15 +3932,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // replacement provider run.  A manual-AI marker, including a terminal
         // retirement marker, remains a required child cleanup transaction and
         // must therefore go through the registered child executor below.
-        const pausedLaneOutcome = exactPausedSourceTerminalOutcome({
+        const pausedLaneOutcome = resolveExactPausedJobBoardTerminal({
           boardRunId,
-          resumePlan,
+          resumePlan: iterationPlan,
           livePlan: getNode(id)?.data?.boardScanResume || null,
           sourceId,
           source: sourceNode,
         });
         if (pausedLaneOutcome.status === 'adopted') {
-          if (!isMergeableTerminalJobSearchOutcome(sourceNode, pausedLaneOutcome.outcome)) {
+          if (!pausedLaneOutcome.mergeable) {
             processed += 1;
             incompleteSearches.push({
               sourceId,
@@ -2860,19 +4009,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // start; the click-time verdict is no longer authoritative. In
         // particular, never wipe a sources-ready/scoring-batch recovery left by
         // the Board that ran ahead of us.
-        const childManualAiResume = sourceNode.data?.manualAiResume || null;
-        const exactSavedScrapeRecovery = !!childManualAiResume?.runId
-          && childManualAiResume.runId === sourceNode.data?.manualAiResume?.runId
-          && isSavedScrapeManualAiResume(childManualAiResume);
-        const turnNodes = getNodes();
-        const turnEdges = getEdges();
-        const recoveryOwner = childManualAiResume?.runId
+        let turnSourceNode = sourceNode;
+        let childManualAiResume = turnSourceNode.data?.manualAiResume || null;
+        let turnNodes = getNodes();
+        let turnEdges = getEdges();
+        let recoveryOwner = childManualAiResume?.runId
           ? findJobSearchBoardRecoveryOwner(sourceId, childManualAiResume.runId, turnNodes, turnEdges)
           : findJobSearchBoardActiveRecoveryOwner(sourceId, turnNodes, turnEdges);
-        const recoveryOwnedHere = !recoveryOwner || (
+        let recoveryOwnedHere = !recoveryOwner || (
           recoveryOwner.orchestratorNodeId === id && recoveryOwner.boardRunId === boardRunId
         );
-        const turnReadiness = moduleSearchReadiness(sourceNode, verifyingPlatformsRef.current, {
+        let turnReadiness = moduleSearchReadiness(turnSourceNode, verifyingPlatformsRef.current, {
           orchestratorNodeId: id,
           boardRunId,
           recoveryOwner,
@@ -2880,31 +4027,140 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // not adopt a legacy batch that predates this transaction. Only the
           // durable plan whose interrupted active child was this Search may
           // replay that sidecar inside the Board-owned lane.
-          legacyBatchRecovery: !!resumePlan
-            && resumePlan.activeSourceId === sourceId,
+          legacyBatchRecovery: !!iterationPlan
+            && iterationPlan.activeSourceId === sourceId,
         });
+        // This check is repeated at the actual queue turn. The click-time
+        // inspection above may now be stale, and a resumed Board has no
+        // click-time inspection at all.
+        const initialRecoveryProbeSignature = interruptedRecoveryProbeSignature(sourceNode.data);
+        let interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, sourceNode.data)
+          ? await inspectExactResumableJobRun(canvasFilePath, sourceId, sourceNode.data, {
+            platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
+          })
+          : null;
+        // Inspection crosses an async IPC boundary. Re-read both the Search and
+        // platform session immediately afterwards: the child itself performs
+        // this same verification check before it can mutate state. If it began
+        // while we were peeking, retain the durable Board plan and yield rather
+        // than recording a false incomplete result (or handing a stale token to
+        // a child that will only return `not-ready`).
+        turnSourceNode = getNode(sourceId);
+        turnNodes = getNodes();
+        turnEdges = getEdges();
+        if (!turnSourceNode || turnSourceNode.type !== 'jobhub') {
+          persistScanResume({ activeSourceId: sourceId });
+          return;
+        }
+        childManualAiResume = turnSourceNode.data?.manualAiResume || null;
+        recoveryOwner = childManualAiResume?.runId
+          ? findJobSearchBoardRecoveryOwner(sourceId, childManualAiResume.runId, turnNodes, turnEdges)
+          : findJobSearchBoardActiveRecoveryOwner(sourceId, turnNodes, turnEdges);
+        recoveryOwnedHere = !recoveryOwner || (
+          recoveryOwner.orchestratorNodeId === id && recoveryOwner.boardRunId === boardRunId
+        );
+        turnReadiness = moduleSearchReadiness(turnSourceNode, verifyingPlatformsRef.current, {
+          orchestratorNodeId: id,
+          boardRunId,
+          recoveryOwner,
+          legacyBatchRecovery: !!iterationPlan
+            && iterationPlan.activeSourceId === sourceId,
+        });
+        if (
+          hasActivePlatformVerification(verifyingPlatformsRef.current)
+          || turnReadiness.statusLabel === 'Checking connections'
+        ) {
+          persistScanResume({ activeSourceId: sourceId });
+          // This scan already consumed its one-shot recovery key. Verification
+          // is an external, retryable gate, so release it for the settled
+          // session rather than stranding the durable plan after it finishes.
+          autoResumedBoardScanRef.current = null;
+          setScanProgress({
+            completed: processed,
+            total: totalSelected,
+            currentLabel: label,
+            label: `Waiting for ${label} connection checks…`,
+          });
+          EventLogger.log(`[JobBoard] recovered scan waiting for platform verification after manifest inspection id=${id} run=${boardRunId} source=${sourceId}`);
+          return;
+        }
+        // Location/profile edits during the first peek invalidate that answer.
+        // Re-inspect against the current Search data before passing any token to
+        // the child; a replaced manifest still fails closed in the child too.
+        if (initialRecoveryProbeSignature !== interruptedRecoveryProbeSignature(turnSourceNode.data)) {
+          interruptedRecoveryRunId = canInspectInterruptedRecovery(turnReadiness, turnSourceNode.data)
+            ? await inspectExactResumableJobRun(canvasFilePath, sourceId, turnSourceNode.data, {
+              platformsVerifying: hasActivePlatformVerification(verifyingPlatformsRef.current),
+            })
+            : null;
+          if (hasActivePlatformVerification(verifyingPlatformsRef.current)) {
+            persistScanResume({ activeSourceId: sourceId });
+            // See the post-peek verification yield above: the same exact plan
+            // must re-enter after the connection check settles.
+            autoResumedBoardScanRef.current = null;
+            setScanProgress({
+              completed: processed,
+              total: totalSelected,
+              currentLabel: label,
+              label: `Waiting for ${label} connection checks…`,
+            });
+            EventLogger.log(`[JobBoard] recovered scan waiting for platform verification after manifest reinspection id=${id} run=${boardRunId} source=${sourceId}`);
+            return;
+          }
+        }
+        const exactSavedScrapeRecovery = !!childManualAiResume?.runId
+          && childManualAiResume.runId === turnSourceNode.data?.manualAiResume?.runId
+          && isSavedScrapeManualAiResume(childManualAiResume);
         const savedRecoveryCanProceed = exactSavedScrapeRecovery
           && recoveryOwnedHere
-          && !sourceNode.data?.locked
-          && !ACTIVE_SEARCH_STATES.has(sourceNode.data?.hubState)
+          && !turnSourceNode.data?.locked
+          && !ACTIVE_SEARCH_STATES.has(turnSourceNode.data?.hubState)
           && turnReadiness.statusLabel !== 'Checking connections'
           && turnReadiness.statusLabel !== 'Deletion pending';
         const pausedContinuation = exactPausedSourceContinuation(
-          resumePlan,
+          iterationPlan,
           sourceId,
-          sourceNode.data,
+          turnSourceNode.data,
         );
+        const awaitingPausedSource = iterationPlan?.awaitingSourceResolution?.sourceId === sourceId
+          && iterationPlan.awaitingSourceResolution?.jobRunId === turnSourceNode.data?.jobRunId;
+        // The first Board click against an already-paused Search records this
+        // exact source/run pair before dispatching the child. Until the user
+        // resolves/skips the source card (or its own continuation starts), do
+        // not turn that durable nonterminal generation into a fresh scan.
+        if (
+          awaitingPausedSource
+          && !pausedContinuation
+          && (
+            turnSourceNode.data?.hubState === 'sources-ready'
+            || ACTIVE_SEARCH_STATES.has(turnSourceNode.data?.hubState)
+          )
+        ) {
+          setScanProgress({
+            completed: processed,
+            total: totalSelected,
+            currentLabel: label,
+            label: `Waiting for ${label} to finish its existing paused search…`,
+          });
+          autoResumedBoardScanRef.current = null;
+          return;
+        }
         // The exact paused handoff may be clean-but-still-sources-ready, or it
         // may have been save-sanitized after scoring started. In both cases the
         // Board's durable source/run pair—not today's editable platform
         // settings—authorizes the child continuation.
         const pausedContinuationCanProceed = !!pausedContinuation
           && recoveryOwnedHere
-          && !sourceNode.data?.locked
-          && !hasPendingManualAiRetirement(sourceNode.data)
+          && !turnSourceNode.data?.locked
+          && !hasPendingManualAiRetirement(turnSourceNode.data)
           && turnReadiness.statusLabel !== 'Checking connections'
           && turnReadiness.statusLabel !== 'Deletion pending';
-        if (!turnReadiness.ready && !savedRecoveryCanProceed && !pausedContinuationCanProceed) {
+        const interruptedRecoveryCanProceed = !!interruptedRecoveryRunId
+          && recoveryOwnedHere
+          && !turnSourceNode.data?.locked
+          && !ACTIVE_SEARCH_STATES.has(turnSourceNode.data?.hubState)
+          && turnReadiness.statusLabel !== 'Deletion pending';
+        if (!turnReadiness.ready && !savedRecoveryCanProceed && !pausedContinuationCanProceed && !interruptedRecoveryCanProceed) {
           if (turnReadiness.statusLabel === 'Deletion pending') {
             // onBeforeDelete is reversible until its cancellation/OS work
             // commits. Keep this exact Board transaction intact; if deletion
@@ -2941,6 +4197,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // after verification settles instead of misclassifying the child
             // as a failed/incomplete search.
             persistScanResume({ activeSourceId: sourceId });
+            autoResumedBoardScanRef.current = null;
             setScanProgress({
               completed: processed,
               total: totalSelected,
@@ -2954,7 +4211,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           incompleteSearches.push({
             sourceId,
             label,
-            status: sourceNode.data?.hubState === 'sources-ready' ? 'paused' : 'not-ready',
+            status: turnSourceNode.data?.hubState === 'sources-ready' ? 'paused' : 'not-ready',
             error: turnReadiness.readinessReason || `${label} is not ready to scan.`,
           });
           persistScanResume({
@@ -2982,16 +4239,24 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         });
 
         activeSearchModuleIdRef.current = sourceId;
+        activeSearchModuleIdsRef.current.add(sourceId);
         const retainedRollback = durableScanResume.activeSourceId === sourceId
           && durableScanResume.activeSourceRollback?.sourceId === sourceId
           ? durableScanResume.activeSourceRollback
           : null;
         const activeSourceRollback = retainedRollback || captureJobSearchRollback(
           sourceId,
-          sourceNode.data,
+          turnSourceNode.data,
           getNodes(),
           getEdges(),
         );
+        const initialPausedDescriptor = !resumePlan
+          && initialContinuationSourceIds.has(sourceId)
+          && turnSourceNode.data?.hubState === 'sources-ready'
+          && typeof turnSourceNode.data?.jobRunId === 'string'
+          && !!turnSourceNode.data.jobRunId
+          ? { sourceId, jobRunId: turnSourceNode.data.jobRunId, pausedAt: Date.now() }
+          : null;
         // Persist the exact pre-run hub + source-card graph before the child is
         // allowed to clear provenance or dismiss warning cards. This is the
         // reload-safe counterpart of JobSearch's in-memory rollback control.
@@ -3003,7 +4268,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // cannot tell a sanitized empty/done scorer from an unrelated retry.
           awaitingSourceResolution: pausedContinuation
             ? durableScanResume.awaitingSourceResolution
-            : null,
+            : initialPausedDescriptor,
         });
         const childPlanCommitted = await waitForBoardPlanCommit({
           getNode,
@@ -3011,7 +4276,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           boardRunId,
           matches: plan => plan.phase === 'searches'
             && plan.activeSourceId === sourceId
-            && plan.activeSourceRollback?.sourceId === sourceId,
+            && plan.activeSourceRollback?.sourceId === sourceId
+            && (!initialPausedDescriptor || (
+              plan.awaitingSourceResolution?.sourceId === sourceId
+              && plan.awaitingSourceResolution?.jobRunId === initialPausedDescriptor.jobRunId
+            )),
         });
         if (!childPlanCommitted) {
           throw new Error(`${label} could not start because its rollback receipt was not committed.`);
@@ -3035,11 +4304,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // It lets the Search finish clean paused rows or reopen the same
             // staged run; it never authorizes a fresh search.
             pausedSourceContinuation: pausedContinuation,
+            freshImportCapability: durableScanResume.freshImportCapabilities?.[sourceId] || null,
             // A Board reload during query/scrape has no manual-AI marker yet.
             // Preserve that distinct recovery intent so the Search probes its
             // exact staged run before considering a fresh retry.
-            recoverInterruptedJobRun: !!resumePlan
-              && resumePlan.activeSourceId === sourceId,
+            recoverInterruptedJobRun: !!iterationPlan
+              && iterationPlan.activeSourceId === sourceId,
+            // Never persist this probe result. It is a one-turn capability
+            // that lets the child verify and resume this exact manifest before
+            // applying its normal fresh-search source validation.
+            interruptedRecoveryRunId,
             finalizationRecovery: durableScanResume.recoverableFailure?.sourceId === sourceId
               && ['terminal-finalization', 'manual-ai-retirement']
                 .includes(durableScanResume.recoverableFailure?.kind)
@@ -3047,6 +4321,49 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
               : null,
           });
           if (cancelled()) return;
+          if (result?.transientReason === 'platforms-verifying') {
+            // This is the final race fence: verification can begin after our
+            // post-peek check but before the child reads its own live state.
+            // The child tags that transient refusal, so keep this exact Board
+            // receipt rather than treating it as an incomplete Search or
+            // clearing a recovery manifest that has not been touched.
+            const postResultSource = getNode(sourceId);
+            const verificationStillActive = hasActivePlatformVerification(verifyingPlatformsRef.current)
+              || moduleSearchReadiness(postResultSource, verifyingPlatformsRef.current, {
+                orchestratorNodeId: id,
+                boardRunId,
+                recoveryOwner: postResultSource?.data?.manualAiResume?.runId
+                  ? findJobSearchBoardRecoveryOwner(
+                    sourceId,
+                    postResultSource.data.manualAiResume.runId,
+                    getNodes(),
+                    getEdges(),
+                  )
+                  : findJobSearchBoardActiveRecoveryOwner(sourceId, getNodes(), getEdges()),
+              }).statusLabel === 'Checking connections';
+            persistScanResume({
+              activeSourceId: sourceId,
+              activeSourceRollback,
+              recoverableFailure: null,
+            });
+            // A resumed Board may have claimed a one-shot recovery key. The
+            // verification transition is an external input, so let that same
+            // durable plan re-enter once its connection check has settled.
+            autoResumedBoardScanRef.current = null;
+            setScanProgress({
+              completed: processed,
+              total: totalSelected,
+              currentLabel: label,
+              label: verificationStillActive
+                ? `Waiting for ${label} connection checks…`
+                : `${label} connection checks changed; waiting to retry…`,
+            });
+            EventLogger.log(
+              `[JobBoard] scan yielding to child platform verification id=${id}`
+              + ` run=${boardRunId} source=${sourceId} stillActive=${verificationStillActive}`,
+            );
+            return;
+          }
           if (result?.status === 'cancelled') {
             if (
               isJobWorkflowDeletionPending(id)
@@ -3067,7 +4384,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // same Board transaction. Its exact rollback has already restored
             // the Search; stop the parent turn too instead of scanning later
             // children or treating an intentional cancel as a failed module.
-            updateGlobal(id, { boardScanResume: null });
+            clearExactBoardScanResume(updateGlobal, id, boardRunId);
             EventLogger.log(`[JobBoard] scan cancelled from child id=${id} run=${boardRunId} source=${sourceId}`);
             addToast({
               title: 'Board run cancelled',
@@ -3305,6 +4622,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             error,
           );
         } finally {
+          activeSearchModuleIdsRef.current.delete(sourceId);
           if (activeSearchModuleIdRef.current === sourceId) activeSearchModuleIdRef.current = null;
         }
       }
@@ -3334,11 +4652,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           description: pausedOnly
             ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
             : nonMergeableOnly
-              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode and run the board again.`
+              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.`
               : `${labels} did not finish. Review those modules, then run the board again.`,
           type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
         });
-        updateGlobal(id, { boardScanResume: null });
+        clearExactBoardScanResume(updateGlobal, id, boardRunId);
         return;
       }
       const supersededSourceId = [...completedOutcomes.keys()].find((sourceId) => {
@@ -3352,9 +4670,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           || !source
           || source.type !== 'jobhub'
           || !connected
-          || source.data?.hubState !== 'done'
-          || (source.data?.jobRunId || null) !== expected.runId
-          || (source.data?.resultDisposition || null) !== expected.resultDisposition;
+          || !completedJobSearchOutcomeMatches(source, expected);
       });
       if (supersededSourceId) {
         const label = moduleLabel(getNode(supersededSourceId)?.data);
@@ -3364,7 +4680,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           description: `${label} changed before the board could combine this scan. Run the board again to keep the result set consistent.`,
           type: 'info',
         });
-        updateGlobal(id, { boardScanResume: null });
+        clearExactBoardScanResume(updateGlobal, id, boardRunId);
         return;
       }
       setScanProgress({
@@ -3385,6 +4701,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         sourceId: module.id,
         runId: module.runId || null,
         resultDisposition: module.resultDisposition || null,
+        legacyPositiveResult: module.legacyPositiveResult === true,
         fingerprint: module.fingerprint,
       }));
       const combineManualAiRunId = createManualAiRunId(id);
@@ -3442,11 +4759,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return;
       }
       if (combineOutcome?.status === 'superseded') {
-        updateGlobal(id, (node) => (
-          node?.data?.boardScanResume?.boardRunId === boardRunId
-            ? { boardScanResume: null }
-            : null
-        ));
+        clearExactBoardScanResume(updateGlobal, id, boardRunId);
         EventLogger.log(`[JobBoard] scan combine superseded id=${id} run=${boardRunId}`);
         return;
       }
@@ -3454,11 +4767,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         setRecoveryError(combineOutcome?.error || 'The final Board combine returned an unknown result.');
         return;
       }
-      updateGlobal(id, (node) => (
-        node?.data?.boardScanResume?.boardRunId === boardRunId
-          ? { boardScanResume: null }
-          : null
-      ));
+      clearExactBoardScanResume(updateGlobal, id, boardRunId);
       EventLogger.log(`[JobBoard] scan completed id=${id} run=${boardRunId} selected=${totalSelected}`);
     } catch (error) {
       if (
@@ -3473,9 +4782,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         description: error?.message || String(error),
         type: 'error',
       });
-      updateGlobal(id, { boardScanResume: null });
+      clearExactBoardScanResume(updateGlobal, id, boardRunId);
     } finally {
       lease?.release();
+      if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
       if (scanLaneLeaseOwnerRef.current === scanToken) {
         scanLaneLeaseOwnerRef.current = null;
       }
@@ -3490,7 +4800,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
       }
     }
-  }, [addToast, boardRecoverySig, canvasFilePath, data, epoch, getEdges, getNode, getNodes, handleCombine, id, jobSearchCoordinator, moduleRunQueue, updateGlobal]);
+  }, [addToast, boardRecoverySig, canvasFilePath, data, epoch, getEdges, getNode, getNodes, handleCombine, id, interruptedRecoveryProbes, jobSearchCoordinator, moduleRunQueue, updateGlobal]);
 
   const settleRecoveredCombine = useCallback((outcome, expectedBoardRunId) => {
     if (
@@ -3519,7 +4829,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       livePlan?.phase === 'combine'
       && (!expectedBoardRunId || livePlan.boardRunId === expectedBoardRunId)
     ) {
-      updateGlobal(id, { boardScanResume: null });
+      clearExactBoardScanResume(updateGlobal, id, livePlan.boardRunId);
     }
     setRecoveryError(null);
     return true;
@@ -3533,6 +4843,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const plan = data.boardScanResume;
     if (!plan || plan.version !== 1 || !plan.boardRunId) {
       autoResumedBoardScanRef.current = null;
+      searchRecoveryErrorRef.current = null;
       foreignRecoveryWaitSigRef.current = null;
       return;
     }
@@ -3546,6 +4857,53 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
     if (foreignRecoveryWaitSigRef.current === boardRecoverySig) return;
     foreignRecoveryWaitSigRef.current = null;
+    const selectedSearchModuleIds = [...new Set(
+      (Array.isArray(plan.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : [])
+        .filter(sourceId => typeof sourceId === 'string' && sourceId),
+    )];
+    // Only verification that affects a selected Search is recovery input.
+    // An unrelated platform's brief check must not consume a retryable Search
+    // error, while finishing a selected platform check remains a real wake-up.
+    const relevantVerifyingPlatforms = new Set(
+      [...(verifyingPlatforms || [])].filter((platformId) => (
+        selectedSearchModuleIds.some((sourceId) => (
+          moduleSearchReadiness(getNode(sourceId), new Set([platformId])).statusLabel === 'Checking connections'
+        ))
+      )),
+    );
+    // Exact interrupted recovery is allowed only while the global session has
+    // settled, even when today's enabled-source set is empty. In that state no
+    // platform appears in `relevantVerifyingPlatforms`, so carry a compact
+    // global marker into the recovery key and wake the same durable plan when
+    // verification starts or finishes.
+    const exactRecoveryBlockedByGlobalVerification = selectedSearchModuleIds.some((sourceId) => {
+      const source = getNode(sourceId);
+      const sourceData = source?.data;
+      return canInspectInterruptedRecovery(
+        moduleSearchReadiness(source, new Set()),
+        sourceData,
+      );
+    });
+    const verificationSignature = [
+      ...relevantVerifyingPlatforms,
+      ...(exactRecoveryBlockedByGlobalVerification && hasActivePlatformVerification(verifyingPlatforms)
+        ? ['exact-recovery-verifying']
+        : []),
+    ].sort().join(',');
+    const recoveryKey = jobBoardSearchRecoveryKey(
+      plan,
+      connectedSig,
+      verificationSignature,
+    );
+    const searchRecoveryError = searchRecoveryErrorRef.current;
+    // A Search error may retry only after a *consumable* external state change.
+    // The error identity is intentionally separate from autoResumedBoardScanRef:
+    // that latch also carries cleanup/combine tokens whose prefixes cannot prove
+    // that a Search changed. We defer clearing until after selected-platform
+    // verification is no longer pending below.
+    const hasChangedSearchRecoveryInput = plan.phase === 'searches'
+      && searchRecoveryError?.message === recoveryError
+      && searchRecoveryError.key !== recoveryKey;
     // Reload recovery needs a file-scoped sidecar. The only no-file exception
     // is a run this mounted Board started itself: source-card resolution is an
     // in-memory continuation of that exact transaction, not durable recovery.
@@ -3555,20 +4913,28 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       !canResumePlanInThisRenderer
       || data.locked
       || data.boardCancellation
-      || recoveryError
+      || (recoveryError && !hasChangedSearchRecoveryInput)
       || scanRunRef.current
       || combineRunRef.current
       || cancellationInFlightRef.current
     ) return;
-
-    const clearMatchingPlan = () => {
-      if (getNode(id)?.data?.boardScanResume?.boardRunId === plan.boardRunId) {
-        updateGlobal(id, { boardScanResume: null });
-      }
+    const setSearchRecoveryError = (message) => {
+      // Associate the error with this immutable external state. The next real
+      // Search/verification transition gets a different key and can retry;
+      // progress writes do not.
+      searchRecoveryErrorRef.current = { key: recoveryKey, message };
+      setRecoveryError(message);
     };
 
-    if (plan.cancellationCleanup) {
-      const key = `${plan.boardRunId}:cleanup:${plan.cancellationCleanup.sourceId || ''}`;
+    const clearMatchingPlan = () => {
+      clearExactBoardScanResume(updateGlobal, id, plan.boardRunId);
+    };
+
+    const pendingChildCleanups = plan.cancellationCleanupsBySource || (
+      plan.cancellationCleanup?.sourceId ? { [plan.cancellationCleanup.sourceId]: plan.cancellationCleanup } : {}
+    );
+    if (Object.keys(pendingChildCleanups).length > 0) {
+      const key = `cleanup:${recoveryKey}:${Object.keys(pendingChildCleanups).join(',')}`;
       if (autoResumedBoardScanRef.current === key) return;
       autoResumedBoardScanRef.current = key;
       EventLogger.log(`[JobBoard] Retrying interrupted child cleanup id=${id} run=${plan.boardRunId}`);
@@ -3581,7 +4947,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // compensation prompt. If no prompt was published before the interruption,
       // restart only the combine from the completed source snapshots.
       if (data.manualAiResume?.runId) return;
-      const key = `${plan.boardRunId}:combine:${plan.combineManualAiRunId || 'unclaimed'}:${plan.updatedAt || 0}`;
+      const key = `combine:${recoveryKey}:${plan.combineManualAiRunId || 'unclaimed'}`;
       if (autoResumedBoardScanRef.current === key) return;
       autoResumedBoardScanRef.current = key;
       EventLogger.log(`[JobBoard] Resuming interrupted combine id=${id} run=${plan.boardRunId}`);
@@ -3600,18 +4966,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
 
-    const selectedSearchModuleIds = [...new Set(
-      (Array.isArray(plan.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : [])
-        .filter(sourceId => typeof sourceId === 'string' && sourceId),
-    )];
     if (selectedSearchModuleIds.length === 0) {
       clearMatchingPlan();
       return;
     }
     const recoveryWaitingForVerification = selectedSearchModuleIds.some((sourceId) => (
-      moduleSearchReadiness(getNode(sourceId), verifyingPlatforms).statusLabel === 'Checking connections'
+      moduleSearchReadiness(getNode(sourceId), relevantVerifyingPlatforms).statusLabel === 'Checking connections'
     ));
-    if (recoveryWaitingForVerification) return;
+    if (recoveryWaitingForVerification) {
+      // A verification wait is never terminal. If a prior effect turn claimed
+      // this recovery key, let the changed verification signature re-admit the
+      // same durable plan once the session settles.
+      autoResumedBoardScanRef.current = null;
+      return;
+    }
 
     const completedSourceRuns = { ...(plan.completedSourceRuns || {}) };
     const incompleteSearches = Array.isArray(plan.incompleteSearches)
@@ -3619,6 +4987,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       : [];
     const activeSourceId = typeof plan.activeSourceId === 'string' ? plan.activeSourceId : null;
     const awaitingSourceResolution = plan.awaitingSourceResolution;
+    const planActiveSourceIds = [...new Set([
+      ...(Array.isArray(plan.activeSourceIds) ? plan.activeSourceIds : []),
+      activeSourceId,
+    ].filter(Boolean))];
+    const planAwaitingSourceResolutions = [
+      ...(Array.isArray(plan.awaitingSourceResolutions) ? plan.awaitingSourceResolutions : []),
+      awaitingSourceResolution,
+    ].filter((descriptor, index, descriptors) => (
+      descriptor?.sourceId
+      && descriptors.findIndex(item => item?.sourceId === descriptor.sourceId) === index
+    ));
     // A source-card continuation can already be waiting on a manual-AI handoff
     // when this Board mounts. Preserve its original source/run proof through
     // Board admission too: the child can settle while this Board waits behind
@@ -3695,7 +5074,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // Board still owns that handoff, so re-enter its registered executor
           // below instead of turning a reload into a permanent failure.
         } else {
-          setRecoveryError('The paused Job Search changed before it could finish. Cancel this Board run or resolve the original search again.');
+          setSearchRecoveryError('The paused Job Search changed before it could finish. Cancel this Board run or resolve the original search again.');
           return;
         }
       }
@@ -3716,7 +5095,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // clean source-card handoff or the save-sanitized scoring replay, both
         // bound to the same Board/Search run tokens.
       } else if (!terminal || terminal.runId !== expectedRunId) {
-        setRecoveryError(sourceData.errorMessage || 'The paused Job Search did not finish cleanly. Resolve it or cancel this Board run.');
+        setSearchRecoveryError(sourceData.errorMessage || 'The paused Job Search did not finish cleanly. Resolve it or cancel this Board run.');
         return;
       } else if (!isMergeableTerminalJobSearchOutcome(source, terminal)) {
         incompleteSearches.push({
@@ -3850,48 +5229,142 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       }
     }
 
+    const retainActiveSource = activeSourceId
+      && !completedSourceRuns[activeSourceId]
+      && !incompleteSearches.some(entry => entry?.sourceId === activeSourceId);
+    const retainedPausedDescriptor = (
+      exactReplayHandoff
+      || exactPausedSourceContinuation(
+        plan,
+        activeSourceId,
+        getNode(activeSourceId)?.data || {},
+      )
+    );
+    // A completed first source may be observed by recovery before the regular
+    // scan handler gets its next turn. Promote the next exact paused child in
+    // that case, retaining every outstanding child rollback instead of
+    // flattening a multi-handoff receipt back to the legacy singular fields.
+    const promotedPausedSources = !retainActiveSource && activeSourceId
+      ? promoteJobBoardPausedSourceResolution({
+        awaitingSourceResolutions: planAwaitingSourceResolutions,
+        activeSourceId,
+        activeSourceIds: planActiveSourceIds,
+        activeSourceRollbacks: plan.activeSourceRollbacks || {},
+        activeSourceManualAiRunIds: plan.activeSourceManualAiRunIds || {},
+        consumedSourceId: activeSourceId,
+      })
+      : null;
     const resumedPlan = {
       ...plan,
       selectedSearchModuleIds,
       completedSourceRuns,
       incompleteSearches,
-      awaitingSourceResolution: (
-        exactReplayHandoff
-        || exactPausedSourceContinuation(
-          plan,
-          activeSourceId,
-          getNode(activeSourceId)?.data || {},
-        )
-      )
+      awaitingSourceResolution: retainedPausedDescriptor
         ? awaitingSourceResolution
-        : null,
+        : (promotedPausedSources?.awaitingSourceResolution || null),
+      awaitingSourceResolutions: retainedPausedDescriptor
+        ? planAwaitingSourceResolutions
+        : (promotedPausedSources?.awaitingSourceResolutions || []),
       // Preserve the interrupted child identity long enough for the scan
       // handler to forward either its manual-AI descriptor or its staged
       // scrape-recovery intent to that executor.
-      activeSourceId: activeSourceId
-        && !completedSourceRuns[activeSourceId]
-        && !incompleteSearches.some(entry => entry?.sourceId === activeSourceId)
+      activeSourceId: retainActiveSource
         ? activeSourceId
-        : null,
+        : (promotedPausedSources?.activeSourceId || null),
+      activeSourceIds: retainActiveSource
+        ? planActiveSourceIds
+        : (promotedPausedSources?.activeSourceIds || []),
+      activeSourceRollback: retainActiveSource
+        ? (plan.activeSourceRollbacks?.[activeSourceId] || plan.activeSourceRollback || null)
+        : (promotedPausedSources?.activeSourceRollback || null),
+      activeSourceRollbacks: retainActiveSource
+        ? (plan.activeSourceRollbacks || (activeSourceId && plan.activeSourceRollback
+          ? { [activeSourceId]: plan.activeSourceRollback }
+          : {}))
+        : (promotedPausedSources?.activeSourceRollbacks || {}),
+      activeSourceManualAiRunIds: retainActiveSource
+        ? (plan.activeSourceManualAiRunIds || {})
+        : (promotedPausedSources?.activeSourceManualAiRunIds || {}),
       phase: 'searches',
-      updatedAt: Date.now(),
     };
-    const key = `${plan.boardRunId}:searches:${plan.updatedAt || 0}`;
-    if (autoResumedBoardScanRef.current === key) return;
-    autoResumedBoardScanRef.current = key;
+    // `updatedAt` changes for progress-only writes. It is not recovery
+    // authority, and using it here can repeatedly re-enter the same mounted
+    // renderer's plan. A fresh explicit run gets a new boardRunId; genuine
+    // deferred recovery paths clear this latch deliberately.
+    if (recoveryError && hasChangedSearchRecoveryInput) {
+      // We reached a state the resumed Search can actually consume: no
+      // selected-platform check is pending and no earlier recovery branch
+      // parked this exact transaction. Clear only this associated Search error
+      // immediately before re-admission.
+      searchRecoveryErrorRef.current = null;
+      setRecoveryError(null);
+    }
+    if (autoResumedBoardScanRef.current === recoveryKey) return;
+    if (!isCurrentBoardScanResume(getNode(id)?.data?.boardScanResume, plan)) {
+      // `clearExactBoardScanResume` may have committed between this effect's
+      // render snapshot and its async recovery work. Do not log or launch a
+      // ghost retry from the now-retired plan.
+      autoResumedBoardScanRef.current = null;
+      return;
+    }
+    autoResumedBoardScanRef.current = recoveryKey;
     EventLogger.log(`[JobBoard] Resuming interrupted selected search id=${id} run=${plan.boardRunId}`);
     void handleSearchSelected({ resumeBoardScan: true, plan: resumedPlan });
   }, [boardRecoverySig, canvasFilePath, combining, connectedSig, data.boardCancellation, data.boardScanResume, data.locked, data.manualAiResume, deletionLifecycleRevision, getEdges, getNode, getNodes, handleCancelRun, handleCombine, handleSearchSelected, id, recoveryError, scanning, settleRecoveredCombine, updateGlobal, verifyingPlatforms]);
 
   useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
-      if (event.detail?.nodeId !== id) return;
+      const cancelledNodeId = event.detail?.nodeId || null;
+      const childPlan = getNode(id)?.data?.boardScanResume || null;
+      const activeChildIds = new Set([
+        ...activeSearchModuleIdsRef.current,
+        ...(Array.isArray(childPlan?.activeSourceIds) ? childPlan.activeSourceIds : []),
+        childPlan?.activeSourceId,
+      ].filter(Boolean));
+      const childMarker = cancelledNodeId && cancelledNodeId !== id
+        ? getNode(cancelledNodeId)?.data?.manualAiResume
+        : null;
+      const rememberedChildRun = cancelledNodeId
+        ? activeSearchManualAiRunIdsRef.current.get(cancelledNodeId)
+        : null;
+      const persistedChildRunId = cancelledNodeId
+        ? childPlan?.activeSourceManualAiRunIds?.[cancelledNodeId]
+        : null;
+      const cancelledActiveChild = !!(
+        cancelledNodeId
+        && activeChildIds.has(cancelledNodeId)
+        && (
+          (
+            childMarker?.orchestratorNodeId === id
+            && childMarker?.boardRunId === childPlan?.boardRunId
+            && childMarker?.runId === event.detail?.runId
+          )
+          || (
+            rememberedChildRun?.boardRunId === childPlan?.boardRunId
+            && rememberedChildRun.runId === event.detail?.runId
+          )
+          || (
+            childPlan?.boardRunId
+            && persistedChildRunId === event.detail?.runId
+          )
+        )
+      );
+      if (cancelledNodeId !== id && !cancelledActiveChild) return;
       const cancelledRunId = event.detail?.runId || null;
       // Modern notifications always identify the exact request. A legacy or
       // malformed node-only event has no authority to cancel whichever newer
       // Board transaction happens to be active when it arrives.
       if (!cancelledRunId) {
         EventLogger.log(`[JobBoard] ignored manual-AI cancellation without a run id=${id}`);
+        return;
+      }
+      if (cancelledActiveChild) {
+        // One child dialog cancellation ends this exact Board transaction.
+        // `handleCancelRun` fans cancellation out through every active child;
+        // do this before the Board-only run-id checks below, which intentionally
+        // know nothing about Search-owned manual handoffs.
+        EventLogger.log(`[JobBoard] child manual-AI cancellation aborting fan-out id=${id} run=${childPlan.boardRunId} source=${cancelledNodeId}`);
+        void handleCancelRun();
         return;
       }
       const liveData = getNode(id)?.data || {};
@@ -3948,9 +5421,75 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   useEffect(() => {
     const onPending = (event) => {
       const detail = event.detail || {};
-      if (detail.nodeId !== id || !detail.runId) return;
-      if (retiredCombineManualAiRunIdsRef.current.has(detail.runId)) return;
+      if (!detail.runId) return;
       const liveData = getNode(id)?.data || {};
+      const childPlan = liveData.boardScanResume;
+      const childActiveIds = new Set([
+        ...activeSearchModuleIdsRef.current,
+        ...(Array.isArray(childPlan?.activeSourceIds) ? childPlan.activeSourceIds : []),
+        childPlan?.activeSourceId,
+      ].filter(Boolean));
+      const childPendingCandidate = detail.nodeId !== id
+        && childActiveIds.has(detail.nodeId)
+        && childPlan?.phase === 'searches'
+        && childPlan?.boardRunId;
+      if (childPendingCandidate) {
+        const expectedBoardRunId = childPlan.boardRunId;
+        const expectedScanToken = scanRunRef.current;
+        // JobSearch may write its marker in its own event listener after this
+        // Board listener. Delay only the correlation capture until that React
+        // commit boundary; UI has not painted a cancellable dialog yet. Recheck
+        // every ownership fence so an old queued callback cannot annotate a
+        // newer Board run.
+        const captureChildPending = () => {
+          const currentPlan = getNode(id)?.data?.boardScanResume;
+          const childMarker = getNode(detail.nodeId)?.data?.manualAiResume;
+          if (
+            (expectedScanToken && scanRunRef.current !== expectedScanToken)
+            || currentPlan?.phase !== 'searches'
+            || currentPlan.boardRunId !== expectedBoardRunId
+            || !Array.isArray(currentPlan.activeSourceIds)
+            || !currentPlan.activeSourceIds.includes(detail.nodeId)
+            || childMarker?.orchestratorNodeId !== id
+            || childMarker?.boardRunId !== expectedBoardRunId
+            || childMarker?.runId !== detail.runId
+          ) return;
+          activeSearchManualAiRunIdsRef.current.set(detail.nodeId, {
+            boardRunId: expectedBoardRunId,
+            runId: detail.runId,
+          });
+          // Persist the same correlation before returning to the dialog. A
+          // renderer restart between pending and cancel must retain the fence;
+          // the cancellation handler still requires the exact run id.
+          updateGlobal(id, (node) => {
+            const plan = node?.data?.boardScanResume;
+            if (
+              plan?.phase !== 'searches'
+              || plan.boardRunId !== expectedBoardRunId
+              || !Array.isArray(plan.activeSourceIds)
+              || !plan.activeSourceIds.includes(detail.nodeId)
+            ) return null;
+            return {
+              boardScanResume: {
+                ...plan,
+                activeSourceManualAiRunIds: {
+                  ...(plan.activeSourceManualAiRunIds || {}),
+                  [detail.nodeId]: detail.runId,
+                },
+                updatedAt: Date.now(),
+              },
+            };
+          });
+        };
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(captureChildPending);
+        } else {
+          Promise.resolve().then(captureChildPending);
+        }
+        return;
+      }
+      if (detail.nodeId !== id) return;
+      if (retiredCombineManualAiRunIdsRef.current.has(detail.runId)) return;
       const persistedCommittedRun = liveData.manualAiResume?.retirementPending === true
         && liveData.manualAiResume?.committedResult === true
         && liveData.manualAiResume?.runId === detail.runId;
@@ -4201,7 +5740,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         .then((outcome) => settleRecoveredCombine(outcome, null));
       return;
     }
-    if (plan.cancellationCleanup) {
+    if (plan.cancellationCleanup || Object.keys(plan.cancellationCleanupsBySource || {}).length > 0) {
       void handleCancelRun();
       return;
     }
@@ -4244,7 +5783,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         </div>
         <div className="min-w-0">
           <p className="text-white/80 text-xs font-semibold leading-tight">Job Board</p>
-          <p className="text-white/30 text-[9px] leading-tight">Run searches, queue work, merge results</p>
+          <p className="text-white/30 text-[9px] leading-tight">Start or continue selected searches, then merge completed results</p>
         </div>
       </div>
 
@@ -4256,9 +5795,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
       <div className="px-3 pb-3">
         <JobBoardSearchSelection
-          modules={connectedModules}
+          modules={executionOrderedModules}
           selectedIds={selectedSearchModuleIds}
           onToggle={toggleSearchModule}
+          onMove={moveSearchModule}
           disabled={!!data.locked}
           running={boardRunVisible}
           progress={finalizingCommittedCombine
@@ -4277,10 +5817,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           recoveryError={recoveryError}
           onRetry={handleRetryRecovery}
           recoveryCanCancel={!cleanupOnlyRecovery && !cancellationCleanupActive && !finalizingCommittedCombine}
+          onRuntimeSnapshot={captureSelectorRuntimeSnapshot}
         />
         {connectedModules.length > 0 && (
           <p className="mt-1.5 text-center text-[8px] leading-snug text-white/20">
-            Selection controls which searches refresh. The board combines all completed connected results.
+            Fresh searches may start in parallel. The shown order controls recovery and result reconciliation; completed searches are reused without another scan. Selection controls which sources start or continue; the board combines all connected completed results.
           </p>
         )}
       </div>

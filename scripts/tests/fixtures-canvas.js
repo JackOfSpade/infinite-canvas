@@ -445,6 +445,7 @@ export default [
 {
     name: 'Glassdoor repeated descriptions require a matching active detail title and stop on the exact panel 429 endpoint',
     run: () => {
+      const source = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       const sameDescription = 'Shared employer description. '.repeat(20).trim();
       const verifiedRepeat = assessDescriptionPanelUpdate({
         sourceId: 'glassdoor',
@@ -478,7 +479,12 @@ export default [
       });
       const glassdoorInitialPacing = descriptionPanelPacing('glassdoor', 0);
       const glassdoorCheckpointPacing = descriptionPanelPacing('glassdoor', 8);
-      const ordinaryPacing = descriptionPanelPacing('google', 8);
+      const googleInitialPacing = descriptionPanelPacing('google', 0);
+      const googleCheckpointPacing = descriptionPanelPacing('google', 8);
+      const ordinaryPacing = descriptionPanelPacing('unknown', 8);
+      const firstPacingWaitAt = source.indexOf('await waitForPanelPacing();');
+      const firstPacingClickAt = source.indexOf('await page.mouse.click(', firstPacingWaitAt);
+      const firstPacingSection = source.slice(firstPacingWaitAt, firstPacingClickAt);
       assert(verifiedRepeat.accepted && verifiedRepeat.reason === 'text-unchanged-title-verified',
         'identical Glassdoor detail text may be accepted only after the active panel independently confirms the clicked title');
       assert(!staleRepeat.accepted && staleRepeat.reason === 'text-unchanged-unverified',
@@ -488,11 +494,20 @@ export default [
       assert(glassdoorInitialPacing.requestDelayMs === 4500 && !glassdoorInitialPacing.checkpointDue
         && glassdoorInitialPacing.checkpointCooldownMs === 12000
         && glassdoorCheckpointPacing.checkpointDue && glassdoorCheckpointPacing.checkpointCooldownMs === 12000
-        && ordinaryPacing.requestDelayMs === 600 && !ordinaryPacing.checkpointDue,
-      'Glassdoor panel requests must proactively use a human-scale gap plus a rolling-window pause, without slowing other card walkers');
+        && googleInitialPacing.requestDelayMs === 3000 && !googleInitialPacing.checkpointDue
+        && googleInitialPacing.checkpointCooldownMs === 15000
+        && googleCheckpointPacing.checkpointDue && googleCheckpointPacing.checkpointCooldownMs === 15000
+        && ordinaryPacing.requestDelayMs === 600 && !ordinaryPacing.checkpointDue
+        && firstPacingSection.includes('if (signal?.aborted) break;'),
+      'Google and Glassdoor panel requests must use source-specific human-scale gaps plus rolling-window pauses without slowing unconfigured card walkers or clicking after a cancelled cooldown');
       assert(!descriptionPanelRetryAllowed('glassdoor') && descriptionPanelRetryAllowed('google'),
         'Glassdoor must issue at most one panel request per listing while other panel sources retain their bounded retry');
-      return { repeat: verifiedRepeat.reason, rateLimit: glassdoor429, checkpoint: glassdoorCheckpointPacing.checkpointCooldownMs };
+      return {
+        repeat: verifiedRepeat.reason,
+        rateLimit: glassdoor429,
+        glassdoorCheckpoint: glassdoorCheckpointPacing.checkpointCooldownMs,
+        googleCheckpoint: googleCheckpointPacing.checkpointCooldownMs,
+      };
   },
 },
 {
@@ -4197,6 +4212,20 @@ export default [
       assert(clone.data.locked === false && clone.draggable === undefined && clone.deletable === undefined, 'Node factory clone safety: clone should unlock');
       assert(clone.data.hubState === 'empty' && clone.data.isNew === false && !clone.data.queuedModuleRun, 'Node factory clone safety: active state/new flag should be sanitized');
 
+      const freshImportClone = cloneNode({
+        id: 'fresh-import-original', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          hubState: 'empty', inputLocked: true, careerFilePaths: ['/tmp/original-career.pdf'],
+          careerImportGeneration: 'career-import:fresh-import-original:one',
+          careerImportFreshCapability: 'career-import:fresh-import-original:one',
+          careerImportConsumption: null,
+        },
+      }, 0, 0);
+      assert(!('careerImportGeneration' in freshImportClone.data)
+        && !('careerImportFreshCapability' in freshImportClone.data)
+        && !('careerImportConsumption' in freshImportClone.data),
+      'Node factory clone safety: an empty copied Job Search must not inherit the original node’s one-shot Board import capability');
+
       const boardClone = cloneNode({
         id: 'board-original',
         type: 'jobboard',
@@ -4206,19 +4235,21 @@ export default [
           resultCount: 2,
           combineSignature: '6:durable-board-signature',
           selectedSearchModuleIds: ['search-a'],
+          searchExecutionOrder: ['search-a'],
           queuedModuleRun: { label: 'Scan Job Search', position: 1 },
           manualAiResume: { runId: 'board-original-run', task: 'job-taxonomy' },
           boardScanResume: { boardRunId: 'board-original-run', selectedSearchModuleIds: ['search-a'] },
         },
       }, 0, 0);
       assert(!('selectedSearchModuleIds' in boardClone.data)
+        && !('searchExecutionOrder' in boardClone.data)
         && JOBBOARD_TRANSIENT_KEYS.every(key => !(key in boardClone.data))
         && !('manualAiResume' in boardClone.data)
         && !('boardScanResume' in boardClone.data)
         && boardClone.data.hubState === 'done'
         && boardClone.data.resultCount === 2
         && boardClone.data.combineSignature === '6:durable-board-signature',
-      'Node factory clone safety: standalone Boards clear connection-specific selection and every in-flight run marker while retaining completed result metadata');
+      'Node factory clone safety: standalone Boards clear connection-specific selection/execution references and every in-flight run marker while retaining completed result metadata');
 
       const scanNoneBoardClone = cloneNode({
         id: 'board-scan-none',
@@ -4289,13 +4320,21 @@ export default [
                 id: 'nested-board', type: 'jobboard', position: { x: 1, y: 1 },
                 data: {
                   hubState: 'done', selectedSearchModuleIds: ['nested-search-b'],
+                  searchExecutionOrder: ['nested-search-b', 'nested-search-a'],
                   queuedModuleRun: { label: 'Scan Job Search', position: 1 },
                   manualAiResume: { runId: 'nested-board-run', task: 'job-taxonomy' },
                   boardScanResume: { boardRunId: 'nested-board-run', selectedSearchModuleIds: ['nested-search-b'] },
                 },
               },
               { id: 'nested-search-a', type: 'jobhub', position: { x: 2, y: 2 }, data: { hubState: 'done', targetRole: 'Role A' } },
-              { id: 'nested-search-b', type: 'jobhub', position: { x: 3, y: 3 }, data: { hubState: 'done', targetRole: 'Role B' } },
+              {
+                id: 'nested-search-b', type: 'jobhub', position: { x: 3, y: 3 },
+                data: {
+                  hubState: 'empty', targetRole: 'Role B', inputLocked: true,
+                  careerImportGeneration: 'career-import:nested-search-b:one',
+                  careerImportFreshCapability: 'career-import:nested-search-b:one',
+                },
+              },
               {
                 id: 'nested-job-group', type: 'jobgroup', position: { x: 4, y: 4 },
                 data: { hubId: 'nested-board', childIds: ['nested-job-card', 'missing-job-card'] },
@@ -4339,16 +4378,23 @@ export default [
         && nestedBoard.data.selectedSearchModuleIds.length === 1
         && nestedBoard.data.selectedSearchModuleIds[0] === nestedSearchB.id
         && nestedBoard.data.selectedSearchModuleIds[0] !== nestedSearchA.id
+        && JSON.stringify(nestedBoard.data.searchExecutionOrder) === JSON.stringify([
+          nestedSearchB.id, nestedSearchA.id,
+        ])
         && !('manualAiResume' in nestedBoard.data)
         && !('boardScanResume' in nestedBoard.data)
         && JOBBOARD_TRANSIENT_KEYS.every(key => !(key in nestedBoard.data)),
-      'Node factory clone safety: a Board inside a duplicated group must remap its exact selected-search subset while dropping the original run state');
+      'Node factory clone safety: a Board inside a duplicated group must remap its exact selected-search subset and execution order while dropping the original run state');
       assert(nestedJobGroup.data.hubId === nestedBoard.id
         && nestedJobCard.data.hubId === nestedBoard.id
         && nestedSourceCard.data.hubId === nestedSearchB.id
         && nestedJobCard.data.originHubId === nestedSearchB.id
         && JSON.stringify(nestedJobGroup.data.childIds) === JSON.stringify([nestedJobCard.id]),
       'Node factory clone safety: nested Board/Search children, group-tree references, and copied Search provenance must all use reassigned ids');
+      assert(!('careerImportGeneration' in nestedSearchB.data)
+        && !('careerImportFreshCapability' in nestedSearchB.data)
+        && !('careerImportConsumption' in nestedSearchB.data),
+      'Node factory clone safety: group/batch remapping must not recreate a copied Job Search import capability under its new id');
       assert(reassigned.data.canvasData.edges.some(edge => edge.source === nestedBoard.id && edge.target === nestedJobGroup.id)
         && reassigned.data.canvasData.edges.some(edge => edge.source === nestedJobGroup.id && edge.target === nestedJobCard.id)
         && reassigned.data.canvasData.edges.some(edge => edge.source === nestedSearchB.id && edge.target === nestedSourceCard.id),
@@ -4655,6 +4701,23 @@ export default [
       assert(clearEnd > clearStart, 'the clear handler must sit before the render-phase code it is sliced against, or this contract silently checks the whole file');
       const clear = source.slice(clearStart, clearEnd);
 
+      const liveNodeAtClear = clear.indexOf('const liveNode = getNode(id);');
+      const missingNodeGuardAt = clear.indexOf('if (!liveNode) return;', liveNodeAtClear);
+      const liveDataAtClear = clear.indexOf('const liveData = liveNode.data || data;', missingNodeGuardAt);
+      const liveLockGuardAt = clear.indexOf('if (liveData.locked) return;', liveDataAtClear);
+      const destructiveClearActions = [
+        clear.indexOf('epoch.bump()'),
+        clear.indexOf('moduleRunQueue.cancelQueuedRunsForNode(id)'),
+        clear.indexOf("window.electronAPI?.cancelNodeTask?.(id, 'career-files-cleared')"),
+        clear.indexOf('updateGlobal(id, {'),
+      ];
+      assert(liveNodeAtClear >= 0
+        && missingNodeGuardAt > liveNodeAtClear
+        && liveDataAtClear > missingNodeGuardAt
+        && liveLockGuardAt > liveDataAtClear
+        && destructiveClearActions.every(actionAt => actionAt > liveLockGuardAt),
+      'clearing career files must reject a deleted or newly locked live node before cancellation, queue, IPC, or global-state mutations');
+
       const guarded = [
         ['initialDropAcceptedRef.current = false', 'the latched initial-drop ref would keep acceptCareerFiles bouncing every replacement drop'],
         ['lastDroppedPathsRef.current = null', 'the previous files\' paths would let Re-run silently re-parse the cleared career files'],
@@ -4726,8 +4789,8 @@ export default [
       'only the matching hub can resume/discard a modern recovery; an owner-unknown legacy offer exposes a separate Start fresh-only path, and Resume still requires a career profile and staged queries');
       assert(source.includes('resumeRunId: offer.runId || null'),
         'the crash-resume IPC request carries the offered run token for backend ownership validation');
-      assert(source.includes('{resumeRunActionable && <button'),
-        'the Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer');
+      assert(source.includes('{!boardRecoveryOwnsActions && resumeRunActionable && <button'),
+        'the standalone Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer; connected or still-reserved Board recoveries defer continuation to their Board');
       assert(source.includes(' Start fresh — this run cannot be resumed from this module.')
         && !source.includes('this hub no longer has career files'),
       'the banner must report the observation (this run cannot be resumed here) rather than asserting a history a virgin hub never had — the only cross-hub case is an owner-unknown legacy offer');
@@ -4867,8 +4930,8 @@ export default [
       // The hub rests at 'done' after every successful run, so the clear action
       // has to be reachable from there too — otherwise swapping career files
       // costs a full Re-run + Reset just to reach the empty state.
-      assert(source.includes('onClearCareerFiles={handleClearCareerFiles}'),
-        'the done state never receives the clear action, so after a successful run the only way to swap career files is a wasted Re-run + Reset');
+      assert((source.match(/onClearCareerFiles=\{activeBoardRecoveryOwnerKey \? null : handleClearCareerFiles\}/g) || []).length >= 2,
+        'the done and paused states retain the clear action after a successful run, except while a durable Board recovery owns the module and would reject it');
       const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
       assert(doneState.includes('onClearCareerFiles')
         && /!locked && onClearCareerFiles/.test(doneState),
@@ -4879,10 +4942,10 @@ export default [
       const sourcesReadyStart = source.indexOf("{hubState === 'sources-ready' && (");
       const sourcesReadyEnd = source.indexOf("hubState === 'done'", sourcesReadyStart);
       const sourcesReadyWiring = source.slice(sourcesReadyStart, sourcesReadyEnd);
-      assert(sourcesReadyWiring.includes('onClearCareerFiles={handleClearCareerFiles}')
+      assert(sourcesReadyWiring.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
         && sourcesReadyState.includes('Clear career files')
         && /!locked && onClearCareerFiles/.test(sourcesReadyState),
-      'an unlocked paused search exposes a wired Clear career files action, while a locked card renders no dead control');
+      'an unlocked paused search exposes a wired Clear career files action, while locked and durable-Board-reserved cards render no dead control');
 
       const clearConfirm = fs.readFileSync(path.resolve('src/hooks/useConfirmDialog.js'), 'utf8');
       assert(clearConfirm.includes('This removes unlocked content from the current canvas.')
@@ -4961,8 +5024,9 @@ export default [
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes("reason.message === 'Node deleted'")
         && jobsSource.includes("phase: 'aborted'")
-        && jobsSource.indexOf('await throwIfSearchAborted();\n    await setJobRunStage') >= 0,
-      'a Reset during scrape discards only its token-scoped recovery run and cannot mark the cancelled manifest gathered');
+        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageAdvanced = await setJobRunStage') >= 0
+        && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),
+      'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
   },
 },

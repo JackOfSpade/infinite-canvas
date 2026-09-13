@@ -25,6 +25,7 @@ import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJo
 import { formatCompletionTimestamp, normalizeCompletionTimestamp } from '../utils/completionTimestamp';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isJobSourceWarningGating, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
+import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { isTerminalSourceStatus } from '../utils/sourceProgress';
 
@@ -64,6 +65,9 @@ import {
   subscribeJobWorkflowDeletionLifecycle,
 } from '../utils/nodeDeletionLifecycle';
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
+import { exactInterruptedRecoveryBackendFailure } from '../utils/jobBoardRecoveryAdmission';
+import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
+import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { moduleFingerprint } from './jobboard/mergeJobs';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
@@ -177,6 +181,7 @@ function reanalysisRestorePatch(data) {
     collectionOnly: data?.collectionOnly,
     testMode: data?.testMode,
     scrapeWarnings: data?.scrapeWarnings,
+    collectionScopeCaveats: normalizeCollectionScopeCaveats(data?.collectionScopeCaveats),
     rerunOutcome: data?.rerunOutcome,
     rerunNotice: data?.rerunNotice,
     jobCount: data?.jobCount,
@@ -224,6 +229,14 @@ function buildQueryCacheKey({ resumeFingerprint, targetRole, jobPreferences, pre
     jobPreferences: String(jobPreferences || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
   });
+}
+
+// The main process accepts only this full-input parse fingerprint for durable
+// recovery. Treat missing, legacy, or malformed values as non-recoverable;
+// never synthesize identity from the mutable stored profile object.
+function normalizeResumeProfileFingerprint(value) {
+  const fingerprint = typeof value === 'string' ? value.trim() : '';
+  return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : '';
 }
 
 // The main process owns the AI/web-research semantics. This deliberately only
@@ -369,6 +382,7 @@ function searchRunOutcome(status, {
   runId = null,
   resultDisposition = null,
   error = null,
+  transientReason = null,
   terminalStatus = null,
   terminalOutcome = null,
   scoreReadyCount = null,
@@ -386,6 +400,7 @@ function searchRunOutcome(status, {
       : {}),
     ...(typeof fingerprint === 'string' && fingerprint ? { fingerprint } : {}),
     ...(manualAiRunId ? { manualAiRunId } : {}),
+    ...(typeof transientReason === 'string' && transientReason ? { transientReason } : {}),
     ...(error ? { error: error?.message || String(error) } : {}),
   };
 }
@@ -447,6 +462,7 @@ function boardRunReadiness(node, {
   terminalFinalizationRecovery = false,
   legacyBatchRecovery = false,
   pausedScoringContinuation = false,
+  interruptedRecovery = false,
 } = {}) {
   if (!node || node.type !== 'jobhub') {
     return searchRunOutcome('not-ready', { error: 'This Job Search module is no longer available.' });
@@ -538,8 +554,15 @@ function boardRunReadiness(node, {
   if (platformsVerifying) {
     return searchRunOutcome('not-ready', {
       error: 'Its selected platform connections are still being checked.',
+      transientReason: 'platforms-verifying',
     });
   }
+  // The Board inspected an exact, hub-owned manifest immediately before this
+  // turn. Its provider set and queries are frozen in that manifest; current
+  // source toggles (including all disabled) cannot turn this recovery into a
+  // fresh scan. handleResumeRun rechecks the token before any mutation and
+  // still enforces the manifest/current-location match.
+  if (interruptedRecovery) return null;
   // Saved scoring replays use their own persisted job/profile/location snapshot
   // and intentionally do not refetch any platform. Do not make a later source
   // selection edit invalidate that exact recovery operation.
@@ -782,11 +805,19 @@ async function waitForCommittedSearchOutcome({ getNode, nodeId, outcome, cancell
   });
 }
 
-function boardRunRollbackPatch(previousData) {
+function boardRunRollbackPatch(previousData, nodeId) {
   const prior = previousData && typeof previousData === 'object' ? previousData : {};
   const restoreDone = prior.hubState === 'done';
+  const freshImportCapability = freshJobCareerImportCapability(prior, { nodeId });
   return {
     ...prior,
+    // A cancelled Board must not restore an unconsumed import capability from
+    // its pre-run snapshot. The retained profile can still support exact
+    // recovery, but a new provider run requires Clear + re-import.
+    ...(freshImportCapability ? jobCareerImportConsumptionPatch({
+      capability: freshImportCapability,
+      origin: 'board-cancelled',
+    }) : {}),
     hubState: restoreDone ? 'done' : 'empty',
     queuedModuleRun: null,
     manualAiResume: null,
@@ -971,6 +1002,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return owner ? `${owner.orchestratorNodeId}:${owner.boardRunId}` : '';
     }, [id]),
   );
+  // Most durable Board recovery ownership makes direct Search controls dead
+  // ends. The sole source-ready exception is the exact child generation a
+  // Board has paused for source resolution; that continuation must still be
+  // able to score after its source decisions are complete.
+  const pausedBoardContinuationOwnerKey = useStore(
+    useCallback((store) => {
+      const jobRunId = store.nodeLookup.get(id)?.data?.jobRunId || null;
+      const owner = findJobSearchBoardPausedContinuationOwner(
+        id,
+        jobRunId,
+        store.nodeLookup,
+        store.edges,
+      );
+      return owner ? `${owner.orchestratorNodeId}:${owner.boardRunId}` : '';
+    }, [id]),
+  );
+  // An interrupted Board run retains durable ownership while its edge is being
+  // removed or its cancellation cleanup commits.  Treat that reservation like
+  // a live connection for every child action that would otherwise be refused
+  // by its launch handler.  This intentionally does not hide source-card
+  // resolution: a matching paused Board continuation still needs those
+  // decisions to complete.
+  const boardRecoveryOwnsActions = managedByJobBoard || !!activeBoardRecoveryOwnerKey;
   const deferDirectSearchToBoard = useCallback((trigger, description = null) => {
     if (!isJobSearchConnectedToBoard(id, getNodes(), getEdges())) return false;
     EventLogger.log(`[JobSearch][${id}] ${trigger} saved without scanning — connected Job Board owns search admission`);
@@ -978,6 +1032,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       title: 'Run from Job Board',
       description: description || 'Use Search selected & combine on the connected Job Board to run this module.',
       type: 'info',
+      dedupeKey: `job-search-run-from-board:${id}`,
     });
     return true;
   }, [addToast, getEdges, getNodes, id]);
@@ -2820,7 +2875,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // `originalPos`, `activeTargetRole` are still passed by callers but no longer
   // needed here.)
   const finishScoringAndSpawn = useCallback(async ({
-    scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
+    scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [], collectionScopeCaveats = [],
     aiSkipped = false, collectionOnly = false, testMode = false,
     jobRunId = null, cancelled = () => false, completeRun = true,
     preferenceMatchedCount = null, preferenceFilteredCount = null,
@@ -2917,6 +2972,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       pendingJobPreferencePlan: null,
       pendingJobPreferencesInterpretation: null,
       scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
+      collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
       rerunOutcome: null,
       rerunNotice: null,
       errorMessage: finalizationError,
@@ -2929,7 +2985,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const runScoringAndSpawn = useCallback(async ({
     profile, careerData = data.careerData, jobs, gatheredCount,
     scrapedCount = Array.isArray(jobs) ? jobs.length : 0,
-    scrapeWarnings, activeTargetRole, originalPos,
+    scrapeWarnings, collectionScopeCaveats = data.collectionScopeCaveats, activeTargetRole, originalPos,
     jobRunId = null, cancelled, locationSnapshot = null, completeRun = true,
     manualAiRunId = null, resultMode = 'replace',
     appendBaseData = null, appendCanCommit = () => true,
@@ -2946,7 +3002,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     // Step 4: Scoring
     setScoringProgress(null); // clear any prior run's counter; backend re-paints "0 / M"
-    updateGlobal(currentId, { hubState: 'scoring', jobCount: jobs.length });
+    // Preserve non-gating collection facts while a legacy/deferred scorer owns
+    // the run.  Most current scorers settle in this call and pass the value on
+    // to finishScoringAndSpawn below, but an older persisted batch returns
+    // early and is finalized later by pollBatchOnce.  Without retaining the
+    // normalized value here, that recovery path silently dropped a completed
+    // Glassdoor nation-scope disclosure.
+    updateGlobal(currentId, {
+      hubState: 'scoring',
+      jobCount: jobs.length,
+      collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
+    });
     const effectiveLocationSnapshot = locationSnapshot || data.locationSnapshot || {
       searchLocation: getSearchLocation({
         searchLocation: data.searchLocation,
@@ -3058,6 +3124,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       gatheredCount,
       scrapedCount,
       scrapeWarnings,
+      collectionScopeCaveats,
       activeTargetRole,
       originalPos,
       aiSkipped: !!scoreResult.aiSkipped,
@@ -3078,7 +3145,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       runId: jobRunId,
       error: 'The scoring pipeline ended without a terminal result.',
     });
-  }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, appendJobsToDoneCanvas, completeManualAiRun, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, data.careerData]);
+  }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, appendJobsToDoneCanvas, completeManualAiRun, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, data.careerData, data.collectionScopeCaveats]);
 
   // ── Legacy Batch-API recovery ─────────────────────────────────────────────
   // A prior app version may have left an API batch sidecar. The main process
@@ -3109,7 +3176,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         || !boardRunId
         || boardPlan?.version !== 1
         || boardPlan.boardRunId !== boardRunId
-        || boardPlan.activeSourceId !== id
+        || (
+          boardPlan.activeSourceId !== id
+          && !(Array.isArray(boardPlan.activeSourceIds) && boardPlan.activeSourceIds.includes(id))
+        )
       ) {
         return searchRunOutcome('not-ready', {
           runId: admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
@@ -3300,6 +3370,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           gatheredCount: res.gatheredCount,
           scrapedCount: res.selectedForScoring ?? res.scoredJobs.length,
           scrapeWarnings: turnData.scrapeWarnings || [],
+          // A deferred batch resumes after the normal search result has left
+          // the renderer. Carry the trusted node field through this terminal
+          // bridge so its non-gating Glassdoor scope disclosure survives.
+          collectionScopeCaveats: turnData.collectionScopeCaveats,
           activeTargetRole: (res.targetRole || turnData.targetRole || '').trim(),
           originalPos: getNode(id)?.position || { x: 0, y: 0 },
           testMode: false,
@@ -3364,6 +3438,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     activeJobPreferences = '', jobPreferencesInterpretation = null,
     careerData = data.careerData, canvasFilePath: cfp,
     jobRunId = null, locationSnapshot = null, descriptionRecoveryJobs = null, descriptionRecoveryState = null,
+    collectionScopeCaveats = [],
     gatheredCount = null, cancelled = () => false, sourceIds = activeEnabledSourceIds,
   }) => {
     jobRunIdRef.current = jobRunId;
@@ -3474,7 +3549,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // rather than restoring the skipped source in sources-ready.
       scrapeWarningsRef.current = latestWarnings;
       if (latestBlockingWarnings.length === 0) {
-        updateGlobal(currentId, { scrapeWarnings: latestWarnings });
+        updateGlobal(currentId, {
+          scrapeWarnings: latestWarnings,
+          collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
+        });
         return { shouldScore: true, warnings: latestWarnings };
       }
       // Do not publish the actionable sources-ready state until the current
@@ -3495,6 +3573,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // rows.
         gatheredCount: gatheredCount ?? foundJobs.length,
         scrapeWarnings: latestWarnings,
+        collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
         jobRunId,
       });
       // Guarantee a Solve/Skip card for every blocked source — a card can be lost
@@ -3503,6 +3582,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return {
         shouldScore: false,
         warnings: latestWarnings,
+        collectionScopeCaveats,
         outcome: searchRunOutcome('paused', {
           runId: jobRunId,
           error: 'Resolve or skip the blocked job sources before this search can finish.',
@@ -3574,6 +3654,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scoreRangeMax: 100,
         scoreThreshold: 0,
         scrapeWarnings: warnings,
+        collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
         pendingJobs: null,
         pendingBatch: null,
         jobRunId,
@@ -3588,6 +3669,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return {
         shouldScore: false,
         warnings,
+        collectionScopeCaveats,
         outcome: finalizationError
           ? searchRunOutcome('recovery-finalization-failed', {
             runId: jobRunId,
@@ -3623,6 +3705,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     queueManagedByBoard = false,
     parentCancelled = null,
     orchestratorNodeId = null,
+    boardRunId = null,
+    freshImportCapability = null,
   } = {}) => {
     if (isJobWorkflowDeletionPending(id)) {
       return searchRunOutcome('cancelled', { error: 'This Job Search is pending deletion.' });
@@ -3792,11 +3876,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // lane. Re-check at its actual turn before destructive setup;
         // otherwise the stale queued callback can start provider work while
         // the UI correctly says "Checking Connections".
-        || platformsVerifyingRef.current
         || hasPendingManualAiRetirement(laneTurnData)
       ) {
         return searchRunOutcome('not-ready', {
           error: 'This Job Search became unavailable while it was queued.',
+        });
+      }
+      if (platformsVerifyingRef.current) {
+        return searchRunOutcome('not-ready', {
+          error: 'Its selected platform connections are still being checked.',
+          ...(queueManagedByBoard ? { transientReason: 'platforms-verifying' } : {}),
         });
       }
       runLocationSnapshot = {
@@ -3818,6 +3907,97 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('not-ready', {
           error: 'Select at least one job platform before running the search.',
         });
+      }
+
+      // Authenticate before spending a fresh-import capability. A rejected
+      // login preflight has not started a provider run or changed the career
+      // input, so it must leave the import available for the user to retry
+      // from its Job Board after signing in. Consuming below first would turn
+      // this recoverable setup failure into a permanent "Clear + import"
+      // state, leaving the Board action disabled even after login succeeds.
+      // LinkedIn is intentionally excluded: its job fetch and description
+      // enrichment use public guest endpoints.
+      const JOB_LOGIN_IDS = getJobAuthPreflightSourceIds(
+        ids => ids.filter(platformId => runActiveEnabledSourceIds.includes(platformId)),
+      );
+      const notLoggedIn = (await Promise.all(
+        JOB_LOGIN_IDS.map(async (platformId) => {
+          const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
+          if (res?.connected) return null;
+          return JOB_SOURCE_BY_ID[platformId]?.name || platformId;
+        })
+      )).filter(Boolean);
+      if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
+      if (notLoggedIn.length > 0) {
+        throw Object.assign(
+          new Error(`Log in to ${notLoggedIn.join(', ')} first (Settings → Job Platform Logins)`),
+          { isLoginGate: true, notLoggedIn }
+        );
+      }
+
+      // A retained profile/files field is not a fresh Board capability. Claim
+      // only the exact token saved in this Board's durable plan, at the actual
+      // lane turn; a reload of that same Board may re-enter its already-owned
+      // token, but a failed/reset older import cannot silently become new work.
+      if (queueManagedByBoard && freshImportCapability) {
+        const importAdmission = jobCareerImportBoardAdmission(laneTurnData, {
+          capability: freshImportCapability,
+          boardRunId,
+          nodeId: currentId,
+        });
+        if (importAdmission.kind === 'missing') {
+          return searchRunOutcome('not-ready', {
+            error: 'This Job Search no longer has the fresh career import reserved by this Job Board. Manually clear career data and import fresh files before starting a new search.',
+          });
+        }
+        if (importAdmission.kind === 'fresh' || importAdmission.kind === 'reclaimable-unstarted') {
+          const reclaimingLegacyUnstartedImport = importAdmission.kind === 'reclaimable-unstarted';
+          const consumptionPatch = jobCareerImportConsumptionPatch({
+            capability: freshImportCapability,
+            boardRunId,
+            origin: 'job-board',
+          });
+          updateGlobal(currentId, (node) => {
+            const current = node?.data || {};
+            // A pre-fix login rejection may have consumed this exact import
+            // before it ever parsed files or touched a provider. Reclaim only
+            // that helper-proven no-work shape, atomically replacing its old
+            // Board receipt with this Board's new run id. Any started/partial
+            // import remains ineligible for a new transaction.
+            const canClaim = freshJobCareerImportCapability(current, { nodeId: currentId }) === freshImportCapability
+              || retryableUnstartedJobCareerImportCapability(current, { nodeId: currentId }) === freshImportCapability;
+            return canClaim
+              ? consumptionPatch
+              : null;
+          });
+          await waitForRendererCommitFrame();
+          const committedImport = jobCareerImportBoardAdmission(getNode(currentId)?.data, {
+            capability: freshImportCapability,
+            boardRunId,
+            nodeId: currentId,
+          });
+          if (committedImport.kind !== 'owned') {
+            return searchRunOutcome('not-ready', {
+              error: 'The fresh career import changed before this Job Board could start it.',
+            });
+          }
+          if (reclaimingLegacyUnstartedImport) {
+            EventLogger.log(
+              `[JobSearch][${currentId}] Reclaimed legacy unstarted Board import for post-login retry board=${boardRunId}`,
+            );
+          }
+        }
+      } else if (!queueManagedByBoard) {
+        // Standalone imports retain their one-shot provenance too. A later
+        // Board connection therefore sees an attempted generation, not a new
+        // import, even when this direct attempt fails before producing rows.
+        const standaloneCapability = freshJobCareerImportCapability(laneTurnData, { nodeId: currentId });
+        if (standaloneCapability) {
+          updateGlobal(currentId, jobCareerImportConsumptionPatch({
+            capability: standaloneCapability,
+            origin: 'standalone',
+          }));
+        }
       }
 
       processingToken = processingRunsRef.current.start();
@@ -3855,6 +4035,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         _boardRollbackSourceProgressFence: null,
         rerunOutcome: null,
         rerunNotice: null,
+        reanalysisNotice: null,
       });
 
       cancelCleanSourceCardDismiss();
@@ -3874,6 +4055,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
+        reanalysisNotice: null,
         testModeNote: null,
         resultDisposition: null,
         // Same reason as the ref above: a run reached through any entry point
@@ -3887,27 +4069,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // until a later render. Keep this run's career material local so every
       // following AI step sees the fresh files immediately.
       let activeCareerData = laneTurnData.careerData || '';
-
-      // Pre-flight: check only sources that require a browser session before
-      // expensive scraping starts. LinkedIn is intentionally excluded; its job
-      // fetch + description enrichment are anonymous/public flows.
-      const JOB_LOGIN_IDS = getJobAuthPreflightSourceIds(
-        ids => ids.filter(platformId => runActiveEnabledSourceIds.includes(platformId)),
-      );
-      const notLoggedIn = (await Promise.all(
-        JOB_LOGIN_IDS.map(async (platformId) => {
-          const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
-          if (res?.connected) return null;
-          return JOB_SOURCE_BY_ID[platformId]?.name || platformId;
-        })
-      )).filter(Boolean);
-      if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
-      if (notLoggedIn.length > 0) {
-        throw Object.assign(
-          new Error(`Log in to ${notLoggedIn.join(', ')} first (Settings → Job Platform Logins)`),
-          { isLoginGate: true, notLoggedIn }
-        );
-      }
 
       // Spawn (or reuse) one platform card per active job source only after the
       // login gate passes. ensureSourceCards intentionally frames all source
@@ -4087,6 +4248,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         canonicalLocation,
         canonicalCountry,
         resumeFingerprint,
+        collectionScopeCaveats: [],
       });
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
@@ -4116,6 +4278,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Country only, kept separate from preferredLocation so a remote-only
         // search still pins which country's market a board serves.
         countryScope: canonicalCountry,
+        // The manifest stores this opaque full-parse fingerprint. It is the
+        // recovery identity for the exact career material used by this run.
+        profileFingerprint: normalizeResumeProfileFingerprint(resumeFingerprint),
         runOrigin,
         profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
       });
@@ -4183,6 +4348,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? searchResult.descriptionRecoveryJobs
           : null,
         descriptionRecoveryState: searchResult.descriptionRecoveryState || null,
+        collectionScopeCaveats: searchResult.collectionScopeCaveats,
         gatheredCount: visibleGatheredCount,
         sourceIds: runActiveEnabledSourceIds,
         cancelled,
@@ -4200,6 +4366,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         });
       }
       const finalWarnings = postSearchResult.warnings;
+      const finalCollectionScopeCaveats = normalizeCollectionScopeCaveats(searchResult.collectionScopeCaveats);
 
       const preferenceResult = await evaluatePreferencesForRun({
         jobs: foundJobs,
@@ -4256,6 +4423,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
           pendingJobs: null, pendingBatch: null, scrapeWarnings: finalWarnings,
+          collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           resultDisposition: 'preference-filtered',
           errorMessage: finalizationError,
         });
@@ -4331,6 +4499,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scoreRangeMax: 100,
           scoreThreshold: 0,
           scrapeWarnings: finalWarnings,
+          collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           pendingJobs: null,
           pendingBatch: null,
           jobRunId: searchResult.runId || null,
@@ -4359,6 +4528,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         jobs: foundJobs,
         gatheredCount: visibleGatheredCount,
         scrapeWarnings: finalWarnings,
+        collectionScopeCaveats: finalCollectionScopeCaveats,
         activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
@@ -4476,6 +4646,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     queueManagedByBoard = false,
     parentCancelled = null,
     orchestratorNodeId = null,
+    boardRunId = null,
+    freshImportCapability = null,
   } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
     return runPipeline({
@@ -4486,6 +4658,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       queueManagedByBoard,
       parentCancelled,
       orchestratorNodeId,
+      boardRunId,
+      freshImportCapability,
     });
   }, [runPipeline]);
   const startProcessingWithProfile = useCallback(
@@ -4496,6 +4670,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       queueManagedByBoard = false,
       parentCancelled = null,
       orchestratorNodeId = null,
+      boardRunId = null,
+      freshImportCapability = null,
     } = {}) => runPipeline({
       profile,
       frameSourceCards,
@@ -4504,6 +4680,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       queueManagedByBoard,
       parentCancelled,
       orchestratorNodeId,
+      boardRunId,
+      freshImportCapability,
     }),
     [runPipeline],
   );
@@ -4889,6 +5067,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
+        reanalysisNotice: null,
       });
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       // Preserve a deliberately blank role from the paused run; only absent
@@ -5057,6 +5236,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const activeResumeLocation = normalizeLocationInput(data.canonicalLocation || data.preferredLocation || '').boardReady;
   const offeredResumeLocation = normalizeLocationInput(resumeOffer?.canonicalLocation || '').boardReady;
   const canResumeOffer = !!resumeOffer?.locationRecorded && activeResumeLocation === offeredResumeLocation;
+  const activeResumeFingerprint = normalizeResumeProfileFingerprint(data.resumeFingerprint);
+  const offeredResumeFingerprint = normalizeResumeProfileFingerprint(resumeOffer?.profileFingerprint);
+  const resumeProfileMatches = !!activeResumeFingerprint
+    && !!offeredResumeFingerprint
+    && activeResumeFingerprint === offeredResumeFingerprint;
   // canResumeOffer is only the LOCATION gate. Resuming also needs the persisted
   // profile and the run's staged queries — handleResumeRun's `!profile ||
   // queries.length === 0` branch silently discards the staged run, so a button
@@ -5065,6 +5249,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     && resumeOffer?.resumable !== false
     && resumeOffer?.nodeId === id
     && hasReusableCareerProfile
+    && resumeProfileMatches
     && ((resumeOffer?.queries?.length ?? 0) > 0);
   useEffect(() => {
     if (!canvasFilePath || !window.electronAPI?.peekJobRun) return undefined;
@@ -5198,6 +5383,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       return searchRunOutcome('not-ready', { error: 'The interrupted run targets a different location.' });
     }
+    const currentResumeFingerprint = normalizeResumeProfileFingerprint(liveData.resumeFingerprint);
+    const offerResumeFingerprint = normalizeResumeProfileFingerprint(offer?.profileFingerprint);
+    if (!currentResumeFingerprint || !offerResumeFingerprint || currentResumeFingerprint !== offerResumeFingerprint) {
+      const error = !offerResumeFingerprint
+        ? 'This unfinished run is missing profile-safe resume metadata. Start fresh to search with the current career profile.'
+        : !currentResumeFingerprint
+          ? 'This Job Search no longer has the profile fingerprint that created the unfinished run. Start fresh to continue safely.'
+          : 'The career profile changed after this search was staged. Start fresh so saved jobs are not resumed under a different profile.';
+      updateGlobal(id, { errorMessage: error, rerunOutcome: null, rerunNotice: null });
+      return queueManagedByBoard
+        ? searchRunOutcome('recovery-inspection-failed', { runId: offer.runId || null, error })
+        : searchRunOutcome('not-ready', { runId: offer.runId || null, error });
+    }
     let profile = liveData.resumeProfile;
     const queries = Array.isArray(offer.queries) ? offer.queries : [];
     // Need a profile (persists in node data across restarts) + the run's queries.
@@ -5293,6 +5491,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             error: 'This interrupted Search was reserved by its Job Board while queued.',
           });
         }
+        const recheckedOfferFingerprint = normalizeResumeProfileFingerprint(currentOffer?.profileFingerprint);
+        if (!recheckedOfferFingerprint || recheckedOfferFingerprint !== offerResumeFingerprint) {
+          updateGlobal(currentId, { queuedModuleRun: null });
+          return searchRunOutcome('not-ready', {
+            runId: offer.runId || null,
+            error: 'The interrupted search profile identity changed while it was queued. Start fresh to continue safely.',
+          });
+        }
         if (
           !currentOffer?.found
           || !currentOffer?.resumable
@@ -5317,11 +5523,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const laneResumeLocation = normalizeLocationInput(
         liveData?.canonicalLocation || liveData?.preferredLocation || '',
       ).boardReady;
+      const laneResumeFingerprint = normalizeResumeProfileFingerprint(liveData?.resumeFingerprint);
       if (
         !liveData
         || liveData.locked
         || isJobWorkflowDeletionPending(currentId)
-        || platformsVerifyingRef.current
         || hasPendingManualAiRetirement(liveData)
         || laneResumeLocation !== offerResumeLocation
         || !(liveData.resumeProfile && typeof liveData.resumeProfile === 'object')
@@ -5329,6 +5535,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('not-ready', {
           runId: offer.runId || null,
           error: 'This interrupted Job Search became unavailable or changed while it was queued.',
+        });
+      }
+      if (!offerResumeFingerprint || !laneResumeFingerprint || laneResumeFingerprint !== offerResumeFingerprint) {
+        const error = !offerResumeFingerprint
+          ? 'This unfinished run is missing profile-safe resume metadata. Start fresh to search with the current career profile.'
+          : !laneResumeFingerprint
+            ? 'This Job Search no longer has the profile fingerprint that created the unfinished run. Start fresh to continue safely.'
+            : 'The career profile changed while this recovery was queued. Start fresh so saved jobs are not resumed under a different profile.';
+        return queueManagedByBoard
+          ? searchRunOutcome('recovery-inspection-failed', { runId: offer.runId || null, error })
+          : searchRunOutcome('not-ready', { runId: offer.runId || null, error });
+      }
+      if (platformsVerifyingRef.current) {
+        return searchRunOutcome('not-ready', {
+          runId: offer.runId || null,
+          error: 'Its selected platform connections are still being checked.',
+          ...(queueManagedByBoard ? { transientReason: 'platforms-verifying' } : {}),
         });
       }
       profile = liveData.resumeProfile;
@@ -5411,6 +5634,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // another run before this click reaches the main process. Bind recovery
         // to the exact manifest token so staged results never cross runs.
         resumeRunId: offer.runId || null,
+        profileFingerprint: laneResumeFingerprint,
         runOrigin: 'crash-resume',
         profileInputMode: 'stored-profile',
       });
@@ -5427,6 +5651,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           new Error(`Log in to ${names.join(', ')} first (Settings → Job Platform Logins)`),
           { isLoginGate: true, notLoggedIn: searchResult.notLoggedIn }
         );
+      }
+      // The Board supplied the exact token it just inspected. A vanished or
+      // replaced manifest is an inspection failure, never an ordinary failed
+      // scrape: JobBoardNode retains its durable receipt and reports Retry
+      // instead of retiring the transaction as a provider failure.
+      const exactRecoveryFailure = queueManagedByBoard
+        ? exactInterruptedRecoveryBackendFailure(searchResult, offer.runId)
+        : null;
+      if (exactRecoveryFailure) {
+        return searchRunOutcome('recovery-inspection-failed', exactRecoveryFailure);
       }
       if (!searchResult?.success) {
         throw Object.assign(new Error(searchResult?.error || 'Job search failed'), {
@@ -5457,6 +5691,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         descriptionRecoveryJobs: Array.isArray(searchResult?.descriptionRecoveryJobs)
           ? searchResult.descriptionRecoveryJobs
           : null,
+        collectionScopeCaveats: searchResult?.collectionScopeCaveats,
         gatheredCount: visibleGatheredCount,
         locationSnapshot,
         cancelled,
@@ -5470,6 +5705,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         });
       }
       const finalWarnings = postSearchResult.warnings;
+      const finalCollectionScopeCaveats = normalizeCollectionScopeCaveats(searchResult?.collectionScopeCaveats);
       const preferenceResult = await evaluatePreferencesForRun({
         jobs: foundJobs,
         profile,
@@ -5494,6 +5730,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
           pendingJobs: null, pendingBatch: null, scrapeWarnings: finalWarnings,
+          collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           resultDisposition: 'preference-filtered',
           errorMessage: terminalFinalizationError(searchResult?.runId, cfp, completion),
         });
@@ -5514,7 +5751,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return await runScoringAndSpawn({
         profile, jobs: preferenceResult.jobs,
         gatheredCount: visibleGatheredCount,
-        scrapeWarnings: finalWarnings, activeTargetRole, originalPos,
+        scrapeWarnings: finalWarnings, collectionScopeCaveats: finalCollectionScopeCaveats, activeTargetRole, originalPos,
         activeJobPreferences, jobPreferencesInterpretation,
         preferenceMatchedCount: preferenceResult.matchedCount,
         preferenceFilteredCount: preferenceResult.filteredCount,
@@ -5613,6 +5850,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       if (cleanup?.ok === true && (cleanup.cleared === true || cleanup.absent === true)) {
         setResumeOffer(current => current?.runId === runId ? null : current);
+        // A connected Job Board may have cached this exact sidecar as a
+        // resumable disabled-platform recovery. Clearing the token lives only
+        // on disk, so notify that Board to drop its scoped cache immediately
+        // instead of leaving a stale Resume affordance until another click.
+        document.dispatchEvent(new CustomEvent('job-run-recovery-ledger-changed', {
+          detail: { hubId: id, canvasFilePath, runId },
+        }));
         return;
       }
       throw new Error(cleanup?.tokenMismatch
@@ -5903,15 +6147,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // dismiss source cards while that continuation is already evaluating/scoring.
     if (processingRunsRef.current.active || scoringContinuationAdmissionRef.current) return;
     if (hasPendingManualAiRetirement(liveData)) return;
-    if (
-      findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
-      && !findJobSearchBoardPausedContinuationOwner(
-        id,
-        liveData.jobRunId || null,
-        getNodes(),
-        getEdges(),
-      )
-    ) {
+    const liveNodes = getNodes();
+    const liveEdges = getEdges();
+    const liveBoardRecoveryOwner = findJobSearchBoardActiveRecoveryOwner(
+      id,
+      liveNodes,
+      liveEdges,
+    );
+    const livePausedBoardContinuationOwner = findJobSearchBoardPausedContinuationOwner(
+      id,
+      liveData.jobRunId || null,
+      liveNodes,
+      liveEdges,
+    );
+    // The card can outlive its selector snapshot while a Board changes phase
+    // or the Search advances to a newer run. Re-prove the exact continuation
+    // immediately before clearing warnings so that stale clicks fail closed.
+    if (liveBoardRecoveryOwner && !livePausedBoardContinuationOwner) {
       addToast({
         title: 'Job Board Run in Progress',
         description: 'Finish or cancel the owning Job Board run before scoring this paused Search.',
@@ -5990,12 +6242,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const acceptCareerFiles = useCallback((paths, names = []) => {
     // Each hub is permanently bound to its INITIAL career-data upload. Once that
     // exists, further drops are refused — re-running a search reuses the same
-    // résumé, and searching with different career data means a NEW hub.
+    // résumé. Clear career data first, then import different files into this
+    // same Job Search when a new career input is intended.
     if (initialDropAcceptedRef.current || dropLockReason || processingRunsRef.current.active) {
       EventLogger.log(`[JobSearch][${id}] Drop rejected: hub already started`);
       addToast({
         title: 'Career data is locked',
-        description: 'This job search is tied to your original career files. Create a new job search to use different ones.',
+        description: 'This job search is tied to its current career files. Choose Clear career data, then import the different files before starting again.',
         type: 'info',
       });
       return;
@@ -6020,8 +6273,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
     initialDropAcceptedRef.current = true;
     lastDroppedPathsRef.current = valid;
+    const careerImportCapability = createJobCareerImportCapability(id);
     EventLogger.log(`[JobSearch][${id}] Drop accepted: ${valid.length} file(s)`);
-    updateGlobal(id, { inputLocked: true, careerFilePaths: valid });
+    updateGlobal(id, {
+      inputLocked: true,
+      careerFilePaths: valid,
+      careerImportGeneration: careerImportCapability,
+      careerImportFreshCapability: careerImportCapability,
+      careerImportConsumption: null,
+    });
     if (deferDirectSearchToBoard(
       'Career-file drop',
       'Career files saved. Use Search selected & combine on the connected Job Board when you are ready.',
@@ -6167,7 +6427,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const durableBoardData = getNode(durableBoardOwner.orchestratorNodeId)?.data || {};
       const durableOwnerHasActiveChild = (
         durableBoardData?.boardScanResume?.activeSourceId === id
+        || durableBoardData?.boardScanResume?.activeSourceIds?.includes(id)
         || durableBoardData?.boardCancellation?.sourceId === id
+        || durableBoardData?.boardCancellation?.sourceIds?.includes(id)
       );
       if (!durableOwnerHasActiveChild && (getNode(id)?.data?.locked ?? data.locked)) break;
       if (!durableOwnerHasActiveChild && !claimStandaloneCancellation()) return;
@@ -6381,6 +6643,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       pendingJobPreferences: null, pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
       pendingCareerData: null,
       scrapeWarnings: [],
+      collectionScopeCaveats: [],
       // A snapshot describes one completed/in-flight run, not the persistent
       // search settings. Leaving it behind lets a later legacy resume use an
       // abandoned residence while the visible fields show the new one.
@@ -6629,6 +6892,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     queueManagedByBoard = false,
     parentCancelled = null,
     orchestratorNodeId = null,
+    boardRunId = null,
+    freshImportCapability = null,
     runOrigin = 'rerun-button',
     manualAiRunId = null,
   } = {}) => {
@@ -6663,6 +6928,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       return searchRunOutcome('not-ready', {
         error: 'Its selected platform connections are still being checked.',
+        ...(queueManagedByBoard ? { transientReason: 'platforms-verifying' } : {}),
       });
     }
     if (activeEnabledSourceIds.length === 0) {
@@ -6710,6 +6976,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queueManagedByBoard,
         parentCancelled,
         orchestratorNodeId,
+        boardRunId,
+        freshImportCapability,
       });
     } else {
       // Files gone but profile is persisted — run from query step onward
@@ -6723,6 +6991,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queueManagedByBoard,
         parentCancelled,
         orchestratorNodeId,
+        boardRunId,
+        freshImportCapability,
       });
     }
   }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getNode, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, deferDirectSearchToBoard, platformsVerifying]);
@@ -6763,27 +7033,39 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const livePlan = node?.data?.boardScanResume;
         if (livePlan?.boardRunId !== boardRunId) return null;
         const liveCleanup = livePlan.cancellationCleanup || {};
+        const cleanupSourceId = cleanupPatch.sourceId || id;
+        const cleanupBySource = livePlan.cancellationCleanupsBySource || {};
+        const sourceCleanup = cleanupBySource[cleanupSourceId] || (
+          liveCleanup.sourceId === cleanupSourceId ? liveCleanup : {}
+        );
         const manualAiRunIds = [...new Set([
-          ...(Array.isArray(liveCleanup.manualAiRunIds)
-            ? liveCleanup.manualAiRunIds
+          ...(Array.isArray(sourceCleanup.manualAiRunIds)
+            ? sourceCleanup.manualAiRunIds
             : []),
-          liveCleanup.manualAiRunId,
+          sourceCleanup.manualAiRunId,
           ...requestedRunIds,
         ].filter(runId => typeof runId === 'string' && runId))];
+        const nextSourceCleanup = {
+          ...sourceCleanup,
+          ...cleanupPatch,
+          sourceId: cleanupSourceId,
+          manualAiRunId: cleanupPatch.manualAiRunId
+            || sourceCleanup.manualAiRunId
+            || manualAiRunIds[0]
+            || null,
+          manualAiRunIds,
+          commitNonce,
+        };
         return {
           boardScanResume: {
             ...livePlan,
-            cancellationCleanup: {
-              ...liveCleanup,
-              ...cleanupPatch,
-              sourceId: cleanupPatch.sourceId || liveCleanup.sourceId || id,
-              manualAiRunId: cleanupPatch.manualAiRunId
-                || liveCleanup.manualAiRunId
-                || manualAiRunIds[0]
-                || null,
-              manualAiRunIds,
-              commitNonce,
+            cancellationCleanupsBySource: {
+              ...cleanupBySource,
+              [cleanupSourceId]: nextSourceCleanup,
             },
+            // Compatibility bridge only: never merge fields from the prior
+            // source's receipt into this source's durable cleanup ledger.
+            cancellationCleanup: { ...nextSourceCleanup },
             updatedAt: Date.now(),
           },
         };
@@ -6792,7 +7074,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         await waitForRendererCommitFrame();
         const livePlan = getNode(orchestratorNodeId)?.data?.boardScanResume;
         if (livePlan?.boardRunId !== boardRunId) return false;
-        const liveCleanup = livePlan.cancellationCleanup;
+        const liveCleanup = livePlan.cancellationCleanupsBySource?.[cleanupPatch.sourceId || id]
+          || livePlan.cancellationCleanup;
         if (liveCleanup?.commitNonce !== commitNonce) continue;
         const liveRunIds = new Set([
           ...(Array.isArray(liveCleanup.manualAiRunIds)
@@ -6817,14 +7100,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const durableRollbackReceipt = boardPlan?.activeSourceRollback?.version === 1
         && boardPlan.activeSourceRollback.sourceId === id
         ? boardPlan.activeSourceRollback
-        : null;
+        : (boardPlan?.activeSourceRollbacks?.[id]?.version === 1
+          && boardPlan.activeSourceRollbacks[id].sourceId === id
+          ? boardPlan.activeSourceRollbacks[id]
+          : null);
       const exactPersistedMarker = liveResume?.runId
         && liveResume.orchestratorNodeId === orchestratorNodeId
         && liveResume.boardRunId === boardRunId;
       const durablePlanClaim = boardPlan?.version === 1
         && boardPlan.boardRunId === boardRunId
         && boardPlan.phase === 'searches'
-        && boardPlan.activeSourceId === id
+        && (boardPlan.activeSourceId === id
+          || (Array.isArray(boardPlan.activeSourceIds) && boardPlan.activeSourceIds.includes(id)))
         && Array.isArray(boardPlan.selectedSearchModuleIds)
         && boardPlan.selectedSearchModuleIds.includes(id);
       // The user may disconnect the edge specifically to remove this Search
@@ -6834,9 +7121,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const durableClaim = exactPersistedMarker || durablePlanClaim;
       if (!durableClaim) return { status: 'stale', cancelled: false };
 
-      const persistedCleanup = boardPlan?.cancellationCleanup?.sourceId === id
-        ? boardPlan.cancellationCleanup
-        : null;
+      const persistedCleanup = boardPlan?.cancellationCleanupsBySource?.[id]
+        || (boardPlan?.cancellationCleanup?.sourceId === id
+          ? boardPlan.cancellationCleanup
+          : null);
       const persistedCleanupHasPriorRun = Object.prototype.hasOwnProperty.call(
         persistedCleanup || {},
         'priorRunId',
@@ -6881,6 +7169,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? persistedCleanup.manualAiRunIds
           : []),
         persistedCleanup?.manualAiRunId,
+        boardPlan?.activeSourceManualAiRunIds?.[id],
         ownsPersistedMarker ? liveResume.runId : null,
       ].filter(Boolean));
       let cancellationManualAiRunId = persistedCleanup?.manualAiRunId
@@ -7062,7 +7351,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // while preserving the new ledger would make both states unusable.
         if (durableRollbackReceipt && !terminalFinalizationRecovery) {
           const rollback = {
-            ...boardRunRollbackPatch(safeClone(durableRollbackReceipt.previousData || {})),
+            ...boardRunRollbackPatch(safeClone(durableRollbackReceipt.previousData || {}), id),
             _boardRollbackSourceProgressFence: {
               nonce: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
             },
@@ -7311,7 +7600,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
     };
     const rollback = {
-      ...boardRunRollbackPatch(control.previousData),
+      ...boardRunRollbackPatch(control.previousData, id),
       _boardRollbackSourceProgressFence: {
         nonce: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
       },
@@ -7437,7 +7726,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     isCancelled,
     manualAiResume = null,
     pausedSourceContinuation = null,
+    freshImportCapability = null,
     recoverInterruptedJobRun = false,
+    interruptedRecoveryRunId = null,
     finalizationRecovery = null,
   } = {}) => {
     if (isJobWorkflowDeletionPending(id)) {
@@ -7494,6 +7785,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       && liveNode?.data?.hubState === 'scoring-batch'
       && typeof liveNode.data.pendingBatch?.batchId === 'string'
       && !!liveNode.data.pendingBatch.batchId;
+    const exactInterruptedRecovery = typeof interruptedRecoveryRunId === 'string'
+      && !!interruptedRecoveryRunId;
     const recoveryOwner = manualAiResume?.runId
       ? findJobSearchBoardRecoveryOwner(id, manualAiResume.runId, getNodes(), getEdges())
       : findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
@@ -7511,6 +7804,33 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         error: 'The paused Job Search continuation no longer matches its Job Board recovery plan.',
       });
     }
+    // Last-line defence for Board admission. A normal `done` generation is
+    // immutable Board input: the parent must combine its stored result rather
+    // than reach the generic handleRerun fallback below and scrape old career
+    // data again. Exact finalization/manual/paused recoveries remain above and
+    // below this guard because they still own a durable transaction.
+    const ordinaryDoneAdmission = classifyJobBoardSourceAdmission(liveNode);
+    const ownsExactDoneRecovery = !!effectiveFinalizationRecovery
+      || !!requestedManualRetirementRecovery
+      || !!effectiveManualAiResume?.retirementPending
+      || isSavedScrapeManualAiResume(effectiveManualAiResume)
+      || exactLegacyBatchRecovery
+      || exactInterruptedRecovery
+      || exactPausedScoringContinuation;
+    if (!ownsExactDoneRecovery && ordinaryDoneAdmission.kind === 'reuse-terminal') {
+      return searchRunOutcome('completed', {
+        runId: ordinaryDoneAdmission.outcome.runId,
+        resultDisposition: ordinaryDoneAdmission.outcome.resultDisposition,
+        reusedByJobBoard: true,
+      });
+    }
+    if (!ownsExactDoneRecovery && ordinaryDoneAdmission.kind === 'terminal-requires-fresh-input') {
+      return searchRunOutcome('not-ready', {
+        runId: liveNode?.data?.jobRunId || null,
+        resultDisposition: liveNode?.data?.resultDisposition || null,
+        error: ordinaryDoneAdmission.reason,
+      });
+    }
     const notReady = boardRunReadiness(liveNode, {
       processing: processingRunsRef.current.active,
       platformsVerifying: platformsVerifyingRef.current,
@@ -7521,6 +7841,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       terminalFinalizationRecovery: !!effectiveFinalizationRecovery || !!requestedManualRetirementRecovery,
       legacyBatchRecovery: exactLegacyBatchRecovery,
       pausedScoringContinuation: exactPausedScoringContinuation,
+      interruptedRecovery: exactInterruptedRecovery,
     });
     if (notReady) return notReady;
     if (requestedManualRetirementRecovery) {
@@ -7543,10 +7864,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const boardPlanAtAdmission = boardPlanForPausedContinuation;
     const durableRollbackAtAdmission = boardPlanAtAdmission?.version === 1
       && boardPlanAtAdmission.boardRunId === boardRunId
-      && boardPlanAtAdmission.activeSourceId === id
-      && boardPlanAtAdmission.activeSourceRollback?.version === 1
-      && boardPlanAtAdmission.activeSourceRollback.sourceId === id
-      ? boardPlanAtAdmission.activeSourceRollback
+      && (boardPlanAtAdmission.activeSourceId === id
+        || (Array.isArray(boardPlanAtAdmission.activeSourceIds)
+          && boardPlanAtAdmission.activeSourceIds.includes(id)))
+      && (
+        (boardPlanAtAdmission.activeSourceRollback?.version === 1
+          && boardPlanAtAdmission.activeSourceRollback.sourceId === id
+          && boardPlanAtAdmission.activeSourceRollback)
+        || (boardPlanAtAdmission.activeSourceRollbacks?.[id]?.version === 1
+          && boardPlanAtAdmission.activeSourceRollbacks[id].sourceId === id
+          && boardPlanAtAdmission.activeSourceRollbacks[id])
+      )
+      ? (boardPlanAtAdmission.activeSourceRollback?.sourceId === id
+        ? boardPlanAtAdmission.activeSourceRollback
+        : boardPlanAtAdmission.activeSourceRollbacks[id])
       : null;
 
     const manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);
@@ -7573,6 +7904,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || control.cancelled
       || boardRunControlRef.current !== control
       || (typeof isCancelled === 'function' && isCancelled());
+    const runFreshBoardImport = () => {
+      const freshAdmission = jobCareerImportBoardAdmission(getNode(id)?.data, {
+        capability: freshImportCapability,
+        boardRunId,
+        nodeId: id,
+      });
+      if (freshAdmission.kind === 'missing') {
+        return searchRunOutcome('not-ready', {
+          error: 'This Job Search was already attempted or is missing its fresh career import proof. Manually clear career data and import fresh files before starting a new Board search.',
+        });
+      }
+      return handleRerun({
+        frameSourceCards: false,
+        runOrigin: 'job-board-scan',
+        manualAiRunId,
+        queueManagedByBoard: true,
+        parentCancelled: cancelled,
+        orchestratorNodeId,
+        boardRunId,
+        freshImportCapability,
+      });
+    };
     const retireOwnedManualMarker = async () => {
       const liveResume = getNode(id)?.data?.manualAiResume || null;
       const markerOwnedByThisRun = liveResume?.runId === manualAiRunId
@@ -7713,6 +8066,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             parentCancelled: cancelled,
             orchestratorNodeId,
           });
+      } else if (exactInterruptedRecovery) {
+        // `expectedRunId` makes a vanished or replaced preflight manifest an
+        // inspection failure. It must never fall through into handleRerun.
+        outcome = await resumeInterruptedRunRef.current?.({
+          discoverForBoard: true,
+          expectedRunId: interruptedRecoveryRunId,
+          queueManagedByBoard: true,
+          parentCancelled: cancelled,
+          orchestratorNodeId,
+          boardRunId,
+          manualAiRunId,
+          onDiscoveredRun: (discovered) => {
+            control.ownsExistingRecoveryRun = true;
+            control.cancelledRunId = discovered?.runId || interruptedRecoveryRunId;
+          },
+        });
+        if (outcome?.status === 'not-found' || outcome?.status === 'stale-recovery-found') {
+          outcome = searchRunOutcome('recovery-inspection-failed', {
+            runId: interruptedRecoveryRunId,
+            error: 'The interrupted Job Search recovery changed before the Job Board could resume it.',
+          });
+        }
       } else if (recoverInterruptedJobRun || window.electronAPI?.peekJobRun) {
         outcome = await resumeInterruptedRunRef.current?.({
           discoverForBoard: true,
@@ -7750,24 +8125,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // fresh retry safe. Inspection failures remain failures so a temporary
         // disk/IPC problem can never truncate recoverable staged pages.
         if (outcome?.status === 'not-found') {
-          outcome = await handleRerun({
-            frameSourceCards: false,
-            runOrigin: 'job-board-recovery',
-            manualAiRunId,
-            queueManagedByBoard: true,
-            parentCancelled: cancelled,
-            orchestratorNodeId,
-          });
+          outcome = await runFreshBoardImport();
         }
       } else {
-        outcome = await handleRerun({
-            frameSourceCards: false,
-            runOrigin: effectiveManualAiResume ? 'job-board-recovery' : 'job-board-scan',
-            manualAiRunId,
-            queueManagedByBoard: true,
-            parentCancelled: cancelled,
-            orchestratorNodeId,
-          });
+        // The ordinary Board path can only begin a newly imported capability.
+        // Exact paused/manifest/manual recovery branches above retain their
+        // own existing-generation inputs and never arrive here.
+        outcome = await runFreshBoardImport();
       }
 
       if (cancelled()) {
@@ -8132,6 +8496,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // has zero current score-ready jobs.
           scrapedCount: 0,
           scrapeWarnings: Array.isArray(runData.scrapeWarnings) ? runData.scrapeWarnings : [],
+          // Re-evaluation only changes the score pass. Keep collection facts
+          // from the completed search rather than clearing its source caveats.
+          collectionScopeCaveats: collectionScopeCaveatsForSavedJobReanalysis(runData),
           preferenceMatchedCount: preferenceResult.matchedCount,
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
@@ -8190,6 +8557,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // from the current preferences, not retained from an older filter.
         scrapedCount: preferenceResult.jobs.length,
         scrapeWarnings: Array.isArray(runData.scrapeWarnings) ? runData.scrapeWarnings : [],
+        // Re-evaluation does not re-collect listings, so its successful
+        // terminal receipt must retain the original collection disclosure.
+        collectionScopeCaveats: collectionScopeCaveatsForSavedJobReanalysis(runData),
         aiSkipped: !!scoreResult.aiSkipped,
         collectionOnly: !!scoreResult.collectionOnly,
         testMode: !!scoreResult.testMode,
@@ -8202,6 +8572,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         completeRun: false,
       });
       if (cancelled()) return;
+      // The retry produced a new terminal receipt.  Its prior non-blocking
+      // failure notice must not survive a successful saved-job re-analysis.
+      updateGlobal(currentId, { reanalysisNotice: null });
       await completeManualAiRun(manualAiRunId);
 
       if (!cancelled()) {
@@ -8237,8 +8610,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: 'done',
         queuedModuleRun: null,
         ...liveRestorePatch,
-        errorMessage: error?.message || String(error),
-        isRateLimit: !!error?.isRateLimit,
+        // The exact prior terminal rows were restored. Keep the failure
+        // visible without using the generic terminal-error state, which would
+        // make a valid Board input look incomplete and route Retry into a
+        // destructive fresh search.
+        errorMessage: null,
+        isRateLimit: false,
+        reanalysisNotice: error?.message || String(error),
       });
       addToast({
         title: 'Saved Job Re-evaluation Failed',
@@ -8271,7 +8649,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // the SAME node instead of rebuilding a module from scratch.
   const handleClearCareerFiles = useCallback((e) => {
     e?.stopPropagation();
-    if (data.locked) return;
+    // A lock may have landed after this callback's render closure was created.
+    // Read the live node before any cancellation, queue, IPC, or data mutation
+    // so Clear cannot remove career identity from a newly locked module.
+    const liveNode = getNode(id);
+    // A delete can remove this node between the rendered Clear control and its
+    // click handler. With no live owner, do not issue cancellation/sidecar
+    // cleanup requests against an id that might already be gone or reused.
+    if (!liveNode) return;
+    const liveData = liveNode.data || data;
+    if (liveData.locked) return;
     const durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(
       id,
       getNodes(),
@@ -8280,9 +8667,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (
       boardRunControlRef.current
       || durableBoardOwner
-      || data.terminalFinalizationRecovery
-      || data.manualAiResume?.retirementPending
-      || hasCancellationPendingManualAiCleanup(getNode(id)?.data || {})
+      || liveData.terminalFinalizationRecovery
+      || liveData.manualAiResume?.retirementPending
+      || hasCancellationPendingManualAiCleanup(liveData)
     ) {
       EventLogger.log(`[JobSearch][${id}] Clear career files rejected: durable search transaction owns this module`);
       addToast({
@@ -8316,7 +8703,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     window.electronAPI?.cancelNodeTask?.(id, 'career-files-cleared');
 
     // Capture sidecar tokens BEFORE the updateGlobal below nulls them.
-    const batchId = data.pendingBatch?.batchId || null;
+    const batchId = liveData.pendingBatch?.batchId || null;
     // A freshly mounted, otherwise-empty hub has no persisted `jobRunId`, but
     // `peekJobRun` may already have found its OWN unfinished manifest. Treat
     // that offer as a final fallback so Clear career files also deletes the
@@ -8325,8 +8712,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const ownedResumeOfferRunId = resumeOffer?.nodeId === id
       ? (resumeOffer.runId || null)
       : null;
-    const runId = data.pendingBatch?.jobRunId || jobRunIdRef.current || data.jobRunId || ownedResumeOfferRunId || null;
-    const priorClearAt = normalizeJobAnalysisClearWatermark(data.jobAnalysisClearedAt);
+    const runId = liveData.pendingBatch?.jobRunId || jobRunIdRef.current || liveData.jobRunId || ownedResumeOfferRunId || null;
+    const priorClearAt = normalizeJobAnalysisClearWatermark(liveData.jobAnalysisClearedAt);
     // Date.now() is millisecond-granular. Advance beyond a prior clear even
     // when two explicit clears land in one millisecond, so each persisted run
     // token has an unambiguous boundary after a restart.
@@ -8385,13 +8772,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // settles or a stale metadata fetch gets a chance to paint one.
     setSavedAnalysisMeta(null);
     updateGlobal(id, {
-      hubState: 'empty', queuedModuleRun: null, errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, testModeNote: null, pendingBatch: null,
+      hubState: 'empty', queuedModuleRun: null, errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, reanalysisNotice: null, testModeNote: null, pendingBatch: null,
       scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
       activeTargetRole: null,
       pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
+      collectionScopeCaveats: [],
       ...buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
       manualAiResume: null,
       _boardRollbackSourceProgressFence: null,
@@ -8413,7 +8801,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         addToast({ title: 'Career Files Cleared', description: 'Search settings kept — drop fresh career files to run again.', type: 'info' });
       }
     });
-  }, [data.locked, data.pendingBatch, data.jobRunId, data.jobAnalysisClearedAt, data.terminalFinalizationRecovery, data.manualAiResume?.retirementPending, id, canvasFilePath, resumeOffer, epoch, moduleRunQueue, updateGlobal, cancelCleanSourceCardDismiss, resetSourceProgress, cleanupAllJobChildren, addToast, getNode, getNodes, getEdges]);
+  }, [data, id, canvasFilePath, resumeOffer, epoch, moduleRunQueue, updateGlobal, cancelCleanSourceCardDismiss, resetSourceProgress, cleanupAllJobChildren, addToast, getNode, getNodes, getEdges]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
   // Several safe, non-destructive actions (saved scrape, re-analysis, late
@@ -8763,6 +9151,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingTargetRole: null,
         resumeProfile: profile,
         careerData,
+        // Snapshot identity belongs to the profile/corpus it restores, not
+        // the previous live hub. Legacy snapshots lacking it stay
+        // non-recoverable instead of inheriting a stale fingerprint.
+        resumeFingerprint: normalizeResumeProfileFingerprint(snapshot.profileFingerprint) || null,
         resumeSummary: buildResumeSummary(profile),
         resumeContext: {
           skills: profile.skills,
@@ -9084,7 +9476,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       processingRunsRef.current.active
       || data.locked
       || platformsVerifying
-      || managedByJobBoard
+      || boardRecoveryOwnsActions
     ) return;
     if (!['empty', 'done', 'sources-ready'].includes(hubState)) return;
     if (
@@ -9155,7 +9547,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         manualAiAutoResumeAttemptRef.current = null;
       }
     });
-  }, [activeBoardRecoveryOwnerKey, canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, deletionLifecycleRevision, getEdges, getNode, getNodes, handleResumeSavedScrape, hubState, id, managedByJobBoard, manualAiAutoResumeRetryRevision, platformsVerifying, runPipeline, settleManualAiRetirement, updateGlobal]);
+  }, [activeBoardRecoveryOwnerKey, boardRecoveryOwnsActions, canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, deletionLifecycleRevision, getEdges, getNode, getNodes, handleResumeSavedScrape, hubState, id, manualAiAutoResumeRetryRevision, platformsVerifying, runPipeline, settleManualAiRetirement, updateGlobal]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
@@ -9321,7 +9713,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const doneGatheredCount = savedAnalysisMatchesCurrentRun
     ? Math.max(Number(data.gatheredCount) || 0, savedSourceGatheredCount)
     : data.gatheredCount;
-  const savedAnalysisPanel = savedAnalysisMeta ? (
+  // A staging-sidecar recovery and a saved scoring snapshot are both recovery
+  // artifacts, even when they came from different runs. Give the unfinished
+  // run priority so this module never presents competing recovery cards.
+  const showUnfinishedRunBanner = Boolean(
+    resumeOffer
+    && !data.queuedModuleRun
+    && !data.terminalFinalizationRecovery
+    && !activeBoardRecoveryOwnerKey
+    && (hubState === 'empty' || hubState === 'done')
+  );
+  const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;
+  const savedAnalysisPanel = shouldShowSavedAnalysisPanel ? (
     <div className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-2 text-left">
       <div className="text-[9px] uppercase tracking-[0.14em] text-white/25">Saved Scrape</div>
       <div className="mt-1 text-[10px] text-white/65">
@@ -9341,15 +9744,24 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       {!!savedAnalysisWarning && (
         <div className="mt-1 text-[9px] text-amber-300/80">{savedAnalysisWarning}</div>
       )}
+      {boardRecoveryOwnsActions && (
+        <div className="mt-2 text-[9px] leading-snug text-white/35">
+          {managedByJobBoard
+            ? 'Saved results are kept for reference. Start searches from the connected Job Board with Search selected & combine.'
+            : 'Saved results are kept for reference while the previous Job Board recovery settles. Direct scoring returns when that recovery finishes or is cancelled.'}
+        </div>
+      )}
       <div className="mt-2 flex gap-1.5">
-        <button
-          className="nodrag flex-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-1 text-[9px] text-blue-100 hover:bg-blue-400/15 disabled:cursor-default disabled:opacity-50"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={handleResumeSavedScrape}
-          disabled={savedAnalysisLoading || controlsLocked}
-        >
-          {savedAnalysisLoading ? 'Resuming…' : 'Resume saved scrape'}
-        </button>
+        {!boardRecoveryOwnsActions && (
+          <button
+            className="nodrag flex-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-1 text-[9px] text-blue-100 hover:bg-blue-400/15 disabled:cursor-default disabled:opacity-50"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={handleResumeSavedScrape}
+            disabled={savedAnalysisLoading || controlsLocked}
+          >
+            {savedAnalysisLoading ? 'Re-scoring…' : 'Re-score saved results'}
+          </button>
+        )}
         <button
           className="nodrag rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] text-white/55 hover:bg-white/10 disabled:cursor-default disabled:opacity-50"
           onPointerDown={(e) => e.stopPropagation()}
@@ -9365,14 +9777,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   ) : null;
 
   // Non-blocking "resume an unfinished run?" banner — only in idle states so it
-  // never overlays a live pipeline. Resume recovers staged jobs and scores them.
-  const resumeBanner = (
-    resumeOffer
-    && !data.queuedModuleRun
-    && !data.terminalFinalizationRecovery
-    && !activeBoardRecoveryOwnerKey
-    && (hubState === 'empty' || hubState === 'done')
-  ) ? (
+  // never overlays a live pipeline. A connected Board owns continuation;
+  // standalone Searches retain their direct resume action.
+  const resumeBanner = showUnfinishedRunBanner ? (
     <div className="m-2 p-2 rounded-md bg-amber-500/10 border border-amber-500/30" onPointerDown={(e) => e.stopPropagation()}>
       <div className="text-amber-200/90 text-[11px] font-medium leading-snug">Unfinished job search found</div>
       <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
@@ -9380,16 +9787,24 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {/* State the observation, not an asserted cause: a legacy owner-unknown
             offer may not share this hub's history, so naming lost career files
             would be a guess — a virgin hub never had them. */}
-        {resumeRunActionable
+        {boardRecoveryOwnsActions && resumeRunActionable
+          ? ' Continue from the connected Job Board with Search selected & combine. Start fresh discards this unfinished run.'
+          : resumeRunActionable
           ? ' Resume to continue it, or start fresh.'
           : canResumeOffer
             ? (resumeOffer.resumable === false
                 ? ' This recovery is older than 24 hours; start fresh to clear it safely.'
-                : ' Start fresh — this run cannot be resumed from this module.')
+                : !offeredResumeFingerprint
+                  ? ' Start fresh — this run predates profile-safe recovery metadata.'
+                  : !activeResumeFingerprint
+                    ? ' Start fresh — this Job Search no longer has the profile fingerprint that created this run.'
+                    : !resumeProfileMatches
+                      ? ' Start fresh — the career profile changed after this run was staged.'
+                      : ' Start fresh — this run cannot be resumed from this module.')
             : ` Start fresh — this run targeted ${resumeOffer.locationRecorded ? (offeredResumeLocation || 'no location') : 'an unrecorded legacy location'}, not the current ${activeResumeLocation || 'no location'}.`}
       </div>
       <div className="flex gap-1.5 mt-1.5">
-        {resumeRunActionable && <button
+        {!boardRecoveryOwnsActions && resumeRunActionable && <button
           className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={handleResumeRun}
@@ -9428,7 +9843,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           )}
           isRateLimit={!!data.isRateLimit}
           locked={errorControlsLocked}
-          onRetry={activeBoardRecoveryOwnerKey ? null : handleRetryFailed}
+          onRetry={boardRecoveryOwnsActions ? null : handleRetryFailed}
           onDismiss={data.terminalFinalizationRecovery ? null : handleDismissError}
         />
       ) : data.testModeNote ? (
@@ -9471,10 +9886,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                       that aren't there. */}
                   <p className="text-white/25 text-[10px] mt-1 text-center">{controlsLocked
                     ? (data.locked ? 'Unlock this module to re-run it or change its files' : 'Queued work will start automatically')
-                    : managedByJobBoard
-                      ? 'Ready — run it from the connected Job Board, or clear these files'
+                    : boardRecoveryOwnsActions
+                      ? (managedByJobBoard
+                        ? 'Ready — run it from the connected Job Board, or clear these files'
+                        : 'A Job Board recovery is settling. Direct search controls return when it finishes or is cancelled.')
                       : 'Re-run with these files, or clear them to search with different ones'}</p>
-                  {hasRunnableCareerInput && !controlsLocked && !managedByJobBoard && (
+                  {hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && (
                     <button
                       type="button"
                       className="nodrag mt-3 px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 text-[10px] border border-blue-500/20 transition-colors"
@@ -9487,7 +9904,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   {/* Not gated on hasReusableCareerProfile — a partially-wedged
                       identity (locked with no parsed profile) is exactly the
                       case that most needs clearing. */}
-                  {!controlsLocked && (
+                  {!controlsLocked && !activeBoardRecoveryOwnerKey && (
                     <button
                       type="button"
                       className="nodrag mt-1.5 px-3 py-1 rounded-full bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/70 text-[10px] border border-white/10 transition-colors"
@@ -9646,8 +10063,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={controlsLocked}
-              onScoreCurrent={handleScoreCurrentResults}
-              onClearCareerFiles={handleClearCareerFiles}
+              onScoreCurrent={activeBoardRecoveryOwnerKey && !pausedBoardContinuationOwnerKey
+                ? null
+                : handleScoreCurrentResults}
+              onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}
             />
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>
@@ -9675,9 +10094,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               verifyDone={verifyDone}
               verifyTotal={verifyTotal}
               managedByJobBoard={managedByJobBoard}
-              onRerun={managedByJobBoard ? null : handleRerun}
-              onReanalyze={data.terminalFinalizationRecovery ? null : handleReanalyze}
-              onClearCareerFiles={handleClearCareerFiles}
+              boardRecoveryPending={!managedByJobBoard && !!activeBoardRecoveryOwnerKey}
+              onRerun={boardRecoveryOwnsActions ? null : handleRerun}
+              onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}
+              onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}
               maxAgeDays={maxAgeDays}
               setMaxAgeDays={setMaxAgeDays}
               collectionLimits={collectionLimits}
@@ -9698,7 +10118,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               jobPreferencePlan={data.jobPreferencePlan || null}
               preferenceEvaluation={data.preferenceEvaluation || null}
               scrapeWarnings={data.scrapeWarnings || []}
+              collectionScopeCaveats={data.collectionScopeCaveats || []}
               rerunOutcome={data.rerunOutcome || null}
+              reanalysisNotice={data.reanalysisNotice || null}
               resultDisposition={data.resultDisposition || null}
               lastCompletedRunAt={data.lastCompletedRunAt || null}
             />

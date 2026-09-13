@@ -1,54 +1,6 @@
-import React, { useId, useMemo } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, Search, X } from 'lucide-react';
-
-const ACTIVE_STATES = new Set([
-  'queued',
-  'parsing',
-  'interpreting-preferences',
-  'querying',
-  'searching',
-  'evaluating-preferences',
-  'scoring',
-  'scoring-batch',
-]);
-
-function moduleReadiness(module) {
-  if (module?.ready === false || module?.canRun === false || module?.runnable === false) {
-    return {
-      ready: false,
-      label: module.readinessLabel || module.statusLabel || 'Needs setup',
-      reason: module.readinessReason || module.disabledReason || module.reason || '',
-    };
-  }
-
-  const state = module?.hubState || module?.status || '';
-  if (module?.running || ACTIVE_STATES.has(state)) {
-    return { ready: true, active: true, label: module.statusLabel || 'Searching…', reason: '' };
-  }
-  if (state === 'sources-ready') {
-    return {
-      ready: false,
-      label: module.statusLabel || 'Needs attention',
-      reason: module.readinessReason || module.reason || 'Resolve or skip the blocked source before continuing.',
-    };
-  }
-  if (state === 'done') {
-    const count = Number.isFinite(module?.count)
-      ? module.count
-      : Number.isFinite(module?.resultCount) ? module.resultCount : null;
-    return {
-      ready: true,
-      label: module.statusLabel || (count == null ? 'Ready to search' : `${count} saved job${count === 1 ? '' : 's'}`),
-      reason: '',
-    };
-  }
-
-  return {
-    ready: true,
-    label: module?.statusLabel || module?.readinessLabel || 'Ready to search',
-    reason: module?.readinessReason || '',
-  };
-}
+import React, { useId, useLayoutEffect, useMemo, useRef } from 'react';
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
+import { jobBoardModuleReadiness, jobBoardSelectionPresentation } from '../../utils/jobBoardSearchSelection.js';
 
 function normalizeProgress(progress, selectedCount) {
   if (!progress) return null;
@@ -66,7 +18,7 @@ function normalizeProgress(progress, selectedCount) {
   const label = progress.label
     || (completed != null && total != null
       ? `${completed} of ${total} searches complete${currentLabel ? ` · ${currentLabel}` : ''}`
-      : currentLabel || 'Searching selected modules…');
+      : currentLabel || 'Starting or continuing selected sources…');
 
   return { label, completed, total };
 }
@@ -91,6 +43,23 @@ function shortestUniqueIdSuffix(id, peerIds) {
   return id;
 }
 
+function roundedLayoutValue(value) {
+  return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+}
+
+function layoutBounds(element) {
+  if (!element) return null;
+  const rect = element.getBoundingClientRect?.();
+  return {
+    width: roundedLayoutValue(rect?.width ?? element.clientWidth),
+    height: roundedLayoutValue(rect?.height ?? element.clientHeight),
+    clientWidth: roundedLayoutValue(element.clientWidth),
+    clientHeight: roundedLayoutValue(element.clientHeight),
+    scrollWidth: roundedLayoutValue(element.scrollWidth),
+    scrollHeight: roundedLayoutValue(element.scrollHeight),
+  };
+}
+
 /**
  * Controlled selection and launch UI for a Job Board's connected Job Search
  * modules. Selection is deliberately owned by the caller so rerenders,
@@ -104,6 +73,7 @@ export function JobBoardSearchSelection({
   modules = [],
   selectedIds = [],
   onToggle,
+  onMove = null,
   disabled = false,
   running = false,
   progress = null,
@@ -112,8 +82,11 @@ export function JobBoardSearchSelection({
   recoveryError = null,
   onRetry = null,
   recoveryCanCancel = true,
+  onRuntimeSnapshot = null,
 }) {
   const fieldsetId = useId();
+  const fieldsetRef = useRef(null);
+  const sourceListRef = useRef(null);
   const selectedSet = useMemo(
     () => selectedIds instanceof Set ? selectedIds : new Set(Array.isArray(selectedIds) ? selectedIds : []),
     [selectedIds],
@@ -124,7 +97,7 @@ export function JobBoardSearchSelection({
       .map(module => ({
         module,
         label: displayModuleLabel(module),
-        readiness: moduleReadiness(module),
+        readiness: jobBoardModuleReadiness(module),
       }));
     const idsByLabel = new Map();
     for (const row of baseRows) {
@@ -143,13 +116,18 @@ export function JobBoardSearchSelection({
         discriminator: {
           suffix,
           visible: `#${suffix}`,
-          accessibleName: `Scan ${row.label}, Job Search ${suffix}`,
+          accessibleName: `Select ${row.label}, Job Search ${suffix}, to start or continue`,
         },
       };
     });
   }, [modules]);
-  const selectedRows = rows.filter(({ module }) => selectedSet.has(module.id));
+  const selectedRows = useMemo(
+    () => rows.filter(({ module }) => selectedSet.has(module.id)),
+    [rows, selectedSet],
+  );
   const hasUnreadySelection = selectedRows.some(({ readiness }) => !readiness.ready);
+  const presentation = jobBoardSelectionPresentation(selectedRows.map(({ module }) => module));
+  const { runLabel } = presentation;
   const controlsDisabled = disabled || running || !!recoveryError;
   const canRun = !controlsDisabled
     && typeof onRun === 'function'
@@ -158,17 +136,63 @@ export function JobBoardSearchSelection({
   const canCancel = running && recoveryCanCancel && typeof onCancel === 'function';
   const canRetry = !!recoveryError && !disabled && typeof onRetry === 'function';
   const progressState = normalizeProgress(progress, selectedRows.length);
+  const actionDisabledReasonId = `${fieldsetId}-run-reason`;
+  // An idle primary action can be disabled by setup, a Board lock, or a
+  // missing callback. Keep a real explanation beside the native disabled
+  // control: colour alone made the prior low-opacity indigo state easy to
+  // mistake for an available action.
+  const primaryActionDisabledReason = !running && !recoveryError && !canRun
+    ? disabled
+      ? 'Unlock this Job Board before starting or continuing searches.'
+      : selectedRows.length === 0
+        ? 'Select at least one connected Job Search source to start or continue.'
+        : hasUnreadySelection
+          ? presentation.unreadyMessage
+          : 'This Job Board is not ready to start searches yet.'
+    : null;
+  const eligibilityReasons = useMemo(() => [
+    disabled ? 'board-disabled' : null,
+    running ? 'board-running' : null,
+    recoveryError ? 'recovery-error' : null,
+    selectedRows.length === 0 ? 'no-selection' : null,
+    hasUnreadySelection ? 'selected-source-unready' : null,
+    typeof onRun !== 'function' ? 'run-handler-unavailable' : null,
+  ].filter(Boolean), [disabled, hasUnreadySelection, recoveryError, running, selectedRows.length, onRun]);
+  const eligibilityReasonKey = eligibilityReasons.join('|');
+
+  // The action predicate is split between Board state and selector state. Keep
+  // a bounded snapshot of exactly what this mounted control evaluated, plus
+  // client/scroll measurements, for the existing FULL Board diagnostics.
+  useLayoutEffect(() => {
+    if (typeof onRuntimeSnapshot !== 'function') return undefined;
+    const emit = () => onRuntimeSnapshot({
+      rowCount: rows.length,
+      selectedCount: selectedRows.length,
+      actionEligible: canRun,
+      actionLabel: String(runLabel || '').slice(0, 80),
+      eligibilityReasons: eligibilityReasonKey ? eligibilityReasonKey.split('|') : [],
+      selectorBounds: layoutBounds(fieldsetRef.current),
+      sourceListBounds: layoutBounds(sourceListRef.current),
+    });
+    emit();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(emit);
+    if (fieldsetRef.current) observer.observe(fieldsetRef.current);
+    if (sourceListRef.current) observer.observe(sourceListRef.current);
+    return () => observer.disconnect();
+  }, [canRun, eligibilityReasonKey, onRuntimeSnapshot, rows.length, runLabel, selectedRows.length]);
 
   return (
     <fieldset
-      className="nodrag w-full space-y-2"
+      ref={fieldsetRef}
+      className="nodrag min-w-0 w-full max-w-full space-y-2"
       onPointerDown={(event) => event.stopPropagation()}
       aria-busy={running}
     >
-      <legend className="flex w-full items-center justify-between gap-2 px-0.5 text-[9px] uppercase tracking-wider text-white/35">
-        <span>Job searches to scan</span>
+      <legend className="flex min-w-0 w-full max-w-full items-center justify-between gap-2 px-0.5 text-[9px] uppercase tracking-wider text-white/35">
+        <span className="min-w-0 truncate">Job Search sources</span>
         {rows.length > 0 && (
-          <span className="normal-case tracking-normal text-white/25">
+          <span className="shrink-0 normal-case tracking-normal text-white/25">
             {selectedRows.length}/{rows.length} selected
           </span>
         )}
@@ -176,60 +200,100 @@ export function JobBoardSearchSelection({
 
       {rows.length === 0 ? (
         <div className="rounded-md border border-dashed border-white/10 px-2 py-3 text-center text-[10px] leading-snug text-white/30">
-          Connect one or more Job Search modules to choose what this board scans.
+          Connect Job Search modules to choose which sources to start or continue. Completed connected results are reused when the Board combines.
         </div>
       ) : (
-        <div className="max-h-44 space-y-1 overflow-y-auto" role="group" aria-label="Connected Job Search modules">
+        <div ref={sourceListRef} className="min-w-0 max-w-full max-h-44 space-y-1 overflow-x-hidden overflow-y-auto" role="group" aria-label="Connected Job Search sources to start or continue">
           {rows.map(({ module, label, readiness, discriminator }, index) => {
             const checked = selectedSet.has(module.id);
             const rowDisabled = controlsDisabled || module.disabled === true || module.selectable === false;
+            const canMove = !rowDisabled && typeof onMove === 'function';
             const descriptionId = readiness.reason ? `${fieldsetId}-module-${index}-reason` : undefined;
             const StatusIcon = readiness.active
               ? Loader2
               : readiness.ready ? CheckCircle2 : AlertCircle;
             return (
-              <label
+              <div
                 key={module.id}
-                className={`flex items-start gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+                className={`flex min-w-0 max-w-full items-start gap-2 overflow-hidden rounded-md border px-2 py-1.5 transition-colors ${
                   checked
                     ? 'border-indigo-500/25 bg-indigo-500/10'
                     : 'border-white/5 bg-white/[0.03] hover:bg-white/5'
-                } ${rowDisabled ? 'cursor-default opacity-55' : 'cursor-pointer'}`}
+                } ${rowDisabled ? 'opacity-55' : ''}`}
               >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={rowDisabled}
-                  aria-label={discriminator?.accessibleName || `Scan ${label}`}
-                  aria-describedby={descriptionId}
-                  onChange={(event) => onToggle?.(module.id, event.target.checked)}
-                  className="mt-0.5 h-3 w-3 shrink-0 cursor-pointer accent-indigo-400 disabled:cursor-default"
-                />
-                <span className="min-w-0 flex-1">
-                  <span
-                    className="flex min-w-0 items-baseline gap-1 text-[10px] font-medium text-white/65"
-                    title={discriminator ? `${label} · Job Search ${module.id}` : label}
-                  >
-                    <span className="min-w-0 truncate">{label}</span>
-                    {discriminator && (
-                      <span className="shrink-0 font-mono text-[8px] text-white/35" aria-hidden="true">
-                        {discriminator.visible}
+                <label className={`flex min-w-0 flex-1 items-start gap-2 ${rowDisabled ? 'cursor-default' : 'cursor-pointer'}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={rowDisabled}
+                    aria-label={discriminator?.accessibleName || `Select ${label} to start or continue`}
+                    aria-describedby={descriptionId}
+                    onChange={(event) => onToggle?.(module.id, event.target.checked)}
+                    className="mt-0.5 h-3 w-3 shrink-0 cursor-pointer accent-indigo-400 disabled:cursor-default"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className="flex min-w-0 items-baseline gap-1 text-[10px] font-medium text-white/65"
+                      title={discriminator ? `${label} · Job Search ${module.id}` : label}
+                    >
+                      <span className="min-w-0 truncate">{label}</span>
+                      {discriminator && (
+                        <span className="shrink-0 font-mono text-[8px] text-white/35" aria-hidden="true">
+                          {discriminator.visible}
+                        </span>
+                      )}
+                    </span>
+                    <span
+                      className={`mt-0.5 flex min-w-0 max-w-full items-center gap-1 text-[9px] ${
+                        readiness.ready ? 'text-emerald-300/65' : 'text-amber-300/75'
+                      }`}
+                      title={readiness.label}
+                    >
+                      <StatusIcon size={9} className={`shrink-0 ${readiness.active ? 'animate-spin' : ''}`} aria-hidden="true" />
+                      <span className="truncate">{readiness.label}</span>
+                    </span>
+                    {readiness.reason && (
+                      <span id={descriptionId} className="mt-0.5 block break-words text-[9px] leading-snug text-amber-300/65">
+                        {readiness.reason}
                       </span>
                     )}
                   </span>
-                  {readiness.reason && (
-                    <span id={descriptionId} className="mt-0.5 block text-[9px] leading-snug text-amber-300/65">
-                      {readiness.reason}
-                    </span>
-                  )}
-                </span>
-                <span className={`flex shrink-0 items-center gap-1 text-[9px] ${
-                  readiness.ready ? 'text-emerald-300/65' : 'text-amber-300/75'
-                }`}>
-                  <StatusIcon size={9} className={readiness.active ? 'animate-spin' : ''} aria-hidden="true" />
-                  {readiness.label}
-                </span>
-              </label>
+                </label>
+                {typeof onMove === 'function' && (
+                  <span className="flex shrink-0 flex-col" role="group" aria-label={`Recovery and reconciliation order for ${label}`}>
+                    <button
+                      type="button"
+                      disabled={!canMove || index === 0}
+                      aria-label={`Move ${label} earlier`}
+                      title="Prioritize this search earlier for recovery and result reconciliation"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onMove(module.id, 'up');
+                      }}
+                      className="rounded p-0.5 text-white/35 hover:bg-white/10 hover:text-white/70 disabled:cursor-default disabled:opacity-25"
+                    >
+                      <ChevronUp size={11} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!canMove || index === rows.length - 1}
+                      aria-label={`Move ${label} later`}
+                      title="Prioritize this search later for recovery and result reconciliation"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onMove(module.id, 'down');
+                      }}
+                      className="rounded p-0.5 text-white/35 hover:bg-white/10 hover:text-white/70 disabled:cursor-default disabled:opacity-25"
+                    >
+                      <ChevronDown size={11} aria-hidden="true" />
+                    </button>
+                  </span>
+                )}
+              </div>
             );
           })}
         </div>
@@ -257,14 +321,9 @@ export function JobBoardSearchSelection({
         </p>
       )}
 
-      {!running && selectedRows.length === 0 && rows.length > 0 && (
-        <p className="text-center text-[9px] leading-snug text-amber-300/65" role="status">
-          Select at least one connected search.
-        </p>
-      )}
-      {!running && hasUnreadySelection && (
-        <p className="text-center text-[9px] leading-snug text-amber-300/65" role="status">
-          Finish setting up the selected searches before running this board.
+      {primaryActionDisabledReason && (
+        <p id={actionDisabledReasonId} className="text-center text-[9px] leading-snug text-amber-300/65" role="status">
+          {primaryActionDisabledReason}
         </p>
       )}
 
@@ -295,21 +354,21 @@ export function JobBoardSearchSelection({
           type="button"
           onClick={running ? onCancel : onRun}
           disabled={running ? !canCancel : !canRun}
-          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+          aria-describedby={primaryActionDisabledReason ? actionDisabledReasonId : undefined}
+          data-action-state={running ? 'running' : (canRun ? 'enabled' : 'disabled')}
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-medium transition-colors disabled:cursor-not-allowed ${
             running
-              ? 'border-rose-500/25 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25'
-              : 'border-indigo-500/25 bg-indigo-500/20 text-indigo-100 hover:bg-indigo-500/30'
+              ? 'border-rose-500/25 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25 disabled:opacity-40'
+              : canRun
+                ? 'border-indigo-300/80 bg-indigo-500 text-white shadow-[0_0_16px_rgba(99,102,241,0.45)] hover:bg-indigo-400 hover:shadow-[0_0_20px_rgba(99,102,241,0.6)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-200/90 focus-visible:ring-offset-1 focus-visible:ring-offset-[#111827]'
+                : 'border-white/10 bg-white/[0.04] text-white/35 shadow-none opacity-70'
           }`}
           title={running
             ? 'Cancel this Board run and keep existing completed results'
-            : selectedRows.length === 0
-              ? 'Select at least one connected Job Search module'
-              : hasUnreadySelection
-                ? 'Finish setting up the selected searches first'
-                : 'Run the selected Job Search modules. If a source needs manual attention, resolve it there; this Board continues and combines saved results automatically.'}
+            : primaryActionDisabledReason || presentation.title}
         >
           {running ? <X size={11} /> : <Search size={11} />}
-          {running ? 'Cancel current run' : 'Search selected & combine'}
+          {running ? 'Cancel current run' : runLabel}
         </button>
       </div>
       )}

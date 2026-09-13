@@ -98,9 +98,10 @@ export const SELLHUB_TRANSIENT_KEYS = [
 ];
 
 // The queue label is renderer-owned and has no worker behind it after restart.
-// Completed results, selectedSearchModuleIds, manualAiResume, and
-// boardScanResume are deliberately durable: together they let an interrupted
-// Board reacquire its lane and continue the exact selected-search transaction.
+// Completed results, selectedSearchModuleIds, searchExecutionOrder,
+// manualAiResume, and boardScanResume are deliberately durable: together they
+// let an interrupted Board reacquire its lane and continue the exact
+// selected-search transaction in its frozen order.
 export const JOBBOARD_TRANSIENT_KEYS = [
   'queuedModuleRun',
 ];

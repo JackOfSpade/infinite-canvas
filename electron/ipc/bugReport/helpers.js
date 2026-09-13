@@ -36,6 +36,64 @@ export function redactReportUrlsInText(value) {
   });
 }
 
+// Renderer events are deliberately a human-readable ring rather than a rigid
+// schema. That makes them useful during a failure, but it also means a legacy
+// or future producer can accidentally interpolate a search query, target role,
+// or Google Jobs document id. Keep this at the report boundary: the reporter
+// may send old in-memory rows, and every current/future EventLogger producer
+// reaches this formatter before an Event History block is written to disk or
+// copied as an inline fallback.
+const SAFE_EVENT_DIAGNOSTIC_VALUES = new Set([
+  'present', 'missing', 'empty', 'unknown', 'invalid', 'none', 'yes', 'no', 'true', 'false', '?',
+]);
+
+const EVENT_SENSITIVE_ASSIGNMENT = /\b(q|query|rawquery|searchquery|careerquery|targetrole|careertarget|preferences?|htidocid|documentid|document|docid)(\s*(?:=|:)\s*)("[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|.*?)(?=(?:\s*(?:[,;|]\s*)?[A-Za-z][A-Za-z0-9_-]{0,40}\s*[=:])|[\r\n]|$)/gi;
+
+function eventSensitiveValueKind(key) {
+  return /^(?:htidocid|documentid|document|docid)$/i.test(key)
+    ? 'document identifier'
+    : /^(?:targetrole|careertarget)$/i.test(key)
+      ? 'target role'
+      : /^preferences?$/i.test(key)
+        ? 'preferences'
+        : 'query';
+}
+
+function redactEventAssignment(_match, key, separator, rawValue) {
+  const bare = String(rawValue).trim().replace(/^(?:"|'|`)|(?:"|'|`)$/g, '');
+  if (SAFE_EVENT_DIAGNOSTIC_VALUES.has(bare.toLowerCase()) || /^\[redacted [^\]]+\]$/i.test(bare)) {
+    return `${key}${separator}${rawValue}`;
+  }
+  return `${key}${separator}[redacted ${eventSensitiveValueKind(key)}]`;
+}
+
+/**
+ * Redact private renderer-event values while preserving timestamps, event
+ * names, stages, source ids, and bounded diagnostic fields around them.
+ */
+export function redactReportEventHistoryLine(value) {
+  // Match the old event export's String(value) coercion exactly; malformed
+  // mocked/legacy rows remain visible as "null"/"undefined" rather than
+  // silently disappearing from a timeline.
+  let text = redactReportUrlsInText(String(value));
+
+  // These are the prose forms emitted by JobSearchNode / JobGroupNode. Match
+  // only an explicit sensitive cue and quoted value; ordinary quoted event
+  // labels remain intact.
+  text = text
+    // The value itself can contain a quote (for example a search for
+    // `"Staff" engineer`), so consume through the last quote on this event
+    // line rather than exposing the suffix after its first embedded quote.
+    .replace(/(\b(?:for\s+query|search\s+query)\s*:\s*)"[^\r\n]*"/gi, '$1"[redacted query]"')
+    .replace(/(\bsearching\s+exactly\s*)"[^\r\n]*"/gi, '$1"[redacted target role]"')
+    .replace(/(\bshow\s+more\s+in\s+role\s*)"[^\r\n]*"/gi, '$1"[redacted role]"');
+
+  // Key/value forms cover JobCard's q=/htidocid= diagnostics and compatible
+  // future event producers. Known metadata-only values (for example the
+  // current q=present / htidocid=missing) remain readable.
+  return text.replace(EVENT_SENSITIVE_ASSIGNMENT, redactEventAssignment);
+}
+
 // "(Ns ago)" suffix for a timestamp — shared by the pipeline snapshot builders.
 export const ago = (ts) => {
   if (!ts) return '';

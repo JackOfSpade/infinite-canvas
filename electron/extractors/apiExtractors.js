@@ -11,7 +11,7 @@
  */
 import { logger } from '../logger.js';
 import { getRandomUA, refreshDiceApiKey, getStealthBrowser, getStealthBrowserInfo } from '../ipc/stealthBrowser.js';
-import { humanDelay } from '../utils/humanDelay.js';
+import { humanCooldown } from '../utils/humanDelay.js';
 import { getDiceApiKey } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
@@ -69,6 +69,102 @@ function createTimeoutSignal(baseSignal, timeoutMs) {
  */
 function abortedDuringFetch(signal, result) {
   return !!signal?.aborted && result?.ok === false;
+}
+
+/** Sleep that wakes promptly when the owning scrape is cancelled. */
+function sleepUnlessAborted(ms, signal) {
+  const wait = Math.max(0, Math.round(Number(ms) || 0));
+  if (wait === 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, wait);
+    signal?.addEventListener?.('abort', done, { once: true });
+  });
+}
+
+/** A fetch-shaped cancellation result, so an abort never turns into a TypeError. */
+function abortedApiOperationResult() {
+  return { ok: false, status: 0, text: '', json: null, warning: null, aborted: true };
+}
+
+/**
+ * Only transport failures are safe to retry automatically. Provider responses
+ * (including HTTP 403/429) are deliberate and another immediate request would
+ * extend the block. A user cancellation is likewise terminal and silent.
+ */
+export function shouldRetryApiTransportFailure(result, signal = null, attempt = 0, maxRetries = 1) {
+  // This generic helper is exported for other API callers. Keep a hostile or
+  // malformed configuration from turning a persistent outage into an infinite
+  // retry loop; source-specific callers can still choose any conservative
+  // value up to this global safety ceiling.
+  const requestedRetries = Number(maxRetries);
+  const retryLimit = Number.isFinite(requestedRetries)
+    ? Math.min(5, Math.max(0, Math.floor(requestedRetries)))
+    : 0;
+  return Number(attempt) < retryLimit
+    && !signal?.aborted
+    && result?.ok === false
+    && Number(result?.status) === 0
+    && result?.warning?.code === 'api-fetch-failed';
+}
+
+/**
+ * Execute a fetch-shaped operation with bounded, abort-aware transport retries.
+ * Timing hooks are injectable so the safety contract can be tested without
+ * sleeping or touching a live provider.
+ */
+export async function runApiTransportRetry(operation, {
+  signal = null,
+  maxRetries = 1,
+  retryDelayMs = 0,
+  jitter = humanCooldown,
+  sleep = sleepUnlessAborted,
+  onRetry = null,
+} = {}) {
+  const MAX_RETRY_DELAY_MS = 60_000;
+  let lastResult = null;
+  for (let attempt = 0; ; attempt++) {
+    // Do not let a cancellation that lands between attempts start another
+    // network operation. This is separate from the post-backoff check: callers
+    // can pass an already-aborted signal before the first attempt as well.
+    if (signal?.aborted) return abortedApiOperationResult();
+    try {
+      lastResult = await operation(attempt);
+    } catch (error) {
+      // A real operation error is a programming/provider-contract failure and
+      // must reach the caller rather than being guessed as transport. If Reset
+      // won the race, however, preserve cancellation's silent terminal path.
+      if (signal?.aborted) return abortedApiOperationResult();
+      throw error;
+    }
+    if (signal?.aborted) return abortedApiOperationResult();
+    if (!shouldRetryApiTransportFailure(lastResult, signal, attempt, maxRetries)) {
+      return lastResult;
+    }
+
+    const configuredDelay = Number(retryDelayMs);
+    const baseDelayMs = Math.min(
+      MAX_RETRY_DELAY_MS,
+      (Number.isFinite(configuredDelay) && configuredDelay > 0 ? configuredDelay : 0) * (2 ** Math.min(attempt, 16)),
+    );
+    const jitteredDelay = jitter(baseDelayMs);
+    const waitMs = Number.isFinite(Number(jitteredDelay))
+      ? Math.min(MAX_RETRY_DELAY_MS, Math.max(0, Math.round(Number(jitteredDelay))))
+      : baseDelayMs;
+    // Retry notifications are observability only. A logger/telemetry callback
+    // must not turn a recoverable transport blip into a rejected source task.
+    try {
+      onRetry?.({ attempt, nextAttempt: attempt + 1, waitMs, result: lastResult });
+    } catch {
+      // Deliberately ignore a diagnostics hook failure.
+    }
+    await sleep(waitMs, signal);
+    if (signal?.aborted) return abortedApiOperationResult();
+  }
 }
 
 /**
@@ -140,6 +236,43 @@ const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
  */
 const LINKEDIN_MAX_RESULTS = 150;
 
+/**
+ * Pacing for LinkedIn's guest *search* API, independent of detail-page
+ * enrichment. An HTTP 429 from `safeApiFetch` is from this HTTP path, whereas
+ * browser enrichment observes login/soft walls instead. Keep this state local
+ * to one source run: it coordinates pages and query modules in that run but
+ * never makes another canvas or provider wait.
+ */
+export function linkedInApiRequestPacing({ requestsIssued = 0 } = {}) {
+  const issued = Math.max(0, Math.floor(Number(requestsIssued) || 0));
+  const checkpointEvery = 3;
+  return {
+    // The first request has no predecessor; every following request gets this
+    // minimum gap, including page-0 of the next query module.
+    requestDelayMs: 6000,
+    delayDue: issued > 0,
+    checkpointEvery,
+    // Pause before request 4, 7, ... so a long multi-query walk does not turn
+    // a sequence of individually-safe gaps into a rolling-window burst.
+    checkpointDue: issued > 0 && issued % checkpointEvery === 0,
+    checkpointCooldownMs: 20000,
+  };
+}
+
+/**
+ * One inter-request pause that satisfies both LinkedIn's normal cadence and a
+ * due rolling-window checkpoint. A checkpoint longer than the ordinary gap is
+ * a substitute, not an additional delay; a future shorter checkpoint cannot
+ * weaken the minimum cadence.
+ */
+export function linkedInPacingWaitMs(pacing = {}) {
+  const requestDelayMs = Math.max(0, Number(pacing?.requestDelayMs) || 0);
+  const checkpointCooldownMs = pacing?.checkpointDue
+    ? Math.max(0, Number(pacing?.checkpointCooldownMs) || 0)
+    : 0;
+  return Math.max(requestDelayMs, checkpointCooldownMs);
+}
+
 // Public endpoint: linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
 // Returns HTML snippets of job cards — no auth, no page rendering needed.
 // Paginates in increments of 25 via the `start` parameter.
@@ -147,12 +280,12 @@ const LINKEDIN_MAX_RESULTS = 150;
 /**
  * Fetch jobs from LinkedIn's public API endpoint (no login needed).
  * Accepts a single query string or an array of up to 3 query strings.
- * Multiple queries are walked sequentially with an inter-query jitter pause
- * and deduplicated by job URL so the same posting isn't returned twice.
+ * Multiple queries are walked sequentially with one source-local request
+ * cadence and deduplicated by job URL so the same posting isn't returned twice.
  *
  * @param {(payload: { completed: number, total: number, count: number, detail: string }) => void} [onProgress]
  *   Optional heartbeat, called at each query boundary and after every page is
- *   fetched+parsed. The multi-minute humanDelay-paced walk below otherwise emits
+ *   fetched+parsed. The multi-minute provider-paced walk below otherwise emits
  *   nothing until the whole function resolves — a false "hung" read downstream
  *   (see fetchHttpSources). Never throws into the scrape.
  */
@@ -162,6 +295,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   const seenUrls = new Set();
   const allJobs = [];
   let warning = null;
+  // Count actual dispatches, not successful pages: a failed request still
+  // consumes LinkedIn's request window. This one counter spans query modules,
+  // eliminating the old shorter inter-query gap after a one-page module.
+  let apiRequestsIssued = 0;
   // Per-query walk outcomes, so a ceiling-truncated source is distinguishable
   // from an exhausted one in the bug report (see the return value below).
   const queryStopReasons = [];
@@ -170,11 +307,6 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     if (signal?.aborted) break;
     // Stop querying if a previous query was blocked — subsequent ones will be too.
     if (warning) break;
-    // Inter-query pause (not before the first query). humanDelay gives a
-    // log-normal spread around the anchor so a multi-query walk doesn't look
-    // like a fixed drumbeat (anchor ≈ the old 3–6s uniform window's midpoint).
-    if (qi > 0) await new Promise(res => setTimeout(res, humanDelay(4500)));
-
     const query = queryList[qi];
     // Query-boundary heartbeat — see onProgress doc above.
     try {
@@ -184,9 +316,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     }
     // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
     // anti-bot, so depth is PACED, not blitzed:
-    //   • a humanDelay log-normal gap (~6s anchor) before each page after the first
-    //     (a fixed 2s drumbeat is a tell — an organically-spread cadence is the
-    //     main signal we control),
+    //   • a human-scale gap before every request after the first plus a small
+    //     rolling-window checkpoint. One counter spans page walks AND query
+    //     modules, so a one-page module cannot make the next module's page 0
+    //     arrive at the old shorter 4.5s cadence,
     //   • an early-exit the moment a page returns no cards, or no card this
     //     QUERY has not already seen (below), so a low-volume query never walks
     //     all 6 pages — we only go deep when results justify it. Freshness is
@@ -202,8 +335,16 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     let unproductiveStreak = 0;
     for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
       if (signal?.aborted) break;
-      // Human-scale log-normal pause before each subsequent page.
-      if (start > 0) await new Promise(res => setTimeout(res, humanDelay(6000)));
+      const pacing = linkedInApiRequestPacing({ requestsIssued: apiRequestsIssued });
+      if (pacing.delayDue) {
+        if (pacing.checkpointDue) {
+          logger.info(`[LinkedIn API] pausing at least ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s after ${apiRequestsIssued} request(s) to drain the guest search window`);
+        }
+        // The checkpoint already exceeds the ordinary minimum. Use exactly one
+        // wait so every third request does not add an unnecessary second gap.
+        await sleepUnlessAborted(humanCooldown(linkedInPacingWaitMs(pacing)), signal);
+        if (signal?.aborted) { stopReason = 'aborted'; break; }
+      }
       const params = new URLSearchParams({
         keywords: query,
         start: String(start),
@@ -218,6 +359,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
       }
 
+      // Count at dispatch, so a timeout/429 is still reflected in the next
+      // decision if the caller keeps this result for diagnostics.
+      apiRequestsIssued++;
       const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
         headers: {
           'Accept': 'text/html',
@@ -368,6 +512,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   return {
     items: allJobs,
     warning,
+    cancelled: !!signal?.aborted,
     gathered: allJobs.length,
     stopReasons: queryStopReasons,
     cap: ceilingBound ? { type: 'source-internal', limit: LINKEDIN_MAX_RESULTS } : null,
@@ -452,8 +597,30 @@ export function linkedInBrowserUnavailableResult(jobs, error) {
   };
 }
 
+/**
+ * LinkedIn detail-page pacing. Guest SEO pages are especially sensitive to a
+ * short burst: the captured failure reached an auth wall after only 3–4 rapid
+ * navigations. Authenticated pages keep the per-request floor but do not need
+ * the guest rolling-window checkpoint.
+ */
+export function linkedInDescriptionPacing({ mode = 'guest', requestsIssued = 0 } = {}) {
+  const issued = Math.max(0, Number(requestsIssued) || 0);
+  const checkpointEvery = mode === 'guest' ? 3 : null;
+  return {
+    requestDelayMs: 2500,
+    checkpointEvery,
+    checkpointDue: Boolean(checkpointEvery && issued > 0 && issued % checkpointEvery === 0),
+    checkpointCooldownMs: mode === 'guest' ? 15000 : 0,
+  };
+}
+
 export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
+  const cancelledResult = () => ({
+    jobs, loginWall: false, loginWallUrl: null, cancelled: true,
+    successCount: 0, attempted: 0, contextRotations: 0,
+  });
+  if (signal?.aborted) return cancelledResult();
 
   // Count jobs without URLs before touching the browser — these are silently
   // skipped in the loop and would otherwise make the success rate look wrong.
@@ -467,7 +634,9 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   // silently and the pass looks hung; instead we return noInternet so the caller
   // can ask the user to switch to a working VPN server. The mid-run detector in
   // the loop catches an uplink that dies partway through.
-  if (!(await probeInternet(signal))) {
+  const internetAvailable = await probeInternet(signal);
+  if (signal?.aborted) return cancelledResult();
+  if (!internetAvailable) {
     logger.warn('[LinkedIn/Browser] Connectivity probe failed before enrichment — egress IP appears offline. Skipping; user should switch VPN to a working server.');
     return { jobs, loginWall: false, loginWallUrl: null, noInternet: true, successCount: 0, attempted: 0, contextRotations: 0 };
   }
@@ -479,6 +648,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
     logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
     return { ...linkedInBrowserUnavailableResult(jobs, err), usedAuthenticated: preferAuthenticated, authenticatedFallback: false };
   }
+  // The probe/browser acquisition can both await while Reset is clicked. The
+  // retained shared browser is not ours to close, but we must not open a new
+  // tab or navigate after cancellation won that race.
+  if (signal?.aborted) return cancelledResult();
   // Browser-process identity for this pass. Returned to the caller so the bug
   // report's egress-IP trail can show whether consecutive passes ran on the SAME
   // browser instance — the discriminator for "browser/session-based limit vs
@@ -515,36 +688,96 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   let mode = preferAuthenticated ? 'authenticated' : 'guest';
   let authenticatedFallback = false;
   let contextRotations = 0;
-  let jobsThisContext = 0; // completed (non-walling) navigations on the current context
+  // A context/page/header setup failure is not a bad listing navigation. It
+  // invalidates the current browser representation, so stop this pass with a
+  // retryable browser-unavailable result instead of repeatedly calling
+  // `page.goto` on a null/stale page for every remaining job.
+  let contextSetupError = null;
+  // This is deliberately NOT the pacing counter. It identifies whether a
+  // freshly-created guest context successfully completed a navigation before a
+  // wall, which is how handleWall distinguishes a session wall from an
+  // IP/fingerprint wall.
+  let jobsThisContext = 0;
   const rotateContext = async () => {
-    await isolatedCtx?.close().catch(() => {});
-    isolatedCtx = await browser.createBrowserContext();
-    page = await isolatedCtx.newPage();
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    if (signal?.aborted) return false;
+    const previousContext = isolatedCtx;
+    // Clear shared references before awaiting close. If cancellation wins while
+    // closing, the caller cannot accidentally reuse a page from that retired
+    // context, and no replacement context/page is created.
+    isolatedCtx = null;
+    page = null;
+    await previousContext?.close().catch(() => {});
+    if (signal?.aborted) return false;
+
+    let nextContext = null;
+    let nextPage = null;
+    try {
+      nextContext = await browser.createBrowserContext();
+      if (signal?.aborted) {
+        await nextContext.close().catch(() => {});
+        return false;
+      }
+      nextPage = await nextContext.newPage();
+      if (signal?.aborted) {
+        await nextContext.close().catch(() => {});
+        return false;
+      }
+      await nextPage.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      if (signal?.aborted) {
+        await nextContext.close().catch(() => {});
+        return false;
+      }
+    } catch (error) {
+      await nextContext?.close().catch(() => {});
+      contextSetupError = error;
+      return false;
+    }
+    isolatedCtx = nextContext;
+    page = nextPage;
     jobsThisContext = 0;
+    return true;
   };
   const applyGuestFallback = async (reason) => {
     if (mode !== 'authenticated') return false;
     logger.info(`[LinkedIn/Browser] authenticated description path unavailable (${reason}); falling back to guest SEO context`);
     await authenticatedPage?.close().catch(() => {});
     authenticatedPage = null;
+    if (signal?.aborted) return false;
     mode = 'guest';
+    if (!(await rotateContext())) return false;
     authenticatedFallback = true;
-    await rotateContext();
     return true;
   };
   try {
     if (mode === 'authenticated') {
+      if (signal?.aborted) return cancelledResult();
       authenticatedPage = await browser.newPage();
+      if (signal?.aborted) {
+        await authenticatedPage.close().catch(() => {});
+        authenticatedPage = null;
+        return cancelledResult();
+      }
       page = authenticatedPage;
       await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      if (signal?.aborted) {
+        await authenticatedPage.close().catch(() => {});
+        authenticatedPage = null;
+        page = null;
+        return cancelledResult();
+      }
     } else {
-      await rotateContext(); // initial context (contextRotations stays 0 — see below)
+      if (!(await rotateContext())) {
+        return signal?.aborted
+          ? cancelledResult()
+          : { ...linkedInBrowserUnavailableResult(jobs, contextSetupError), usedAuthenticated: preferAuthenticated, authenticatedFallback: false };
+      } // initial context (contextRotations stays 0 — see below)
     }
   } catch (err) {
+    await authenticatedPage?.close().catch(() => {});
     logger.warn(`[LinkedIn/Browser] Cannot open tab for enrichment: ${err.message}`);
     await isolatedCtx?.close().catch(() => {});
-    return { jobs, loginWall: false, loginWallUrl: null };
+    if (signal?.aborted) return cancelledResult();
+    return { ...linkedInBrowserUnavailableResult(jobs, err), usedAuthenticated: preferAuthenticated, authenticatedFallback: false };
   }
 
   const enriched = [...jobs];
@@ -583,6 +816,11 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   // index-based value excluded the walling row, included URL-less rows, and
   // became misleading after a context rotation retried the same URL.
   const attemptedIndexes = new Set();
+  // Count actual `page.goto()` dispatches across contexts and representations.
+  // A timeout, redirect-to-wall, or evaluation failure still reached LinkedIn
+  // and must consume the rolling request window. Do NOT reset this at a guest
+  // context rotation: a new cookie jar does not erase an IP/fingerprint limit.
+  let detailRequestsIssued = 0;
 
   // Shared login-wall URL pattern. Applied to both the pre-evaluate finalUrl
   // (HTTP redirects) and the post-evaluate page.url() (JS redirects).
@@ -593,6 +831,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   // this job" (caller does i--; continue). A fresh context that walls before
   // completing any job ⇒ IP-based limit ⇒ stop (rotation is futile).
   const handleWall = async (wallUrl, atIndex) => {
+    if (signal?.aborted) return true;
     if (contextRotations > 0 && jobsThisContext === 0) {
       loginWallAt = atIndex;
       loginWallUrl = wallUrl;
@@ -607,7 +846,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
     }
     logger.info(`[LinkedIn/Browser] guest wall at job ${atIndex + 1} after ${jobsThisContext} job(s) on this context — rotating guest context (#${contextRotations + 1}) and retrying`);
     contextRotations++;
-    await rotateContext();
+    if (!(await rotateContext()) || signal?.aborted) return true;
     consecutiveEvalErrors = 0; // fresh context — reset the eval-error streak
     return false;
   };
@@ -625,7 +864,21 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
       let navOk = false;
 
       try {
+        // Put pacing immediately before dispatch. This covers wall retries and
+        // authenticated→guest fallback paths (which `continue` before the old
+        // end-of-loop wait), while avoiding a duplicate post-navigation wait.
+        const pacing = linkedInDescriptionPacing({ mode, requestsIssued: detailRequestsIssued });
+        if (detailRequestsIssued > 0) {
+          if (pacing.checkpointDue) {
+            logger.info(`[LinkedIn/Browser] pausing at least ${Math.ceil(pacing.checkpointCooldownMs / 1000)}s after ${detailRequestsIssued} LinkedIn detail request(s) to let the rolling request window drain`);
+          }
+          // One wait covers the normal cadence and (when due) its longer
+          // checkpoint; see linkedInPacingWaitMs for the short-checkpoint case.
+          await sleepUnlessAborted(humanCooldown(linkedInPacingWaitMs(pacing)), signal);
+          if (signal?.aborted) break;
+        }
         attemptedIndexes.add(i);
+        detailRequestsIssued++;
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         navOk = true;
 
@@ -637,6 +890,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           if (await applyGuestFallback('authenticated session redirected to an auth page')) {
             i--; continue;
           }
+          if (contextSetupError || signal?.aborted) break;
           if (await handleWall(finalUrl, i)) break;
           i--; continue; // retry this job on the fresh context
         }
@@ -739,11 +993,13 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           if (mode === 'authenticated' && await applyGuestFallback('authenticated page evaluation failed')) {
             i--; continue;
           }
+          if (contextSetupError || signal?.aborted) break;
           // JS-redirect login wall: LinkedIn redirected mid-evaluate.
           if (LOGIN_WALL_RE.test(result.postEvalUrl || '')) {
             if (await applyGuestFallback('authenticated session redirected while reading the page')) {
               i--; continue;
             }
+            if (contextSetupError || signal?.aborted) break;
             if (await handleWall(result.postEvalUrl, i)) break;
             i--; continue; // retry this job on the fresh context
           }
@@ -754,6 +1010,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
             if (await applyGuestFallback('authenticated page evaluation repeatedly failed')) {
               i--; continue;
             }
+            if (contextSetupError || signal?.aborted) break;
             if (await handleWall(result.postEvalUrl || page.url(), i - (consecutiveEvalErrors - 1))) break;
             i--; continue; // retry on the fresh context
           }
@@ -765,6 +1022,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           if (mode === 'authenticated' && await applyGuestFallback('no usable rendered description')) {
             i--; continue;
           }
+          if (contextSetupError || signal?.aborted) break;
           noDesc++;
           // Classify: gutted soft-block page (no title, no JSON-LD) vs a real page
           // that genuinely lacks a description. The former is recoverable.
@@ -796,7 +1054,14 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         const networkLevel = err?.name === 'TimeoutError' || /Navigation timeout|net::ERR_/i.test(msg);
         if (networkLevel) {
           consecutiveNavErrors++;
-          if (consecutiveNavErrors >= NO_INTERNET_NAV_ERRORS && !(await probeInternet(signal))) {
+          const internetAvailable = consecutiveNavErrors >= NO_INTERNET_NAV_ERRORS
+            ? await probeInternet(signal)
+            : true;
+          // `probeInternet` deliberately wakes on cancellation. Check the
+          // owning signal before interpreting a failed probe, otherwise Reset
+          // between its await and this branch can be reported as a dead VPN.
+          if (signal?.aborted) break;
+          if (!internetAvailable) {
             noInternet = true;
             stoppedNoInternetAt = i;
             logger.warn(`[LinkedIn/Browser] No internet on current egress IP — ${consecutiveNavErrors} consecutive network failure(s) and a connectivity probe failed. Stopping (${enriched.length - i - 1} job(s) unattempted); user should switch VPN to a working server.`);
@@ -812,13 +1077,6 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
       // current context's tally — used to detect "fresh context walled immediately".
       if (navOk) jobsThisContext++;
 
-      // Brief pause between navigations — only when there are more jobs to visit.
-      // humanDelay gives a log-normal spread around the anchor (~500ms ±20%)
-      // so the cadence looks organic rather than a fixed drumbeat.
-      if (i < enriched.length - 1 && !signal?.aborted && loginWallAt === null) {
-        const hasMoreWithUrl = enriched.slice(i + 1).some(j => j.url);
-        if (hasMoreWithUrl) await new Promise(r => setTimeout(r, humanDelay(500)));
-      }
     }
   } finally {
     // Closing the isolated context also closes its pages and frees cookies.
@@ -839,6 +1097,11 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${offlineSuffix}${firstFailSuffix}`);
   return {
     jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations, noInternet,
+    cancelled: !!signal?.aborted,
+    browserUnavailable: !!contextSetupError,
+    profileReserved: false,
+    retryable: !!contextSetupError,
+    browserError: contextSetupError?.message || null,
     usedAuthenticated: preferAuthenticated,
     authenticatedFallback,
     // Failure breakdown so a caller can categorise the residual still-empty jobs.
@@ -848,7 +1111,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
     // (soft-blocks don't trip the URL-based wall detector). evalErrors/navErrors
     // are transient transport failures. Without this split a "still empty" count is
     // ambiguous between "nothing to fetch" and "we quit while soft-blocked".
-    noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors,
+    noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, detailRequestsIssued,
     browserGen: browserInfo.generation,
     browserAgeMs: browserInfo.launchedAt ? (Date.now() - browserInfo.launchedAt) : null,
   };
@@ -1580,8 +1843,27 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
 // that could suppress a real employer. Compared lowercased.
 const SPONSORED_EMPLOYERS = new Set(['ai supermarket']);
 
+// Provider payloads are external, untyped input. Do not call arbitrary
+// `toString()` implementations here: a Symbol is safe to stringify but a
+// hostile/object-valued field can throw and take down the whole feed.
+function remoteOkScalarText(value) {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return '';
+}
+
+function remoteOkFeedKey(job) {
+  return remoteOkScalarText(job?.id) || remoteOkScalarText(job?.url);
+}
+
+function remoteOkPostingUrl(value) {
+  const raw = remoteOkScalarText(value).trim();
+  if (!raw) return '';
+  return raw.startsWith('http') ? raw : `https://remoteok.com${raw}`;
+}
+
 export function isRemoteOkSponsoredPlacement(job) {
-  return SPONSORED_EMPLOYERS.has(String(job?.company || '').trim().toLowerCase());
+  return SPONSORED_EMPLOYERS.has(remoteOkScalarText(job?.company).trim().toLowerCase());
 }
 
 /**
@@ -1628,6 +1910,13 @@ export function formatRemoteOkSalary(min, max) {
  * @returns {string[]} lowercase single-word tags, deduped, capped
  */
 export function remoteOkTagsFromQueries(queries, max = REMOTEOK_MAX_TAG_FETCHES) {
+  // Callers may ask for a smaller cap (useful for tests or a conservative UI
+  // mode), but must never expand the provider's global request budget.
+  const requestedMax = Number(max);
+  const limit = Number.isFinite(requestedMax)
+    ? Math.min(REMOTEOK_MAX_TAG_FETCHES, Math.max(0, Math.floor(requestedMax)))
+    : REMOTEOK_MAX_TAG_FETCHES;
+  if (limit === 0) return [];
   const seen = new Set();
   const tags = [];
   for (const query of Array.isArray(queries) ? queries : [queries]) {
@@ -1639,7 +1928,7 @@ export function remoteOkTagsFromQueries(queries, max = REMOTEOK_MAX_TAG_FETCHES)
       if (seen.has(word)) continue;
       seen.add(word);
       tags.push(word);
-      if (tags.length >= max) return tags;
+      if (tags.length >= limit) return tags;
     }
   }
   return tags;
@@ -1647,6 +1936,12 @@ export function remoteOkTagsFromQueries(queries, max = REMOTEOK_MAX_TAG_FETCHES)
 
 /** At most this many extra tag-scoped requests per run (ToS courtesy). */
 const REMOTEOK_MAX_TAG_FETCHES = 3;
+
+// A dropped connection or one 10s timeout is often transient. Retry it once
+// with an abort-aware delay; provider responses such as 403/429 never enter
+// this path because immediate retries would worsen a throttle.
+const REMOTEOK_MAX_TRANSPORT_RETRIES = 1;
+const REMOTEOK_TRANSPORT_RETRY_DELAY_MS = 2000;
 
 /** Words that are never useful RemoteOK tags. */
 const REMOTEOK_TAG_STOPWORDS = new Set([
@@ -1656,14 +1951,80 @@ const REMOTEOK_TAG_STOPWORDS = new Set([
 ]);
 
 async function fetchRemoteOkFeed(url, signal) {
-  const r = await safeApiFetch(url, {
-    headers: {
-      'Accept': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  // Never put a query-derived tag (or the whole request URL) in process logs.
+  // Source logs may be included in support bundles; the structured diagnostic
+  // report already has a deliberately bounded, redacted provenance channel.
+  const feedLabel = url === 'https://remoteok.com/api' ? 'bare feed' : 'tag-scoped feed';
+  let attempts = 0;
+  const result = await runApiTransportRetry(async () => {
+    attempts++;
+    return safeApiFetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+      signal: createTimeoutSignal(signal, apiTimeout('remoteok-api')),
+    }, 'remoteok');
+  }, {
+    signal,
+    maxRetries: REMOTEOK_MAX_TRANSPORT_RETRIES,
+    retryDelayMs: REMOTEOK_TRANSPORT_RETRY_DELAY_MS,
+    onRetry: ({ waitMs, result: failedResult }) => {
+      const evidence = String(failedResult?.warning?.evidence || 'transport failure').slice(0, 240);
+      logger.warn(`[RemoteOK API] ${feedLabel}: ${evidence}; retrying once after ${Math.ceil(waitMs / 1000)}s`);
     },
-    signal: createTimeoutSignal(signal, apiTimeout('remoteok-api')),
-  }, 'remoteok');
-  return r;
+  });
+  if (!result || typeof result !== 'object') {
+    return {
+      ok: false,
+      status: 0,
+      text: '',
+      json: null,
+      attempts,
+      warning: {
+        code: 'remoteok-malformed-response',
+        severity: 'throttle',
+        evidence: `[RemoteOK API] ${feedLabel} returned no fetch result`,
+        suggestion: 'RemoteOK returned an invalid response. Retry later; if it persists, the API response format may have changed.',
+      },
+    };
+  }
+  // A 2xx response with a non-array body is not an empty jobs feed. Treating
+  // it as one hid HTML error pages and schema changes as a successful zero.
+  // This is deliberately *after* the transport retry: malformed provider data
+  // is not a transport failure and must not be immediately re-requested.
+  if (result.ok && !Array.isArray(result.json)) {
+    return {
+      ...result,
+      ok: false,
+      attempts,
+      warning: result.warning || {
+        code: 'remoteok-malformed-response',
+        severity: 'throttle',
+        evidence: `[RemoteOK API] ${feedLabel} returned HTTP ${result.status} with a non-array JSON payload`,
+        suggestion: 'RemoteOK returned an unexpected response. Retry later; if it persists, the API response format may have changed.',
+      },
+    };
+  }
+  // `safeApiFetch` deliberately has specific anti-bot classifications only
+  // for statuses it understands. Do not let another non-2xx status (for
+  // example a provider 500) become a false, warning-less zero-result success.
+  if (!result.ok && !result.warning && !signal?.aborted) {
+    return {
+      ...result,
+      attempts,
+      warning: {
+        code: result.status ? `http-${result.status}` : 'api-fetch-failed',
+        severity: 'throttle',
+        evidence: `[RemoteOK API] ${feedLabel} returned HTTP ${result.status || 'an unknown network error'}`,
+        suggestion: 'RemoteOK did not return a usable feed. Retry later; if it persists, the provider may be unavailable.',
+      },
+    };
+  }
+  if (attempts > 1 && result.ok) {
+    logger.info(`[RemoteOK API] ${feedLabel}: transport retry recovered`);
+  }
+  return { ...result, attempts };
 }
 
 /**
@@ -1678,12 +2039,15 @@ async function fetchRemoteOkFeed(url, signal) {
 export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const r = await fetchRemoteOkFeed('https://remoteok.com/api', signal);
 
-  if (!r.ok) {
+  if (signal?.aborted || r?.aborted) {
+    return { items: [], warning: null, sponsoredDropped: 0, cancelled: true };
+  }
+  if (!r?.ok || r.warning) {
     if (!abortedDuringFetch(signal, r)) {
       if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
-      else logger.warn(`[RemoteOK API] Returned ${r.status}`);
+      else logger.warn(`[RemoteOK API] Returned ${r?.status ?? 'an invalid response'}`);
     }
-    return { items: [], warning: r.warning, sponsoredDropped: 0 };
+    return { items: [], warning: r?.warning || null, sponsoredDropped: 0 };
   }
 
   const data = r.json;
@@ -1693,26 +2057,51 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // feed scopes derived from the already-reported role queries, never posting
   // payloads or descriptions; keeping this separately explains a historical
   // all-rejected result without retaining rejected jobs themselves.
-  const feedProvenance = [{ scope: 'bare', received: jobs.length, added: jobs.length }];
+  const feedProvenance = [{ scope: 'bare', received: jobs.length, added: jobs.length, attempts: r.attempts || 1 }];
+  let feedWarning = null;
   // The bare feed is capped at roughly 100 postings, so widen with a few tag-scoped
   // fetches that return DIFFERENT inventory. Additive only: the bare feed is
   // always the base and is never replaced, and rows are deduped by id/url below.
-  const seenFeedKeys = new Set(jobs.map(j => String(j?.id || j?.url || '')).filter(Boolean));
+  const seenFeedKeys = new Set(jobs.map(remoteOkFeedKey).filter(Boolean));
   for (const tag of remoteOkTagsFromQueries(queries)) {
     if (signal?.aborted) break;
     const tagged = await fetchRemoteOkFeed(`https://remoteok.com/api?tag=${encodeURIComponent(tag)}`, signal);
-    if (!tagged.ok || !Array.isArray(tagged.json)) continue;
+    if (!tagged?.ok || tagged.warning || !Array.isArray(tagged.json)) {
+      if (!abortedDuringFetch(signal, tagged) && !feedWarning) {
+        feedWarning = tagged?.warning || {
+          code: 'remoteok-malformed-response',
+          severity: 'throttle',
+          evidence: '[RemoteOK API] tag-scoped feed returned an invalid response',
+          suggestion: 'RemoteOK returned an unexpected response. The base feed was kept; retry later for complete tag-scoped coverage.',
+        };
+      }
+      // Preserve request accounting even when an optional scoped feed is
+      // unavailable. Omitting it made a partial fan-out indistinguishable from
+      // a run where the derived tag was never requested. Crucially, stop here:
+      // a 403/429/persistent transport failure is provider-wide evidence, and
+      // firing the later optional tags would be an immediate retry by another
+      // name that can extend a throttle.
+      feedProvenance.push({ scope: 'tag', tag, received: 0, added: 0, attempts: tagged?.attempts || 1, unavailable: true, fanoutStopped: true });
+      if (!signal?.aborted) logger.warn('[RemoteOK API] tag-scoped feed unavailable; retaining bare-feed results and stopping optional tag fan-out');
+      break;
+    }
     const received = Math.max(0, tagged.json.length - 1);
     let added = 0;
     for (const job of tagged.json.slice(1)) {
-      const key = String(job?.id || job?.url || '');
+      const key = remoteOkFeedKey(job);
       if (!key || seenFeedKeys.has(key)) continue;
       seenFeedKeys.add(key);
       jobs.push(job);
       added++;
     }
-    feedProvenance.push({ scope: 'tag', tag, received, added });
-    logger.info(`[RemoteOK API] ?tag=${tag} added ${added} posting(s) beyond the bare feed`);
+    feedProvenance.push({ scope: 'tag', tag, received, added, attempts: tagged.attempts || 1 });
+    logger.info(`[RemoteOK API] tag-scoped feed added ${added} posting(s) beyond the bare feed`);
+  }
+  if (signal?.aborted) {
+    // Do not expose/stage a partial corpus from a run the user cancelled. The
+    // HTTP-source wrapper recognizes this envelope and leaves the source card
+    // untouched until the enclosing search abort settles.
+    return { items: [], warning: null, sponsoredDropped: 0, cancelled: true };
   }
 
   // Remove sponsored placements before role admission. RemoteOK's endpoint is
@@ -1727,8 +2116,9 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // scored and shown to the user as if they were jobs.
   const sponsored = [];
   const providerRows = jobs.flatMap(job => {
+    if (!job || typeof job !== 'object' || Array.isArray(job)) return [];
     if (isRemoteOkSponsoredPlacement(job)) {
-      sponsored.push(String(job.position || '?'));
+      sponsored.push(remoteOkScalarText(job.position) || '?');
       return [];
     }
     return [job];
@@ -1739,13 +2129,15 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 
   const feedJobs = providerRows.map((job) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
-    const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
-    const tags = (job.tags || []).join(', ');
-    const url = job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '';
+    const descText = typeof job.description === 'string'
+      ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      : '';
+    const tags = Array.isArray(job.tags) ? job.tags.map(remoteOkScalarText).filter(Boolean).join(', ') : '';
+    const url = remoteOkPostingUrl(job.url);
     return {
-      title: job.position || '',
-      company: job.company || '',
-      location: job.location || 'Remote',
+      title: typeof job.position === 'string' ? job.position : '',
+      company: typeof job.company === 'string' ? job.company : '',
+      location: typeof job.location === 'string' && job.location.trim() ? job.location : 'Remote',
       // Build from whichever bounds are real numbers. The feed has no `salary`
       // key at all, so that branch never fires; and guarding only salary_min
       // meant a max-only posting reported NO salary (bucketed Unspecified and
@@ -1767,12 +2159,12 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       // and sometimes a relative path; only prefix the relative form, else we get
       // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
       url,
-      posted: job.date || '',
+      posted: typeof job.date === 'string' ? job.date : '',
       source: 'remoteok',
       // Trace-only source metadata. The shared whole-feed matcher ignores this
       // field; it is retained solely to show that tags were not admission evidence.
       _relevanceTraceTags: Array.isArray(job.tags)
-        ? job.tags.map(tag => String(tag).slice(0, 50)).slice(0, 20)
+        ? job.tags.map(remoteOkScalarText).filter(Boolean).map(tag => tag.slice(0, 50)).slice(0, 20)
         : [],
     };
   });
@@ -1797,7 +2189,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     items,
     sponsoredDropped: sponsored.length,
     remoteFeedProvenance: feedProvenance,
-    warning: r.warning,
+    warning: feedWarning,
   };
 }
 

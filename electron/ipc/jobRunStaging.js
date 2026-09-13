@@ -19,7 +19,8 @@
  *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
  *                 jobPreferencePlan, canonicalLocation, maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
- *                                queries: { [query]: { lastPage } } } }
+ *                                queries: { [query]: { lastPage } },
+ *                                collectionScopeCaveats?: [{ sourceId, code }] } }
  *     }
  *
  * `stage` values actually written: 'searching' (run start / resume re-entry)
@@ -40,6 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
+import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 
 const MANIFEST_VERSION = 2;
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
@@ -59,6 +61,14 @@ function normalizeNodeId(nodeIdOrOptions) {
     ? nodeIdOrOptions.nodeId
     : nodeIdOrOptions;
   return typeof nodeId === 'string' && nodeId.trim() ? nodeId.trim() : null;
+}
+
+// Resume identity is a parser-produced lowercase SHA-256 only. Keep this at
+// the durable schema boundary as well as renderer/IPC admission, so direct or
+// future callers cannot serialize arbitrary or oversized profile tokens.
+export function normalizeJobRunProfileFingerprint(value) {
+  const fingerprint = typeof value === 'string' ? value.trim() : '';
+  return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : null;
 }
 
 function pathHash(value, length = 24) {
@@ -761,7 +771,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     stage: 'searching',
     inputs: {
       queries,
-      profileFingerprint,
+      profileFingerprint: normalizeJobRunProfileFingerprint(profileFingerprint),
       targetRole,
       jobPreferences: sanitizeJobPreferences(jobPreferences),
       jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
@@ -902,7 +912,13 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
 }
 
 /** Set a source's terminal status ('done' | 'blocked') for the expected run. */
-export async function markSourceStatus(canvasFilePath, sourceId, status, now, { expectedRunId = null, nodeId = null } = {}) {
+export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
+  expectedRunId = null,
+  nodeId = null,
+  // Omitted preserves older/source-only status writes. A supplied value is
+  // normalized at this durable boundary so recovery never trusts provider data.
+  collectionScopeCaveats = undefined,
+} = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
@@ -911,6 +927,9 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now, { 
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
+    if (collectionScopeCaveats !== undefined) {
+      src.collectionScopeCaveats = normalizeCollectionScopeCaveats(collectionScopeCaveats);
+    }
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] markSourceStatus failed: ${e?.message || e}`); }

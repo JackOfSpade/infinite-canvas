@@ -5,12 +5,18 @@ import { applyBugReportCode } from '../utils/bugReportCodes';
 import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
 import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
+import { collectCompactJobBoardTopology } from '../utils/jobBoardReportTopology';
 import { useIsMountedRef } from './useIsMountedRef';
 
 function reportBoardCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
     ? value
     : null;
+}
+
+function safeReportField(value, key) {
+  try { return value?.[key]; }
+  catch { return undefined; }
 }
 
 export function useIssueReporter({
@@ -220,40 +226,15 @@ export function useIssueReporter({
       // node-dump detail. Preserve a bounded, non-job-content summary so JOBS
       // and RECOVERY reports can still say that collection finished while a
       // connected board is intentionally hiding an obsolete cascade.
-      const nodeTypeById = new Map((allNodesDeep || []).map(node => [node?.id, node?.type]));
-      const connectedSourceHubIdsByBoard = new Map();
-      // Edges are scoped to the currently visible canvas.  That is still useful
-      // corroboration for a board on this level; the board's persisted combine
-      // signature remains the durable source provenance when a nested canvas
-      // is being reported from another level.
-      for (const edge of edges || []) {
-        const boardId = nodeTypeById.get(edge?.source) === 'jobboard'
-          ? edge.source
-          : nodeTypeById.get(edge?.target) === 'jobboard'
-            ? edge.target
-            : null;
-        const otherId = boardId === edge?.source ? edge?.target : edge?.source;
-        if (!boardId || nodeTypeById.get(otherId) !== 'jobhub') continue;
-        if (!connectedSourceHubIdsByBoard.has(boardId)) connectedSourceHubIdsByBoard.set(boardId, new Set());
-        connectedSourceHubIdsByBoard.get(boardId).add(otherId);
-      }
-      // Independent of anything the board recorded about itself: how many job
-      // cards for it are ACTUALLY on the canvas. `resultCount` and
-      // `mergeStats.unique` are both written from the same merge output, so
-      // comparing them can never fail; this is the only number the report can
-      // check the board's claim against. Board filters and collapsed groups set
-      // `hidden` rather than removing nodes, so this is stable across view state.
-      const renderedCardsByBoard = new Map();
-      for (const node of allNodesDeep || []) {
-        if (node?.type !== 'jobcard') continue;
-        const owner = node?.data?.hubId;
-        if (typeof owner !== 'string' || !owner) continue;
-        renderedCardsByBoard.set(owner, (renderedCardsByBoard.get(owner) || 0) + 1);
-      }
-      const allJobBoardStates = (allNodesDeep || [])
-        .filter(node => node?.type === 'jobboard')
-        .map(node => {
-          const rawClear = node.data?.clearProvenance;
+      // Compact JOBS/RECOVERY Board facts use the same canvas-local graph rule
+      // as the FULL Board diagnostic. A flattened id map plus root-only edges
+      // cannot prove a nested Board's source relation and can cross-link two
+      // imported duplicate ids in sibling groups.
+      const compactBoardTopology = collectCompactJobBoardTopology(nodes, edges);
+      const allJobBoardStates = compactBoardTopology.boards
+        .map(({ node, id, scope, connectedSourceHubIds, renderedCardCount }) => {
+          const data = safeReportField(node, 'data');
+          const rawClear = safeReportField(data, 'clearProvenance');
           // Keep only the compact provenance needed to distinguish an explicit
           // user clear from a board that was never combined. The old signature
           // is bounded and re-validated by the main-process report renderer.
@@ -283,15 +264,16 @@ export function useIssueReporter({
               }
             : null;
           return {
-            renderedCardCount: renderedCardsByBoard.get(node.id) ?? 0,
-            id: typeof node.id === 'string' ? node.id : '',
-            hubState: typeof node.data?.hubState === 'string' ? node.data.hubState : 'empty',
-            resultCount: reportBoardCount(node.data?.resultCount),
-            stale: node.data?.stale === true,
-            staleReason: typeof node.data?.staleReason === 'string' ? node.data.staleReason.slice(0, 120) : null,
-            combineSignature: typeof node.data?.combineSignature === 'string' ? node.data.combineSignature.slice(0, 4_000) : null,
-            mergeUnique: reportBoardCount(node.data?.mergeStats?.unique),
-            connectedSourceHubIds: [...(connectedSourceHubIdsByBoard.get(node.id) || [])].slice(0, 25),
+            renderedCardCount,
+            id,
+            diagnosticScope: scope,
+            hubState: typeof safeReportField(data, 'hubState') === 'string' ? safeReportField(data, 'hubState') : 'empty',
+            resultCount: reportBoardCount(safeReportField(data, 'resultCount')),
+            stale: safeReportField(data, 'stale') === true,
+            staleReason: typeof safeReportField(data, 'staleReason') === 'string' ? safeReportField(data, 'staleReason').slice(0, 120) : null,
+            combineSignature: typeof safeReportField(data, 'combineSignature') === 'string' ? safeReportField(data, 'combineSignature').slice(0, 4_000) : null,
+            mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique')),
+            connectedSourceHubIds: [...new Set(connectedSourceHubIds)].slice(0, 25),
             clearProvenance,
           };
         });
@@ -323,6 +305,7 @@ export function useIssueReporter({
           currentJobHubIds,
           jobBoardStates: allJobBoardStates.slice(0, 25),
           jobBoardStateCount: allJobBoardStates.length,
+          jobBoardStateOmissions: compactBoardTopology.omissions,
         } : null,
         nodes: reportNodes,
         edges,

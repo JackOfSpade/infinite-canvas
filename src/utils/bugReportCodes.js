@@ -331,6 +331,17 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
   },
 
+  JOBBOARD: {
+    label: 'Job Board Admission & Recovery',
+    description: 'Job Board selector/admission audit — connected Job Search readiness, interrupted Board ownership/recovery, fresh-career-import admission, and login-preflight timing. Keeps the redacted nodes, edges, and mounted selector state required to explain a disabled Board action while omitting unrelated drawings, layout internals, and media snapshots.',
+    logFilter: line =>
+      /\[JobBoard\]|\[JobSearch\]|job.?board|(?:search|combine).*(?:selected|resume|recover|admission|ready|unready)|career.?import|fresh.?import|preflight|login|log.?in|logged|sign.?in|auth|session|verify|verified|not connected|connected|glassdoor|indeed|ziprecruiter|linkedin|dice/i.test(line),
+    // The Board diagnostic needs the live graph and mounted selector snapshot.
+    // Keep `nodes`, `edges`, and `nodeComponentStates`; only unrelated bulky
+    // visual/layout payloads are omitted.
+    excludeSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState', 'jobAuditDetail'],
+  },
+
   MARKET: {
     label: 'Marketplace Pricing Pipeline',
     description: 'Sell-hub pricing audit — photo analysis, multi-source comp scrape (per-source counts, warnings, blocks), captcha resolve outcomes, AI synthesis (FMV, match quality), and platform-fit results. Drops heavy node/edge/media dumps and narrows the event log to marketplace pipeline events (the marketplaceTelemetry section is always kept).',

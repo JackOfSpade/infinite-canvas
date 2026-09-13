@@ -176,6 +176,12 @@ function sanitizeJobHubClone(data) {
   delete data.manualAiCleanupReceipts;
   delete data.terminalFinalizationRecovery;
   delete data.queuedModuleRun;
+  // Fresh-import capability is node-scoped user intent, not reusable career
+  // data. A copy (including a nested/group copy that later remaps its id) must
+  // never be able to start provider work from the original node's import.
+  delete data.careerImportGeneration;
+  delete data.careerImportFreshCapability;
+  delete data.careerImportConsumption;
   if (!NONTERMINAL_JOB_HUB_STATES.has(state)) return;
   const hasCompletedResults = Array.isArray(data.scoredJobs) && data.scoredJobs.length > 0;
   data.hubState = hasCompletedResults ? 'done' : 'empty';
@@ -265,6 +271,10 @@ export function cloneNode(original, dx = 40, dy = 40) {
       || clone.data.selectedSearchModuleIds.length > 0) {
       delete clone.data.selectedSearchModuleIds;
     }
+    // Execution order, like a nonempty selection, references the original
+    // Board's connections. Group duplication remaps it after every child id is
+    // allocated; a standalone Board clone has no compatible Search ids.
+    delete clone.data.searchExecutionOrder;
     for (const key of CLONED_JOB_BOARD_RUN_KEYS) delete clone.data[key];
   } else if (clone.data?.hubState) {
     if (clone.data.hubState === 'researching') {

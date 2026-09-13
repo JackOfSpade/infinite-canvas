@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, generateMarkdown, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 
 const JOB_TASKS = [
   'career-file-extract',
@@ -1203,6 +1204,57 @@ export default [
       const run = ipcMain.__getInvokeHandler('non-api-lifecycle-report-test')({ sender }, { nodeId: 'handoff-report-node' });
       await new Promise(resolve => setImmediate(resolve));
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const pendingLifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
+      const matching = pendingManualHandoffsForActiveTasks([{
+        nodeId: 'handoff-report-node',
+        senderId: sender.id,
+        taskDetails: [{ channel: 'non-api-lifecycle-report-test' }],
+      }], pendingLifecycle);
+      const wrongChannel = pendingManualHandoffsForActiveTasks([{
+        nodeId: 'handoff-report-node',
+        senderId: sender.id,
+        taskDetails: [{ channel: 'different-ipc-task' }],
+      }], pendingLifecycle);
+      const wrongRun = pendingManualHandoffsForActiveTasks([{
+        nodeId: 'handoff-report-node',
+        senderId: sender.id,
+        taskDetails: [{ channel: 'non-api-lifecycle-report-test', manualAiRunId: 'different-workflow' }],
+      }], [{
+        nodeId: 'handoff-report-node', windowId: sender.id,
+        channel: 'non-api-lifecycle-report-test', runId: 'actual-workflow', outcome: 'pending',
+      }]);
+      const mixedControllers = pendingManualHandoffsForActiveTasks([{
+        nodeId: 'handoff-report-node',
+        senderId: sender.id,
+        taskDetails: [
+          { channel: 'non-api-lifecycle-report-test', manualAiRunId: 'actual-workflow' },
+          { channel: 'unrelated-ipc-task', manualAiRunId: null },
+        ],
+      }], [{
+        nodeId: 'handoff-report-node', windowId: sender.id,
+        channel: 'non-api-lifecycle-report-test', runId: 'actual-workflow', outcome: 'pending',
+      }]);
+      const pendingReport = generateMarkdown({
+        description: 'A manual taxonomy handoff is waiting.', filterCode: 'FULL',
+        filterStats: {
+          hasJobNodes: true, hasSellNodes: false,
+          currentNodeIds: ['handoff-report-node', 'handoff-report-board'], omittedSections: [],
+        },
+        nodes: [
+          { id: 'handoff-report-node', type: 'jobhub', data: {} },
+          {
+            id: 'handoff-report-board', type: 'jobboard', data: {
+              boardScanResume: {
+                phase: 'searches', selectedSearchModuleIds: ['handoff-report-node'],
+                completedSourceRuns: {}, incompleteSearches: [],
+                activeSourceIds: ['handoff-report-node', 'other-active-source'],
+                awaitingSourceResolutions: [{ sourceId: 'handoff-report-node' }, { sourceId: 'other-pending-source' }],
+              },
+            },
+          },
+        ],
+        edges: [], drawings: [], nodeInternals: [], nodeComponentStates: [], frontEndState: {}, eventLogs: [],
+      }, sender.id).markdown;
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
       const rejected = await submit({ sender }, { requestId: request.requestId, response: '{}' });
       const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
@@ -1222,6 +1274,14 @@ export default [
         && receipt?.attemptKind === 'partial-recovery' && receipt?.rootBatchSize === 24
         && receipt?.replays === 1 && receipt?.outcome === 'accepted' && receipt?.acceptedAt && receipt?.settledAt,
       'the lifecycle records initial delivery, validation rejection/reissue, remount replay, acceptance, and final settlement');
+      assert(matching.get('handoff-report-node')?.[0]?.task === 'job-taxonomy-classify'
+        && wrongChannel.size === 0 && wrongRun.size === 0 && mixedControllers.size === 0
+        && pendingReport.includes('⏳ awaiting manual response: job-taxonomy-classify')
+        && pendingReport.includes('IPC `non-api-lifecycle-report-test`')
+        && pendingReport.includes('Board `…handoff-` searches · 1 selected · 0 completed · 2 active · 2 awaiting source resolution · this source active · this source awaiting resolution')
+        && !pendingReport.includes('handoff-report-board')
+        && !pendingReport.includes('TOP_SECRET_PROMPT'),
+      'an active controller is correlated only to the same-node, same-channel pending manual handoff, and FULL exposes only its redacted Board/source progress');
       assert(markdown.includes('Non-API AI Handoff Lifecycle')
         && markdown.includes('1 paste rejection(s)')
         && markdown.includes('1 reissued')

@@ -29,10 +29,18 @@ function durableManualAiRunIdsForWorkflowNode(node) {
   return [...new Set([
     data.manualAiResume?.runId,
     data.boardScanResume?.combineManualAiRunId,
+    ...(data.boardScanResume?.activeSourceManualAiRunIds
+      && typeof data.boardScanResume.activeSourceManualAiRunIds === 'object'
+      ? Object.values(data.boardScanResume.activeSourceManualAiRunIds)
+      : []),
     data.boardScanResume?.cancellationCleanup?.manualAiRunId,
     ...(Array.isArray(data.boardScanResume?.cancellationCleanup?.manualAiRunIds)
       ? data.boardScanResume.cancellationCleanup.manualAiRunIds
       : []),
+    ...Object.values(data.boardScanResume?.cancellationCleanupsBySource || {}).flatMap(cleanup => [
+      cleanup?.manualAiRunId,
+      ...(Array.isArray(cleanup?.manualAiRunIds) ? cleanup.manualAiRunIds : []),
+    ]),
     data.boardScanResume?.recoverableFailure?.manualAiRunId,
     ...(Array.isArray(data.boardCancellation?.manualAiRunIds)
       ? data.boardCancellation.manualAiRunIds
@@ -125,22 +133,28 @@ export function collectDeletedBoardChildClaims(nodes) {
   const visit = (items) => {
     for (const node of items || []) {
       const plan = node?.type === 'jobboard' ? node.data?.boardScanResume : null;
+      const activeSourceIds = [...new Set([
+        ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+        plan?.activeSourceId,
+      ].filter(Boolean))];
       if (
         plan?.version === 1
         && plan.phase === 'searches'
         && node.id
         && plan.boardRunId
-        && plan.activeSourceId
+        && activeSourceIds.length > 0
       ) {
-        const key = `${node.id}\u0000${plan.boardRunId}\u0000${plan.activeSourceId}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          claims.push({
-            orchestratorNodeId: node.id,
-            boardRunId: plan.boardRunId,
-            sourceId: plan.activeSourceId,
-            plan,
-          });
+        for (const sourceId of activeSourceIds) {
+          const key = `${node.id}\u0000${plan.boardRunId}\u0000${sourceId}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            claims.push({
+              orchestratorNodeId: node.id,
+              boardRunId: plan.boardRunId,
+              sourceId,
+              plan,
+            });
+          }
         }
       }
       visit(node?.data?.canvasData?.nodes);

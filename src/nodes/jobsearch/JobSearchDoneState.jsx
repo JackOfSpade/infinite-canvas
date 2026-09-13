@@ -6,6 +6,7 @@ import { JobCollectionLimitsControl } from '../../components/JobCollectionLimits
 import { JobPlatformSelectionControl } from '../../components/JobPlatformSelectionControl';
 import { JobSearchLocationFields } from '../../components/JobSearchLocationFields';
 import { formatCompletionTimestamp } from '../../utils/completionTimestamp';
+import { hasGlassdoorCountryScopeCaveat } from '../../utils/jobCollectionScopeCaveats';
 
 // e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
@@ -34,6 +35,10 @@ export function JobSearchDoneState({
   // A connected Job Board owns fresh-search admission and queueing. This card
   // remains the editor for its source/search settings and saved results.
   managedByJobBoard = false,
+  // A disconnected Board can retain a durable recovery plan while it finishes
+  // cancellation or rollback. It owns launch actions, but is deliberately not
+  // presented as a live connection.
+  boardRecoveryPending = false,
   // Action props
   onRerun = null,
   // Reassesses the saved listings only; it does not scrape or run the
@@ -70,8 +75,13 @@ export function JobSearchDoneState({
   preferenceEvaluation = null,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
+  // Non-gating source limitations carried with completed results. These remain
+  // visible after source cards are reaped and must not be confused with a
+  // warning that pauses or skips scoring.
+  collectionScopeCaveats = [],
   // A completed run with no eligible results replaces the old result set.
   rerunOutcome = null,
+  reanalysisNotice = null,
   resultDisposition = null,
   lastCompletedRunAt = null,
 }) {
@@ -84,6 +94,7 @@ export function JobSearchDoneState({
   const skippedAi = aiSkipped || collectionOnly || testMode;
   const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
   const noNewResults = rerunOutcome === 'no-new-results';
+  const glassdoorCountryScopeUnenforced = hasGlassdoorCountryScopeCaveat(collectionScopeCaveats);
   const validCount = (value) => (
     typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
   );
@@ -190,10 +201,24 @@ export function JobSearchDoneState({
         <div className="flex items-start gap-1.5 mt-2 px-2 py-1.5 rounded-md bg-indigo-500/10 border border-indigo-500/15 w-full">
           <LayoutGrid size={11} className="text-indigo-300/70 shrink-0 mt-0.5" />
           <p className="text-indigo-200/70 text-[10px] leading-snug">
-            {managedByJobBoard
-              ? <>Use the connected <span className="font-medium">Job Board Module</span> to refresh and merge results.</>
+            {boardRecoveryPending
+              ? <>A previous <span className="font-medium">Job Board</span> recovery is settling. Results stay available; direct search actions return when it finishes or is cancelled.</>
+              : managedByJobBoard
+              ? <>Use the connected <span className="font-medium">Job Board Module</span> to reuse and merge these completed results. To search again, manually clear career data and import fresh files in Job Search first.</>
               : <>Connect a <span className="font-medium">Job Board Module</span> to view & merge these results.</>}
           </p>
+        </div>
+      )}
+
+      {glassdoorCountryScopeUnenforced && (
+        <div className="w-full mt-1 rounded-md border border-amber-400/25 bg-amber-400/5 px-2 py-1.5 text-[9px] leading-snug text-amber-100/80" role="status">
+          <span className="font-medium">Glassdoor country scope was not enforceable.</span> Its country-level results may follow this machine&apos;s browsing region. Set a city, state, or province to scope Glassdoor results.
+        </div>
+      )}
+
+      {reanalysisNotice && (
+        <div className="w-full mt-1 rounded-md border border-amber-400/20 bg-amber-400/5 px-2 py-1.5 text-[9px] leading-snug text-amber-100/75" role="status">
+          Saved-job re-evaluation did not finish. Your existing results are still available to the Job Board. Try re-evaluating again when ready.
         </div>
       )}
 
@@ -223,7 +248,11 @@ export function JobSearchDoneState({
           )}
           {managedByJobBoard ? (
             <p className="px-2 py-1 text-center text-[10px] leading-snug text-blue-200/55">
-              Fresh searches are queued from the connected Job Board.
+              The connected Job Board reuses these completed results. To start a fresh search, manually choose Clear career data and import fresh files in Job Search first; the Board can then start it.
+            </p>
+          ) : boardRecoveryPending ? (
+            <p className="px-2 py-1 text-center text-[10px] leading-snug text-blue-200/55">
+              A previous Job Board recovery is settling. Direct search actions return when it finishes or is cancelled.
             </p>
           ) : onRerun ? (
             <button
@@ -271,7 +300,9 @@ export function JobSearchDoneState({
               aria-describedby={targetRoleHelpId}
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
             />
-            <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role on the next {managedByJobBoard ? 'Board scan' : 're-run'}.</span>
+            <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">{managedByJobBoard
+              ? 'Leave blank to generate best-fit search variations. For a fresh Board search, manually choose Clear career data and import fresh files in Job Search first; the Board then starts it with this role.'
+              : 'Leave blank to generate best-fit search variations. Set a role to search that exact role on the next re-run.'}</span>
           </label>
           <label className="flex flex-col gap-1 text-[10px] text-white/40">
             <span>Job Preferences <span className="text-white/25">(optional)</span></span>
@@ -286,7 +317,9 @@ export function JobSearchDoneState({
               className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25 leading-snug"
             />
             <span id={preferencesHelpId} className="text-[9px] leading-snug text-white/25">
-              Applies on the next {managedByJobBoard ? 'Board scan' : 're-run'} and saved-job re-evaluation. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
+              {managedByJobBoard
+                ? 'Saved-job re-evaluation uses these preferences. For a fresh Board search, manually choose Clear career data and import fresh files in Job Search first; the Board then starts it. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.'
+                : 'Applies on the next re-run and saved-job re-evaluation. Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.'}
             </span>
           </label>
           <JobSearchLocationFields

@@ -23,6 +23,15 @@ export function JobSearchSourcesReadyState({
   onScoreCurrent,
   onClearCareerFiles = null,
 }) {
+  // A Board-owned recovery may leave the Search visible while the Board is
+  // settling its durable plan. In that state the Search handler correctly
+  // rejects a direct score request, so do not promise an action that cannot
+  // run. The exact paused Board continuation still receives its callback and
+  // remains able to finish scoring after its source decisions are resolved.
+  const canScoreCurrent = !locked
+    && jobsAvailable > 0
+    && typeof onScoreCurrent === 'function';
+
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1.5">
       <ShieldAlert size={20} className="text-amber-400/80 mb-1" />
@@ -35,14 +44,16 @@ export function JobSearchSourcesReadyState({
           : 'Some sources need attention before we score results.'}
       </p>
       <p className="text-white/30 text-[10px] text-center px-2 leading-snug mt-1">
-        Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed. Or click below to score what we have now.
+        {canScoreCurrent
+          ? 'Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed. Or click below to score what we have now.'
+          : 'Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed.'}
       </p>
 
       {resumeSummary && (
         <p className="text-white/20 text-[10px] text-center mt-1">{resumeSummary}</p>
       )}
 
-      {!locked && jobsAvailable > 0 && (
+      {canScoreCurrent && (
         <button
           onClick={onScoreCurrent}
           onPointerDown={(e) => e.stopPropagation()}

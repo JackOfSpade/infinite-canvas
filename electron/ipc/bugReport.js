@@ -21,13 +21,14 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
-import { isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
-import { shortId, redactReportUrl, redactReportUrlsInText, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { getNonApiAiHandoffLifecycle, isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
+import { shortId, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
-import { buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
+import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
+import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -54,6 +55,20 @@ function truncateDiagnosticText(value, max) {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+// Keep Node Diagnostics aligned with JobCardNode's Open Listing action. The
+// report needs only the effective route class, never the raw Google identity
+// URL (whose query/fragment can contain opaque provider tokens).
+function effectiveJobCardLinkState(data) {
+  try {
+    const raw = data?.url || data?.googleCardUrl;
+    const effective = normalizeJobListingExternalUrl(data);
+    if (!effective) return 'missing';
+    return isGoogleJobsInternalUrl(raw) ? 'Google fallback' : 'direct';
+  } catch {
+    return 'missing';
+  }
 }
 
 // These values contain user-authored preference text or research evidence.
@@ -992,8 +1007,20 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       // distinguish an intentional hidden prior result from a ghost board.
       if (n.type === 'jobboard') {
         previewParts.push(`stale: ${d.stale ? 'true' : 'false'}`);
-        if (d.staleReason) previewParts.push(`staleReason: ${truncateDiagnosticText(d.staleReason, 100)}`);
-        if (d.combineSignature != null) previewParts.push(`combineSignature: ${String(d.combineSignature).slice(0, 160) || '∅'}`);
+        // The renderer normally stores a count-only stale reason. Do not
+        // export arbitrary persisted text here: imported/malformed Board data
+        // could otherwise carry a query, URL token, or custom opaque id.
+        const staleReason = typeof d.staleReason === 'string'
+          && /^(?:connections changed|(?:\d+ (?:disconnected|added|updated|updating))(?: · \d+ (?:disconnected|added|updated|updating))*)$/.test(d.staleReason)
+          ? d.staleReason
+          : null;
+        if (staleReason) previewParts.push(`staleReason: ${staleReason}`);
+        else if (d.staleReason) previewParts.push('staleReason: recorded (details withheld)');
+        // A combine signature embeds source hub ids and fingerprints. It is
+        // useful as a presence fact here, but the raw serialized value belongs
+        // nowhere in Node Diagnostics; the dedicated Board section correlates
+        // it using redacted identities instead.
+        if (d.combineSignature != null) previewParts.push('combineSignature: present (opaque source provenance)');
       }
       if (d.errorMessage) previewParts.push(`err: ${truncateDiagnosticText(d.errorMessage, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
@@ -1026,6 +1053,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
       if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
+      if (n.type === 'jobcard') previewParts.push(`link: ${effectiveJobCardLinkState(d)}`);
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
       if (d.url) previewParts.push(`url: ${redactReportUrl(d.url).slice(0, 50)}`);
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
@@ -1318,6 +1346,39 @@ function buildLastSaveErrorMarkdown(lastSaveError) {
   return lastSaveErrorMarkdown;
 }
 
+// A node may own several IPC controllers. Match the exact originating channel
+// as well as node id, so a pending copy/paste prompt suppresses the stale-task
+// warning only for the controller actually awaiting it.
+export function pendingManualHandoffsForActiveTasks(tasks, lifecycles) {
+  const pending = Array.isArray(lifecycles)
+    ? lifecycles.filter(item => item?.nodeId && !item?.settledAt && item?.outcome === 'pending')
+    : [];
+  const byNode = new Map();
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const details = Array.isArray(task?.taskDetails)
+      ? task.taskDetails
+      : (Array.isArray(task?.channels) ? task.channels.map(channel => ({ channel })) : []);
+    if (details.length === 0) continue;
+    const matchesByDetail = details.map(detail => pending.filter(item => (
+      item.nodeId === task.nodeId
+      && typeof item.channel === 'string'
+      && item.channel === detail?.channel
+      && (task.senderId == null || item.windowId == null || item.windowId === task.senderId)
+      // Newer requests carry a renderer-created workflow id through both
+      // records. Require it when the handoff has one; only legacy requests
+      // without a run id may use the node/channel fallback.
+      && (item.runId ? item.runId === detail?.manualAiRunId : !detail?.manualAiRunId)
+    )));
+    // The table is one row per node. Only suppress its hang hint when EVERY
+    // active controller has an exact pending handoff; otherwise a simultaneous
+    // unrelated controller could be silently masked by the manual wait.
+    if (matchesByDetail.some(matches => matches.length === 0)) continue;
+    const matches = [...new Map(matchesByDetail.flat().map(item => [item.requestId || `${item.nodeId}:${item.task}:${item.issuedAt}`, item])).values()];
+    byNode.set(task.nodeId, matches);
+  }
+  return byNode;
+}
+
 function buildActiveTasksMarkdown(reportWindowId) {
   let activeTasksMarkdown = '';
     const allTasks = snapshotActiveNodeTasks() || [];
@@ -1328,6 +1389,9 @@ function buildActiveTasksMarkdown(reportWindowId) {
       ? allTasks
       : snapshotActiveNodeTasks(reportWindowId);
     const foreignCount = allTasks.length - localTasks.length;
+    let handoffLifecycles = [];
+    try { handoffLifecycles = getNonApiAiHandoffLifecycle({ windowId: reportWindowId }); } catch { /* optional diagnostic */ }
+    const manualHandoffsByNode = pendingManualHandoffsForActiveTasks(localTasks, handoffLifecycles);
     // Listing status checks serialize through a global FIFO lock (statusCheckLock)
     // — they do NOT register an AbortController task, so they're invisible above.
     // Surface the queue depth so "two Check-Alls feel stuck behind each other"
@@ -1390,6 +1454,8 @@ function buildActiveTasksMarkdown(reportWindowId) {
       const rows = localTasks
         .map(t => {
           const last = lastActivityForNode(t.nodeId);
+          const matchingHandoffs = manualHandoffsByNode.get(t.nodeId) || [];
+          const manualWait = matchingHandoffs.length > 0;
           // Suspect a hang when the node has shown no signal past the hint window
           // (or none at all) while a task is still registered and aging.
           // A scrape the user deliberately paused is silent BY REQUEST. Flagging
@@ -1397,8 +1463,14 @@ function buildActiveTasksMarkdown(reportWindowId) {
           // not exist, so the pause state overrides the staleness heuristic.
           let scrapePaused = false;
           try { scrapePaused = getManualScraperTelemetry?.()?.paused === true && jobsTel?.nodeId === t.nodeId; } catch { /* ignore */ }
-          const suspect = !scrapePaused && (last == null ? t.oldestAgeMs : last.ms) > HUNG_HINT_MS;
-          const lastCell = last == null ? 'no node activity recorded' : `${fmtAge(last.ms)} ago (${last.label})`;
+          const suspect = !scrapePaused && !manualWait && (last == null ? t.oldestAgeMs : last.ms) > HUNG_HINT_MS;
+          const handoffTasks = [...new Set(matchingHandoffs.map(item => String(item.task || 'unknown').replace(/[|`]/g, "'")))].join(', ');
+          const newestHandoffIssuedAt = matchingHandoffs.reduce((latest, item) => Math.max(latest, Number(item?.issuedAt) || 0), 0);
+          const handoffAge = newestHandoffIssuedAt ? fmtAge(Math.max(0, Date.now() - newestHandoffIssuedAt)) : 'unknown age';
+          const activity = last == null ? 'no node activity recorded' : `${fmtAge(last.ms)} ago (${last.label})`;
+          const lastCell = manualWait
+            ? `${activity} · ⏳ awaiting manual response: ${handoffTasks} (${handoffAge})`
+            : activity;
           const flag = scrapePaused ? ' ⏸️ paused by user' : suspect ? ' ⚠️ possibly hung' : '';
           const chans = t.channels?.length ? t.channels.join(', ') : '—';
           return `| \`${shortId(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
@@ -1413,6 +1485,9 @@ function buildActiveTasksMarkdown(reportWindowId) {
 > the newest signal naming this node, with the signal that supplied it in
 > parentheses (a main-process log line, or the run's own progress heartbeat —
 > most scraper log lines carry no nodeId, so logs alone understate activity).
+> A matching pending Non-API AI handoff on the same node and IPC channel is
+> reported as **awaiting manual response**, not hung; see its redacted receipt
+> below for delivery and Board-progress context.
 > A large age + stale activity (⚠️ possibly hung, >3m of silence) is the
 > signature of a stuck task — e.g. a request hanging on a network call that
 > never returns.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
@@ -2315,7 +2390,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // needs the receipt because its plan/classify steps use this manual handoff.
   let nonApiHandoffMarkdown = '';
   if (isFullReport || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS') || reportCodes.has('TAXONOMY')) {
-    try { nonApiHandoffMarkdown = buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId); }
+    try { nonApiHandoffMarkdown = buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId, nodes); }
     catch { /* never break the report on diagnostic failure */ }
   }
 
@@ -2339,8 +2414,9 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // This compact reconciliation carries the summary counts and status facts;
   // detailed evidence remains in the pipeline immediately below.
   let jobCompletionAssessmentMarkdown = '';
+  let jobBoardDiagnosticsMarkdown = '';
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
-    const jobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
+    const rawJobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
       ? payload.filterStats.jobBoardStates
       : (nodes || []).filter(node => node?.type === 'jobboard').map(node => {
           const rawClear = node.data?.clearProvenance;
@@ -2381,17 +2457,85 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
             clearProvenance,
           };
         });
+    // filterStats can be assembled before edge state is refreshed. The live
+    // canvas graph is authoritative for direct Board↔Job Search admission, so
+    // retain any supplied provenance but always add current connected sources.
+    // Root-level ids can be duplicated in hand-edited/imported canvas data.
+    // Keep every owner so a root edge is only treated as a completion fact when
+    // both endpoints resolve uniquely; Map(id -> last node) would otherwise
+    // create a false Board↔Search correlation.
+    const nodesById = new Map();
+    for (const node of (nodes || [])) {
+      if (!node?.id) continue;
+      const peers = nodesById.get(node.id) || [];
+      peers.push(node);
+      nodesById.set(node.id, peers);
+    }
+    const connectedSourcesByBoard = new Map();
+    // Direct Board↔Search connectivity is a cheap exact relation. Scan the
+    // complete graph so a valid edge after unrelated canvas edges is never
+    // silently omitted from completion correlation.
+    for (const edge of (edges || [])) {
+      const sourceEntries = nodesById.get(edge?.source);
+      const targetEntries = nodesById.get(edge?.target);
+      if (sourceEntries?.length !== 1 || targetEntries?.length !== 1) continue;
+      const source = sourceEntries[0];
+      const target = targetEntries[0];
+      const board = source?.type === 'jobboard' ? source : target?.type === 'jobboard' ? target : null;
+      const peer = board === source ? target : board === target ? source : null;
+      if (!board?.id || !peer?.id || (peer.type !== 'jobhub' && peer.type !== 'jobsearch')) continue;
+      if (!connectedSourcesByBoard.has(board.id)) connectedSourcesByBoard.set(board.id, []);
+      connectedSourcesByBoard.get(board.id).push(peer.id);
+    }
+    // A renderer may omit an untouched/empty Board from its compact stats.
+    // Keep that Board in the reconciliation too: a live edge to an empty Board
+    // is meaningful evidence of an admitted-but-not-yet-consumed source.
+    const suppliedBoardIds = new Set(rawJobBoardStates.map(board => board?.id).filter(Boolean));
+    const liveOnlyBoards = (nodes || []).filter(node => node?.type === 'jobboard' && node?.id && !suppliedBoardIds.has(node.id))
+      .map((node) => ({
+        id: node.id,
+        hubState: node.data?.hubState,
+        resultCount: node.data?.resultCount,
+        renderedCardCount: (nodes || []).filter(candidate => candidate?.type === 'jobcard' && candidate?.data?.hubId === node.id).length,
+        stale: node.data?.stale,
+        staleReason: node.data?.staleReason,
+        combineSignature: node.data?.combineSignature,
+        mergeUnique: node.data?.mergeStats?.unique,
+        clearProvenance: node.data?.clearProvenance,
+      }));
+    const jobBoardStates = [...rawJobBoardStates, ...liveOnlyBoards].map((board) => {
+      const id = board?.id;
+      const supplied = Array.isArray(board?.connectedSourceHubIds) ? board.connectedSourceHubIds : [];
+      // Current renderer snapshots mark each Board's canvas-local scope and
+      // already resolved its local edges. Rejoining root-level live edges by a
+      // bare id would corrupt a nested/sibling Board that reused an imported
+      // id. Only legacy unscoped snapshots need this root-canvas supplement.
+      const live = typeof board?.diagnosticScope === 'string'
+        ? []
+        : (nodesById.get(id)?.length === 1 ? (connectedSourcesByBoard.get(id) || []) : []);
+      return { ...board, connectedSourceHubIds: [...new Set([...supplied, ...live])].slice(0, 25) };
+    });
     try {
       jobCompletionAssessmentMarkdown = buildJobCompletionAssessment(
         canvasFilePath,
         currentNodeIds,
         jobBoardStates,
-        payload.filterStats?.jobBoardStateCount,
+        Math.max(
+          jobBoardStates.length,
+          Number.isFinite(Number(payload.filterStats?.jobBoardStateCount))
+            ? Math.max(0, Math.floor(Number(payload.filterStats.jobBoardStateCount)))
+            : 0,
+        ),
         currentJobHubIds,
         reportWindowId,
+        payload.filterStats?.jobBoardStateOmissions,
       );
     }
     catch { jobCompletionAssessmentMarkdown = diagnosticRenderFailureMarkdown('Job Completion Assessment', new Error('could not reconcile job completion facts')); }
+  }
+  if (isFullReport || reportCodes.has('JOBBOARD')) {
+    try { jobBoardDiagnosticsMarkdown = buildJobBoardDiagnostics(nodes, edges, nodeComponentStates); }
+    catch { jobBoardDiagnosticsMarkdown = diagnosticRenderFailureMarkdown('Job Board Transaction & Display Diagnostics', new Error('could not inspect board transaction state')); }
   }
 
   let marketplacePipelineMarkdown = '';
@@ -2467,7 +2611,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];
@@ -2476,7 +2620,13 @@ ${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMark
   // export boundary, legacy/mocked unmarked rows receive a labelled timestamp
   // and the shared block stamps any legacy/mocked unmarked row then renders
   // the same chronological array newest-first.
-  const chronologicalEventLines = Array.isArray(events) ? events.map(String) : [];
+  // EventLogger lives in the renderer and can contain legacy in-memory rows
+  // created before a producer learned to avoid raw query/role values. Sanitize
+  // only as the report crosses its export boundary, so its on-screen/debug ring
+  // stays faithful while every report delivery path shares one safe policy.
+  const chronologicalEventLines = Array.isArray(events)
+    ? events.map(redactReportEventHistoryLine)
+    : [];
   const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
 
   const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + eventsMarkdown;

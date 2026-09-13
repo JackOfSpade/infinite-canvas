@@ -68,6 +68,9 @@ export function hubHasAcceptedInitialDrop(hub) {
 export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAnalysisClearedRunId = null } = {}) {
   return {
     inputLocked: false,
+    careerImportGeneration: null,
+    careerImportFreshCapability: null,
+    careerImportConsumption: null,
     resumeProfile: null,
     careerData: null,
     resumeSummary: null,

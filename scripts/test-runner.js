@@ -7,6 +7,7 @@ import job_scoring_cache from './tests/job-scoring-cache.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
 import jobs_location_language from './tests/jobs-location-language.js';
 import job_source_country_scope from './tests/job-source-country-scope.js';
+import job_collection_scope_caveats from './tests/job-collection-scope-caveats.js';
 import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks.js';
 import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
@@ -52,6 +53,7 @@ const testGroups = [
   ['marketplace-extractors-auth.js', marketplace_extractors_auth],
   ['jobs-location-language.js', jobs_location_language],
   ['job-source-country-scope.js', job_source_country_scope],
+  ['job-collection-scope-caveats.js', job_collection_scope_caveats],
   ['marketplace-diagnostics-locks.js', marketplace_diagnostics_locks],
   ['platform-utils.js', platform_utils],
   ['skill-opportunities.js', skill_opportunities],

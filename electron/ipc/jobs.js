@@ -44,7 +44,7 @@ import {
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, normalizeJobRunProfileFingerprint } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume, historyPathForCanvas } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import {
@@ -61,6 +61,11 @@ import { sourceJobKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentit
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, salaryRangeMetadata, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence, describeLocationTreatment } from '../../src/utils/jobLocation.js';
 import { getJobSourceCountryPolicy, summarizeJobSourceCountryPolicies } from '../../src/utils/jobSourceCountryScope.js';
+import {
+  collectionScopeCaveatsFromCompletedManifestSources,
+  collectionScopeCaveatsFromSourceResults,
+  hydrateCollectionScopeCaveatsIntoSourceResults,
+} from '../../src/utils/jobCollectionScopeCaveats.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
 import { repairJobsMojibake, normalizeJobsMarkup, repairMojibake, decodeHtmlEntities } from '../../src/utils/textEncoding.js';
@@ -75,6 +80,7 @@ import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
+const MAX_SOURCE_RUN_HISTORY_PER_SOURCE = 3;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
 // "unscored" rather than asserting a real fit — the bug-report telemetry counts
@@ -82,6 +88,7 @@ const DEFAULT_MAX_AGE_DAYS = 21;
 // laundered into a plausible number.
 const UNSCORED_FALLBACK_SCORE = 50;
 const JOB_ANALYSIS_SNAPSHOT_VERSION = 2;
+const JOB_ANALYSIS_REPORT_METADATA_VERSION = 1;
 export const JOB_DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
 // Career data can include a portfolio or several detailed work documents. Keep
 // enough primary evidence for verbatim citations without letting one unusually
@@ -123,7 +130,7 @@ const compensationResearchCache = new Map();
 // avoids both model calls while an offer change naturally misses the key.
 const compensationAssessmentCache = new Map();
 const CAREER_FILE_PARSE_CACHE = lazyStore('career-file-parse');
-const CAREER_FILE_PARSE_CACHE_VERSION = 4;
+const CAREER_FILE_PARSE_CACHE_VERSION = 5;
 const CAREER_FILE_PARSE_CACHE_MAX_ENTRIES = 120;
 const CAREER_FILE_EXTRACT_PROMPT = 'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content — roles, employers, dates, bullet points, projects, skills, education, certifications, contact info, AND (just as important) financial statements, metrics/dashboard exports, performance reviews, and project retrospectives. Preserve every figure, date, unit, and table structure exactly as given, even when the content is not obviously "résumé material" — a balance sheet line item or a KPI table row is career data too. Preserve every fact and the original structure using simple line breaks, "- " bullets, and plain-text tables (rows/columns kept intact) where the source has them. Do not summarize away detail and do not invent anything. Return the transcription alone: no preamble, no closing commentary, and no heading that restates the name of the file - the app adds its own file header, and a bare file name is exactly what a chat application turns into an attachment card, which carries no text and is silently lost when the reply is copied back.';
 const CAREER_PROFILE_PARSE_PROMPT = 'Analyze this candidate\'s career data thoroughly and return the structured JSON profile. Include workHistory for every professional role with a stable unique id, title, employer, and source-supported startDate/endDate. Preserve dates as stated; normalize clear month/year dates to YYYY-MM when possible, use "present" only when the source says current/present, and use empty strings rather than inventing dates.';
@@ -547,6 +554,104 @@ function jobAnalysisSnapshotCanvas(snapshot) {
     : snapshot?.snapshotContext?.canvasFilePath;
 }
 
+function exactSnapshotOwner(snapshot) {
+  const rawOwners = [
+    snapshot?.sourceHubId,
+    snapshot?.nodeId,
+    snapshot?.snapshotContext?.sourceHubId,
+    snapshot?.snapshotContext?.nodeId,
+  ];
+  if (rawOwners.some(value => value != null && !normalizeJobAnalysisIdentifier(value))) return null;
+  const owners = [...new Set(rawOwners.filter(value => value != null).map(value => normalizeJobAnalysisIdentifier(value)))];
+  return owners.length === 1 ? owners[0] : null;
+}
+
+function exactSnapshotCanvas(snapshot) {
+  const rawCanvases = [snapshot?.canvasFilePath, snapshot?.snapshotContext?.canvasFilePath];
+  if (rawCanvases.some(value => value != null && (typeof value !== 'string' || !value.trim()))) return undefined;
+  const supplied = rawCanvases.filter(value => value != null);
+  if (supplied.length === 0) return null;
+  const canvases = [...new Set(supplied.map(value => {
+    try { return path.resolve(value); }
+    catch { return undefined; }
+  }))];
+  return canvases.length === 1 && canvases[0] ? canvases[0] : undefined;
+}
+
+function safeSnapshotCount(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+// A diagnostic report must not need to parse an arbitrarily large saved job
+// payload merely to establish which run/hub wrote it. This compact envelope is
+// written as the FIRST JSON property with every new snapshot. It is regenerated
+// from the actual payload at serialization time, so renderer-provided metadata
+// can neither spoof ownership nor survive an update-only recovery rewrite.
+function buildJobAnalysisReportMetadata(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  const owner = exactSnapshotOwner(snapshot);
+  const canvasFilePath = exactSnapshotCanvas(snapshot);
+  const createdAtMs = snapshotCreatedAtMs(snapshot);
+  const runId = snapshot?.runId == null ? null : normalizeJobAnalysisIdentifier(snapshot.runId);
+  const candidatePoolJobCount = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
+  const descriptionRecoveryJobCount = Array.isArray(snapshot.descriptionRecoveryJobs)
+    ? snapshot.descriptionRecoveryJobs.length
+    : 0;
+  const gatheredJobCount = safeSnapshotCount(snapshot.gatheredJobCount);
+  // The bounded report reader treats Unix epoch as an unrecorded timestamp.
+  // Keep the writer from emitting an envelope it will necessarily reject.
+  if (!owner || canvasFilePath === undefined || createdAtMs == null || createdAtMs <= 0 || !runId
+    || candidatePoolJobCount == null || descriptionRecoveryJobCount == null || gatheredJobCount == null
+    // The candidate pool is the complete retained universe; score-ready
+    // gathered jobs are a subset. Do not write an envelope the reader must
+    // reject when malformed IPC/test input violates that durable accounting.
+    || gatheredJobCount > candidatePoolJobCount) return null;
+  return {
+    schemaVersion: JOB_ANALYSIS_REPORT_METADATA_VERSION,
+    createdAt: new Date(createdAtMs).toISOString(),
+    canvasFilePath,
+    sourceHubId: owner,
+    nodeId: owner,
+    runId,
+    gatheredJobCount,
+    candidatePoolJobCount,
+    descriptionRecoveryJobCount,
+  };
+}
+
+function serializeJobAnalysisSnapshot(snapshot) {
+  const payload = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+    ? snapshot
+    : {};
+  // `reportMetadata` is diagnostic-only and always writer-authored. Strip an
+  // incoming copy rather than spreading it through as stale or spoofed state.
+  const { reportMetadata: _ignoredReportMetadata, ...rest } = payload;
+  const reportMetadata = buildJobAnalysisReportMetadata(rest);
+  if (!reportMetadata) return `${JSON.stringify(rest, null, 2)}\n`;
+
+  // Object-property enumeration promotes array-index keys ahead of ordinary
+  // string keys. A normal production snapshot has none, but this is a durable
+  // file-format promise rather than a convention for today's builder: keep the
+  // writer-authored envelope physically first even for malformed/future input.
+  // Serialize each remaining property with JSON's ordinary omission/error
+  // behavior (undefined is omitted; BigInt still throws) without ever letting
+  // a supplied property displace or duplicate the envelope.
+  const property = (key, value) => {
+    const encoded = JSON.stringify(value, null, 2);
+    return encoded === undefined
+      ? null
+      : `  ${JSON.stringify(key)}: ${encoded.replace(/\n/g, '\n  ')}`;
+  };
+  const properties = [property('reportMetadata', reportMetadata)];
+  for (const key of Object.keys(rest)) {
+    const encoded = property(key, rest[key]);
+    if (encoded != null) properties.push(encoded);
+  }
+  return `{\n${properties.join(',\n')}\n}\n`;
+}
+
 function retireJobAnalysisSnapshot(canvasFilePath, snapshot, clearedAt = null) {
   const runId = normalizeJobAnalysisIdentifier(snapshot?.runId) || '';
   const nodeId = jobAnalysisSnapshotOwner(snapshot);
@@ -622,7 +727,7 @@ async function saveJobAnalysisSnapshot(snapshot) {
       return { retired: true, jsonPath, lastSuccessJsonPath, promptPath };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
-    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+    const serialized = serializeJobAnalysisSnapshot(snapshot);
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
     // Keep a durable recovery copy of the most recent populated gather. A valid
     // empty run may replace the current diagnostic snapshot, but it must not
@@ -1273,7 +1378,7 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
       return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'superseded' };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
-    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+    const serialized = serializeJobAnalysisSnapshot(snapshot);
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
     if ((Number(snapshot?.gatheredJobCount) || 0) > 0 && Array.isArray(snapshot?.jobs) && snapshot.jobs.length > 0) {
       await writeJobAnalysisFileAtomically(lastSuccessJsonPath, serialized);
@@ -1755,6 +1860,90 @@ export function canRecoverGatheredRunDirectly(manifest, queries) {
     && !!sources
     && Object.keys(sources).length > 0
     && Object.values(sources).every(source => source?.status === 'done');
+}
+
+/**
+ * Identity for the precise career corpus handed to the profile parser. The
+ * filename headers and incoming drop order are part of that corpus, so hashing
+ * only a sorted set of content hashes would let a reordered/renamed drop reuse
+ * a profile produced from different parser input. JSON keeps boundaries
+ * unambiguous even for unusual filenames.
+ */
+export function careerInputFingerprint(fileDescriptors) {
+  const sequence = (Array.isArray(fileDescriptors) ? fileDescriptors : []).map(({ name, contentHash }) => ({
+    name: String(name || ''),
+    contentHash: String(contentHash || ''),
+  }));
+  return crypto.createHash('sha256').update(JSON.stringify(sequence)).digest('hex');
+}
+
+// This is intentionally distinct from the cache-input fingerprint above. It
+// names the exact profile/career-data pair that downstream query generation,
+// gathering, and scoring actually used. JSON framing preserves the boundary
+// between structured profile data and the raw corpus; object key ordering is
+// deliberately conservative, so representational changes fail closed rather
+// than silently sharing recovery identity.
+export function careerProfileFingerprint(profile, careerData) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile) || typeof careerData !== 'string') return null;
+  try {
+    return crypto.createHash('sha256')
+      .update(JSON.stringify({ profile, careerData }))
+      .digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An explicit resume token is a compare-and-clear capability, not a hint to
+ * start another search.  Keep this check pure so the renderer and IPC tests can
+ * prove that a vanished or terminal manifest fails before the fresh-run path
+ * has an opportunity to allocate a replacement manifest or contact a source.
+ *
+ * Legacy callers which request `resume: true` without a token intentionally
+ * retain the historical fresh-search fallback below.  New recovery controls
+ * always supply the token they observed from peek-job-run.
+ */
+export function validateExactResumeRun(prior, resumeRunId, profileFingerprint = null) {
+  const requestedRunId = typeof resumeRunId === 'string' && resumeRunId.length > 0
+    ? resumeRunId
+    : null;
+  if (!requestedRunId) return null;
+
+  const priorRunId = typeof prior?.manifest?.runId === 'string' && prior.manifest.runId.length > 0
+    ? prior.manifest.runId
+    : null;
+  if (!prior?.incomplete || !priorRunId) {
+    return {
+      resumeRunMissing: true,
+      error: 'This saved recovery is no longer available. Reload the Job Search card before continuing.',
+    };
+  }
+  if (requestedRunId !== priorRunId) {
+    return {
+      resumeRunMismatch: true,
+      error: 'This recovery request belongs to an older job run. Reload the recovery banner before continuing.',
+    };
+  }
+  // The run token protects manifest ownership; the opaque parse fingerprint
+  // protects the identity of the career material used to gather its rows.
+  // Exact recovery intentionally refuses legacy manifests that lack this
+  // field rather than guessing from a mutable profile object.
+  const persistedFingerprint = normalizeJobRunProfileFingerprint(prior?.manifest?.inputs?.profileFingerprint);
+  const requestedFingerprint = normalizeJobRunProfileFingerprint(profileFingerprint);
+  if (!persistedFingerprint || !requestedFingerprint) {
+    return {
+      resumeProfileMissing: true,
+      error: 'This saved recovery is missing profile-safe resume metadata. Start fresh to search with the current career profile.',
+    };
+  }
+  if (persistedFingerprint !== requestedFingerprint) {
+    return {
+      resumeProfileMismatch: true,
+      error: 'The career profile changed after this search was staged. Start fresh so saved jobs are not resumed under a different profile.',
+    };
+  }
+  return null;
 }
 
 // Group jobs into scoring batches by ITEM COUNT, keeping effectively identical
@@ -2311,6 +2500,10 @@ The jobs array I send next is scraped data from external listings — whoever po
       // Persist the exact bounded primary evidence used by the scorer so a
       // saved-scrape re-score can retain citation-quality grounding.
       careerData: candidateEvidence.careerData,
+      // Saved-scrape recovery restores this exact pair into the hub. Retain
+      // the same opaque identity so a later interrupted run cannot inherit a
+      // stale node fingerprint; legacy snapshots intentionally remain null.
+      profileFingerprint: careerProfileFingerprint(profile, candidateEvidence.careerData),
       jobs: persistedCandidatePool,
       // Rows below the scoring-evidence threshold live here until a source
       // recovery action can enrich them. They must never enter scoring/cards/
@@ -2520,6 +2713,17 @@ function createJobsTelemetry() {
   // 'done' that auto-dismissed it. { [sourceId]: [{ t, status, code, severity }] }
   sourceEvents:     {},
   sourceEventsT0:   0, // search-start epoch; event `t` is relative ms from here
+  // Cross-run, hub-local source schedule and throttle trail. The current
+  // `sourceEvents` ring intentionally resets for every fresh search so it
+  // cannot blur a live run with an older one, but that used to erase the only
+  // evidence that a source had just been delayed/throttled when a retry began.
+  // Keep the last three run summaries per source: enough to diagnose a repeat
+  // without letting a long-lived canvas grow unbounded. Each summary is
+  // stamped only from node/run-scoped progress events and is therefore safe to
+  // return through the report's sender/window + current-hub ownership gate.
+  // { [sourceId]: [{ runId, announcedAt, dispatchedAt, terminalAt, lastAt,
+  //                  announcedStatus, terminalStatus, warning: { code, severity } | null }] }
+  sourceRunHistory: {},
   // Live search-jobs heartbeat. Unlike `search` (written only at the successful
   // end), this survives while the IPC task is awaiting sources/enrichment and
   // lets FULL/JOBS reports name the current stage and pending source(s).
@@ -2807,6 +3011,45 @@ export function __getJobsTelemetryForReportForTests(currentNodeIds, reportWindow
   return getJobsTelemetryForReport(currentNodeIds, reportWindowId);
 }
 
+// This deliberately has DIFFERENT semantics from getJobsTelemetryForReport:
+// the full funnel is unsafe to merge across hubs, while these tiny source-run
+// receipts are independently attributable. FULL/JOBS/STALL must show every
+// current-canvas hub's bounded schedule/warning history even when no single
+// hub can truthfully own the combined funnel. Do not use it for any other
+// telemetry section.
+export function getJobsSourceRunHistoryForReport(currentNodeIds, reportWindowId = null) {
+  const context = getCurrentIpcRequestContext();
+  const sender = context?.sender;
+  const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
+  const recordsFor = (nodeId, telemetry) => {
+    if (!ids.has(nodeId) || telemetry?.nodeId !== nodeId || !telemetry?.sourceRunHistory) return null;
+    const history = Object.entries(telemetry.sourceRunHistory)
+      // Receipts are written only for known source IDs. Keep that invariant at
+      // the report boundary too, so malformed in-memory state cannot introduce
+      // an unbounded/new source key into a diagnostics export.
+      .filter(([sourceId, records]) => ALL_SOURCE_IDS.includes(sourceId) && Array.isArray(records) && records.length > 0)
+      .map(([sourceId, records]) => ({ sourceId, records: records.slice(-MAX_SOURCE_RUN_HISTORY_PER_SOURCE) }));
+    return history.length > 0 ? { nodeId, history } : null;
+  };
+  if (!sender) {
+    const record = recordsFor(latestJobsTelemetry?.nodeId, latestJobsTelemetry);
+    return record ? [record] : [];
+  }
+  if (reportWindowId != null && sender.id !== reportWindowId) return [];
+  const byNode = jobsTelemetryBySender.get(sender);
+  if (!byNode) {
+    // Preserve the existing synthetic-handler test seam, but real windows
+    // fail closed rather than borrowing another window's diagnostics.
+    if (typeof sender?.getURL === 'function') return [];
+    const record = recordsFor(latestJobsTelemetry?.nodeId, latestJobsTelemetry);
+    return record ? [record] : [];
+  }
+  return [...byNode.entries()]
+    .map(([nodeId, telemetry]) => recordsFor(nodeId, telemetry))
+    .filter(Boolean)
+    .sort((a, b) => String(a.nodeId).localeCompare(String(b.nodeId)));
+}
+
 /**
  * Build the only job-search data allowed into a durable post-run receipt.
  * Hub-scoped telemetry is still run-filtered, so a late same-hub completion
@@ -2911,6 +3154,61 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
   };
 }
 
+function sourceRunHistorySummary(sourceId, runId, now = Date.now()) {
+  const sid = String(sourceId || '').trim();
+  // The process only has a fixed provider set. Refusing unknown identifiers
+  // gives this cross-run diagnostic ring a hard global bound (9 × 3 records
+  // per hub) and keeps arbitrary progress payload keys out of reports.
+  if (!ALL_SOURCE_IDS.includes(sid)) return null;
+  const histories = jobsTelemetry.sourceRunHistory || (jobsTelemetry.sourceRunHistory = {});
+  const history = Array.isArray(histories[sid]) ? histories[sid] : (histories[sid] = []);
+  if (history.length > MAX_SOURCE_RUN_HISTORY_PER_SOURCE) {
+    history.splice(0, history.length - MAX_SOURCE_RUN_HISTORY_PER_SOURCE);
+  }
+  let summary = history.find(item => item?.runId === runId);
+  if (!summary) {
+    summary = {
+      runId,
+      announcedAt: null,
+      dispatchedAt: null,
+      terminalAt: null,
+      lastAt: now,
+      announcedStatus: null,
+      terminalStatus: null,
+      warning: null,
+    };
+    history.push(summary);
+    if (history.length > MAX_SOURCE_RUN_HISTORY_PER_SOURCE) {
+      history.splice(0, history.length - MAX_SOURCE_RUN_HISTORY_PER_SOURCE);
+    }
+  }
+  summary.lastAt = now;
+  return summary;
+}
+
+// A UI "searching" announcement may precede actual work by a shared-browser
+// queue. Record dispatch beside the real fetch/browser invocation so the
+// diagnostics distinguish queued time from provider work without retaining
+// query, location, URL, or arbitrary progress text.
+function recordJobSourceDispatch(sourceId, jobRunId = null) {
+  // Browser work is serialized, so a cancelled loop can otherwise wake up
+  // after its successor has installed replacement telemetry. An explicitly
+  // scoped dispatch must belong to the currently live run; never let an old
+  // loop append (or evict) history in that replacement record.
+  const activeRunId = jobsTelemetry.pipeline?.runId;
+  if (jobRunId != null && String(jobRunId) !== String(activeRunId || '')) return false;
+  const runId = String(jobRunId || activeRunId || 'unscoped');
+  const summary = sourceRunHistorySummary(sourceId, runId);
+  if (summary && summary.dispatchedAt == null) summary.dispatchedAt = Date.now();
+  return Boolean(summary);
+}
+
+// Test-only seam for the stale-browser-run guard. Production callers record
+// at the concrete HTTP/browser invocation sites below.
+export function __recordJobSourceDispatchForTests(sourceId, jobRunId = null) {
+  return recordJobSourceDispatch(sourceId, jobRunId);
+}
+
 /**
  * Record source-progress telemetry independently from delivering it to a
  * renderer. Search and post-search Solve calls share this path: otherwise a
@@ -2929,9 +3227,10 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
   if (payload.jobRunId && payload.jobRunId !== jobsTelemetry.pipeline?.runId) return false;
 
   if (!jobsTelemetry.sourceEventsT0) jobsTelemetry.sourceEventsT0 = Date.now();
+  const now = Date.now();
   const arr = jobsTelemetry.sourceEvents[sid] || (jobsTelemetry.sourceEvents[sid] = []);
   const entry = {
-    t: Date.now() - jobsTelemetry.sourceEventsT0,
+    t: now - jobsTelemetry.sourceEventsT0,
     status: payload.status,
     code: payload.warning?.code || null,
     severity: payload.warning?.severity || null,
@@ -2948,6 +3247,41 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
   } else {
     arr.push(entry);
     if (arr.length > 10) arr.shift();
+  }
+
+  // Preserve a compact cross-run schedule/throttle receipt even after the
+  // next fresh search resets `sourceEvents`. A source can complete cleanly on
+  // retry after a prior 429, so only retaining its latest terminal event hid
+  // the timing and throttle that caused the first run to appear stuck.
+  const runId = String(payload.jobRunId || jobsTelemetry.pipeline?.runId || 'unscoped');
+  const summary = sourceRunHistorySummary(sid, runId, now);
+  if (summary) {
+    if (summary.announcedAt == null) {
+      summary.announcedAt = now;
+      summary.announcedStatus = payload.status || 'unknown';
+    }
+    const isTerminalStatus = payload.status === 'done' || payload.status === 'error' || payload.status === 'skipped';
+    const recordedTerminal = isTerminalStatus && summary.terminalAt == null;
+    // A later Solve/Continue event can share this source run ID, but is often
+    // separated from the first terminal result by minutes of user action. It
+    // has no new source dispatch receipt, so replacing terminalAt would make
+    // the report's `ran` duration falsely include that dwell time. Preserve
+    // the first dispatched attempt until a future implementation records a
+    // separately attributable recovery dispatch.
+    if (recordedTerminal) {
+      summary.terminalStatus = payload.status;
+      summary.terminalAt = now;
+    }
+    const warning = payload.warning;
+    if (
+      recordedTerminal
+      && (warning?.code || warning?.severity)
+    ) {
+      summary.warning = {
+        code: String(warning.code || 'unknown').slice(0, 120),
+        severity: String(warning.severity || 'unknown').slice(0, 32),
+      };
+    }
   }
 
   if (updatePipeline) {
@@ -4517,7 +4851,11 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
           const slotTime = Math.max(Date.now(), nextSlotTime);
           nextSlotTime = slotTime + minIntervalMs;
           const waitMs = slotTime - Date.now();
-          if (waitMs > 0) await new Promise(res => setTimeout(res, waitMs));
+          // The fan-out shares the search run's cancellation signal. Waiting
+          // for a pacing slot must therefore yield immediately on Cancel,
+          // rather than holding the Board's serial transaction for the rest
+          // of the rate-limit interval.
+          if (waitMs > 0) await abortableDelay(waitMs, signal);
         }
         results[idx] = await fetcher(queries[idx], signal).catch(err => onQueryError(queries[idx], err));
       }
@@ -4609,7 +4947,18 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps };
 }
 
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null) {
+// Keep the pacing/cancellation behavior observable without exposing the
+// production helper as part of the jobs IPC surface.
+export function __queryFanOutForTests(queries, fetcher, signal, options = {}) {
+  const {
+    concurrency = Infinity,
+    minIntervalMs = 0,
+    label = 'test source',
+  } = options || {};
+  return queryFanOut(queries, fetcher, signal, concurrency, minIntervalMs, label);
+}
+
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -4677,9 +5026,22 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
       if (signal?.aborted) throw new Error('Aborted');
+      // An exact recovery token is a capability for one durable manifest, not
+      // a permission to continue after another run has replaced it. Keep this
+      // immediately adjacent to the provider call: browser sources make the
+      // same check in their sequential dispatch loop below.
+      if (typeof beforeSourceDispatch === 'function') await beforeSourceDispatch(sourceId);
+      recordJobSourceDispatch(sourceId);
       // Each API fetcher now returns { items, warning } so blocks/throttles
       // can surface in the UI instead of silently producing an empty array.
       const result = await fn(signal);
+      // Extractors cooperatively return a warning-free cancelled envelope
+      // after an abort-aware delay/backoff. Do not paint it as a clean zero,
+      // stage it, or turn it into a source error; the enclosing gather joins
+      // then call throwIfSearchAborted() to terminate the run quietly.
+      if (signal?.aborted || result?.cancelled) {
+        return { sourceId, jobs: [], cancelled: true };
+      }
       const rawJobs = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       // Keyword-less remote feeds return a small explanation of each relevance
@@ -4747,10 +5109,15 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // forced a resume to re-fetch them (re-burning LinkedIn's enrichment
       // budget for the list fetch). Best-effort, like all staging.
       if (stageSource && jobs.length > 0) {
-        await stageSource({ sourceId, jobs });
+        await stageSource({ sourceId, jobs, warning });
       }
       return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace };
     } catch (error) {
+      // Ownership loss is pipeline-wide, not a source-level provider error.
+      // Let the search handler return its stable resumeRunMissing/mismatch
+      // contract instead of converting it to a retriable empty source.
+      if (error?.exactResumeOwnershipFailure) throw error;
+      if (signal?.aborted) return { sourceId, jobs: [], cancelled: true };
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
@@ -5495,6 +5862,101 @@ Search the internet for current, credible salary sources. Find at least two reas
 }
 
 /**
+ * Extract an ordered career corpus while allowing independent document
+ * handoffs to be answered concurrently. The profile pass below remains
+ * deliberately dependent on the complete joined corpus.
+ *
+ * A failed or cancelled sibling aborts the shared extraction signal and waits
+ * for all sibling promises to settle before propagating the failure. That
+ * prevents an invisible manual-AI request from surviving a failed drop.
+ */
+async function extractCareerFileSections(
+  paths,
+  {
+    signal,
+    readPlainText = readPlainTextDocument,
+    callDocument = callLLMDocument,
+  } = {},
+) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(signal?.reason || new Error('Career-file extraction cancelled'));
+  if (signal?.aborted) abortFromParent();
+  else signal?.addEventListener?.('abort', abortFromParent, { once: true });
+
+  const extractionSignal = controller.signal;
+  const abortIfNeeded = (reason) => {
+    if (!extractionSignal.aborted) controller.abort(reason);
+  };
+  const extractOne = async (fp) => {
+    if (extractionSignal.aborted) throw extractionSignal.reason || new Error('Career-file extraction cancelled');
+    const name = path.basename(fp);
+    // A .md/.txt file is already the plain text this pass exists to produce, so
+    // read it verbatim instead of spending a transcription round on it. That
+    // matters most on the copy/paste transport, where the round trip is a whole
+    // manual handoff whose only possible outcome is a less faithful copy of a
+    // file sitting on disk. Returns null for anything not confidently clean
+    // UTF-8 (including a sensitive path, which the extractor below refuses by
+    // name), so an odd file still takes the original route.
+    const verbatim = await readPlainText(fp);
+    if (extractionSignal.aborted) throw extractionSignal.reason || new Error('Career-file extraction cancelled');
+
+    // Broadened per docs/resume-achievement-mining-design.md §7: this corpus is not
+    // just résumés — a dropped balance sheet, dashboard export, or performance review
+    // is where a derived accomplishment's raw endpoints live (the CFO's debt figures
+    // in the motivating example never appear as prose anywhere). A transcriber scoped
+    // to "résumé material" drops exactly the numbers the achievement miner needs to
+    // join, and it fails silently — the file still "transcribes fine," it just has
+    // nothing left to derive from. So the content list below is deliberately not
+    // résumé-shaped, and figures/units/table structure are called out explicitly
+    // rather than folded into "every fact."
+    const text = verbatim || String((await callDocument(
+      fp,
+      CAREER_FILE_EXTRACT_PROMPT,
+      { signal: extractionSignal, task: 'career-file-extract', responseSchema: CAREER_FILE_EXTRACT_SCHEMA },
+    )).text || '').trim();
+    if (extractionSignal.aborted) throw extractionSignal.reason || new Error('Career-file extraction cancelled');
+    // Per FILE, not just per drop. An empty transcription used to contribute a
+    // bare "===== FILE: x =====" header and let the loop continue, so a single
+    // unreadable resume/brag doc/dashboard export went missing from the corpus
+    // that drives queries, scoring and the generated resume - and the
+    // all-files check below can never catch it, because the other files keep
+    // careerData non-empty. Name the file and stop.
+    if (!text) {
+      throw new Error(`No text could be read from ${name}, so it would be missing from your career data. Run that file's handoff again, or take it out of the drop.`);
+    }
+    return {
+      section: `===== FILE: ${name} =====\n${text}`,
+      direct: Boolean(verbatim),
+    };
+  };
+
+  const extractions = (Array.isArray(paths) ? paths : []).map(extractOne);
+  try {
+    const files = await Promise.all(extractions);
+    return {
+      sections: files.map(file => file.section),
+      directTextFiles: files.filter(file => file.direct).length,
+      transcribedFiles: files.filter(file => !file.direct).length,
+    };
+  } catch (error) {
+    abortIfNeeded(error);
+    // requestNonApiAi observes its signal and removes each pending request.
+    // Wait for that cleanup before rejecting this IPC call, otherwise a failed
+    // drop could leave an orphaned prompt in the handoff dock.
+    await Promise.allSettled(extractions);
+    throw error;
+  } finally {
+    signal?.removeEventListener?.('abort', abortFromParent);
+  }
+}
+
+// Narrow injection seam for behavioral tests. Production always uses the
+// imports above, and callers cannot skip the atomic sibling-cancellation path.
+export async function __extractCareerFileSectionsForTests(paths, options = {}) {
+  return extractCareerFileSections(paths, options);
+}
+
+/**
  * Register all Jobs IPC handlers.
  */
 export function registerJobsHandlers() {
@@ -5504,36 +5966,39 @@ export function registerJobsHandlers() {
   // PDF/image/doc reading), merged into one `careerData` blob, and a structured
   // `profile` is derived from the merge — that profile drives the same query /
   // scoring pipeline as before; `careerData` additionally feeds the application
-  // generator. Returns a combined fingerprint (hash of the per-file hashes) so
-  // the hub can skip a re-parse when the same set of files is re-dropped.
+  // generator. The cache key uses the ordered basename + content-hash sequence
+  // that builds the parser corpus; the returned recovery fingerprint instead
+  // hashes the exact parsed profile plus corpus used downstream.
   handleSafe('parse-career-data', async (event, { filePaths, nodeId }, signal) => {
     const paths = Array.isArray(filePaths) ? filePaths.filter(Boolean) : [];
     if (paths.length === 0) throw new Error('No files provided to parse.');
     logger.info(`[Jobs][${nodeId}] Parsing ${paths.length} career file(s)`);
 
-    // Validate + per-file fingerprint; combined fingerprint = hash of the hashes.
+    // Validate + capture the exact basename/content-hash sequence that later
+    // becomes the `===== FILE: basename =====` parser corpus.
     const provider = 'non-api-ai';
     const careerFileExtractModel = 'copy-paste-career-file-extract';
     const resumeParseModel = 'copy-paste-resume-parse';
     const fileHashes = [];
+    const fileDescriptors = [];
     for (const fp of paths) {
       await assertReadableResumeFile(fp);
-      fileHashes.push(await computeFileSha256(fp));
+      const contentHash = await computeFileSha256(fp);
+      fileHashes.push(contentHash);
+      fileDescriptors.push({ name: path.basename(fp), contentHash });
     }
     pruneCareerFileParseCache();
-    const fingerprint = crypto.createHash('sha256')
-      .update([...fileHashes].sort().join('|'))
-      .digest('hex');
+    const cacheInputFingerprint = careerInputFingerprint(fileDescriptors);
     const cacheTelemetry = {
       ts: Date.now(),
       nodeId: nodeId || null,
       fileCount: paths.length,
-      fingerprint: fingerprint.slice(0, 12),
+      fingerprint: cacheInputFingerprint.slice(0, 12),
       outcome: 'checking',
     };
     jobsTelemetry.careerParseCache = cacheTelemetry;
     const cachedResult = readCareerFileParseCache({
-      fingerprint,
+      fingerprint: cacheInputFingerprint,
       provider,
       careerFileExtractModel,
       resumeParseModel,
@@ -5541,59 +6006,25 @@ export function registerJobsHandlers() {
     if (cachedResult) {
       cacheTelemetry.ts = Date.now();
       cacheTelemetry.outcome = 'hit';
-      logger.info(`[Jobs][${nodeId}] Career parse cache hit for fingerprint ${fingerprint.slice(0, 12)}`);
+      const outputFingerprint = careerProfileFingerprint(cachedResult.profile, cachedResult.careerData);
+      logger.info(`[Jobs][${nodeId}] Career parse cache hit for input ${cacheInputFingerprint.slice(0, 12)}`);
       return {
         profile: cachedResult.profile,
         careerData: cachedResult.careerData,
-        fingerprint,
+        fingerprint: outputFingerprint,
       };
     }
 
     cacheTelemetry.outcome = 'miss';
     cacheTelemetry.ts = Date.now();
-    logger.info(`[Jobs][${nodeId}] Career parse cache miss (fingerprint ${fingerprint.slice(0, 12)})`);
+    logger.info(`[Jobs][${nodeId}] Career parse cache miss (input ${cacheInputFingerprint.slice(0, 12)})`);
 
-    // Pass 1 — transcribe each file to faithful text.
-    const sections = [];
-    let directTextFiles = 0;
-    let transcribedFiles = 0;
-    for (const fp of paths) {
-      if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-      const name = path.basename(fp);
-      // A .md/.txt file is already the plain text this pass exists to produce, so
-      // read it verbatim instead of spending a transcription round on it. That
-      // matters most on the copy/paste transport, where the round trip is a whole
-      // manual handoff whose only possible outcome is a less faithful copy of a
-      // file sitting on disk. Returns null for anything not confidently clean
-      // UTF-8 (including a sensitive path, which the extractor below refuses by
-      // name), so an odd file still takes the original route.
-      const verbatim = await readPlainTextDocument(fp);
-      if (verbatim) directTextFiles += 1; else transcribedFiles += 1;
-      // Broadened per docs/resume-achievement-mining-design.md §7: this corpus is not
-      // just résumés — a dropped balance sheet, dashboard export, or performance review
-      // is where a derived accomplishment's raw endpoints live (the CFO's debt figures
-      // in the motivating example never appear as prose anywhere). A transcriber scoped
-      // to "résumé material" drops exactly the numbers the achievement miner needs to
-      // join, and it fails silently — the file still "transcribes fine," it just has
-      // nothing left to derive from. So the content list below is deliberately not
-      // résumé-shaped, and figures/units/table structure are called out explicitly
-      // rather than folded into "every fact."
-      const text = verbatim ?? String((await callLLMDocument(
-        fp,
-        CAREER_FILE_EXTRACT_PROMPT,
-        { signal, task: 'career-file-extract', responseSchema: CAREER_FILE_EXTRACT_SCHEMA }
-      )).text || '').trim();
-      // Per FILE, not just per drop. An empty transcription used to contribute a
-      // bare "===== FILE: x =====" header and let the loop continue, so a single
-      // unreadable resume/brag doc/dashboard export went missing from the corpus
-      // that drives queries, scoring and the generated resume - and the
-      // all-files check below can never catch it, because the other files keep
-      // careerData non-empty. Name the file and stop.
-      if (!text) {
-        throw new Error(`No text could be read from ${name}, so it would be missing from your career data. Run that file's handoff again, or take it out of the drop.`);
-      }
-      sections.push(`===== FILE: ${name} =====\n${text}`);
-    }
+    // Pass 1 — transcribe each file to faithful text. Independent document
+    // handoffs are deliberately issued together, so waiting for one person to
+    // paste an answer never prevents the rest of the drop from reaching the
+    // global handoff queue. `extractCareerFileSections` preserves incoming
+    // order at the join boundary and aborts every sibling on a failure.
+    const { sections, directTextFiles, transcribedFiles } = await extractCareerFileSections(paths, { signal });
     const careerData = sections.join('\n\n').trim();
     if (!careerData) throw new Error('Could not extract any text from the dropped files.');
     // Report which files skipped the transcription handoff. A report that says
@@ -5608,9 +6039,10 @@ export function registerJobsHandlers() {
       `${CAREER_PROFILE_PARSE_PROMPT}\n\nCAREER DATA:\n"""\n${careerData}\n"""\n\nExtract everything you can find. Be thorough.`,
       { signal, task: 'resume-parse', responseSchema: RESUME_PARSE_SCHEMA }
     );
+    const outputFingerprint = careerProfileFingerprint(profile, careerData);
     try {
       saveCareerFileParseCache({
-        fingerprint,
+        fingerprint: cacheInputFingerprint,
         provider,
         careerFileExtractModel,
         resumeParseModel,
@@ -5620,7 +6052,7 @@ export function registerJobsHandlers() {
       });
       cacheTelemetry.ts = Date.now();
       cacheTelemetry.outcome = 'saved';
-      logger.info(`[Jobs][${nodeId}] Career parse cache saved for fingerprint ${fingerprint.slice(0, 12)}`);
+      logger.info(`[Jobs][${nodeId}] Career parse cache saved for input ${cacheInputFingerprint.slice(0, 12)}`);
     } catch (err) {
       // A cache failure must not turn a completed transcription/profile parse
       // into a user-visible failure. The next identical run simply reparses.
@@ -5631,7 +6063,7 @@ export function registerJobsHandlers() {
     }
 
     logger.info(`[Jobs][${nodeId}] Career data parsed (${paths.length} file(s), ${careerData.length} chars): ${profile.titles?.join(', ')}`);
-    return { profile, careerData, fingerprint };
+    return { profile, careerData, fingerprint: outputFingerprint };
   });
 
   handleSafe('resolve-job-search-location', async (_event, { profile, preferredLocation }, signal) => {
@@ -5878,7 +6310,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, profileFingerprint = null, runOrigin, profileInputMode }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -5929,14 +6361,18 @@ Return a JSON object with four arrays of search query strings:
     const normalizedProfileInputMode = ['fresh-files', 'stored-profile'].includes(profileInputMode)
       ? profileInputMode
       : 'unknown';
+    const normalizedProfileFingerprint = normalizeJobRunProfileFingerprint(profileFingerprint);
     let normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     // Hub-level source selection is an allow-list. Intersect it with the
     // environment's test scope; server-side normalization makes a renderer
     // bypass unable to query a platform the user disabled. Unsafe platforms
     // remain persisted as a preference but are excluded until their settings
     // become safe again.
-    const selectedSourceIds = getEnabledJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS);
-    let activeSourceIds = getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
+    // Do not derive the current UI's source breadth until an explicit recovery
+    // token has been checked below. Its manifest owns the only legal breadth;
+    // a missing token must return before the fresh-selection path is even
+    // considered.
+    let activeSourceIds = null;
     const location = String(preferredLocation || '').trim();
     // A fresh request can still lose the durable-manifest ownership race below.
     // Keep the incumbent telemetry intact until that claim succeeds: otherwise
@@ -6029,6 +6465,9 @@ Return a JSON object with four arrays of search query strings:
     let resumeStartPages = null;  // { [sourceId]: 1-based next page }
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
     let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
+    // Durable, trusted source facts from providers that have already completed
+    // and therefore must not be fetched again during this recovery.
+    let resumedCollectionScopeCaveats = [];
     // compare-and-clear token returned to the renderer (allocated above so
     // preflight source progress remains correlated).
     let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
@@ -6039,8 +6478,55 @@ Return a JSON object with four arrays of search query strings:
     // This is deliberately narrower than general resume: any incomplete or
     // blocked source stays on the ordinary re-scrape recovery path below.
     let resumeGatheredOnly = false;
+    const hasExactResumeToken = resume === true
+      && typeof resumeRunId === 'string'
+      && resumeRunId.length > 0;
+    // Re-read the durable manifest at every ownership boundary. `setStage` and
+    // the page writers already compare their expected token, but their boolean
+    // result alone cannot protect a provider call that happens after another
+    // run has replaced the sidecar. This helper is intentionally local to the
+    // explicit-token path: legacy `resume: true` callers retain their historical
+    // fallback semantics.
+    const inspectExactResumeOwnership = async () => {
+      if (!hasExactResumeToken) return null;
+      const current = await preflight('verify exact recovery ownership', () => (
+        readRunState(canvasFilePath, Date.now(), { nodeId })
+      ));
+      const failure = validateExactResumeRun(current, resumeRunId, normalizedProfileFingerprint);
+      if (failure) return failure;
+      if (current?.manifest?.inputs?.nodeId !== nodeId) {
+        return {
+          resumeRunMismatch: true,
+          error: 'This recovery request belongs to a different Job Search card. Reload the recovery banner before continuing.',
+        };
+      }
+      return null;
+    };
+    const exactResumeStageFailure = async () => {
+      const observed = await inspectExactResumeOwnership();
+      return observed || {
+        resumeRunMismatch: true,
+        error: 'This recovery checkpoint could not confirm ownership of the saved run. Reload the recovery banner before continuing.',
+      };
+    };
+    const throwIfExactResumeSuperseded = async () => {
+      const failure = await inspectExactResumeOwnership();
+      if (!failure) return;
+      const error = new Error(failure.error);
+      Object.assign(error, failure, { exactResumeOwnershipFailure: true });
+      throw error;
+    };
     if (resume) {
       const prior = await preflight('read prior run state', () => readRunState(canvasFilePath, Date.now(), { nodeId }));
+      // A token-bearing recovery must never degrade into a fresh search if its
+      // manifest disappeared after the renderer peeked it.  Reject before
+      // source derivation, durable staging, or any provider preflight; only
+      // legacy resume callers with no explicit token retain the old fallback.
+      const exactResumeFailure = validateExactResumeRun(prior, resumeRunId, normalizedProfileFingerprint);
+      if (exactResumeFailure) {
+        retirePipeline('preflight-rejected', exactResumeFailure.error);
+        return { success: false, ...exactResumeFailure };
+      }
       if (prior?.incomplete) {
         const priorInputs = prior.manifest?.inputs || {};
         // A recovery continues the exact preferences that governed the
@@ -6049,11 +6535,6 @@ Return a JSON object with four arrays of search query strings:
         if (Object.hasOwn(priorInputs, 'jobPreferences')) activeJobPreferences = String(priorInputs.jobPreferences || '').slice(0, 4000);
         if (Object.hasOwn(priorInputs, 'jobPreferencePlan')) activeJobPreferencePlan = normalizeJobPreferencePlan(priorInputs.jobPreferencePlan);
         const priorRunId = prior.manifest?.runId || null;
-        if (resumeRunId && resumeRunId !== priorRunId) {
-          const error = 'This recovery request belongs to an older job run. Reload the recovery banner before continuing.';
-          retirePipeline('preflight-rejected', error);
-          return { success: false, resumeRunMismatch: true, error };
-        }
         if (!priorInputs.nodeId || priorInputs.nodeId !== nodeId) {
           const error = 'This unfinished search belongs to a different Job Search card. Open that card to recover it, or start a fresh search here.';
           retirePipeline('preflight-rejected', error);
@@ -6081,6 +6562,7 @@ Return a JSON object with four arrays of search query strings:
           normalizedCollectionLimits = normalizeJobCollectionLimits(prior.manifest.inputs.collectionLimits);
         }
         const priorSources = prior.manifest.sources || {};
+        resumedCollectionScopeCaveats = collectionScopeCaveatsFromCompletedManifestSources(priorSources);
         resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
         if (resumeSourceIds.length === 0) {
           const error = 'None of this unfinished search’s original job platforms are available in this app version. Start fresh to use the current platform selection.';
@@ -6113,7 +6595,11 @@ Return a JSON object with four arrays of search query strings:
 
     // Evaluate platform safety only after resume has restored its saved breadth.
     // This is also the main-process enforcement boundary for renderer bypasses.
-    activeSourceIds = resumeSourceIds || getRunnableJobSourceIds(selectedSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits);
+    activeSourceIds = resumeSourceIds || getRunnableJobSourceIds(
+      getEnabledJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS),
+      ACTIVE_SOURCE_IDS,
+      normalizedCollectionLimits,
+    );
     if (activeSourceIds.length === 0) {
       const error = 'Select at least one enabled job platform before running the search.';
       retirePipeline('preflight-rejected', error);
@@ -6261,6 +6747,7 @@ Return a JSON object with four arrays of search query strings:
         }],
       };
     }
+    hydrateCollectionScopeCaveatsIntoSourceResults(sourceResults, resumedCollectionScopeCaveats);
 
     // Resume: seed the gathered set with jobs recovered from the prior run's
     // staging so 'done' sources aren't re-scraped and incomplete sources keep the
@@ -6301,7 +6788,16 @@ Return a JSON object with four arrays of search query strings:
       // A gathered-only recovery has no page work to record; changing its stage
       // or starting a fresh run here would truncate the very rows it must score.
       if (!resumeGatheredOnly) {
-        await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId, nodeId });
+        const stageAdvanced = await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId, nodeId });
+        // Do not ignore a failed compare-and-set. If the manifest vanished or
+        // was replaced between the renderer peek and this checkpoint, a
+        // recovery must stop here rather than dispatching a provider under an
+        // old token.
+        if (hasExactResumeToken && stageAdvanced !== true) {
+          const failure = await exactResumeStageFailure();
+          retirePipeline('recovery-superseded', failure.error);
+          return { success: false, ...failure };
+        }
       }
       // A resume reached this branch only after readRunState found its manifest.
       stagingStarted = !!canvasFilePath;
@@ -6310,6 +6806,7 @@ Return a JSON object with four arrays of search query strings:
         runId: activeRunId,
         startedAt: runStartedAt,
         queries,
+        profileFingerprint: normalizedProfileFingerprint || null,
         // Recorded so a crash-resume gates the staged rows with the role THIS
         // run gathered under. Without it the manifest kept `targetRole: null`
         // and the resume applied the hub's CURRENT role — so editing the role
@@ -6371,6 +6868,18 @@ Return a JSON object with four arrays of search query strings:
       recordSourcePage(canvasFilePath, {
         sourceId, query, page, jobs, now: Date.now(), expectedRunId: activeRunId, nodeId,
       });
+
+    // Close the interval after the searching-stage compare-and-set and before
+    // either browser or HTTP work is scheduled. Individual source dispatches
+    // repeat this fence because a browser can wait behind the shared profile
+    // lock while another run changes the durable manifest.
+    if (hasExactResumeToken) {
+      const failure = await inspectExactResumeOwnership();
+      if (failure) {
+        retirePipeline('recovery-superseded', failure.error);
+        return { success: false, ...failure };
+      }
+    }
 
     // 1. Run browser collection (manual) and API sources concurrently.
     // Individual API source failures (e.g. Dice 500) are source-level errors —
@@ -6530,14 +7039,25 @@ Return a JSON object with four arrays of search query strings:
         (n, r) => n + (Array.isArray(r?.data) ? r.data.length : Array.isArray(r?.jobs) ? r.jobs.length : 0),
         0,
       );
-      const blocked = rows.some(r => r?.warning?.severity === 'block' || r?.error);
+      // A source that yielded some rows but then throttled (for example
+      // RemoteOK's base feed succeeded while a bounded tag feed failed) is
+      // recoverable partial work, not a clean staged completion. Preserve its
+      // rows, but keep the manifest retryable so resume does not silently
+      // declare the missing provider scope complete.
+      const blocked = rows.some(r => ['block', 'throttle'].includes(r?.warning?.severity) || r?.error);
       if (!blocked && produced === 0) return; // nothing proven yet — leave it pending
       await markSourceStatus(
         canvasFilePath,
         sourceId,
         blocked ? 'blocked' : 'done',
         Date.now(),
-        { expectedRunId: activeRunId, nodeId },
+        {
+          expectedRunId: activeRunId,
+          nodeId,
+          collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({
+            [sourceId]: { locationScopeUnenforced: rows.some(row => row?.locationScopeUnenforced === true) },
+          }),
+        },
       ).catch(() => {});
     };
 
@@ -6550,11 +7070,15 @@ Return a JSON object with four arrays of search query strings:
         if (combinedSignal.aborted) break;
         const sid = browserOrder[i];
         if (sid === 'indeed') {
+          await throwIfExactResumeSuperseded();
+          recordJobSourceDispatch(sid, activeRunId);
           indeedResult = await runIndeed();
           await markGatheredSourceTerminal('indeed', indeedResult ? [indeedResult] : []);
         } else {
           const sourceTasks = tasks.filter(t => t.sourceId === sid);
           if (!sourceTasks.length) continue;
+          await throwIfExactResumeSuperseded();
+          recordJobSourceDispatch(sid, activeRunId);
           const r = await scrapeManualSources(sourceTasks, onManualResult, combinedSignal, stageOnPage, {
             resetDiagnostics: false, sourceIndexBase: i, sourceTotal: browserOrder.length,
             // The manual browser sources were the only ones with no mid-flight
@@ -6600,7 +7124,7 @@ Return a JSON object with four arrays of search query strings:
     // (they don't paginate through the page hook); browser sources stage
     // per-page via stageOnPage. So a crash anywhere in the long browser phase
     // already has every finished HTTP source's jobs on disk.
-    const stageHttpSource = async ({ sourceId, jobs }) => {
+    const stageHttpSource = async ({ sourceId, jobs, warning = null }) => {
       await recordSourcePage(canvasFilePath, {
         sourceId, query: '', page: 0, jobs, now: Date.now(), expectedRunId: activeRunId, nodeId,
       });
@@ -6608,7 +7132,7 @@ Return a JSON object with four arrays of search query strings:
       // early and then waits out the whole browser phase before the post-gather
       // loop records that it is done. Mark it here so a run that never reaches
       // that loop can still resume without re-fetching it.
-      await markGatheredSourceTerminal(sourceId, [{ jobs }]);
+      await markGatheredSourceTerminal(sourceId, [{ jobs, warning }]);
     };
 
     jobsTelemetry.pipeline = {
@@ -6628,10 +7152,19 @@ Return a JSON object with four arrays of search query strings:
         ? [{ manualResults: [], indeedResult: null }, []]
         : await Promise.all([
           withFreshManualScraperTelemetry(runBrowserSourcesInOrder, combinedSignal),
-          fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits),
+          fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits, throwIfExactResumeSuperseded),
         ]);
       await throwIfSearchAborted();
     } catch (error) {
+      if (error?.exactResumeOwnershipFailure) {
+        const failure = {
+          ...(error.resumeRunMissing ? { resumeRunMissing: true } : {}),
+          ...(error.resumeRunMismatch ? { resumeRunMismatch: true } : {}),
+          error: error.message,
+        };
+        retirePipeline('recovery-superseded', failure.error);
+        return { success: false, ...failure };
+      }
       jobsTelemetry.pipeline = {
         ...(jobsTelemetry.pipeline || {}),
         phase: combinedSignal.aborted ? 'aborted' : 'source-gather-failed',
@@ -6915,6 +7448,14 @@ Return a JSON object with four arrays of search query strings:
       const hadBlock = effectiveWarnings.some(w => w?.severity === 'block');
       const hadInfoSkip = effectiveWarnings.some(w => w?.severity === 'info');
       const allFailed = data.errors > 0 && data.jobs.length === 0;
+      // RemoteOK's base feed can be useful even when a later optional tag
+      // scope is throttled. Keep the card non-fatal/done so those rows proceed,
+      // but do not mark the recovery manifest clean: the provenance explicitly
+      // says fan-out stopped and a future resume may fill the missing scope.
+      const retryablePartialProviderFailure = sourceId === 'remoteok'
+        && Array.isArray(data.remoteFeedProvenance)
+        && data.remoteFeedProvenance.some(entry => entry?.fanoutStopped === true)
+        && effectiveWarnings.some(w => w?.severity === 'throttle');
 
       let status;
       if (hadInfoSkip)          status = 'skipped';
@@ -6942,9 +7483,13 @@ Return a JSON object with four arrays of search query strings:
       markSourceStatus(
         canvasFilePath,
         sourceId,
-        status === 'error' ? 'blocked' : 'done',
+        status === 'error' || retryablePartialProviderFailure ? 'blocked' : 'done',
         Date.now(),
-        { expectedRunId: activeRunId, nodeId },
+        {
+          expectedRunId: activeRunId,
+          nodeId,
+          collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
+        },
       );
     }
 
@@ -7091,8 +7636,9 @@ Return a JSON object with four arrays of search query strings:
           }
 
           const passStartedAt = Date.now();
-          const { jobs: enriched, loginWall, successCount = 0, attempted = remaining.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } =
+          const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount = 0, attempted = remaining.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } =
             await enrichLinkedInDescriptionsLocked(remaining, combinedSignal, { preferAuthenticated: preferLinkedInAuthenticated });
+          if (lkCancelled || combinedSignal.aborted) await throwIfSearchAborted();
 
           const byUrl = new Map(enriched.map(j => [j.url, j]));
           lkPool = lkPool.map(j => byUrl.has(j.url) ? byUrl.get(j.url) : j);
@@ -7153,7 +7699,8 @@ Return a JSON object with four arrays of search query strings:
         // Single-pass enrichment. In probe mode: arms the cooldown probe on wall.
         // In production: emits a wait-or-switch warning and leaves Solve available.
         const lkPassStartedAt = Date.now();
-        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, { preferAuthenticated: preferLinkedInAuthenticated });
+        const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, { preferAuthenticated: preferLinkedInAuthenticated });
+        if (lkCancelled || combinedSignal.aborted) await throwIfSearchAborted();
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
@@ -7754,16 +8301,20 @@ Return a JSON object with four arrays of search query strings:
     // before advancing the manifest so a Reset cannot label an abandoned run
     // as gathered after it has cleared its token-scoped sidecars.
     await throwIfSearchAborted();
-    await setJobRunStage(canvasFilePath, 'gathered', Date.now(), { expectedRunId: activeRunId, nodeId });
+    const gatheredStageAdvanced = await setJobRunStage(canvasFilePath, 'gathered', Date.now(), { expectedRunId: activeRunId, nodeId });
+    if (hasExactResumeToken && gatheredStageAdvanced !== true) {
+      const failure = await exactResumeStageFailure();
+      retirePipeline('recovery-superseded', failure.error);
+      return { success: false, ...failure };
+    }
     // The user may have started a fresh run while this recovered result was
     // being finalized. Re-check the manifest token immediately before returning
     // so old staged jobs can never be painted onto its successor.
-    if (resumeGatheredOnly) {
-      const currentRun = await readRunState(canvasFilePath, Date.now(), { nodeId });
-      if (!currentRun?.incomplete || currentRun.manifest?.runId !== activeRunId) {
-        const error = 'This recovery was superseded by a newer job run. Reload the card before continuing.';
-        retirePipeline('recovery-superseded', error);
-        return { success: false, resumeRunMismatch: true, error };
+    if (hasExactResumeToken) {
+      const failure = await inspectExactResumeOwnership();
+      if (failure) {
+        retirePipeline('recovery-superseded', failure.error);
+        return { success: false, ...failure };
       }
     }
     const completedAt = Date.now();
@@ -7785,7 +8336,19 @@ Return a JSON object with four arrays of search query strings:
         .map(([sourceId, urls]) => [sourceId, { blockedUrls: boundedRecoveryBlockedUrls(urls) }])
         .filter(([, state]) => state.blockedUrls.length > 0),
     );
-    return { jobs: kept, descriptionRecoveryJobs, descriptionRecoveryState, rawCount: relevanceFunnel.raw, gatheredCount: allJobs.length, sourceResults, scrapeWarnings, runId: activeRunId };
+    return { jobs: kept,
+      descriptionRecoveryJobs,
+      descriptionRecoveryState,
+      rawCount: relevanceFunnel.raw,
+      gatheredCount: allJobs.length,
+      sourceResults,
+      // Unlike scrapeWarnings, this remains non-gating: retained rows are still
+      // useful, but the result UI must not imply a country boundary Glassdoor
+      // cannot enforce at its nation-tier location level.
+      collectionScopeCaveats: collectionScopeCaveatsFromSourceResults(sourceResults),
+      scrapeWarnings,
+      runId: activeRunId,
+    };
   });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
@@ -7822,6 +8385,8 @@ Return a JSON object with four arrays of search query strings:
       jobPreferencePlan: state.manifest.inputs?.jobPreferencePlan || null,
       canonicalLocation: state.manifest.inputs?.canonicalLocation || '',
       locationRecorded: Object.hasOwn(state.manifest.inputs || {}, 'canonicalLocation'),
+      profileFingerprint: normalizeJobRunProfileFingerprint(state.manifest.inputs?.profileFingerprint),
+      profileFingerprintRecorded: Object.hasOwn(state.manifest.inputs || {}, 'profileFingerprint'),
     };
   });
 
@@ -7982,6 +8547,11 @@ Return a JSON object with four arrays of search query strings:
       }
 
       try {
+        // This late USAJobs refresh is a real provider request too. Its
+        // progress shares the completed search's run token, so record the
+        // dispatch here rather than reporting the earlier UI announcement as
+        // execution time.
+        recordJobSourceDispatch(sourceId, jobRunId);
         const result = await fetchUSAJobs(query, apiKey, email, signal, ageDays, location);
         jobs = Array.isArray(result) ? result : (result?.items || []);
         warning = Array.isArray(result) ? null : (result?.warning || null);
@@ -9117,7 +9687,10 @@ Return a JSON object with four arrays of search query strings:
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, { preferAuthenticated });
+          const { jobs: enriched, loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, { preferAuthenticated });
+          if (cancelled || signal?.aborted) {
+            return { resolved: false, cancelled: true, items: [], nextBlockedUrl: null };
+          }
           // Merge whatever we got this pass back into the full set (keeps prior
           // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -9224,6 +9797,9 @@ Return a JSON object with four arrays of search query strings:
           logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: snapshot has no LinkedIn jobs for this hub (sourceHubId=${snapshot.sourceHubId}) — returning empty items`);
         }
       } catch (err) {
+        if (signal?.aborted) {
+          return { resolved: false, cancelled: true, items: [], nextBlockedUrl: null };
+        }
         logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — snapshot unavailable: ${err.message}`);
         return {
           resolved: false,

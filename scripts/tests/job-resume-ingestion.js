@@ -2,12 +2,96 @@ import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCh
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests } from '../../electron/ipc/jobs.js';
+import { __extractCareerFileSectionsForTests, __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests } from '../../electron/ipc/jobs.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __recordResumeAttemptForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
 
 export default [
+  {
+    name: 'career-file extraction fans out independent manual handoffs, joins in drop order, and aborts siblings atomically',
+    run: async () => {
+      const calls = [];
+      const resolvers = new Map();
+      const completed = __extractCareerFileSectionsForTests(
+        ['/tmp/first.pdf', '/tmp/native.md', '/tmp/third.docx'],
+        {
+          readPlainText: async (filePath) => filePath.endsWith('.md') ? 'NATIVE NOTES' : null,
+          callDocument: (filePath, _prompt, options) => new Promise((resolve) => {
+            calls.push({ filePath, options });
+            resolvers.set(filePath, resolve);
+          }),
+        },
+      );
+      await new Promise(resolve => setImmediate(resolve));
+      assert(calls.map(call => call.filePath).join(',') === '/tmp/first.pdf,/tmp/third.docx'
+        && calls.every(call => call.options.task === 'career-file-extract' && call.options.signal instanceof AbortSignal),
+      'all non-plain-text files issue their independent manual extraction handoffs before any response is awaited, while native text skips the handoff');
+
+      // Resolve out of order: the profile corpus must remain in the drop order,
+      // because both its filename headers and order participate in its cache key.
+      resolvers.get('/tmp/third.docx')({ text: 'THIRD TEXT' });
+      resolvers.get('/tmp/first.pdf')({ text: 'FIRST TEXT' });
+      const extracted = await completed;
+      assert(extracted.directTextFiles === 1 && extracted.transcribedFiles === 2
+        && extracted.sections.join('\n---\n') === [
+          '===== FILE: first.pdf =====\nFIRST TEXT',
+          '===== FILE: native.md =====\nNATIVE NOTES',
+          '===== FILE: third.docx =====\nTHIRD TEXT',
+        ].join('\n---\n'),
+      'parallel handoff settlements are rejoined into the exact original file order with accurate direct/transcribed telemetry');
+
+      let siblingAbortObserved = false;
+      let siblingStarted = false;
+      let failure = null;
+      try {
+        await __extractCareerFileSectionsForTests(
+          ['/tmp/empty.pdf', '/tmp/pending.docx'],
+          {
+            readPlainText: async () => null,
+            callDocument: async (filePath, _prompt, { signal }) => {
+              if (filePath.endsWith('empty.pdf')) return { text: '' };
+              siblingStarted = true;
+              return new Promise((_resolve, reject) => {
+                signal.addEventListener('abort', () => {
+                  siblingAbortObserved = true;
+                  reject(signal.reason);
+                }, { once: true });
+              });
+            },
+          },
+        );
+      } catch (error) {
+        failure = error;
+      }
+      assert(siblingStarted && siblingAbortObserved
+        && failure?.message.includes('No text could be read from empty.pdf'),
+      'an invalid file response aborts and settles every still-pending sibling handoff before the drop fails');
+
+      const parent = new AbortController();
+      let parentAbortCount = 0;
+      const cancelled = __extractCareerFileSectionsForTests(
+        ['/tmp/one.pdf', '/tmp/two.docx'],
+        {
+          signal: parent.signal,
+          readPlainText: async () => null,
+          callDocument: async (_filePath, _prompt, { signal }) => new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => {
+              parentAbortCount += 1;
+              reject(signal.reason);
+            }, { once: true });
+          }),
+        },
+      );
+      await new Promise(resolve => setImmediate(resolve));
+      parent.abort(new Error('drop cancelled'));
+      let cancellation = null;
+      try { await cancelled; } catch (error) { cancellation = error; }
+      assert(parentAbortCount === 2 && cancellation?.message === 'drop cancelled',
+        'cancelling the parent parse task propagates to every issued extraction handoff and waits for their cleanup');
+      return { parallelHandoffs: calls.length, orderedSections: extracted.sections.length, siblingAbortObserved, parentAbortCount };
+    },
+  },
   {
     name: 'cleared job hubs reject stale analysis snapshots and honestly classify sidecar cleanup',
     run: () => {
@@ -102,7 +186,8 @@ export default [
       const stagingEnd = source.indexOf('const stageOnPage =', stagingStart);
       const staging = source.slice(stagingStart, stagingEnd);
       assert(staging.includes('if (resumeScope) {')
-        && staging.includes('if (!resumeGatheredOnly) {\n        await setJobRunStage')
+        && staging.includes('if (!resumeGatheredOnly) {\n        const stageAdvanced = await setJobRunStage')
+        && staging.includes('if (hasExactResumeToken && stageAdvanced !== true)')
         && staging.includes('} else {\n      const startedRun = await startJobRun'),
       'gathered-only recovery remains inside the resume branch, preserving its original manifest token and staged rows instead of starting/truncating a fresh run');
       // A run that dies DURING the gather never reaches the finalization loop
@@ -113,10 +198,15 @@ export default [
       assert(source.includes('const markGatheredSourceTerminal = async (sourceId, results)')
         && source.includes('await markGatheredSourceTerminal(sid, r);')
         && source.includes("await markGatheredSourceTerminal('indeed', indeedResult ? [indeedResult] : []);")
-        && source.includes('await markGatheredSourceTerminal(sourceId, [{ jobs }]);'),
+        && source.includes('await markGatheredSourceTerminal(sourceId, [{ jobs, warning }]);'),
       'every source records its terminal manifest status as it finishes, so resume after a mid-gather crash reuses staged rows instead of re-scraping them');
       assert(source.includes("if (!blocked && produced === 0) return; // nothing proven yet — leave it pending"),
         'the in-gather mark is conservative: only a source that demonstrably produced rows or blocked is written, so a wrong guess costs a re-scrape and never staged results');
+      assert(source.includes("['block', 'throttle'].includes(r?.warning?.severity)")
+        && source.includes('const retryablePartialProviderFailure = sourceId === \'remoteok\'')
+        && source.includes('entry?.fanoutStopped === true')
+        && source.includes("status === 'error' || retryablePartialProviderFailure ? 'blocked' : 'done'"),
+      'a throttled RemoteOK optional tag fanout preserves its base rows but remains retryable in the gathered manifest instead of being misclassified as a clean completion');
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);
       const finalization = source.slice(finalizationStart, gatheredStage);
@@ -771,6 +861,124 @@ export default [
           && await exists(unsavedPaths.jsonPath) && await exists(unsavedPaths.lastSuccessJsonPath) && await exists(unsavedPaths.promptPath),
         'an untitled canvas preserves a verified-foreign fallback bundle as an expected no-op');
         return { trashed: trashed.length, retiredRun: clearedRun.runId, newRun: nextRun.runId };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job analysis snapshot writers atomically prepend fresh bounded report metadata for current, last-success, and recovery rewrites',
+    run: async () => {
+      const root = path.join('/tmp', `ic-snapshot-report-metadata-${process.pid}-${Date.now()}`);
+      const canvas = path.join(root, 'canvas.json');
+      const hubId = 'snapshot-report-metadata-hub';
+      const paths = getJobAnalysisPaths(canvas, path.join(root, 'unsaved'), hubId);
+      const initial = {
+        canvasFilePath: canvas,
+        sourceHubId: hubId,
+        nodeId: hubId,
+        runId: 'snapshot-report-metadata-run',
+        createdAt: '2026-09-13T08:00:00.000Z',
+        gatheredJobCount: 1,
+        jobs: [{ title: 'First saved job' }],
+        descriptionRecoveryJobs: [],
+        marker: 'initial-runtime-payload',
+        reportMetadata: { schemaVersion: 999, sourceHubId: 'spoofed-owner', injected: 'must not survive' },
+      };
+      const read = async (filePath) => JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+      const assertMetadata = (stored, expected) => {
+        assert(Object.keys(stored)[0] === 'reportMetadata'
+          && stored.reportMetadata?.schemaVersion === 1
+          && stored.reportMetadata?.sourceHubId === hubId
+          && stored.reportMetadata?.nodeId === hubId
+          && stored.reportMetadata?.canvasFilePath === canvas
+          && stored.reportMetadata?.runId === initial.runId
+          && stored.reportMetadata?.createdAt === expected.createdAt
+          && stored.reportMetadata?.gatheredJobCount === expected.gatheredJobCount
+          && stored.reportMetadata?.candidatePoolJobCount === expected.jobs.length
+          && stored.reportMetadata?.descriptionRecoveryJobCount === expected.descriptionRecoveryJobs.length
+          && !Object.hasOwn(stored.reportMetadata, 'injected'),
+        'the writer prepends a fresh, bounded envelope derived from the actual snapshot instead of persisting supplied diagnostic metadata');
+      };
+      try {
+        await fs.promises.mkdir(root, { recursive: true });
+        await __saveJobAnalysisSnapshotForTests(initial);
+        const current = await read(paths.jsonPath);
+        const lastSuccess = await read(paths.lastSuccessJsonPath);
+        assertMetadata(current, initial);
+        assertMetadata(lastSuccess, initial);
+        assert(current.marker === initial.marker && lastSuccess.marker === initial.marker
+          && current.jobs[0].title === initial.jobs[0].title
+          && current.reportMetadata.candidatePoolJobCount === lastSuccess.reportMetadata.candidatePoolJobCount,
+        'current and populated last-success snapshots retain identical runtime payload semantics and metadata counts');
+        const resumed = await __loadJobAnalysisSnapshotForTests(canvas, hubId, initial.runId);
+        assert(resumed.origin === 'current'
+          && resumed.snapshot.marker === initial.marker
+          && resumed.snapshot.reportMetadata?.sourceHubId === hubId
+          && !Object.hasOwn(resumed.snapshot.reportMetadata || {}, 'injected'),
+        'the extra diagnostic envelope is inert to the normal exact-owner resume reader and cannot revive supplied metadata');
+
+        // JSON enumerates array-index property names ahead of normal string
+        // names. The report reader relies on a physically first envelope, so
+        // an unexpected future top-level numeric field must not displace it.
+        const numericTopLevel = { ...initial, 0: 'future top-level field' };
+        await __saveJobAnalysisSnapshotForTests(numericTopLevel);
+        const numericSerialized = await fs.promises.readFile(paths.jsonPath, 'utf8');
+        assert(/^\{\n\x20{2}"reportMetadata":/.test(numericSerialized)
+          && JSON.parse(numericSerialized)['0'] === 'future top-level field',
+        'the writer keeps reportMetadata physically first even when a future snapshot has an array-index-like top-level key');
+
+        const inconsistentCounts = {
+          ...initial,
+          gatheredJobCount: 2,
+          jobs: [{ title: 'Only retained candidate' }],
+        };
+        await __saveJobAnalysisSnapshotForTests(inconsistentCounts);
+        const inconsistentStored = await read(paths.jsonPath);
+        assert(!Object.hasOwn(inconsistentStored, 'reportMetadata')
+          && inconsistentStored.gatheredJobCount === 2
+          && inconsistentStored.jobs.length === 1,
+        'an impossible score-ready/candidate-pool count pair preserves the resume payload but omits diagnostic metadata the reader would reject');
+
+        // The bounded report reader deliberately treats the Unix epoch as an
+        // unrecorded timestamp. Preserve this legacy/test payload without
+        // emitting an envelope that its reader will necessarily reject.
+        const epochSnapshot = {
+          ...initial,
+          createdAt: '1970-01-01T00:00:00.000Z',
+          marker: 'epoch-runtime-payload',
+        };
+        await __saveJobAnalysisSnapshotForTests(epochSnapshot);
+        const epochCurrent = await read(paths.jsonPath);
+        const epochLastSuccess = await read(paths.lastSuccessJsonPath);
+        assert(!Object.hasOwn(epochCurrent, 'reportMetadata')
+          && !Object.hasOwn(epochLastSuccess, 'reportMetadata')
+          && epochCurrent.createdAt === epochSnapshot.createdAt
+          && epochLastSuccess.marker === epochSnapshot.marker,
+        'an epoch-zero timestamp preserves current and last-success payloads without a diagnostic envelope the bounded reader rejects as unrecorded');
+
+        const rewritten = {
+          ...initial,
+          createdAt: '2026-09-13T08:01:00.000Z',
+          gatheredJobCount: 2,
+          jobs: [{ title: 'First saved job' }, { title: 'Recovered second job' }],
+          descriptionRecoveryJobs: [{ title: 'Deferred recovery job' }],
+          marker: 'recovery-rewrite-runtime-payload',
+          reportMetadata: { schemaVersion: 0, sourceHubId: 'stale-spoof' },
+        };
+        await __createDescriptionRecoveryCheckpointForTests(rewritten);
+        const recoveryResult = await __saveDescriptionRecoverySnapshotIfCurrentForTests(
+          rewritten, { nodeId: hubId, jobRunId: initial.runId },
+        );
+        const rewrittenCurrent = await read(paths.jsonPath);
+        const rewrittenLastSuccess = await read(paths.lastSuccessJsonPath);
+        assert(recoveryResult.saved === true && recoveryResult.globalSaved === true
+          && rewrittenCurrent.marker === rewritten.marker
+          && rewrittenLastSuccess.marker === rewritten.marker,
+        'the update-only description-recovery writer replaces both populated snapshot generations after its ownership checkpoint succeeds');
+        assertMetadata(rewrittenCurrent, rewritten);
+        assertMetadata(rewrittenLastSuccess, rewritten);
+        return { currentAndLastSuccess: true, recoveryRewrite: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }

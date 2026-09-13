@@ -328,17 +328,22 @@ export function useCanvasActions({
           if (error?.code !== 'JOB_BOARD_MODULE_UNAVAILABLE') throw error;
           const plan = board.data?.boardScanResume;
           const boardWillBeRemoved = removedWorkflowIds.has(board.id);
+          const activeSourceIds = [...new Set([
+            ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+            plan?.activeSourceId,
+          ].filter(sourceId => !removedWorkflowIds.has(sourceId)))];
           if (
             boardWillBeRemoved
             && plan?.phase === 'searches'
-            && plan.activeSourceId
-            && !removedWorkflowIds.has(plan.activeSourceId)
+            && activeSourceIds.length > 0
           ) {
-            fallbackClaims.push({
-              orchestratorNodeId: board.id,
-              boardRunId: plan.boardRunId,
-              sourceId: plan.activeSourceId,
-              plan,
+            activeSourceIds.forEach(sourceId => {
+              fallbackClaims.push({
+                orchestratorNodeId: board.id,
+                boardRunId: plan.boardRunId,
+                sourceId,
+                plan,
+              });
             });
           } else if (!boardWillBeRemoved && jobBoardHasCancellableRecovery(board)) {
             throw error;

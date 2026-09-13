@@ -58,11 +58,14 @@ export function getActiveJobBoardSearchReferenceIds(board) {
   return [...new Set([
     ...(Array.isArray(plan?.selectedSearchModuleIds) ? plan.selectedSearchModuleIds : []),
     plan?.activeSourceId,
+    ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
     plan?.cancellationCleanup?.sourceId,
+    ...Object.keys(plan?.cancellationCleanupsBySource || {}),
     ...Object.keys(plan?.completedSourceRuns || {}),
     ...(Array.isArray(plan?.combineSourceRuns) ? plan.combineSourceRuns.map(entry => entry?.sourceId) : []),
     ...replayableManualSourceRuns.map(entry => entry?.sourceId),
     cancellation?.sourceId,
+    ...(Array.isArray(cancellation?.sourceIds) ? cancellation.sourceIds : []),
     cancellation?.childCleanup?.sourceId,
   ].filter(Boolean))];
 }

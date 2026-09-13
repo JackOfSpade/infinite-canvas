@@ -267,12 +267,19 @@ export function isNonApiJobTask(task) {
   return NON_API_JOB_TASKS.has(task);
 }
 
-function createHandoffLifecycle({ requestId, sender, nodeId, task, batch, batchTotal, itemCount, attemptKind, rootBatchSize, materializedPrompt }) {
+function createHandoffLifecycle({ requestId, runId, sender, nodeId, channel, task, batch, batchTotal, itemCount, attemptKind, rootBatchSize, materializedPrompt }) {
   const issuedAt = Date.now();
   const lifecycle = {
     requestId: String(requestId || '').slice(0, 12),
     windowId: sender?.id ?? null,
     nodeId: nodeId || null,
+    // Kept in-memory only for exact active-controller correlation. It is never
+    // rendered into the report; visible receipts use the separate request id.
+    runId: cleanRunId(runId) || null,
+    // The originating IPC channel is safe control-plane metadata.  It lets the
+    // bug report correlate a long-lived controller with this exact pending
+    // handoff, instead of mistaking every silent node-level task for a hang.
+    channel: typeof channel === 'string' && channel ? channel.slice(0, 120) : null,
     task: task || 'unknown',
     batch: batch ?? null,
     batchTotal: batchTotal ?? null,
@@ -600,6 +607,7 @@ export async function requestNonApiAi({
     recoveryMode: context.manualAiRecoveryMode || null,
     sender,
     nodeId: context.nodeId || null,
+    channel: typeof context.channel === 'string' ? context.channel : null,
     ...batchMeta,
     itemCount: cleanBatchNumber(itemCount),
     attemptKind: cleanAttemptKind(attemptKind),

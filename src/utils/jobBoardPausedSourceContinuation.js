@@ -46,19 +46,32 @@ export function terminalJobSearchOutcome(source) {
   const sourceData = source?.data || {};
   const runId = sourceData.jobRunId || null;
   const resultDisposition = sourceData.resultDisposition || null;
+  const hasRunProvenance = sourceData.jobRunId !== null
+    && sourceData.jobRunId !== undefined
+    && sourceData.jobRunId !== '';
+  const hasDispositionProvenance = sourceData.resultDisposition !== null
+    && sourceData.resultDisposition !== undefined
+    && sourceData.resultDisposition !== '';
+  const scoredCount = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
+  // Older canvases stored completed positive scored rows before run receipts
+  // were introduced.  They are valid display inputs, never authoritative
+  // empties: preserve and fingerprint them rather than routing a Board click
+  // into a replacement scrape just because provenance fields are absent.
+  // A partial modern receipt is not legacy data.  Treat it as untrusted rather
+  // than silently upgrading it to a reusable terminal result.
+  const legacyPositiveResult = scoredCount > 0 && !hasRunProvenance && !hasDispositionProvenance;
   if (
     source?.type !== 'jobhub'
     || sourceData.hubState !== 'done'
     || !!sourceData.errorMessage
-    || typeof runId !== 'string'
-    || !runId
-    || typeof resultDisposition !== 'string'
-    || !resultDisposition
+    || (!legacyPositiveResult && (typeof runId !== 'string' || !runId))
+    || (!legacyPositiveResult && (typeof resultDisposition !== 'string' || !resultDisposition))
     || resultDisposition === 'incomplete'
   ) return null;
   return {
     runId,
-    resultDisposition,
+    resultDisposition: resultDisposition || 'legacy-scored',
+    legacyPositiveResult,
     fingerprint: moduleCombineFingerprint(
       sourceData.scoredJobs,
       sourceData.locationSnapshot?.remoteResidences || sourceData.remoteResidences || {},
@@ -132,4 +145,20 @@ export function exactPausedSourceTerminalOutcome({
     return { status: 'generation-changed', expectedRunId };
   }
   return { status: 'pending', expectedRunId };
+}
+
+/**
+ * Classify the exact terminal handoff at the Board boundary.  Keeping the
+ * mergeability decision beside the token check prevents a Board recovery from
+ * treating a terminal source-card result as a new runnable Search merely
+ * because its renderer state changed between the Solve/Skip action and the
+ * Board's next lane turn.
+ */
+export function resolveExactPausedJobBoardTerminal(options) {
+  const terminal = exactPausedSourceTerminalOutcome(options);
+  if (terminal.status !== 'adopted') return terminal;
+  return {
+    ...terminal,
+    mergeable: isMergeableTerminalJobSearchOutcome(options?.source, terminal.outcome),
+  };
 }

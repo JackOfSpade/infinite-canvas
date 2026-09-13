@@ -108,8 +108,11 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
     if (board?.type !== 'jobboard') return [];
     const plan = board.data?.boardScanResume;
     const connected = connectedBoardIds.has(board.id);
-    const boardCancellationOwnsSearch = board.data?.boardCancellation?.sourceId === searchId
-      && typeof board.data.boardCancellation.boardRunId === 'string'
+    const boardCancellationOwnsSearch = (
+      board.data?.boardCancellation?.sourceId === searchId
+      || (Array.isArray(board.data?.boardCancellation?.sourceIds)
+        && board.data.boardCancellation.sourceIds.includes(searchId))
+    ) && typeof board.data?.boardCancellation?.boardRunId === 'string'
       && !!board.data.boardCancellation.boardRunId;
     // Disconnect is itself an asynchronous ownership transition. Keep an
     // active/cleanup plan in the election until exact child retirement has
@@ -121,15 +124,21 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
       && typeof plan.boardRunId === 'string'
       && !!plan.boardRunId
       && (
-        (plan.phase === 'searches' && plan.activeSourceId === searchId)
+        (plan.phase === 'searches' && (
+          plan.activeSourceId === searchId
+          || (Array.isArray(plan.activeSourceIds) && plan.activeSourceIds.includes(searchId))
+        ))
         || plan.cancellationCleanup?.sourceId === searchId
       );
     if (!connected && !ownsDisconnectedCleanup && !boardCancellationOwnsSearch) return [];
     const selectedBySearchPlan = plan?.phase === 'searches'
       && Array.isArray(plan.selectedSearchModuleIds)
       && plan.selectedSearchModuleIds.includes(searchId);
+    const activeSourceIds = Array.isArray(plan?.activeSourceIds)
+      ? plan.activeSourceIds.filter(sourceId => typeof sourceId === 'string' && sourceId)
+      : [];
     const ownsActiveSearch = (selectedBySearchPlan || ownsDisconnectedCleanup)
-      && plan.activeSourceId === searchId;
+      && (plan.activeSourceId === searchId || activeSourceIds.includes(searchId));
     const ownsCancellationCleanup = plan?.cancellationCleanup?.sourceId === searchId;
     // Completed children are frozen inputs of the same still-open transaction.
     // Reserve them too: another Board must not rerun one between a crash and the
@@ -518,6 +527,45 @@ export function getSelectedConnectedJobSearchIds(selection, connectedIds) {
 }
 
 /**
+ * Resolve a Board's optional execution preference against a live set of
+ * searches.  The preference intentionally carries no membership meaning:
+ * missing, stale, or newly-connected ids simply fall back to the stable canvas
+ * order supplied by `ids`.
+ */
+export function orderJobSearchIds(executionOrder, ids) {
+  const available = uniqueStringIds(ids);
+  if (!Array.isArray(executionOrder)) return available;
+  const availableSet = new Set(available);
+  const preferred = uniqueStringIds(executionOrder)
+    .filter(nodeId => availableSet.has(nodeId));
+  const preferredSet = new Set(preferred);
+  return [...preferred, ...available.filter(nodeId => !preferredSet.has(nodeId))];
+}
+
+/**
+ * Move a connected Search in the visible execution order.  Disconnected ids
+ * are retained after the visible order so reconnecting a Search does not lose
+ * a user's saved preference, while new connections retain canvas-order
+ * fallback until explicitly moved.
+ */
+export function moveJobSearchExecutionOrder(executionOrder, connectedIds, searchId, direction) {
+  const connected = uniqueStringIds(connectedIds);
+  if (typeof searchId !== 'string' || !connected.includes(searchId)) return executionOrder;
+  const offset = direction === 'up' ? -1 : direction === 'down' ? 1 : 0;
+  if (!offset) return executionOrder;
+  const ordered = orderJobSearchIds(executionOrder, connected);
+  const from = ordered.indexOf(searchId);
+  const to = from + offset;
+  if (from < 0 || to < 0 || to >= ordered.length) return executionOrder;
+  [ordered[from], ordered[to]] = [ordered[to], ordered[from]];
+  const connectedSet = new Set(connected);
+  const hidden = Array.isArray(executionOrder)
+    ? uniqueStringIds(executionOrder).filter(nodeId => !connectedSet.has(nodeId))
+    : [];
+  return [...ordered, ...hidden];
+}
+
+/**
  * Toggle one live connection and return an explicit allow-list.
  *
  * A disconnected id is hidden from the current selector/run, but remains part
@@ -791,16 +839,16 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
       }
 
       const selection = original.data?.selectedSearchModuleIds;
+      const copiedConnectedSearchIds = getConnectedJobSearchIds(
+        original.id,
+        originalNodes,
+        originalEdges,
+      ).filter(searchId => oldIdToNewId.has(searchId));
       if (Array.isArray(selection)) {
         // An explicit scan-none choice contains no connection ids and is safe
         // to retain when the Board is copied alone. A nonempty allow-list is
         // connection-specific: with no copied connected Search, keep
         // cloneNode's missing/default-all state for future connections.
-        const copiedConnectedSearchIds = getConnectedJobSearchIds(
-          original.id,
-          originalNodes,
-          originalEdges,
-        ).filter(searchId => oldIdToNewId.has(searchId));
         const remappedSelection = uniqueStringIds(
           selection.map(searchId => copiedOwnerId(searchId, 'jobhub')),
         );
@@ -815,6 +863,20 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
           // explicitly unselected connected Search is copied, persist [] so it
           // cannot silently become selected through the default-all fallback.
           setDataField('selectedSearchModuleIds', remappedSelection);
+        }
+      }
+
+      const executionOrder = original.data?.searchExecutionOrder;
+      if (Array.isArray(executionOrder)) {
+        const remappedExecutionOrder = uniqueStringIds(
+          executionOrder.map(searchId => copiedOwnerId(searchId, 'jobhub')),
+        );
+        // Unlike selection, an empty execution order has no semantic meaning.
+        // Preserve an explicit priority only when this duplicate includes a
+        // compatible Search, while retaining hidden copied ids for a later
+        // reconnect just as the selection remap does.
+        if (remappedExecutionOrder.length > 0 || copiedConnectedSearchIds.length > 0) {
+          setDataField('searchExecutionOrder', remappedExecutionOrder);
         }
       }
     }
@@ -836,3 +898,83 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
 
 // Compatibility name for callers that only need the Board-selection behavior.
 export const remapCopiedJobBoardSelections = remapCopiedJobModuleReferences;
+
+const JOB_BOARD_SELECTOR_ACTIVE_STATES = new Set([
+  'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
+  'evaluating-preferences', 'scoring', 'scoring-batch',
+]);
+
+// This is deliberately a pure boundary between Board admission and its
+// selector.  Callers that supplied a computed continuation verdict must not
+// have it overwritten by the raw persisted `sources-ready` display state.
+export function jobBoardModuleReadiness(module) {
+  if (module?.ready === false || module?.canRun === false || module?.runnable === false) {
+    return {
+      ready: false,
+      label: module.readinessLabel || module.statusLabel || 'Needs setup',
+      reason: module.readinessReason || module.disabledReason || module.reason || '',
+    };
+  }
+  const state = module?.hubState || module?.status || '';
+  if (module?.running || JOB_BOARD_SELECTOR_ACTIVE_STATES.has(state)) {
+    return { ready: true, active: true, label: module.statusLabel || 'Searching…', reason: '' };
+  }
+  if (module?.ready === true || module?.boardAction === 'continue') {
+    return {
+      ready: true,
+      label: module.statusLabel || 'Resume saved search',
+      reason: module.readinessReason || module.reason || '',
+    };
+  }
+  if (state === 'sources-ready') {
+    return {
+      ready: false,
+      label: module.statusLabel || 'Needs attention',
+      reason: module.readinessReason || module.reason || 'Resolve or skip the blocked source before continuing.',
+    };
+  }
+  if (state === 'done') {
+    const count = Number.isFinite(module?.count)
+      ? module.count
+      : Number.isFinite(module?.resultCount) ? module.resultCount : null;
+    return {
+      ready: true,
+      label: module.statusLabel || (count == null ? 'Ready to search' : `${count} saved job${count === 1 ? '' : 's'}`),
+      reason: '',
+    };
+  }
+  return {
+    ready: true,
+    label: module?.statusLabel || module?.readinessLabel || 'Ready to search',
+    reason: module?.readinessReason || '',
+  };
+}
+
+export function jobBoardSelectionPresentation(selectedModules) {
+  const selected = Array.isArray(selectedModules) ? selectedModules : [];
+  const freshCount = selected.filter(module => module?.boardAction === 'scan').length;
+  const reusableCount = selected.filter(module => module?.boardAction === 'reuse').length;
+  const hasContinuation = selected.some(module => (
+    module?.boardAction === 'continue'
+    || /^(Finish saved search|Resume saved scoring|Resume pending search|Resume saved recovery)$/.test(module?.statusLabel || '')
+  ));
+  const hasTokenlessPaused = selected.some(module => module?.boardAction === 'continue-blocked');
+  const runLabel = freshCount > 0
+    ? ((reusableCount > 0 || hasContinuation) ? 'Continue & combine' : 'Search & combine')
+    : hasContinuation
+      ? 'Resume & combine'
+      : reusableCount > 0
+        ? 'Combine saved results'
+        : 'Search selected & combine';
+  const title = freshCount > 0
+    ? 'Selected fresh sources will start and selected paused sources will continue. Completed selected sources are reused without another scan; the Board then combines every connected completed result.'
+    : hasContinuation
+      ? 'Continue the selected Job Search state. Completed results are reused without another scan; the Board then combines every connected completed result.'
+      : reusableCount > 0
+        ? 'Reuse the selected completed Job Search results without another scan, then combine every connected completed result.'
+        : 'Start or continue the selected Job Search state. If a source needs manual attention, resolve it there; this Board resumes and combines every connected completed result automatically.';
+  const unreadyMessage = hasTokenlessPaused
+    ? 'A selected paused Job Search has no recoverable run token. Resolve it from Job Search, or clear career data, re-import, then start fresh.'
+    : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to search again, clear career data and import fresh files in Job Search.';
+  return { freshCount, reusableCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
+}

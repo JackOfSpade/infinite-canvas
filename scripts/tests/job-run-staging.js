@@ -1,4 +1,5 @@
-import { __getJobsTelemetryForReportForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobRunProfileFingerprint, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { registerJobsHandlers } from '../../electron/ipc/jobs.js';
 
 export default [
   {
@@ -880,6 +881,269 @@ export default [
     },
   },
   {
+    name: 'job run staging rejects non-parser profile fingerprints at the durable manifest boundary',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-profile-fingerprint-schema-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await startRun(canvasPath, {
+          runId: 'fingerprint-schema-run',
+          startedAt: 1,
+          nodeId: 'fingerprint-schema-hub',
+          sourceIds: ['indeed'],
+          profileFingerprint: 'not-a-parser-fingerprint',
+        });
+        const state = await readRunState(canvasPath, 2, { nodeId: 'fingerprint-schema-hub' });
+        const valid = 'a'.repeat(64);
+        assert(state?.manifest?.inputs?.profileFingerprint === null
+          && normalizeJobRunProfileFingerprint(valid) === valid
+          && normalizeJobRunProfileFingerprint(valid.toUpperCase()) === null
+          && normalizeJobRunProfileFingerprint('x'.repeat(4096)) === null,
+        `the manifest must retain only lowercase SHA-256 profile fingerprints, got ${JSON.stringify(state?.manifest?.inputs?.profileFingerprint)}`);
+        return { durableBoundaryStrict: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career input fingerprints bind the ordered basename and content sequence',
+    run() {
+      const original = careerInputFingerprint([
+        { name: 'resume.pdf', contentHash: 'a'.repeat(64) },
+        { name: 'portfolio.pdf', contentHash: 'b'.repeat(64) },
+      ]);
+      const reordered = careerInputFingerprint([
+        { name: 'portfolio.pdf', contentHash: 'b'.repeat(64) },
+        { name: 'resume.pdf', contentHash: 'a'.repeat(64) },
+      ]);
+      const renamed = careerInputFingerprint([
+        { name: 'resume-renamed.pdf', contentHash: 'a'.repeat(64) },
+        { name: 'portfolio.pdf', contentHash: 'b'.repeat(64) },
+      ]);
+      const profileV1 = careerProfileFingerprint({ name: 'Ada', skills: ['JavaScript'] }, '===== FILE: resume.pdf =====\nAda');
+      const profileV2 = careerProfileFingerprint({ name: 'Ada', skills: ['TypeScript'] }, '===== FILE: resume.pdf =====\nAda');
+      const corpusV2 = careerProfileFingerprint({ name: 'Ada', skills: ['JavaScript'] }, '===== FILE: resume.pdf =====\nAda Lovelace');
+      const savedSnapshot = buildJobAnalysisSnapshot({
+        jobs: [],
+        profile: { name: 'Ada', skills: ['JavaScript'] },
+        careerData: '===== FILE: resume.pdf =====\nAda',
+      }).snapshot;
+      assert(/^[a-f0-9]{64}$/.test(original)
+        && original !== reordered
+        && original !== renamed
+        && /^[a-f0-9]{64}$/.test(profileV1)
+        && profileV1 !== profileV2
+        && profileV1 !== corpusV2
+        && savedSnapshot.profileFingerprint === careerProfileFingerprint(savedSnapshot.profile, savedSnapshot.careerData),
+      'career recovery identity must change when parser input, parsed profile, or corpus changes, including saved-scrape snapshots');
+      return { canonicalHash: true, reorderedRejected: true, renamedRejected: true, outputPairBound: true, snapshotBound: true };
+    },
+  },
+  {
+    name: 'job run staging: exact-token recovery fails closed when its manifest is gone or terminal',
+    run: async () => {
+      const missing = validateExactResumeRun(null, 'run-observed-by-renderer');
+      const terminal = validateExactResumeRun({
+        incomplete: false,
+        manifest: { runId: 'run-observed-by-renderer' },
+      }, 'run-observed-by-renderer');
+      const malformed = validateExactResumeRun({
+        incomplete: true,
+        manifest: {},
+      }, 'run-observed-by-renderer');
+      const mismatch = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'replacement-run' },
+      }, 'run-observed-by-renderer');
+      const exact = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
+      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      const missingProfile = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'run-observed-by-renderer', inputs: {} },
+      }, 'run-observed-by-renderer', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      const mismatchedProfile = validateExactResumeRun({
+        incomplete: true,
+        manifest: { runId: 'run-observed-by-renderer', inputs: { profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
+      }, 'run-observed-by-renderer', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+      const legacy = validateExactResumeRun(null, null);
+      assert(missing?.resumeRunMissing === true
+        && terminal?.resumeRunMissing === true
+        && malformed?.resumeRunMissing === true
+        && mismatch?.resumeRunMismatch === true
+        && exact === null
+        && missingProfile?.resumeProfileMissing === true
+        && mismatchedProfile?.resumeProfileMismatch === true
+        && legacy === null,
+      `an exact recovery token must also bind the persisted profile fingerprint, while tokenless legacy resume retains its compatibility path: ${JSON.stringify({ missing, terminal, malformed, mismatch, exact, missingProfile, mismatchedProfile, legacy })}`);
+
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-missing-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        registerJobsHandlers();
+        const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const sender = {
+          id: 66_001,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+          send: () => {},
+        };
+        const result = await searchJobs({ sender }, {
+          nodeId: 'exact-resume-hub',
+          canvasFilePath: canvasPath,
+          queries: ['platform engineer'],
+          resume: true,
+          resumeRunId: 'run-observed-by-renderer',
+          profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        });
+        const after = await readRunState(canvasPath, Date.now(), { nodeId: 'exact-resume-hub' });
+        assert(result.success === false && result.resumeRunMissing === true && after == null,
+          `a missing exact token must not invoke the fresh start path or create a replacement manifest, got ${JSON.stringify({ result, after })}`);
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+
+      const mismatchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-profile-'));
+      const mismatchCanvasPath = path.join(mismatchRoot, 'workspace.json');
+      try {
+        await startRun(mismatchCanvasPath, {
+          runId: 'profile-bound-run',
+          startedAt: Date.now(),
+          nodeId: 'exact-resume-hub',
+          queries: ['platform engineer'],
+          profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          canonicalLocation: '',
+          sourceIds: ['indeed'],
+        });
+        const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const sender = {
+          id: 66_003,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+          send: () => {},
+        };
+        const result = await searchJobs({ sender }, {
+          nodeId: 'exact-resume-hub',
+          canvasFilePath: mismatchCanvasPath,
+          queries: ['platform engineer'],
+          resume: true,
+          resumeRunId: 'profile-bound-run',
+          profileFingerprint: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        });
+        const after = await readRunState(mismatchCanvasPath, Date.now(), { nodeId: 'exact-resume-hub' });
+        assert(result.success === false && result.resumeProfileMismatch === true
+          && after?.manifest?.runId === 'profile-bound-run',
+        `a profile-mismatched exact token must fail before dispatch and preserve its staged manifest, got ${JSON.stringify({ result, after })}`);
+      } finally {
+        await fs.promises.rm(mismatchRoot, { recursive: true, force: true });
+      }
+
+      const jobsSource = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const handlerStart = jobsSource.indexOf("handleSafe('search-jobs'");
+      const priorReadAt = jobsSource.indexOf("readRunState(canvasFilePath, Date.now(), { nodeId })", handlerStart);
+      const exactGuardAt = jobsSource.indexOf('const exactResumeFailure = validateExactResumeRun(prior, resumeRunId, normalizedProfileFingerprint);', priorReadAt);
+      const exactReturnAt = jobsSource.indexOf('return { success: false, ...exactResumeFailure };', exactGuardAt);
+      const freshSourceDerivationAt = jobsSource.indexOf('activeSourceIds = resumeSourceIds || getRunnableJobSourceIds(', exactReturnAt);
+      const freshStartAt = jobsSource.indexOf('await startJobRun(canvasFilePath, {', handlerStart);
+      const providerDispatchAt = jobsSource.indexOf('fetchHttpSources(', handlerStart);
+      assert(handlerStart >= 0
+        && priorReadAt > handlerStart
+        && exactGuardAt > priorReadAt
+        && exactReturnAt > exactGuardAt
+        && freshSourceDerivationAt > exactReturnAt
+        && freshStartAt > exactReturnAt
+        && providerDispatchAt > exactReturnAt,
+      'search-jobs must return an explicit-token recovery failure before it derives fresh source breadth, allocates a fresh manifest, or dispatches any provider work');
+      return { missingFailsClosed: true, replacementFailsClosed: true, profileMismatchFailsClosed: true, noFreshManifest: true, legacyFallbackRetained: true };
+    },
+  },
+  {
+    name: 'job run staging: exact-token recovery stops at a replaced searching-stage checkpoint before provider dispatch',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-exact-resume-stage-race-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'exact-stage-race-hub';
+      const runId = 'observed-exact-run';
+      const replacementRunId = 'replacement-after-peek';
+      const sender = {
+        id: 66_002,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+        send: () => {},
+      };
+      const originalReadFile = fs.promises.readFile;
+      let manifestPath = null;
+      let manifestReads = 0;
+      let replacedAtStageBoundary = false;
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt: 1,
+          queries: ['platform engineer'],
+          profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          canonicalLocation: '',
+          nodeId,
+          sourceIds: ['remoteok'],
+        });
+        manifestPath = path.join(root, (await fs.promises.readdir(root)).find(name => (
+          /^workspace\.jobs-run\..+\.json$/.test(name)
+        )));
+        assert(manifestPath && await fs.promises.stat(manifestPath).then(stat => stat.isFile()),
+          'test setup must locate the owned recovery manifest');
+
+        // `readRunState` consumes read #1. `setStage` first locates the owned
+        // sidecar (read #2), then reads it again under its manifest mutex. Swap
+        // the file between those two reads to model another run winning after
+        // the renderer/IPC peek but before the stage compare-and-set.
+        fs.promises.readFile = async (...args) => {
+          const value = await originalReadFile(...args);
+          if (String(args[0]) === manifestPath) {
+            manifestReads += 1;
+            if (manifestReads === 2) {
+              const replacement = JSON.parse(String(value));
+              replacement.runId = replacementRunId;
+              await fs.promises.writeFile(manifestPath, JSON.stringify(replacement), 'utf8');
+              replacedAtStageBoundary = true;
+            }
+          }
+          return value;
+        };
+
+        __resetJobsTelemetryForTests();
+        registerJobsHandlers();
+        const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const result = await searchJobs({ sender }, {
+          nodeId,
+          canvasFilePath: canvasPath,
+          queries: ['platform engineer'],
+          resume: true,
+          resumeRunId: runId,
+          profileFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        });
+        const after = await readRunState(canvasPath, Date.now(), { nodeId });
+        const remoteDispatches = getJobsTelemetry()?.sourceRunHistory?.remoteok || [];
+        assert(replacedAtStageBoundary
+          && result.success === false
+          && result.resumeRunMismatch === true
+          && after?.manifest?.runId === replacementRunId
+          && remoteDispatches.every(entry => entry.dispatchedAt == null),
+        `a replacement at the searching-stage CAS must return exact-token mismatch before provider dispatch or fresh replacement, got ${JSON.stringify({ replacedAtStageBoundary, result, after: after?.manifest?.runId, remoteDispatches })}`);
+        return { stageFence: true, providerDispatches: 0, replacementPreserved: true };
+      } finally {
+        fs.promises.readFile = originalReadFile;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job run staging: saved-canvas start failure fails closed before source collection',
     run: async () => {
       const jobsSource = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
@@ -1570,9 +1834,11 @@ export default [
         && fanOut.includes(".map(reason => (typeof reason === 'string' ? reason : reason?.stopReason))")
         && fanOut.includes("warning: { code: 'query-error', severity: 'warn' }")
         && fanOut.includes("stopReason: 'query-error'")
+        && fanOut.includes('await abortableDelay(waitMs, signal);')
+        && !fanOut.includes('await new Promise(res => setTimeout(res, waitMs))')
         && fanOut.includes('const caps = [...new Map(')
         && fanOut.includes('stopReasons, pagesFetched, cap, caps }'),
-      'query fan-out must aggregate Dice page counts and retain every finite extractor cap');
+      'query fan-out must aggregate Dice page counts, retain every finite extractor cap, and make paced dispatch waits abortable');
       const completeProviderTotals = [401, null].every(value => (
         value != null && value !== '' && Number.isFinite(Number(value))
       ));
@@ -1604,6 +1870,89 @@ export default [
         && source.includes('server-side; ${dicePageSizeFact}'),
       'Dice date-bound diagnostics must describe the cap-sized API request rather than always claiming the 400/1000 default');
       return { fanOutPages: true, sourceCap: true };
+    },
+  },
+  {
+    name: 'job run staging: fan-out pacing aborts before a second dispatch',
+    run: async () => {
+      const controller = new AbortController();
+      let signalWaitRegistered;
+      const pacingWaitRegistered = new Promise((resolve) => { signalWaitRegistered = resolve; });
+      let observedPacingWait = false;
+      // The wrapper makes the test wait for abortableDelay to subscribe before
+      // aborting. That is a deterministic handoff, not a wall-clock guess at
+      // whether the second query reached its long pacing timer.
+      const signal = {
+        get aborted() { return controller.signal.aborted; },
+        addEventListener(type, listener, options) {
+          if (type === 'abort' && !observedPacingWait) {
+            observedPacingWait = true;
+            signalWaitRegistered();
+          }
+          return controller.signal.addEventListener(type, listener, options);
+        },
+        removeEventListener(...args) {
+          return controller.signal.removeEventListener(...args);
+        },
+      };
+      const fetchCalls = [];
+      const fanOut = __queryFanOutForTests(
+        ['first query', 'second query'],
+        async (query) => {
+          fetchCalls.push(query);
+          return { items: [] };
+        },
+        signal,
+        { concurrency: 1, minIntervalMs: 750, label: 'fan-out abort test' },
+      );
+      let handshakeTimeout = null;
+      let outcomeTimeout = null;
+      let cleanupTimeout = null;
+      try {
+        const handshake = await Promise.race([
+          pacingWaitRegistered.then(() => ({ status: 'registered' })),
+          new Promise((resolve) => {
+            handshakeTimeout = setTimeout(() => resolve({ status: 'timed-out' }), 500);
+          }),
+        ]);
+        if (handshakeTimeout) clearTimeout(handshakeTimeout);
+        assert(handshake.status === 'registered',
+          'the second fan-out dispatch must reach an abort-aware pacing wait promptly');
+        controller.abort();
+
+        const outcome = await Promise.race([
+          fanOut.then(
+            (value) => ({ status: 'resolved', value }),
+            (error) => ({ status: 'rejected', error }),
+          ),
+          new Promise((resolve) => {
+            outcomeTimeout = setTimeout(() => resolve({ status: 'timed-out' }), 300);
+          }),
+        ]);
+        if (outcomeTimeout) clearTimeout(outcomeTimeout);
+
+        assert(
+          outcome.status === 'rejected'
+            && outcome.error?.message === 'aborted'
+            && JSON.stringify(fetchCalls) === JSON.stringify(['first query'])
+            && !outcome.value?.warning,
+          `aborting during the second query's paced wait must settle promptly without dispatching it or converting cancellation into a query-error envelope, got ${JSON.stringify({ outcome: { status: outcome.status, error: outcome.error?.message, value: outcome.value }, fetchCalls })}`,
+        );
+        return { promptAbort: true, secondDispatchPrevented: true, noQueryErrorEnvelope: true };
+      } finally {
+        if (handshakeTimeout) clearTimeout(handshakeTimeout);
+        if (outcomeTimeout) clearTimeout(outcomeTimeout);
+        controller.abort();
+        // If a future regression removes abortable pacing, do not leave its
+        // raw timer behind. The shorter interval bounds this cleanup path too.
+        await Promise.race([
+          fanOut.catch(() => undefined),
+          new Promise((resolve) => {
+            cleanupTimeout = setTimeout(resolve, 1_000);
+          }),
+        ]);
+        if (cleanupTimeout) clearTimeout(cleanupTimeout);
+      }
     },
   },
   {

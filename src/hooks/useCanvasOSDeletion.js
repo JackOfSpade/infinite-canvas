@@ -212,17 +212,22 @@ export function useCanvasOSDeletion({
           if (error?.code !== 'JOB_BOARD_MODULE_UNAVAILABLE') throw error;
           const plan = board.data?.boardScanResume;
           const boardWillBeDeleted = cleanupWorkflowIds.has(board.id);
+          const activeSourceIds = [...new Set([
+            ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
+            plan?.activeSourceId,
+          ].filter(sourceId => !cleanupWorkflowIds.has(sourceId)))];
           if (
             boardWillBeDeleted
             && plan?.phase === 'searches'
-            && plan.activeSourceId
-            && !cleanupWorkflowIds.has(plan.activeSourceId)
+            && activeSourceIds.length > 0
           ) {
-            fallbackClaims.push({
-              orchestratorNodeId: board.id,
-              boardRunId: plan.boardRunId,
-              sourceId: plan.activeSourceId,
-              plan,
+            activeSourceIds.forEach(sourceId => {
+              fallbackClaims.push({
+                orchestratorNodeId: board.id,
+                boardRunId: plan.boardRunId,
+                sourceId,
+                plan,
+              });
             });
           } else if (!boardWillBeDeleted && jobBoardHasCancellableRecovery(board)) {
             // A surviving affected Board must be mounted so its renderer queue

@@ -1,4 +1,4 @@
-import { assert, formatRemoteOkSalary, linkedInPageStopReason, remoteOkTagsFromQueries, wwrCategoriesFromQueries } from '../test-dependencies.js';
+import { assert, fetchLinkedInJobs, fetchRemoteOKJobs, formatRemoteOkSalary, linkedInApiRequestPacing, linkedInDescriptionPacing, linkedInPacingWaitMs, linkedInPageStopReason, remoteOkTagsFromQueries, runApiTransportRetry, shouldRetryApiTransportFailure, wwrCategoriesFromQueries } from '../test-dependencies.js';
 import {
   tokenizeTargetRole,
   titleMatchesTargetRole,
@@ -301,6 +301,49 @@ export default [
     },
   },
   {
+    name: 'LinkedIn guest search requests use one local cadence across query modules',
+    run: () => {
+      const first = linkedInApiRequestPacing({ requestsIssued: 0 });
+      const second = linkedInApiRequestPacing({ requestsIssued: 1 });
+      const fourth = linkedInApiRequestPacing({ requestsIssued: 3 });
+      assert(!first.delayDue && !first.checkpointDue,
+        'the first LinkedIn search request has no prior provider request to delay');
+      assert(second.delayDue && second.requestDelayMs === 6000 && !second.checkpointDue,
+        'every subsequent request, including a next query module page 0, has the same minimum gap');
+      assert(fourth.delayDue && fourth.checkpointDue && fourth.checkpointEvery === 3
+        && fourth.checkpointCooldownMs === 20000,
+      'before each fourth guest-search request, drain the rolling window without retrying a 429');
+      assert(linkedInPacingWaitMs(second) === 6000
+        && linkedInPacingWaitMs(fourth) === 20000
+        && linkedInPacingWaitMs({ requestDelayMs: 6000, checkpointDue: true, checkpointCooldownMs: 1000 }) === 6000,
+      'the actual pre-dispatch wait is one long checkpoint when it covers the ordinary gap, while a future short checkpoint still preserves the normal minimum');
+      return { gapMs: second.requestDelayMs, checkpointMs: fourth.checkpointCooldownMs, checkpointWaitMs: linkedInPacingWaitMs(fourth) };
+    },
+  },
+  {
+    name: 'LinkedIn description requests use provider-local gaps and guest rolling-window pauses',
+    run: () => {
+      const guestBeforeCheckpoint = linkedInDescriptionPacing({ mode: 'guest', requestsIssued: 2 });
+      const guestCheckpoint = linkedInDescriptionPacing({ mode: 'guest', requestsIssued: 3 });
+      const authenticated = linkedInDescriptionPacing({ mode: 'authenticated', requestsIssued: 3 });
+      assert(guestBeforeCheckpoint.requestDelayMs === 2500 && !guestBeforeCheckpoint.checkpointDue,
+        'every LinkedIn detail navigation must have a minimum human-scale gap');
+      assert(guestCheckpoint.checkpointDue && guestCheckpoint.checkpointEvery === 3
+        && guestCheckpoint.checkpointCooldownMs === 15000,
+      'the guest SEO path must pause after each small burst before LinkedIn reaches its observed 3–4 request wall');
+      assert(!authenticated.checkpointDue && authenticated.checkpointEvery === null,
+        'an authenticated detail walk keeps the per-request floor without guest-session checkpoints');
+      const afterThreeDispatched = linkedInDescriptionPacing({ mode: 'guest', requestsIssued: 3 });
+      assert(afterThreeDispatched.checkpointDue,
+        'the checkpoint input is dispatched requests, so failed/walling navigations cannot evade the next guest pause');
+      assert(linkedInPacingWaitMs(guestBeforeCheckpoint) === 2500
+        && linkedInPacingWaitMs(guestCheckpoint) === 15000
+        && linkedInPacingWaitMs({ requestDelayMs: 2500, checkpointDue: true, checkpointCooldownMs: 500 }) === 2500,
+      'detail navigation makes one abortable pre-dispatch wait: the guest checkpoint substitutes for, rather than stacks with, its ordinary gap');
+      return { gapMs: guestCheckpoint.requestDelayMs, checkpointMs: guestCheckpoint.checkpointCooldownMs, checkpointWaitMs: linkedInPacingWaitMs(guestCheckpoint) };
+    },
+  },
+  {
     name: 'RemoteOK tag fan-out is derived, deduped and bounded',
     run: () => {
       // The bare feed is capped at roughly 100 postings (limit/offset are ignored), and a
@@ -322,6 +365,146 @@ export default [
       // metadata element only, which is zero rows after the slice(1).
       assert(remoteOkTagsFromQueries(['zzqxnotatag']).length === 1, 'an unknown word is still attempted — a miss costs one empty response, not an error');
       return { ok: true };
+    },
+  },
+  {
+    name: 'RemoteOK retries only transient transport failures and never provider throttles or cancellation',
+    run: async () => {
+      const transportFailure = {
+        ok: false,
+        status: 0,
+        warning: { code: 'api-fetch-failed' },
+      };
+      assert(shouldRetryApiTransportFailure(transportFailure, null, 0, 1),
+        'the first network/timeout failure is eligible for one bounded retry');
+      assert(!shouldRetryApiTransportFailure(transportFailure, null, 1, 1),
+        'a persistent transport failure stops after the configured retry ceiling');
+      assert(!shouldRetryApiTransportFailure({ ok: false, status: 429, warning: { code: 'http-429' } }, null, 0, 1),
+        'HTTP 429 is a provider throttle and must not be retried immediately');
+      assert(!shouldRetryApiTransportFailure({ ok: false, status: 403, warning: { code: 'http-403' } }, null, 0, 1),
+        'HTTP 403 is a provider response and must not be retried immediately');
+      assert(!shouldRetryApiTransportFailure(transportFailure, { aborted: true }, 0, 1),
+        'user cancellation must suppress a retry');
+
+      let calls = 0;
+      const waits = [];
+      const recovered = await runApiTransportRetry(async () => {
+        calls++;
+        return calls === 1 ? transportFailure : { ok: true, status: 200 };
+      }, {
+        maxRetries: 1,
+        retryDelayMs: 2000,
+        jitter: ms => ms,
+        sleep: async ms => { waits.push(ms); },
+      });
+      assert(recovered.ok && calls === 2 && waits.length === 1 && waits[0] === 2000,
+        'a transient transport failure must execute exactly one delayed retry and return its recovery');
+
+      calls = 0;
+      const cancellation = { aborted: false };
+      const cancelled = await runApiTransportRetry(async () => {
+        calls++;
+        return transportFailure;
+      }, {
+        signal: cancellation,
+        maxRetries: 1,
+        retryDelayMs: 2000,
+        jitter: ms => ms,
+        sleep: async () => { cancellation.aborted = true; },
+      });
+      assert(!cancelled.ok && cancelled.aborted && cancelled.warning === null && calls === 1,
+        'cancellation during retry backoff must prevent the second request and suppress a false transport warning');
+
+      calls = 0;
+      const capped = await runApiTransportRetry(async () => {
+        calls++;
+        return transportFailure;
+      }, {
+        maxRetries: Infinity,
+        retryDelayMs: 0,
+        jitter: ms => ms,
+        sleep: async () => {},
+      });
+      assert(!capped.ok && calls === 1,
+        'a non-finite generic retry setting must not turn a persistent failure into an infinite loop');
+
+      calls = 0;
+      await runApiTransportRetry(async () => {
+        calls++;
+        return transportFailure;
+      }, {
+        maxRetries: 1_000_000,
+        retryDelayMs: 0,
+        jitter: ms => ms,
+        sleep: async () => {},
+      });
+      assert(calls === 6,
+        'a huge generic retry setting must stop at the five-retry safety ceiling');
+      return { maxRetries: 1, recoveredCalls: 2, cancelledCalls: calls };
+    },
+  },
+  {
+    name: 'RemoteOK public fetch retries only transports and preserves partial base results safely',
+    run: async () => {
+      const nativeFetch = globalThis.fetch;
+      const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), { status });
+      try {
+        let calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          throw new TypeError('socket dropped');
+        };
+        const persistentTransport = await fetchRemoteOKJobs(['engineer']);
+        assert(calls === 2 && persistentTransport.items.length === 0
+          && persistentTransport.warning?.code === 'api-fetch-failed',
+        'a persistent RemoteOK transport failure retries exactly once and remains visible');
+
+        calls = 0;
+        const cancelledController = new AbortController();
+        cancelledController.abort();
+        globalThis.fetch = async () => { calls++; throw new Error('must not fetch after cancellation'); };
+        const cancelledRemote = await fetchRemoteOKJobs(['engineer'], cancelledController.signal);
+        const cancelledLinkedIn = await fetchLinkedInJobs(['engineer'], cancelledController.signal);
+        assert(calls === 0 && cancelledRemote.cancelled && cancelledRemote.warning === null
+          && cancelledLinkedIn.cancelled && cancelledLinkedIn.warning === null,
+        'cancelled HTTP extractors return silent envelopes before dispatch, so downstream progress/staging can ignore them');
+
+        calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          return new Response('', { status: 429 });
+        };
+        const throttled = await fetchRemoteOKJobs(['engineer']);
+        assert(calls === 1 && throttled.warning?.code === 'http-429',
+          'an HTTP 429 is terminal and must not be retried');
+
+        calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          return jsonResponse({ maintenance: true });
+        };
+        const malformed = await fetchRemoteOKJobs(['engineer']);
+        assert(calls === 1 && malformed.warning?.code === 'remoteok-malformed-response',
+          'a 200 non-array payload is a visible malformed-provider failure, not a successful zero');
+
+        calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          if (calls === 1) {
+            return jsonResponse([{ legal: 'metadata' }, {
+              id: 'base-1', position: 'Platform Engineer', company: 'Acme', url: '/remote-jobs/base-1', tags: ['platform'],
+            }]);
+          }
+          return new Response('', { status: 429 });
+        };
+        const partial = await fetchRemoteOKJobs(['platform engineer']);
+        assert(calls === 2 && partial.items.length === 1 && partial.warning?.code === 'http-429'
+          && partial.remoteFeedProvenance?.length === 2 && partial.remoteFeedProvenance[1]?.fanoutStopped,
+        'a failed optional tag feed preserves base jobs and stops all later tag requests');
+        return { transportCalls: 2, throttleCalls: 1, partialCalls: calls };
+      } finally {
+        globalThis.fetch = nativeFetch;
+      }
     },
   },
   {

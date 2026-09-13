@@ -916,6 +916,40 @@ export default [
     },
   },
   {
+    name: 'IPC safe handler: concurrent startup inspections on one node remain distinct tasks',
+    run: async () => {
+      electronPkg.ipcMain.__clearInvokeHandlers();
+      const releases = new Map();
+      for (const channel of ['test:peek-job-run', 'test:get-last-job-analysis-snapshot']) {
+        handleSafe(channel, async () => {
+          await new Promise(resolve => { releases.set(channel, resolve); });
+          return { channel };
+        });
+      }
+      const event = senderEvent();
+      const nodeId = 'startup-recovery-node';
+      const pending = ['test:peek-job-run', 'test:get-last-job-analysis-snapshot'].map(channel => (
+        electronPkg.ipcMain.__getInvokeHandler(channel)(event, { nodeId })
+      ));
+      await Promise.resolve();
+
+      const [active] = snapshotActiveNodeTasks(event.sender.id);
+      assert(active?.nodeId === nodeId
+        && active.taskCount === 2
+        && JSON.stringify([...active.channels].sort()) === JSON.stringify([
+          'test:get-last-job-analysis-snapshot', 'test:peek-job-run',
+        ]),
+      `two independent load-time inspections must stay visible as two tasks, got ${JSON.stringify(active)}`);
+
+      for (const release of releases.values()) release();
+      const settled = await Promise.all(pending);
+      assert(settled.every(result => result.success === true)
+        && snapshotActiveNodeTasks(event.sender.id).length === 0,
+      `both independent inspections must clean up after settling, got ${JSON.stringify({ settled, active: snapshotActiveNodeTasks(event.sender.id) })}`);
+      return { tasks: active.taskCount, channels: active.channels.length };
+    },
+  },
+  {
     name: 'IPC safe handler: cancellation is scoped to the requesting canvas even when node ids collide',
     run: async () => {
       electronPkg.ipcMain.__clearInvokeHandlers();
